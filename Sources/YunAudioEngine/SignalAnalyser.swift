@@ -35,12 +35,15 @@ public final class SignalAnalyser {
         public var verdictConfidence: Double
         /// The model's own label, which is finer than the verdict.
         public var verdictLabel: String
+        /// The fundamental of the voice in hertz, or zero when there is no
+        /// pitch to find. Silence, breath and a fan all correctly report zero.
+        public var pitchHertz: Float
 
         public init(
             momentary: Double, shortTerm: Double, integrated: Double, range: Double,
             peak: Double, bands: [Float], duration: Double,
             verdict: SoundClassifier.Verdict, verdictConfidence: Double,
-            verdictLabel: String
+            verdictLabel: String, pitchHertz: Float = 0
         ) {
             self.momentary = momentary
             self.shortTerm = shortTerm
@@ -52,13 +55,15 @@ public final class SignalAnalyser {
             self.verdict = verdict
             self.verdictConfidence = verdictConfidence
             self.verdictLabel = verdictLabel
+            self.pitchHertz = pitchHertz
         }
 
         public static let silent = Reading(
             momentary: -.infinity, shortTerm: -.infinity, integrated: -.infinity,
             range: 0, peak: -.infinity,
             bands: [Float](repeating: 0, count: SpectrumAnalyser.bandCount),
-            duration: 0, verdict: .quiet, verdictConfidence: 0, verdictLabel: "")
+            duration: 0, verdict: .quiet, verdictConfidence: 0, verdictLabel: "",
+            pitchHertz: 0)
     }
 
     private var loudness: LoudnessMeter
@@ -72,6 +77,10 @@ public final class SignalAnalyser {
     /// not be paying for either — a router that quietly loads a neural network
     /// to forward audio between two devices has misunderstood its own job.
     public private(set) var classifier: SoundClassifier?
+    private var tracker: PitchTracker?
+    /// Samples waiting for a whole tracker frame.
+    private var pitchPending: [Float] = []
+    private var lastPitch: Float = 0
     private let sampleRate: Double
     private var buffer: [Float]
     private var measuredFrames: Int = 0
@@ -87,6 +96,8 @@ public final class SignalAnalyser {
         public static let spectrum = Needs(rawValue: 1 << 1)
         /// Apple's sound model.
         public static let classification = Needs(rawValue: 1 << 2)
+        /// The fundamental frequency, which is a transform per frame.
+        public static let pitch = Needs(rawValue: 1 << 3)
     }
 
     private var needs: Needs = []
@@ -107,6 +118,14 @@ public final class SignalAnalyser {
             if classifier == nil { classifier = SoundClassifier(sampleRate: sampleRate) }
         } else {
             classifier = nil
+        }
+
+        if wanted.contains(.pitch) {
+            if tracker == nil { tracker = PitchTracker(sampleRate: sampleRate) }
+        } else {
+            tracker = nil
+            pitchPending.removeAll(keepingCapacity: true)
+            lastPitch = 0
         }
     }
 
@@ -135,8 +154,30 @@ public final class SignalAnalyser {
                 loudness.add(base, count: taken)
                 spectrum?.add(base, count: taken)
                 classifier?.add(base, count: taken)
+                if tracker != nil {
+                    pitchPending.append(
+                        contentsOf: UnsafeBufferPointer(start: base, count: taken))
+                }
             }
             measuredFrames += taken
+            // One frame at a time, keeping only the newest: a backlog of pitch
+            // frames is a backlog of answers nobody will read.
+            while pitchPending.count >= PitchTracker.frameSize {
+                if let tracker {
+                    let frame = Array(pitchPending.prefix(PitchTracker.frameSize))
+                    let found = tracker.track(frame: frame)
+                    // Held through a frame or two of consonant rather than
+                    // dropping to nothing: a readout that blinks off on every
+                    // plosive is unreadable.
+                    if found > 0 {
+                        lastPitch = found
+                    } else {
+                        lastPitch *= 0.5
+                        if lastPitch < 20 { lastPitch = 0 }
+                    }
+                }
+                pitchPending.removeFirst(PitchTracker.frameSize)
+            }
             if taken < buffer.count { return }
         }
     }
@@ -156,7 +197,8 @@ public final class SignalAnalyser {
             duration: Double(measuredFrames) / sampleRate,
             verdict: classifier?.verdict ?? .quiet,
             verdictConfidence: classifier?.confidence ?? 0,
-            verdictLabel: classifier?.label ?? "")
+            verdictLabel: classifier?.label ?? "",
+            pitchHertz: lastPitch)
     }
 
     /// Starts the integrated measurement over. Bound to a button, because an
@@ -167,6 +209,8 @@ public final class SignalAnalyser {
         loudness.reset()
         spectrum?.reset()
         classifier?.reset()
+        pitchPending.removeAll(keepingCapacity: true)
+        lastPitch = 0
         measuredFrames = 0
     }
 }

@@ -627,20 +627,12 @@ final class RouterModel {
     /// captures. Not called by the running app.
     func prepareForRendering() {
         refreshApps()
-        guard let source = selectedSource else { return }
-        let destinationUID = selectedDestination?.uid ?? "preview-destination"
-        activeRoutes = (0..<2).map { channel in
-            Route(
-                source: ChannelRef(deviceUID: source.uid, channel: 0),
-                destination: ChannelRef(deviceUID: destinationUID, channel: channel))
-        }
-        routeGains = [1.0, 0.7]
-        routeMutes = [false, true]
-        levels = [0.28, 0.0]
-        // A populated state rather than a blank one. A design capture of every
-        // panel at its default shows none of the things worth looking at — the
-        // voice card in particular renders as one picker reading "None", which
-        // says nothing about what it does.
+        // Everything that does not depend on a device comes first.
+        //
+        // It used to sit after the guard below, so on any machine where no
+        // input was selected the whole analysis card rendered empty — every
+        // figure a dash — and the design captures showed nothing of the panel
+        // they exist to check.
         voicePreset = .masculineToFeminine
         analysis = SignalAnalyser.Reading(
             momentary: -19.4, shortTerm: -18.6, integrated: -18.2, range: 6.4,
@@ -652,8 +644,19 @@ final class RouterModel {
                 return Float(max(0.05, 0.85 * exp(-pow((position - 0.34) / 0.28, 2))))
             },
             duration: 42, verdict: .speech, verdictConfidence: 0.86,
-            verdictLabel: "speech")
+            verdictLabel: "speech", pitchHertz: 147)
         outputPeak = 0.39
+
+        guard let source = selectedSource else { return }
+        let destinationUID = selectedDestination?.uid ?? "preview-destination"
+        activeRoutes = (0..<2).map { channel in
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: 0),
+                destination: ChannelRef(deviceUID: destinationUID, channel: channel))
+        }
+        routeGains = [1.0, 0.7]
+        routeMutes = [false, true]
+        levels = [0.28, 0.0]
     }
 
     // MARK: Driver
@@ -1986,7 +1989,13 @@ final class RouterModel {
     var isAnalysisVisible = false {
         didSet {
             guard isAnalysisVisible, !oldValue else { return }
-            analysis = analyser?.reading() ?? .silent
+            // Only when there is something to read from. The fallback used to
+            // be `?? .silent`, which meant opening the window while nothing was
+            // running replaced whatever was on screen with dashes — and wiped
+            // the fixture the design captures depend on, so the analysis card
+            // rendered empty in every one of them.
+            guard let analyser else { return }
+            analysis = analyser.reading()
         }
     }
 
@@ -2391,7 +2400,9 @@ final class RouterModel {
     /// not be holding a neural network open in case somebody looks.
     private func refreshAnalysisNeeds() {
         var wanted: SignalAnalyser.Needs = []
-        if isAnalysisVisible { wanted.formUnion([.loudness, .spectrum, .classification]) }
+        if isAnalysisVisible {
+            wanted.formUnion([.loudness, .spectrum, .classification, .pitch])
+        }
         if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
         if isDucking { wanted.formUnion([.classification]) }
 
@@ -2403,6 +2414,14 @@ final class RouterModel {
     }
 
     @ObservationIgnored private var analysisNeeds: SignalAnalyser.Needs = []
+
+    /// Raw frames off the analysis tap, for diagnostics that want the signal
+    /// rather than a summary of it.
+    func drainAnalysisForDiagnostics(
+        into destination: UnsafeMutablePointer<Float>, capacity: Int
+    ) -> Int {
+        engine.drainAnalysis(into: destination, capacity: capacity)
+    }
 
     /// True when no analysis is being computed at all.
     var analysisIsIdle: Bool { analyser?.isIdle ?? true }

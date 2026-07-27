@@ -123,6 +123,10 @@ struct LoudnessReadout: View {
                     model.loudnessOffset == nil ? -.infinity : model.analysis.integrated,
                     unit: loc("LUFS"))
                 figure(loc("Peak"), model.analysis.peak, unit: loc("dBFS"))
+                // The note being sung or spoken, which nothing else in this
+                // category shows and which anybody using the voice presets
+                // wants: it is the number the shift is relative to.
+                pitchFigure
                 Spacer(minLength: 0)
             }
 
@@ -245,6 +249,37 @@ struct LoudnessReadout: View {
         case .music: Yun.Palette.info
         case .noise: Yun.Palette.textTertiary
         case .quiet: Yun.Palette.textMuted
+        }
+    }
+
+    /// The fundamental, with the note it corresponds to.
+    ///
+    /// Hertz alone means something to about one person in fifty; the note name
+    /// beside it means something to anybody who has ever touched an
+    /// instrument, and it is the same number.
+    private var pitchFigure: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(loc("Pitch"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(
+                    model.analysis.pitchHertz > 0
+                        ? String(format: "%.0f", model.analysis.pitchHertz) : "—"
+                )
+                .font(.system(size: 15, weight: .medium, design: .monospaced))
+                .foregroundStyle(
+                    model.analysis.pitchHertz > 0
+                        ? Yun.Palette.textPrimary : Yun.Palette.textMuted
+                )
+                .monospacedDigit()
+                Text(loc("Hz"))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textMuted)
+                if let note = PitchTracker.noteName(model.analysis.pitchHertz) {
+                    YunBadge(note)
+                }
+            }
         }
     }
 

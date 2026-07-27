@@ -3269,3 +3269,207 @@ struct VoicePresetTests {
         #expect(VoicePreset(rawValue: "child") == .child)
     }
 }
+
+// MARK: - Finding the note
+
+/// Pitch tracking is the thing every serious voice conversion starts from, and
+/// the one place where a plausible-looking implementation is usually wrong by
+/// exactly an octave. These feed it voices at known fundamentals.
+@Suite("Pitch tracking")
+struct PitchTrackerTests {
+
+    /// A voice-shaped signal: a harmonic series under formants, which is much
+    /// harder to track than a sine — the second harmonic is often louder than
+    /// the fundamental, which is exactly what makes trackers report an octave
+    /// up.
+    private func voice(
+        fundamental: Double, frames: Int, sampleRate: Double = 48000
+    ) -> [Float] {
+        let count = frames * PitchTracker.frameSize
+        var samples = [Float](repeating: 0, count: count)
+        let formants = [700.0, 1220.0, 2600.0]
+        var harmonic = 1
+        while Double(harmonic) * fundamental < sampleRate / 2 - 1000 {
+            let frequency = fundamental * Double(harmonic)
+            var weight = 0.02
+            for (index, formant) in formants.enumerated() {
+                let bandwidth = 110.0 + Double(index) * 60
+                let distance = (frequency - formant) / bandwidth
+                weight += (1 / (1 + distance * distance)) / Double(index + 1)
+            }
+            for index in 0..<count {
+                samples[index] +=
+                    Float(weight * sin(2 * Double.pi * frequency * Double(index) / sampleRate))
+            }
+            harmonic += 1
+        }
+        let peak = samples.map(abs).max() ?? 1
+        return samples.map { $0 / peak * 0.4 }
+    }
+
+    /// The whole claim. A male voice, a female voice and something between,
+    /// each found to within a few hertz.
+    @Test("it finds the fundamental of a voice-shaped signal")
+    func findsFundamental() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        for expected in [95.0, 120.0, 165.0, 220.0, 300.0] {
+            let samples = voice(fundamental: expected, frames: 4)
+            let found = tracker.track(frames: samples, count: 4)
+            #expect(found.count == 4)
+            for estimate in found {
+                #expect(
+                    abs(Double(estimate) - expected) < expected * 0.05,
+                    "wanted \(expected), got \(estimate)")
+            }
+        }
+    }
+
+    /// The failure mode of every autocorrelation tracker ever written: twice
+    /// the period correlates almost as well, and a naive peak search takes it
+    /// about half the time. A voice whose second harmonic is louder than its
+    /// fundamental is the case that catches it.
+    @Test("it does not report an octave down")
+    func noOctaveErrors() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        for expected in [110.0, 140.0, 180.0, 240.0] {
+            let samples = voice(fundamental: expected, frames: 2)
+            for estimate in tracker.track(frames: samples, count: 2) {
+                // Not half, and not double.
+                #expect(
+                    abs(Double(estimate) - expected / 2) > expected * 0.1,
+                    "reported an octave down for \(expected): \(estimate)")
+                #expect(
+                    abs(Double(estimate) - expected * 2) > expected * 0.1,
+                    "reported an octave up for \(expected): \(estimate)")
+            }
+        }
+    }
+
+    /// Silence has no pitch, and saying it has one would make a converter chase
+    /// noise between words.
+    @Test("silence reports no pitch at all")
+    func silence() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        let quiet = [Float](repeating: 0, count: PitchTracker.frameSize * 3)
+        #expect(tracker.track(frames: quiet, count: 3).allSatisfy { $0 == 0 })
+    }
+
+    /// Nor does noise. This is the one that separates a tracker from a
+    /// lag-finder: white noise has a best lag, and it is not a pitch.
+    @Test("noise reports no pitch")
+    func noise() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        // Zero-mean, and checked to be: the first version of this was not,
+        // and the offset it carried is what exposed the tracker's own missing
+        // mean removal. A fixture that is wrong in an interesting way is worth
+        // keeping honest.
+        var state: UInt64 = 0x2545_F491_4F6C_DD1D
+        var samples = (0..<(PitchTracker.frameSize * 3)).map { _ -> Float in
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Float(Int32(bitPattern: UInt32(truncatingIfNeeded: state >> 32)))
+                / Float(Int32.max) * 0.4
+        }
+        let mean = samples.reduce(0, +) / Float(samples.count)
+        samples = samples.map { $0 - mean }
+        #expect(abs(samples.reduce(0, +) / Float(samples.count)) < 0.001)
+        let found = tracker.track(frames: samples, count: 3)
+        // Some frames of noise will occasionally look periodic; most must not.
+        #expect(found.filter { $0 > 0 }.count <= 1)
+    }
+
+    /// A constant offset correlates perfectly with itself at every lag, so any
+    /// of it swamps the periodic part. Converter bias and unsettled high-pass
+    /// filters both produce one routinely.
+    @Test("a signal with a large offset is still tracked correctly")
+    func toleratesDirectCurrent() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        let clean = voice(fundamental: 140, frames: 2)
+        let offset = clean.map { $0 + 0.35 }
+        for estimate in tracker.track(frames: offset, count: 2) {
+            #expect(abs(Double(estimate) - 140) < 7, "got \(estimate)")
+        }
+    }
+
+    @Test("a batch gives the same answers as one at a time")
+    func batchMatchesSingle() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        let samples = voice(fundamental: 150, frames: 8)
+        let batched = tracker.track(frames: samples, count: 8)
+        for index in 0..<8 {
+            let start = index * PitchTracker.frameSize
+            let single = tracker.track(
+                frame: Array(samples[start..<(start + PitchTracker.frameSize)]))
+            #expect(abs(batched[index] - single) < 0.01)
+        }
+    }
+
+    /// The search range has to cover a speaking voice and no more: wider costs
+    /// candidates and invites the octave errors above.
+    @Test("the search range covers a speaking voice")
+    func range() {
+        #expect(PitchTracker.lowestHertz <= 70)
+        #expect(PitchTracker.highestHertz >= 350)
+        // Two periods of the lowest voice have to fit in a frame, or an
+        // autocorrelation cannot find it.
+        #expect(Double(PitchTracker.frameSize) >= 2 * 48000 / PitchTracker.lowestHertz)
+    }
+
+    /// Asking for more frames than were handed over must not read past the end.
+    @Test("a short buffer is refused rather than read past")
+    func shortBuffer() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        #expect(tracker.track(frames: [Float](repeating: 0, count: 100), count: 4).isEmpty)
+        #expect(tracker.track(frame: [0, 0, 0]) == 0)
+    }
+}
+
+// MARK: - Note names
+
+/// Hertz alone means something to about one person in fifty. The note beside it
+/// means something to anybody who has touched an instrument, and it is the same
+/// number — so it has to be the right one.
+@Suite("Note names")
+struct NoteNameTests {
+    @Test("the reference pitch and its octaves are named correctly")
+    func referencePitch() {
+        #expect(PitchTracker.noteName(440) == "A4")
+        #expect(PitchTracker.noteName(220) == "A3")
+        #expect(PitchTracker.noteName(880) == "A5")
+    }
+
+    /// Middle C is the one everybody checks, and the one an off-by-one octave
+    /// in the arithmetic gets wrong.
+    @Test("middle C is C4")
+    func middleC() {
+        #expect(PitchTracker.noteName(261.63) == "C4")
+    }
+
+    /// A speaking voice sits between these, which is the range the readout will
+    /// actually spend its life in.
+    @Test("speaking voices land where they should")
+    func speakingRange() {
+        // A typical male fundamental.
+        #expect(PitchTracker.noteName(110) == "A2")
+        // A typical female one.
+        #expect(PitchTracker.noteName(220) == "A3")
+        #expect(PitchTracker.noteName(146.83) == "D3")
+    }
+
+    /// Rounding to the nearest semitone rather than the one below.
+    @Test("a frequency between two notes takes the nearer")
+    func rounding() {
+        // Just under A4, but much nearer to it than to G♯4.
+        #expect(PitchTracker.noteName(437) == "A4")
+        // Nearly halfway up: A♯4 is 466.16, A4 is 440, so 455 is nearer A♯4.
+        #expect(PitchTracker.noteName(455) == "A♯4")
+    }
+
+    /// Nothing outside the range gets a name, because there is no note there
+    /// worth showing.
+    @Test("silence and nonsense get no name at all")
+    func outOfRange() {
+        #expect(PitchTracker.noteName(0) == nil)
+        #expect(PitchTracker.noteName(10) == nil)
+        #expect(PitchTracker.noteName(20000) == nil)
+    }
+}

@@ -130,6 +130,33 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
+        print("\npitch tracking")
+        // Knowing the actual fundamental is what would let a voice be moved to
+        // a range rather than by an amount. Measured against the live signal:
+        // in a quiet room there is no pitch to find, and reporting one would be
+        // the failure worth catching.
+        // Through the analyser rather than beside it: the analyser drains the
+        // ring dry every fifty milliseconds, so a diagnostic that read the same
+        // ring found nothing and reported it as a lack of audio. The tracker is
+        // one of the analyser's outputs now, which is where it belonged.
+        model.isAnalysisVisible = true
+        await pause(1.5)
+        let pitch = model.analysis.pitchHertz
+        note(
+            pitch > 0
+                ? String(format: "%.0f Hz", pitch) : "no pitch — a quiet room has none")
+        check(
+            "any pitch reported is inside the range it searches",
+            pitch == 0
+                || (Double(pitch) >= PitchTracker.lowestHertz - 1
+                    && Double(pitch) <= PitchTracker.highestHertz + 1)
+        )
+        // A quiet room has no fundamental, and inventing one would make a
+        // converter chase noise between words.
+        if model.outputVerdict == .veryQuiet || model.outputVerdict == .silent {
+            check("a silent room reports no pitch", pitch == 0)
+        }
+
         print("\nvoice presets")
         // The claim is that both halves move together. Pitch alone is a
         // chipmunk and formants alone is somebody talking through a tube; the
