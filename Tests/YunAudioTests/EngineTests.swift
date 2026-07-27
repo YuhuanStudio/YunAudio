@@ -171,3 +171,27 @@ struct PathQualityTests {
         #expect(value.bufferLatencyMilliseconds == 0)
     }
 }
+
+// MARK: - Meter ballistics
+
+@Suite("Meter ballistics")
+struct MeterBallisticsTests {
+    /// A fixed per-cycle decay ties the meter's fall time to the buffer size:
+    /// at 128 frames it would drop four times faster than at 512 for the same
+    /// signal. The decay is derived from the cycle duration instead.
+    @Test("the meter falls at the same rate whatever the buffer size")
+    func rateIsIndependentOfBufferSize() {
+        for frames in [64, 128, 256, 512] {
+            let perCycle = RTGraph.decay(bufferFrames: frames, sampleRate: 48000)
+            let cyclesPerSecond = 48000.0 / Double(frames)
+            let perSecond = 20 * log10(pow(Double(perCycle), cyclesPerSecond))
+            #expect(abs(perSecond - -20) < 0.01)
+        }
+    }
+
+    @Test("a degenerate configuration falls back rather than dividing by zero")
+    func degenerate() {
+        #expect(RTGraph.decay(bufferFrames: 0, sampleRate: 48000) == 0.85)
+        #expect(RTGraph.decay(bufferFrames: 128, sampleRate: 0) == 0.85)
+    }
+}

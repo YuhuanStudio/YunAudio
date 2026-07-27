@@ -58,6 +58,14 @@ struct RTGraph {
     /// doubles as the sequence number guarding the clock anchor below.
     var cycleCounter: UnsafeMutablePointer<UInt64>
 
+    /// Per-cycle decay applied to the peak meters.
+    ///
+    /// Computed from the buffer size so the meter falls at the same rate in
+    /// wall-clock terms whatever the buffer is. A fixed per-cycle factor ties
+    /// the ballistics to the IO rate: at 128 frames the meter decays four times
+    /// faster than at 512, for the same signal.
+    var peakDecay: Float
+
     /// Most recent input timestamp from the aggregate, which is the clock
     /// master's own sample time. Published to the virtual driver so it can lock
     /// its clock to the microphone instead of free-running on the host clock.
@@ -80,7 +88,17 @@ struct RTGraph {
     /// cycle, so the normal path costs one predictable branch.
     var selftest: UnsafeMutablePointer<RTSelftest>?
 
-    static func allocate(routes routeList: [RTRoute]) -> UnsafeMutablePointer<RTGraph> {
+    /// Peak meters fall by 20 dB per second, which is the usual ballistic for
+    /// a peak-reading meter and slow enough to read.
+    static func decay(bufferFrames: Int, sampleRate: Double) -> Float {
+        guard bufferFrames > 0, sampleRate > 0 else { return 0.85 }
+        let secondsPerCycle = Double(bufferFrames) / sampleRate
+        return Float(pow(10.0, -20.0 * secondsPerCycle / 20.0))
+    }
+
+    static func allocate(
+        routes routeList: [RTRoute], bufferFrames: Int = 128, sampleRate: Double = 48000
+    ) -> UnsafeMutablePointer<RTGraph> {
         let count = max(routeList.count, 1)
 
         let routeStorage = UnsafeMutablePointer<RTRoute>.allocate(capacity: count)
@@ -109,6 +127,7 @@ struct RTGraph {
             routeCount: Int32(routeList.count),
             peaks: peakStorage,
             cycleCounter: counterStorage,
+            peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
             clockSampleTime: clockSampleStorage,
             clockHostTime: clockHostStorage,
             voiceIsolation: nil,
@@ -291,7 +310,7 @@ func yunAudioIOProc(
         // Decay towards the new peak so the meter falls smoothly instead of
         // flickering, without needing any timer on the UI side.
         let previous = peaks[index]
-        peaks[index] = peak > previous ? peak : previous * 0.85
+        peaks[index] = peak > previous ? peak : previous * graph.pointee.peakDecay
     }
 
     // Loopback integrity check. Overwrites the destination channel with a

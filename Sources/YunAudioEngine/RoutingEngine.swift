@@ -273,7 +273,8 @@ public final class RoutingEngine: @unchecked Sendable {
                 usesIsolatedSource: isolatedSource != nil && route.source == isolatedSource)
         }
 
-        let graph = RTGraph.allocate(routes: rtRoutes)
+        let graph = RTGraph.allocate(
+            routes: rtRoutes, bufferFrames: Int(bufferFrames), sampleRate: rate)
         self.graph = graph
         activeRoutes = routes
 
