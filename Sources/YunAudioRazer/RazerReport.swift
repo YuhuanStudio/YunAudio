@@ -1,15 +1,19 @@
 import Foundation
 
-/// Razer's vendor HID report.
+/// Razer's classic vendor HID report, as documented by the openrazer project:
+/// 90 bytes on report id 0, with a checksum over the middle of the frame.
 ///
-/// The wire format is documented by the openrazer project, which reverse
-/// engineered it for Linux. It is stable across the whole product line: 90
-/// bytes, report id 0, with a checksum over the middle of the frame.
+/// **This format does not apply to the Seiren V3 Pro.** Parsing that device's
+/// report descriptor shows no 90-byte report of any kind — its vendor
+/// collections declare 63-byte reports on `0xFF90` and `0xFF53` and a 1020-byte
+/// one on `0xFF82`. Sending a 90-byte frame to report id 0 gets echoed back
+/// with status `new`, and sweeping every known transaction id changes nothing,
+/// because the report being addressed does not exist.
 ///
-/// The Seiren V3 Pro exposes this on interface 3 with vendor usage page
-/// `0xFF0C`, which is how Synapse configures it on Windows. macOS never claims
-/// that interface, so a user-space process can reach it with no driver, no
-/// kernel extension and no special entitlement.
+/// Kept because the encoding is correct for the keyboard and mouse range, and
+/// because the checksum and framing are a reasonable starting point if a
+/// capture of Synapse shows the audio line uses a variant of it. Nothing here
+/// is wired into a working path today.
 public struct RazerReport {
     public static let size = 90
 
@@ -100,13 +104,12 @@ public struct RazerReport {
     public var decodedStatus: Status? { Status(rawValue: status) }
 }
 
-/// Commands used here.
+/// Command ids from the keyboard and mouse protocol.
 ///
-/// Only the read-only ones are wired up. The write side of Razer's command space
-/// is not publicly documented for this device, and a wrong command class can
-/// write to persistent configuration — so discovering it belongs behind a USB
-/// capture of Synapse on Windows, not behind guesswork against someone's
-/// microphone.
+/// Listed for reference only — none of them elicit a response from a Seiren
+/// V3 Pro, which does not speak this protocol. The audio line's command format
+/// needs a USB capture of Synapse; guessing at command bytes against hardware
+/// that stores configuration is not a reasonable substitute.
 public enum RazerCommand {
     /// Class 0x00 — device information.
     public static let firmwareVersion = (commandClass: UInt8(0x00), commandID: UInt8(0x81))
