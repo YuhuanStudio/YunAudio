@@ -183,6 +183,28 @@ enum UIFlowCheck {
             await pause(0.4)
             check("the cable was pulled", model.activeRoutes.count == before)
             check("still running after patching", model.isRunning)
+
+            // A sixteen-channel destination must not put sixteen empty ports on
+            // the canvas; the card was taller than the window and pushed the
+            // mixer out of sight.
+            let shown = model.canvasDestinations.first?.channels.count ?? 0
+            check("the canvas holds back unused channels", shown <= 8)
+            note("\(shown) channels shown, \(model.hiddenCanvasChannels) held back")
+            if model.hiddenCanvasChannels > 0 {
+                model.showsAllCanvasChannels = true
+                check(
+                    "they can still be reached",
+                    (model.canvasDestinations.first?.channels.count ?? 0) > shown)
+                model.showsAllCanvasChannels = false
+            }
+            // Every port a cable can reach must be offered, or a route restored
+            // from disk would have no port to draw against.
+            let offered = Set(model.canvasDestinations.first?.channels ?? [])
+            check(
+                "every connected channel is on the canvas",
+                model.activeRoutes
+                    .filter { $0.destination.deviceUID == destination.uid }
+                    .allSatisfy { offered.contains($0.destination.channel) })
         }
 
         print("\nstopping")

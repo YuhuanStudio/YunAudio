@@ -131,3 +131,5 @@
 "absent" = "absent";
 "Buffered" = "Buffered";
 "Dropped" = "Dropped";
+"Show %d more channels" = "Show %d more channels";
+"Fewer channels" = "Fewer channels";

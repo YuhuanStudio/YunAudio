@@ -289,13 +289,40 @@ final class RouterModel {
         return groups
     }
 
+    /// Whether the canvas offers every channel a device has, or only the ones
+    /// worth looking at.
+    var showsAllCanvasChannels = false
+
     var canvasDestinations: [PortGroup] {
         guard let destination = selectedDestination else { return [] }
         return [
             PortGroup(
                 uid: destination.uid, name: destination.name,
-                channels: Array(0..<min(destination.outputChannels, 8)))
+                channels: Array(0..<canvasChannelCount(of: destination)))
         ]
+    }
+
+    /// Channels a sixteen-channel device offers on the canvas.
+    ///
+    /// Showing all of them turned the patchbay into a column of fourteen empty
+    /// ports — the card was mostly dead space and it pushed the mixer off the
+    /// bottom of the window. Two past the highest one in use is enough to make
+    /// the next connection without hunting, and the rest are one click away.
+    private func canvasChannelCount(of device: AudioDevice) -> Int {
+        let total = device.outputChannels
+        guard !showsAllCanvasChannels else { return min(total, 16) }
+        let highestInUse =
+            activeRoutes
+            .filter { $0.destination.deviceUID == device.uid }
+            .map(\.destination.channel)
+            .max() ?? -1
+        return min(total, max(2, highestInUse + 3))
+    }
+
+    /// Channels the canvas is holding back, so the button can say how many.
+    var hiddenCanvasChannels: Int {
+        guard let destination = selectedDestination else { return 0 }
+        return min(destination.outputChannels, 16) - canvasChannelCount(of: destination)
     }
 
     /// Adds a cable. Silent when the route is already up, because the graph is

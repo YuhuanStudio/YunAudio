@@ -46,7 +46,33 @@ struct RoutingCanvas: View {
                     )
                     .frame(maxWidth: .infinity)
                 } else {
-                    patchbay
+                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                        patchbay
+                        if model.hiddenCanvasChannels > 0 || model.showsAllCanvasChannels {
+                            Button {
+                                model.showsAllCanvasChannels.toggle()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(
+                                        systemName: model.showsAllCanvasChannels
+                                            ? "chevron.up" : "chevron.down"
+                                    )
+                                    .font(.system(size: 8, weight: .semibold))
+                                    Text(
+                                        model.showsAllCanvasChannels
+                                            ? loc("Fewer channels")
+                                            : String(
+                                                format: loc("Show %d more channels"),
+                                                model.hiddenCanvasChannels))
+                                }
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .contentShape(.rect)
+                            }
+                            .buttonStyle(.plain)
+                            .focusEffectDisabled()
+                        }
+                    }
                 }
             }
         }
