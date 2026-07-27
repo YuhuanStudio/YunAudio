@@ -616,7 +616,11 @@ final class RouterModel {
         }
     }
 
-    func stop() {
+    func stop() { stop(then: nil) }
+
+    /// - Parameter completion: Runs on the main actor once the engine is fully
+    ///   down and `isBusy` has been cleared, so a caller can start again.
+    func stop(then completion: (@MainActor () -> Void)? = nil) {
         guard !isBusy else { return }
         isBusy = true
         let engine = engine
@@ -625,6 +629,7 @@ final class RouterModel {
             Task { @MainActor in
                 self.isBusy = false
                 self.finishStop()
+                completion?()
             }
         }
     }
@@ -669,8 +674,12 @@ final class RouterModel {
     /// audio — so the two cases are kept apart rather than treated alike.
     private func restartIfRunning() {
         guard isRunning else { return }
-        stop()
-        start()
+        // stop() is asynchronous and holds `isBusy` until the engine queue has
+        // finished, so calling start() straight after it hits the busy guard and
+        // the route never comes back. Chain them instead.
+        stop {
+            self.start()
+        }
     }
 
     /// Reroutes without stopping. Returns false when the change needs a rebuild.
