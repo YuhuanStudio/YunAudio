@@ -10,6 +10,8 @@
 	<string>com.yuhuanstudio.yunaudio</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
+	<key>CFBundleIconFile</key>
+	<string>YunAudio</string>
 	<key>CFBundleName</key>
 	<string>YunAudio</string>
 	<key>CFBundleDisplayName</key>

@@ -31,6 +31,8 @@ BUNDLE="build/YunAudio.app"
 
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
+./App/make-icon.sh >/dev/null
+cp build/YunAudio.icns "${BUNDLE}/Contents/Resources/"
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
 

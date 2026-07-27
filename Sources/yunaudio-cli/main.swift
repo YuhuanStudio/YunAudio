@@ -303,6 +303,43 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+// How long the blocking parts take, because start() runs on the main thread.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard let source = all.first(where: { $0.hasInput && $0.transport == .usb }),
+          let destination = all.first(where: { $0.hasOutput && $0.transport.isVirtual })
+    else { print("need a USB input and a virtual output"); exit(1) }
+
+    print("source \(source.name) → \(destination.name)\n")
+    let routes = [Route(
+        source: ChannelRef(deviceUID: source.uid, channel: 0),
+        destination: ChannelRef(deviceUID: destination.uid, channel: 0))]
+
+    var startTimes: [Double] = []
+    var stopTimes: [Double] = []
+    for _ in 0..<5 {
+        let engine = RoutingEngine()
+        var mark = Date()
+        try engine.start(
+            sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid,
+            routes: routes)
+        startTimes.append(Date().timeIntervalSince(mark) * 1000)
+        mark = Date()
+        engine.stop()
+        stopTimes.append(Date().timeIntervalSince(mark) * 1000)
+    }
+    func report(_ label: String, _ values: [Double]) {
+        let sorted = values.sorted()
+        print(String(
+            format: "  %@  median %.0f ms, worst %.0f ms",
+            label, sorted[sorted.count / 2], sorted.last ?? 0))
+    }
+    report("start", startTimes)
+    report("stop ", stopTimes)
+    print("\n  Both run on the main thread today, so this is how long the UI stalls.")
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
     let taps = AudioProcesses.liveTaps()
     print("live process taps: \(taps.count)")

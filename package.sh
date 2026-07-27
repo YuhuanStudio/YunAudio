@@ -54,6 +54,8 @@ mkdir -p "${STAGING}"
 # The app bundle.
 APP="${STAGING}/YunAudio.app"
 mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+./App/make-icon.sh >/dev/null
+cp build/YunAudio.icns "${APP}/Contents/Resources/"
 cp App/Info.plist "${APP}/Contents/Info.plist"
 cp .build/release/YunAudioApp "${APP}/Contents/MacOS/YunAudioApp"
 
