@@ -314,3 +314,9 @@
 "Formants" = "Formants";
 "Resonance" = "Resonance";
 "Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk." = "Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk.";
+"Plugins" = "Plugins";
+"Add an Audio Unit" = "Add an Audio Unit";
+"Remove" = "Remove";
+"%d installed." = "%d installed.";
+"%@ could not be loaded." = "%@ could not be loaded.";
+"This one runs in its own process, so every block makes a round trip. Expect it to cost latency." = "This one runs in its own process, so every block makes a round trip. Expect it to cost latency.";

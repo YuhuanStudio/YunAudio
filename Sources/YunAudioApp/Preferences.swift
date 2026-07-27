@@ -57,6 +57,9 @@ struct Preferences: Codable, Equatable, Sendable {
     var sourceRoles: [String: String]?
     /// Hold a key to talk rather than clicking to mute.
     var isPushToTalkEnabled: Bool?
+    /// Third-party Audio Units in the chain, and their knob positions.
+    var plugins: [AudioUnitPlugin]?
+    var pluginValues: [String: Float]?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -88,7 +91,9 @@ struct Preferences: Codable, Equatable, Sendable {
         isDucking: false,
         duckDecibels: -14,
         sourceRoles: [:],
-        isPushToTalkEnabled: false)
+        isPushToTalkEnabled: false,
+        plugins: [],
+        pluginValues: [:])
 }
 
 @MainActor

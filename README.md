@@ -111,6 +111,20 @@ resonances moved would pass for a plain pitch shifter. Alongside it, a character
 stage built on ring modulation, decimation and soft clipping: robot, radio,
 monster, bitcrush, alien.
 
+**Third-party Audio Units.** This is what a plugin means in audio, and it is the
+one place where loading somebody else's code is the right answer rather than an
+elaborate way to avoid a configuration file: the format exists, the system vets
+and sandboxes it, and thousands are already installed. They go in one place, and
+it is not arbitrary — after everything this application shapes and before the
+limiter, because the limiter's whole job is that nothing downstream sees a
+sample it has to clip. Anything running after it can put the signal back over
+full scale, so a plugin cannot be allowed there whatever the user drags around.
+
+A unit that has to run in its own process makes every render an XPC round trip,
+which is fine in a mixing session and not fine inside a callback with a 2.7 ms
+deadline. That is said before it goes in the path rather than discovered
+afterwards.
+
 **Devices are described by documents, not by code.** CoreAudio says a microphone
 has three input channels and nothing about what is on them. Knowing that the
 Seiren V3 Pro's three are the processed capsule, the dry capsule and the output

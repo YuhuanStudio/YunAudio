@@ -396,6 +396,125 @@ struct MainWindow: View {
         }
     }
 
+    /// Third-party Audio Units.
+    ///
+    /// The one place in this application where somebody else's code runs, and
+    /// the right one: the format exists, the system vets it, and thousands of
+    /// these are already installed on the machine. The built-in stages stay
+    /// Apple's own because their limiter is better than one written here.
+    @ViewBuilder
+    private var pluginList: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            ForEach(model.enabledPlugins) { plugin in
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    HStack(spacing: Yun.Space.sm) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(plugin.name)
+                                .font(Yun.Text.label)
+                                .foregroundStyle(Yun.Palette.textPrimary)
+                            Text(plugin.manufacturerName)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                        }
+                        Spacer(minLength: 0)
+                        Button {
+                            model.removePlugin(plugin)
+                        } label: {
+                            Image(systemName: "minus")
+                                .font(.system(size: 10))
+                                .frame(width: 14)
+                        }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                        .accessibilityLabel(Text(loc("Remove")))
+                    }
+                    if !plugin.loadsInProcess {
+                        // Said before it is in the path rather than discovered
+                        // afterwards: an out-of-process render is an XPC round
+                        // trip inside a callback with a 2.7 ms deadline.
+                        Text(
+                            loc(
+                                "This one runs in its own process, so every block makes a round trip. Expect it to cost latency."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if model.isRunning {
+                        ForEach(model.pluginParameters(plugin).prefix(6)) { parameter in
+                            pluginParameterRow(parameter, in: plugin)
+                        }
+                    }
+                }
+            }
+
+            if !model.failedPlugins.isEmpty {
+                Text(
+                    String(
+                        format: loc("%@ could not be loaded."),
+                        model.failedPlugins.joined(separator: ", "))
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !model.enabledPlugins.isEmpty { YunDivider() }
+
+            Menu {
+                ForEach(model.availablePlugins) { plugin in
+                    Button("\(plugin.manufacturerName) — \(plugin.name)") {
+                        model.addPlugin(plugin)
+                    }
+                    .disabled(model.enabledPlugins.contains(plugin))
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 10))
+                    Text(loc("Add an Audio Unit"))
+                }
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(model.availablePlugins.isEmpty)
+
+            Text(
+                String(
+                    format: loc("%d installed."), model.availablePlugins.count)
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+        }
+    }
+
+    private func pluginParameterRow(
+        _ parameter: EffectParameter, in plugin: AudioUnitPlugin
+    ) -> some View {
+        let value = model.pluginValue(of: parameter, in: plugin)
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(parameter.title)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                Spacer()
+                Text(parameter.formatted(value))
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+            }
+            YunSlider(
+                fraction: Binding(
+                    get: {
+                        parameter.fraction(
+                            for: model.pluginValue(of: parameter, in: plugin))
+                    },
+                    set: {
+                        model.setPluginValue(
+                            parameter.value(atFraction: $0), of: parameter, in: plugin)
+                    }))
+        }
+    }
+
     /// Held to talk rather than clicked to mute.
     ///
     /// Sits with the input because that is what it takes over: while it is
@@ -552,6 +671,11 @@ struct MainWindow: View {
                             .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                }
+
+                if !model.availablePlugins.isEmpty || !model.enabledPlugins.isEmpty {
+                    sectionHeading(loc("Plugins"))
+                    YunCard { pluginList }
                 }
 
                 if model.lighting.isAvailable {

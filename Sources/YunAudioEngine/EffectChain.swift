@@ -381,10 +381,27 @@ final class EffectChain {
     /// Total latency the chain adds, in frames.
     private(set) var latencyFrames = 0
 
-    init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
-        guard !kinds.isEmpty else { return nil }
+    /// Third-party units in the chain, in the order given.
+    private(set) var plugins: [AudioUnitPlugin] = []
+    /// Which of `units` each plugin is, so its parameters can be reached.
+    private var pluginUnits: [String: AudioComponentInstance] = [:]
+    /// Plugins that would not load, named so the interface can say which.
+    private(set) var failedPlugins: [String] = []
+
+    convenience init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
+        self.init(
+            kinds: kinds, plugins: [], sampleRate: sampleRate,
+            maximumFrames: maximumFrames)
+    }
+
+    init?(
+        kinds: [EffectKind], plugins requested: [AudioUnitPlugin], sampleRate: Double,
+        maximumFrames: Int
+    ) {
+        guard !kinds.isEmpty || !requested.isEmpty else { return nil }
         self.maximumFrames = maximumFrames
         stages = kinds.sorted { $0.chainOrder < $1.chainOrder }
+        plugins = requested
 
         inputBuffer = .allocate(capacity: maximumFrames)
         inputBuffer.initialize(repeating: 0, count: maximumFrames)
@@ -438,6 +455,54 @@ final class EffectChain {
                 unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
                 &frames, UInt32(MemoryLayout<UInt32>.size))
             units.append(unit)
+        }
+
+        // Third-party units go in one place, and it is not arbitrary: after
+        // everything this application shapes, and before the limiter. The
+        // limiter's whole job is that nothing downstream ever sees a sample it
+        // has to clip, and anything running after it can put the signal back
+        // over full scale — so a plugin cannot be allowed there whatever the
+        // user drags around. Everywhere else in the chain is a matter of taste
+        // and this is not.
+        if !plugins.isEmpty {
+            let insertAt = hostedStages.firstIndex(of: .limiter) ?? units.count
+            var built: [AudioComponentInstance] = []
+            for plugin in plugins {
+                var description = plugin.componentDescription
+                guard let component = AudioComponentFindNext(nil, &description) else {
+                    failedPlugins.append(plugin.name)
+                    continue
+                }
+                var instance: AudioComponentInstance?
+                guard
+                    AudioComponentInstanceNew(component, &instance) == noErr,
+                    let unit = instance
+                else {
+                    failedPlugins.append(plugin.name)
+                    continue
+                }
+                AudioUnitSetProperty(
+                    unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                    &format, formatSize)
+                AudioUnitSetProperty(
+                    unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
+                    &format, formatSize)
+                var frames = UInt32(maximumFrames)
+                AudioUnitSetProperty(
+                    unit, kAudioUnitProperty_MaximumFramesPerSlice,
+                    kAudioUnitScope_Global, 0, &frames,
+                    UInt32(MemoryLayout<UInt32>.size))
+                built.append(unit)
+                pluginUnits[plugin.id] = unit
+            }
+            if !built.isEmpty {
+                units.insert(contentsOf: built, at: insertAt)
+                // The native stage's position is an index into `units`, so
+                // inserting ahead of it moves it.
+                if let native = nativeIndex, native >= insertAt {
+                    nativeIndex = native + built.count
+                }
+            }
         }
 
         // A chain of nothing but the native stage is legitimate: somebody who
@@ -810,6 +875,27 @@ final class EffectChain {
 
     /// Applies a knob to the live unit. Audio Unit parameter changes are
     /// realtime-safe by design, so this needs no queue of its own.
+    /// Sets a parameter on a third-party unit.
+    ///
+    /// Separate from the built-in setter because there is nothing to switch on:
+    /// the parameter is whatever the plugin's author called it, and the only
+    /// description of it is the one the unit handed out at runtime.
+    func set(_ parameter: String, ofPlugin id: String, to value: Float) {
+        guard let unit = pluginUnits[id],
+            let identifier = AudioUnitPlugins.parameterID(from: parameter)
+        else { return }
+        AudioUnitSetParameter(unit, identifier, kAudioUnitScope_Global, 0, value, 0)
+    }
+
+    /// How many units the chain built, for tests that care about placement.
+    var unitCountForTesting: Int { units.count }
+
+    /// What a hosted plugin says its controls are.
+    func parameters(ofPlugin id: String) -> [EffectParameter] {
+        guard let unit = pluginUnits[id] else { return [] }
+        return AudioUnitPlugins.parameters(of: unit)
+    }
+
     func set(_ parameter: String, of kind: EffectKind, to value: Float) {
         if kind == .formant {
             // A percentage either way, which is what the control says. −20%

@@ -163,6 +163,21 @@ public final class RoutingEngine: @unchecked Sendable {
     public var onClockLockFailure: (@Sendable () -> Void)?
 
     public private(set) var lastIsolationError: String?
+    /// Third-party units that were asked for and would not load, by name.
+    public private(set) var failedPlugins: [String] = []
+    /// What the hosted plugins say their controls are, by plugin id.
+    public func pluginParameters(_ id: String) -> [EffectParameter] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return effectChain?.parameters(ofPlugin: id) ?? []
+    }
+
+    /// Sets a control on a hosted third-party unit.
+    public func setPluginParameter(_ parameter: String, ofPlugin id: String, to value: Float) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        effectChain?.set(parameter, ofPlugin: id, to: value)
+    }
     /// Why the echo canceller is not running, when it was asked for.
     public private(set) var lastEchoCancellationError: String?
 
@@ -230,6 +245,8 @@ public final class RoutingEngine: @unchecked Sendable {
     ///     must not stop somebody hearing their own voice.
     ///   - effects: Processing stages to insert ahead of the routes. More than
     ///     one supersedes `voiceIsolation`, which is the single-stage form.
+    ///   - plugins: Third-party Audio Units, placed after everything this
+    ///     application shapes and before the limiter.
     ///   - preferredSampleRate: Used when both devices support it, rather than
     ///     always taking the highest common rate — a voice chat gains nothing
     ///     above 48 kHz.
@@ -249,6 +266,7 @@ public final class RoutingEngine: @unchecked Sendable {
         additionalDestinationUIDs: [String] = [],
         monitorDeviceUID: String? = nil,
         effects: [EffectKind] = [],
+        plugins: [AudioUnitPlugin] = [],
         preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
         voiceIsolation: VoiceIsolationSettings? = nil,
@@ -378,9 +396,13 @@ public final class RoutingEngine: @unchecked Sendable {
         if effects.count > 1, let first = routes.first {
             isolatedSource = first.source
             if let chain = EffectChain(
-                kinds: effects, sampleRate: rate, maximumFrames: Int(bufferFrames))
+                kinds: effects, plugins: plugins, sampleRate: rate,
+                maximumFrames: Int(bufferFrames))
             {
                 effectChain = chain
+                // Named rather than silently dropped: a chain that quietly
+                // lost a stage sounds different and says nothing about why.
+                failedPlugins = chain.failedPlugins
                 effectLatencyFrames = chain.latencyFrames
                 voiceIsolationLatencyFrames =
                     effects.contains(.voiceIsolation) ? chain.latencyFrames : 0

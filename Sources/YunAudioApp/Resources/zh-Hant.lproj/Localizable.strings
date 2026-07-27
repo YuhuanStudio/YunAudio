@@ -314,3 +314,9 @@
 "Formants" = "共振峰";
 "Resonance" = "共振位移";
 "Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk." = "移動聲音的共振峰而不動音高。這才是讓變聲聽起來像另一個人、而不是花栗鼠的關鍵。";
+"Plugins" = "外掛";
+"Add an Audio Unit" = "加入 Audio Unit";
+"Remove" = "移除";
+"%d installed." = "已安裝 %d 個。";
+"%@ could not be loaded." = "%@ 無法載入。";
+"This one runs in its own process, so every block makes a round trip. Expect it to cost latency." = "這個外掛在自己的處理程序中執行，每個區塊都要跨程序往返一次，預期會增加延遲。";

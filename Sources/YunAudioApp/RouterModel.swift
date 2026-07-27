@@ -76,6 +76,65 @@ final class RouterModel {
         didSet { if oldValue != autoStart { persist() } }
     }
 
+    // MARK: Third-party units
+
+    /// Every Audio Unit effect installed on this machine, minus Apple's own —
+    /// those are the built-in stages already.
+    ///
+    /// Read once and kept: enumerating components walks the whole plugin
+    /// registry, which is not something to do on every view update.
+    private(set) var availablePlugins: [AudioUnitPlugin] = []
+
+    /// The ones in the chain, in order.
+    var enabledPlugins: [AudioUnitPlugin] = [] {
+        didSet {
+            guard oldValue != enabledPlugins else { return }
+            persist()
+            restartIfRunning()
+        }
+    }
+
+    /// Ones that were asked for and would not load.
+    private(set) var failedPlugins: [String] = []
+
+    func refreshPlugins() {
+        availablePlugins = AudioUnitPlugins.installed()
+        // Anything remembered that is no longer installed is dropped rather
+        // than carried: a reference to a plugin somebody uninstalled would fail
+        // to load on every start and say so every time.
+        let installed = Set(availablePlugins.map(\.id))
+        let surviving = enabledPlugins.filter { installed.contains($0.id) }
+        if surviving.count != enabledPlugins.count { enabledPlugins = surviving }
+    }
+
+    func addPlugin(_ plugin: AudioUnitPlugin) {
+        guard !enabledPlugins.contains(plugin) else { return }
+        enabledPlugins.append(plugin)
+    }
+
+    func removePlugin(_ plugin: AudioUnitPlugin) {
+        enabledPlugins.removeAll { $0 == plugin }
+    }
+
+    func pluginParameters(_ plugin: AudioUnitPlugin) -> [EffectParameter] {
+        engine.pluginParameters(plugin.id)
+    }
+
+    func setPluginValue(
+        _ value: Float, of parameter: EffectParameter, in plugin: AudioUnitPlugin
+    ) {
+        pluginValues["\(plugin.id).\(parameter.id)"] = value
+        engine.setPluginParameter(parameter.id, ofPlugin: plugin.id, to: value)
+        persist()
+    }
+
+    func pluginValue(of parameter: EffectParameter, in plugin: AudioUnitPlugin) -> Float {
+        pluginValues["\(plugin.id).\(parameter.id)"] ?? parameter.defaultValue
+    }
+
+    /// Knob positions, keyed by plugin and parameter.
+    var pluginValues: [String: Float] = [:]
+
     /// Apple's voice isolation model. Off by default: it costs 56 ms of latency
     /// and by definition ends bit-exactness, so it is a deliberate trade rather
     /// than something to enable quietly on the user's behalf.
@@ -1142,6 +1201,9 @@ final class RouterModel {
 
     init() {
         refreshDevices()
+        // Before restoring, so a remembered plugin that has since been
+        // uninstalled is dropped rather than failing to load on every start.
+        refreshPlugins()
         restore()
 
         engine.onClockLockFailure = { [weak self] in
@@ -1309,6 +1371,8 @@ final class RouterModel {
         sourceRoles = (saved.sourceRoles ?? [:]).compactMapValues(
             LevelCalibration.Role.init(rawValue:))
         isPushToTalkEnabled = saved.isPushToTalkEnabled ?? false
+        enabledPlugins = saved.plugins ?? []
+        pluginValues = saved.pluginValues ?? [:]
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1370,7 +1434,9 @@ final class RouterModel {
                 isDucking: isDucking,
                 duckDecibels: duckDecibels,
                 sourceRoles: sourceRoles.mapValues(\.rawValue),
-                isPushToTalkEnabled: isPushToTalkEnabled))
+                isPushToTalkEnabled: isPushToTalkEnabled,
+                plugins: enabledPlugins,
+                pluginValues: pluginValues))
     }
 
     // MARK: Devices
@@ -1609,6 +1675,7 @@ final class RouterModel {
 
         let engine = engine
         let effects = Array(enabledEffects)
+        let pluginList = enabledPlugins
         let isolation =
             enabledEffects.contains(.voiceIsolation)
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
@@ -1637,6 +1704,7 @@ final class RouterModel {
                     taps: handle.taps,
                     monitorDeviceUID: monitor,
                     effects: effects,
+                    plugins: pluginList,
                     preferredSampleRate: rate,
                     bufferFrames: buffer,
                     voiceIsolation: isolation,
@@ -1824,6 +1892,7 @@ final class RouterModel {
         measuredRateRatio = engine.measuredRateRatio
         refreshRecordingState()
         outputPeak = engine.outputPeak
+        if failedPlugins != engine.failedPlugins { failedPlugins = engine.failedPlugins }
         outputClippedSamples = engine.outputClippedSamples
         // Drained every poll whether or not the analysis panel is open. The ring
         // is finite, so a consumer that only ran while a view was visible would

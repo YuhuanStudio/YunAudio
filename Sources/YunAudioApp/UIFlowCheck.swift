@@ -1,4 +1,5 @@
 import AppKit
+import AudioToolbox
 import CoreAudio
 import Foundation
 import YunAudioEngine
@@ -128,6 +129,33 @@ enum UIFlowCheck {
         check("it can be armed", model.watchesIOAllocations)
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
+
+        print("\nthird-party units")
+        note("\(model.availablePlugins.count) Audio Unit effect(s) installed")
+        // Apple's own are the built-in stages; listing them again would put
+        // AUPeakLimiter in the picker beside the limiter in the panel above it.
+        check(
+            "none of Apple's own units are offered as plugins",
+            model.availablePlugins.allSatisfy {
+                $0.manufacturer != kAudioUnitManufacturer_Apple
+            })
+        check(
+            "every offered plugin has a name",
+            model.availablePlugins.allSatisfy { !$0.name.isEmpty })
+        if let plugin = model.availablePlugins.first(where: \.loadsInProcess) {
+            note("hosting \(plugin.manufacturerName) — \(plugin.name)")
+            model.addPlugin(plugin)
+            check("it is in the chain", model.enabledPlugins.contains(plugin))
+            check(
+                "adding it twice does nothing",
+                {
+                    model.addPlugin(plugin); return model.enabledPlugins.count == 1
+                }())
+            model.removePlugin(plugin)
+            check("and it comes back out", model.enabledPlugins.isEmpty)
+        } else {
+            note("nothing installed that can load in-process — hosting not exercised")
+        }
 
         print("\nlight ring")
         if model.lighting.isAvailable {

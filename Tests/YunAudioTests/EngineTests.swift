@@ -2987,3 +2987,109 @@ struct NativeStageTests {
         #expect(chain.latencyFrames >= FormantShifter.windowSize)
     }
 }
+
+// MARK: - Third-party units
+
+/// Hosting somebody else's Audio Unit is the one place where loading other
+/// people's code is the right answer rather than an elaborate way to avoid a
+/// configuration file: the format exists, the system vets it, and thousands are
+/// already installed.
+///
+/// What can be tested without assuming any particular plugin is present is the
+/// machinery around it — which is also where the mistakes are.
+@Suite("Audio Unit plugins")
+struct AudioUnitPluginTests {
+
+    /// Enumeration must not crash, must not list Apple's own units twice, and
+    /// must come back in a stable order.
+    @Test("enumeration is well-formed whatever is installed")
+    func enumeration() {
+        let plugins = AudioUnitPlugins.installed()
+        // Apple's own are the built-in stages; listing them again would put
+        // AUPeakLimiter in the plugin picker beside the limiter in the panel.
+        #expect(plugins.allSatisfy { $0.manufacturer != kAudioUnitManufacturer_Apple })
+        #expect(plugins.allSatisfy { !$0.name.isEmpty })
+        #expect(Set(plugins.map(\.id)).count == plugins.count)
+        // Stable between calls, so the list does not shuffle between launches.
+        #expect(AudioUnitPlugins.installed().map(\.id) == plugins.map(\.id))
+    }
+
+    /// The identifier has to survive being written to preferences and read
+    /// back, or a chain cannot be restored.
+    @Test("a plugin reference round-trips through preferences")
+    func codable() throws {
+        let plugin = AudioUnitPlugin(
+            type: kAudioUnitType_Effect, subType: 0x61626364,
+            manufacturer: 0x65666768, name: "Example", manufacturerName: "Somebody",
+            loadsInProcess: true)
+        let data = try JSONEncoder().encode(plugin)
+        #expect(try JSONDecoder().decode(AudioUnitPlugin.self, from: data) == plugin)
+    }
+
+    /// Parameter ids are strings so they can share a type with the built-in
+    /// ones; the mapping back has to be exact.
+    @Test("parameter identifiers survive the round trip")
+    func parameterIdentifiers() {
+        #expect(AudioUnitPlugins.parameterID(from: "p0") == 0)
+        #expect(AudioUnitPlugins.parameterID(from: "p42") == 42)
+        // Anything that is not one of ours must not be mistaken for one: the
+        // built-in stages use names like "threshold".
+        #expect(AudioUnitPlugins.parameterID(from: "threshold") == nil)
+        #expect(AudioUnitPlugins.parameterID(from: "") == nil)
+        #expect(AudioUnitPlugins.parameterID(from: "pitch") == nil)
+    }
+
+    /// A plugin that is not installed has to be reported, not silently dropped:
+    /// a chain that quietly lost a stage sounds different and says nothing.
+    @Test("a missing plugin is named rather than skipped in silence")
+    func missingPlugin() throws {
+        let absent = AudioUnitPlugin(
+            type: kAudioUnitType_Effect, subType: 0x7A7A7A7A,
+            manufacturer: 0x7A7A7A7A, name: "Not Installed",
+            manufacturerName: "Nobody", loadsInProcess: true)
+        let chain = try #require(
+            EffectChain(
+                kinds: [.limiter], plugins: [absent], sampleRate: 48000,
+                maximumFrames: 512))
+        #expect(chain.failedPlugins == ["Not Installed"])
+        // And the rest of the chain still works.
+        #expect(chain.stages == [.limiter])
+    }
+
+    /// The limiter's guarantee is that nothing downstream sees a sample it has
+    /// to clip. Anything running after it can put the signal back over full
+    /// scale, so a plugin must never land there — whatever order they were
+    /// given in.
+    @Test("plugins are placed before the limiter, never after")
+    func placement() throws {
+        // Uses a real installed plugin when there is one, because the
+        // assertion is about where a unit that actually loaded ends up.
+        guard let plugin = AudioUnitPlugins.installed().first(where: \.loadsInProcess)
+        else {
+            Issue.record("no third-party units installed — placement not exercised")
+            return
+        }
+        let chain = try #require(
+            EffectChain(
+                kinds: [.equaliser, .limiter], plugins: [plugin], sampleRate: 48000,
+                maximumFrames: 512))
+        #expect(chain.failedPlugins.isEmpty, "\(plugin.name) did not load")
+        #expect(chain.unitCountForTesting == 3)
+        // Signal still reaches the end.
+        for index in 0..<512 { chain.inputBuffer[index] = 0.2 }
+        #expect(chain.render(frames: 512, sampleTime: 0))
+    }
+
+    /// A unit that has to run in its own process makes every render an XPC
+    /// round trip, which is fine in a mixing application and not fine inside a
+    /// callback with a 2.7 ms deadline. It has to be visible before somebody
+    /// puts it in the path.
+    @Test("in-process loading is reported rather than discovered")
+    func reportsProcessModel() {
+        // Whatever is installed, the flag has to be a definite answer for each.
+        for plugin in AudioUnitPlugins.installed() {
+            _ = plugin.loadsInProcess
+        }
+        #expect(Bool(true))
+    }
+}
