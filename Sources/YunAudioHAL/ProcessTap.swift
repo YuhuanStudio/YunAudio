@@ -14,6 +14,12 @@ extension AudioProperty {
     public static var processIsRunningOutput: AudioProperty<UInt32> {
         .init(kAudioProcessPropertyIsRunningOutput)
     }
+    public static var processDevices: AudioProperty<AudioObjectID> {
+        .init(kAudioProcessPropertyDevices)
+    }
+    public static var tapList: AudioProperty<AudioObjectID> {
+        .init(kAudioHardwarePropertyTapList)
+    }
     public static var tapUID: AudioProperty<CFString> { .init(kAudioTapPropertyUID) }
     public static var tapFormat: AudioProperty<AudioStreamBasicDescription> {
         .init(kAudioTapPropertyFormat)
@@ -128,7 +134,24 @@ public enum ProcessTapError: Error, CustomStringConvertible {
     }
 }
 
+extension AudioProcess {
+    /// Devices this process currently has open, per scope.
+    public func devices(scope: AudioObjectPropertyScope) -> [AudioObjectID] {
+        let property = AudioProperty<AudioObjectID>.processDevices.scoped(to: scope)
+        return (try? id.array(of: property)) ?? []
+    }
+}
+
 public enum AudioProcesses {
+    /// Every process tap currently alive on the system, ours or anyone's.
+    ///
+    /// A tap that outlives the process that made it keeps duplicating audio,
+    /// so this is the first thing to check when something sounds doubled.
+    public static func liveTaps() -> [(id: AudioObjectID, uid: String)] {
+        let ids = (try? AudioObjectID.system.array(of: .tapList)) ?? []
+        return ids.map { ($0, (try? $0.string(of: .tapUID)) ?? "—") }
+    }
+
     /// Every process the HAL is tracking, newest-looking first.
     ///
     /// Processes with no bundle identifier and no audio activity are dropped:

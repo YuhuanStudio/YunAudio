@@ -296,6 +296,57 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 
 // MARK: - Run
 
+// Restores devices to a sane rate.
+//
+// Routing has to align sample rates across the devices it binds together, and
+// that change persists on the hardware after the tool exits. A tool that
+// reconfigures someone's hardware has to be able to put it back.
+// What is actually going on right now: live taps, and which devices each
+// audio-using process has open.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
+    let taps = AudioProcesses.liveTaps()
+    print("live process taps: \(taps.count)")
+    for tap in taps { print("  · \(tap.uid)  (object \(tap.id))") }
+
+    print("\nprocesses holding audio devices:")
+    let devices = (try? AudioDevices.all()) ?? []
+    let byID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.name) })
+    for process in (try? AudioProcesses.all(includingSilent: true)) ?? [] {
+        let inputs = process.devices(scope: kAudioObjectPropertyScopeInput)
+        let outputs = process.devices(scope: kAudioObjectPropertyScopeOutput)
+        guard !inputs.isEmpty || !outputs.isEmpty else { continue }
+        let inNames = inputs.map { byID[$0] ?? "object \($0)" }.joined(separator: ", ")
+        let outNames = outputs.map { byID[$0] ?? "object \($0)" }.joined(separator: ", ")
+        print("  \(process.name)")
+        if !inputs.isEmpty { print("     in:  \(inNames)") }
+        if !outputs.isEmpty { print("     out: \(outNames)") }
+    }
+    exit(0)
+}
+
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "reset" {
+    let target = CommandLine.arguments.count > 2
+        ? Double(CommandLine.arguments[2]) ?? 48000 : 48000
+    do {
+        for device in try AudioDevices.all() {
+            guard device.availableSampleRates.contains(target),
+                  let current = device.currentSampleRate, current != target
+            else { continue }
+            do {
+                try device.setNominalSampleRate(target)
+                print("  \(device.name): \(Int(current)) Hz → \(Int(target)) Hz")
+            } catch {
+                print("  \(device.name): could not change rate — \(error)")
+            }
+        }
+        print("done")
+    } catch {
+        print("reset failed: \(error)")
+        exit(1)
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "razer" {
     if CommandLine.arguments.contains("--dump") {
         RazerDevice.dumpCandidates()
@@ -409,6 +460,77 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     } catch {
         print("tap failed: \(error)")
         exit(1)
+    }
+    exit(0)
+}
+
+// Runs echo-cancelled capture against a real microphone/speaker pair.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
+    let micMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "MacBook Pro的麥克風"
+    let speakerMatch = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "MacBook Pro的揚聲器"
+    let all = (try? AudioDevices.all()) ?? []
+    guard let mic = all.first(where: { $0.name.contains(micMatch) && $0.hasInput }),
+          let speaker = all.first(where: { $0.name.contains(speakerMatch) && $0.hasOutput })
+    else {
+        print("could not find both \"\(micMatch)\" and \"\(speakerMatch)\"")
+        exit(1)
+    }
+    print("microphone  \(mic.name)  (\(mic.inputChannels) in / \(mic.outputChannels) out)")
+    print("speaker     \(speaker.name)")
+
+    guard let capture = EchoCancellingCapture(
+        microphoneUID: mic.uid, speakerUID: speaker.uid)
+    else {
+        print("AUVoiceProcessingIO could not be set up for that pair")
+        exit(1)
+    }
+    print("bound to    \(capture.isBoundToDedicatedDevice ? "a private aggregate" : "the system defaults")")
+    print("rate        \(Int(capture.sampleRate)) Hz")
+
+    // Peak is published through an atomic-free box read on the main thread; a
+    // torn float would cost one stale meter frame and nothing else.
+    final class Meter: @unchecked Sendable {
+        var peak: Float = 0
+        var frames = 0
+    }
+    let meter = Meter()
+
+    guard capture.start(capture: { samples, count, _ in
+        var peak: Float = 0
+        for index in 0..<count {
+            let magnitude = abs(samples[index])
+            if magnitude > peak { peak = magnitude }
+        }
+        meter.peak = max(meter.peak * 0.8, peak)
+        meter.frames += count
+    }) else {
+        print("could not start the unit")
+        exit(1)
+    }
+
+    print("\ncapturing echo-cancelled microphone for 5s — speak\n")
+    for _ in 0..<15 {
+        Thread.sleep(forTimeInterval: 0.33)
+        let db = meter.peak > 0 ? 20 * log10(meter.peak) : -120
+        let filled = max(0, min(24, Int((db + 60) / 2.5)))
+        print("  \(String(repeating: "█", count: filled))\(String(repeating: "·", count: 24 - filled))  \(meter.frames) frames")
+    }
+    capture.stop()
+    print("\ntotal frames captured: \(meter.frames)")
+    exit(meter.frames > 0 ? 0 : 1)
+}
+
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec" {
+    // Three configurations, because the interesting question is not "does it
+    // work" but "which binding does it accept".
+    print("— system defaults (no device set) —")
+    print(EchoCancellation.probe(inputDeviceUID: nil).summary)
+
+    let devices = (try? AudioDevices.all()) ?? []
+    for device in devices where device.hasInput {
+        let duplex = device.hasOutput ? "duplex" : "input-only"
+        print("\n— \(device.name)  (\(duplex)) —")
+        print(EchoCancellation.probe(inputDeviceUID: device.uid).summary)
     }
     exit(0)
 }
