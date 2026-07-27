@@ -77,7 +77,7 @@ public struct RazerReport {
     }
 
     /// What the device said about the command.
-    public enum Status: UInt8, CustomStringConvertible {
+    public enum Status: UInt8, Sendable, CustomStringConvertible {
         case new = 0x00
         case busy = 0x01
         case successful = 0x02
