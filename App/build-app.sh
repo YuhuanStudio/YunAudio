@@ -34,6 +34,11 @@ mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
 
+# The driver travels inside the bundle so the app can offer to install it.
+if [[ -d "Driver/build/YunAudioDriver.driver" ]]; then
+	cp -R Driver/build/YunAudioDriver.driver "${BUNDLE}/Contents/Resources/"
+fi
+
 # Ad-hoc signature with the audio-input entitlement. Distribution needs a real
 # Developer ID identity and notarisation; this is enough for the TCC prompt to
 # work locally.

@@ -6,7 +6,10 @@ import SwiftUI
 @MainActor
 enum PanelRenderer {
     static func write(to directory: String, model: RouterModel) {
-        render(PanelView(model: model), basename: "panel", directory: directory)
+        model.prepareForRendering()
+        render(
+            PanelView(model: model, forcesRoutedLayout: true),
+            basename: "panel", directory: directory)
         // The preferences window scrolls, and a ScrollView has no intrinsic
         // height offscreen — without an explicit size it renders as an empty
         // pane. Pinned to the window's minimum size.

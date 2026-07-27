@@ -1,3 +1,4 @@
+import AppKit
 import CoreAudio
 import Foundation
 
@@ -169,20 +170,19 @@ public enum AudioProcesses {
             }
     }
 
-    /// Maps PIDs to human names without pulling in AppKit at this layer.
+    /// Maps PIDs to the names a person would recognise.
+    ///
+    /// An earlier version reached `NSRunningApplication` through KVC to keep
+    /// AppKit out of this module. That was wrong twice over:
+    /// `runningApplications` is a class method, so the KVC lookup could never
+    /// succeed — it failed silently in a command-line context and threw
+    /// `NSUnknownKeyException` inside an app. Importing AppKit is the honest
+    /// cost of showing "Discord" instead of "Renderer".
     private static func runningApplicationNames() -> [pid_t: String] {
         var result: [pid_t: String] = [:]
-        // NSRunningApplication lives in AppKit; using its Objective-C runtime
-        // name keeps this module free of a UI framework dependency.
-        guard let appClass = NSClassFromString("NSRunningApplication") as? NSObject.Type,
-              let running = appClass.value(forKey: "runningApplications") as? [NSObject]
-        else { return result }
-        for application in running {
-            guard let pid = application.value(forKey: "processIdentifier") as? pid_t
-            else { continue }
-            if let name = application.value(forKey: "localizedName") as? String {
-                result[pid] = name
-            }
+        for application in NSWorkspace.shared.runningApplications {
+            guard let name = application.localizedName else { continue }
+            result[application.processIdentifier] = name
         }
         return result
     }

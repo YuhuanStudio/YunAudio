@@ -284,6 +284,64 @@ public struct YunBadge: View {
     }
 }
 
+// MARK: - Fader
+
+/// A horizontal gain fader.
+///
+/// Drawn rather than using `Slider`, which brings the system accent colour and
+/// system knob metrics into a panel that is otherwise entirely Zinc. The value
+/// is in decibels because that is how gain is thought about; the caller
+/// converts to a linear multiplier.
+public struct YunFader: View {
+    @Binding private var decibels: Float
+    private let range: ClosedRange<Float>
+
+    public init(decibels: Binding<Float>, range: ClosedRange<Float> = -40...12) {
+        _decibels = decibels
+        self.range = range
+    }
+
+    private var fraction: Double {
+        Double((decibels - range.lowerBound) / (range.upperBound - range.lowerBound))
+    }
+
+    public var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Yun.Palette.elevated)
+                    .frame(height: 4)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: max(0, min(width, width * fraction)), height: 4)
+                Circle()
+                    .fill(Yun.Palette.card)
+                    .overlay { Circle().strokeBorder(Yun.Palette.borderStrong, lineWidth: 1) }
+                    .frame(width: 12, height: 12)
+                    .offset(x: max(0, min(width - 12, width * fraction - 6)))
+            }
+            .frame(height: 14)
+            .contentShape(.rect)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        let ratio = Float(max(0, min(1, value.location.x / width)))
+                        decibels = range.lowerBound
+                            + ratio * (range.upperBound - range.lowerBound)
+                    })
+        }
+        .frame(height: 14)
+    }
+}
+
+/// Converts a fader position to the linear multiplier the engine wants.
+/// The bottom of the range is silence rather than a very small number, so a
+/// fader pulled all the way down is actually off.
+public func yunGainMultiplier(decibels: Float, minimum: Float = -40) -> Float {
+    decibels <= minimum ? 0 : pow(10, decibels / 20)
+}
+
 // MARK: - Toggle
 
 /// A switch in the Zinc language: the track fills with the inverted accent when

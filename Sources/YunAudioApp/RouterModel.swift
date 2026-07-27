@@ -1,7 +1,9 @@
+import CoreAudio
 import Foundation
 import Observation
 import YunAudioEngine
 import YunAudioHAL
+import YunDesign
 
 /// How the source's channels map onto a stereo destination.
 public enum SourceChannelMode: String, CaseIterable, Identifiable, Sendable {
@@ -81,6 +83,157 @@ final class RouterModel {
     /// hand so the UI never claims a preset is active when it is not.
     var activePresetName: String?
 
+    // MARK: Application sources
+
+    /// Applications that can be captured. Refreshed on demand — the list churns
+    /// as apps come and go, and polling it continuously would be wasteful for
+    /// something only looked at when a menu is opened.
+    private(set) var availableApps: [AudioProcess] = []
+
+    /// Bundle identifiers of the applications being captured alongside the
+    /// microphone. Stored by bundle id rather than pid so the choice survives
+    /// the app being quit and relaunched.
+    var capturedAppBundleIDs: Set<String> = [] {
+        didSet { if oldValue != capturedAppBundleIDs { persist(); restartIfRunning() } }
+    }
+
+    var tapMuteBehavior: TapMuteBehavior = .unmuted {
+        didSet { if oldValue != tapMuteBehavior { persist(); restartIfRunning() } }
+    }
+
+    /// Populates the model with representative state for the offscreen design
+    /// captures. Not called by the running app.
+    func prepareForRendering() {
+        refreshApps()
+        guard let source = selectedSource else { return }
+        let destinationUID = selectedDestination?.uid ?? "preview-destination"
+        activeRoutes = (0..<2).map { channel in
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: 0),
+                destination: ChannelRef(deviceUID: destinationUID, channel: channel))
+        }
+        routeGains = [1.0, 0.7]
+        routeMutes = [false, true]
+        levels = [0.28, 0.0]
+    }
+
+    // MARK: Driver
+
+    private(set) var driverMessage: String?
+    private(set) var isInstallingDriver = false
+
+    /// True when the driver can be installed from here, rather than only
+    /// described. False means the app was launched without the driver beside
+    /// it — running from a build directory, usually.
+    var canInstallDriver: Bool { DriverInstaller.bundledDriverURL != nil }
+
+    func installDriver() {
+        isInstallingDriver = true
+        driverMessage = nil
+        let outcome = DriverInstaller.install()
+        isInstallingDriver = false
+        switch outcome {
+        case .installed:
+            driverMessage = nil
+            // coreaudiod needs a moment to publish the new device.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                self.refreshDevices()
+                self.selectedDestinationUID = self.outputDevices
+                    .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
+                    ?? self.selectedDestinationUID
+            }
+        case .cancelled:
+            driverMessage = nil
+        case let .failed(reason):
+            driverMessage = reason
+        case .removed:
+            break
+        }
+    }
+
+    func refreshApps() {
+        availableApps = (try? AudioProcesses.all()) ?? []
+    }
+
+    /// Resolves the saved bundle identifiers to the processes running right now.
+    /// An application splits its audio across helper processes — Discord uses
+    /// four — so every process sharing the prefix is captured, not just the one
+    /// the user picked.
+    private var tappableProcessIDs: [AudioObjectID] {
+        guard !capturedAppBundleIDs.isEmpty else { return [] }
+        return availableApps
+            .filter { process in
+                guard let bundle = process.bundleID else { return false }
+                return capturedAppBundleIDs.contains { bundle.hasPrefix($0) }
+            }
+            .map(\.id)
+    }
+
+    /// Per-route peak levels, aligned with `routes`.
+    var routeLevels: [Float] { levels }
+
+    // MARK: Per-route control
+
+    private(set) var routeGains: [Float] = []
+    private(set) var routeMutes: [Bool] = []
+
+    func setGain(_ gain: Float, forRouteAt index: Int) {
+        guard index < routeGains.count else { return }
+        routeGains[index] = gain
+        engine.setGain(gain, forRouteAt: index)
+        persist()
+    }
+
+    /// A route's fader position in decibels.
+    func faderDecibels(forRouteAt index: Int) -> Float {
+        guard index < routeGains.count else { return 0 }
+        let gain = routeGains[index]
+        return gain <= 0 ? -40 : 20 * log10(gain)
+    }
+
+    func setFaderDecibels(_ decibels: Float, forRouteAt index: Int) {
+        setGain(yunGainMultiplier(decibels: decibels), forRouteAt: index)
+    }
+
+    /// Human label for a route.
+    ///
+    /// The source name is dropped when every route shares it, which is the
+    /// common case: repeating "Razer Seiren V3 Pro" on each row only pushes the
+    /// channels out of view behind an ellipsis.
+    func label(for route: Route) -> String {
+        let channels = "ch\(route.source.channel + 1) → ch\(route.destination.channel + 1)"
+        let sources = Set(activeRoutes.map(\.source.deviceUID))
+        guard sources.count > 1 else { return channels }
+        return "\(sourceName(for: route))  \(channels)"
+    }
+
+    private func sourceName(for route: Route) -> String {
+        let source: String
+        if let device = inputDevices.first(where: { $0.uid == route.source.deviceUID }) {
+            source = device.name
+        } else if route.source.deviceUID.contains("-") {
+            // Tap UIDs are UUIDs; name the applications they carry instead.
+            source = capturedAppBundleIDs.isEmpty
+                ? "Application audio"
+                : availableApps
+                    .first { process in
+                        guard let bundle = process.bundleID else { return false }
+                        return capturedAppBundleIDs.contains { bundle.hasPrefix($0) }
+                    }?.name ?? "Application audio"
+        } else {
+            source = route.source.deviceUID
+        }
+        return source
+    }
+
+    func setMuted(_ muted: Bool, forRouteAt index: Int) {
+        guard index < routeMutes.count else { return }
+        routeMutes[index] = muted
+        engine.setMuted(muted, forRouteAt: index)
+        persist()
+    }
+
     /// Latency the isolation stage adds, in milliseconds.
     var voiceIsolationLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
@@ -97,6 +250,8 @@ final class RouterModel {
     private(set) var isClockLocked = false
     private(set) var measuredRateRatio: Double = 1
     private(set) var clockLockFailed = false
+    /// The routes actually running, including any built from application taps.
+    private(set) var activeRoutes: [Route] = []
 
     /// Global mute, applied through the lock-free command queue so it takes
     /// effect on the next IO cycle without rebuilding anything.
@@ -190,6 +345,7 @@ final class RouterModel {
 
         let saved = PreferencesStore.load()
         autoStart = saved.autoStart
+        capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
         voiceIsolationEnabled = saved.voiceIsolationEnabled
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
@@ -217,7 +373,8 @@ final class RouterModel {
             autoStart: autoStart,
             voiceIsolationEnabled: voiceIsolationEnabled,
             voiceIsolationMix: voiceIsolationMix,
-            preferredSampleRate: preferredSampleRate))
+            preferredSampleRate: preferredSampleRate,
+            capturedAppBundleIDs: Array(capturedAppBundleIDs)))
     }
 
     // MARK: Devices
@@ -312,7 +469,30 @@ final class RouterModel {
             lastError = "the input and output cannot be the same device"
             return
         }
-        let routeList = routes
+        refreshApps()
+        var routeList = routes
+        var taps: [ProcessTap] = []
+
+        // Application audio joins as extra source channels on the same
+        // aggregate, so a tapped app is addressable exactly like a microphone.
+        let processIDs = tappableProcessIDs
+        if !processIDs.isEmpty {
+            if let tap = try? ProcessTap(
+                processIDs: processIDs, muteBehavior: tapMuteBehavior) {
+                taps.append(tap)
+                let destinationChannels = min(2, selectedDestination?.outputChannels ?? 0)
+                let tapChannels = Int(tap.format?.mChannelsPerFrame ?? 2)
+                for channel in 0..<min(destinationChannels, tapChannels) {
+                    routeList.append(Route(
+                        source: ChannelRef(deviceUID: tap.uid, channel: channel),
+                        destination: ChannelRef(
+                            deviceUID: destination, channel: channel)))
+                }
+            } else {
+                lastError = "could not capture the selected applications"
+            }
+        }
+
         guard !routeList.isEmpty else {
             lastError = "no usable channels between those devices"
             return
@@ -325,12 +505,16 @@ final class RouterModel {
                 sourceDeviceUID: source,
                 destinationDeviceUID: destination,
                 routes: routeList,
+                taps: taps,
                 preferredSampleRate: preferredSampleRate,
                 voiceIsolation: voiceIsolationEnabled
                     ? VoiceIsolationSettings(mixPercent: voiceIsolationMix)
                     : nil)
             isRunning = true
             lastError = nil
+            activeRoutes = routeList
+            routeGains = routeList.map(\.gain)
+            routeMutes = routeList.map(\.isMuted)
             startPolling()
         } catch {
             isRunning = false
@@ -343,6 +527,9 @@ final class RouterModel {
         isRunning = false
         stopPolling()
         levels = []
+        activeRoutes = []
+        routeGains = []
+        routeMutes = []
         pathQuality = nil
         isClockLocked = false
     }

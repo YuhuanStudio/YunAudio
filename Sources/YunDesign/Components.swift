@@ -34,6 +34,66 @@ public struct YunDivider: View {
     }
 }
 
+// MARK: - Disclosure
+
+/// A collapsible card.
+///
+/// A menu bar panel has a hard height budget — it drops from under the status
+/// item and a laptop screen runs out fast. Sections that are read occasionally
+/// rather than watched continuously collapse by default so the ones that matter
+/// during a session stay visible without scrolling.
+public struct YunDisclosure<Content: View>: View {
+    private let title: String
+    private let subtitle: String?
+    @Binding private var isExpanded: Bool
+    private let content: Content
+
+    public init(
+        _ title: String,
+        subtitle: String? = nil,
+        isExpanded: Binding<Bool>,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        _isExpanded = isExpanded
+        self.content = content()
+    }
+
+    public var body: some View {
+        YunCard {
+            VStack(alignment: .leading, spacing: Yun.Space.md) {
+                Button {
+                    isExpanded.toggle()
+                } label: {
+                    HStack(spacing: Yun.Space.sm) {
+                        Text(title)
+                            .font(Yun.Text.label)
+                            .foregroundStyle(Yun.Palette.textPrimary)
+                        if let subtitle, !isExpanded {
+                            Text(subtitle)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .lineLimit(1)
+                        }
+                        Spacer(minLength: Yun.Space.sm)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Yun.Palette.textMuted)
+                            .rotationEffect(.degrees(isExpanded ? 0 : -90))
+                    }
+                    .contentShape(.rect)
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+
+                if isExpanded { content }
+            }
+        }
+        .animation(.easeOut(duration: 0.18), value: isExpanded)
+    }
+}
+
 // MARK: - Status
 
 public enum YunStatusTone {

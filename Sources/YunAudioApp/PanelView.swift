@@ -10,6 +10,22 @@ import YunDesign
 /// level would muddy both, so they stay in separate layers.
 struct PanelView: View {
     @Bindable var model: RouterModel
+    /// Forces the routed layout for the offscreen design captures. The panel
+    /// otherwise shows the onboarding card whenever the driver is absent, which
+    /// hides everything worth inspecting.
+    var forcesRoutedLayout = false
+
+    // Only the mixer starts open: it is the one section watched while routing.
+    // Devices open on first run, when there is nothing configured to collapse.
+    @State private var showsDevices: Bool?
+    @State private var showsApps = false
+    @State private var showsProcessing = false
+
+    private var devicesExpanded: Binding<Bool> {
+        Binding(
+            get: { showsDevices ?? (model.selectedDestination == nil) },
+            set: { showsDevices = $0 })
+    }
 
     /// Width of the leading label column. Sized for the longest label in the
     /// panel — "Channels" wrapped mid-word when this was narrower.
@@ -19,10 +35,12 @@ struct PanelView: View {
         GlassEffectContainer {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 header
-                if model.isDriverInstalled {
+                if model.isDriverInstalled || forcesRoutedLayout {
                     presets
                     signalPath
                     devicePickers
+                    appSources
+                    if !model.activeRoutes.isEmpty { mixer }
                     if model.isRunning { runtimeDetail }
                     if let error = model.lastError { errorRow(error) }
                     voiceIsolation
@@ -88,7 +106,11 @@ struct PanelView: View {
     // MARK: Pickers
 
     private var devicePickers: some View {
-        YunCard {
+        YunDisclosure(
+            "Devices",
+            subtitle: model.selectedSource.map { "\($0.name) → \(model.selectedDestination?.name ?? "none")" },
+            isExpanded: devicesExpanded
+        ) {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 picker(
                     "Input", selection: $model.selectedSourceUID,
@@ -215,16 +237,170 @@ struct PanelView: View {
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Button("Check again") { model.refreshDevices() }
-                    .buttonStyle(YunButtonStyle(.secondary, small: true))
+                HStack(spacing: Yun.Space.sm) {
+                    if model.canInstallDriver {
+                        Button(model.isInstallingDriver ? "Installing…" : "Install") {
+                            model.installDriver()
+                        }
+                        .buttonStyle(YunButtonStyle(.primary, small: true))
+                        .disabled(model.isInstallingDriver)
+                    }
+                    Button("Check again") { model.refreshDevices() }
+                        .buttonStyle(YunButtonStyle(.secondary, small: true))
+                }
+                if !model.canInstallDriver {
+                    Text("Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image.")
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let message = model.driverMessage {
+                    Text(message)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
+        }
+    }
+
+    // MARK: Application sources
+
+    private var appSources: some View {
+        YunDisclosure(
+            "Application audio",
+            subtitle: model.capturedAppBundleIDs.isEmpty
+                ? "none captured" : "\(model.capturedAppBundleIDs.count) captured",
+            isExpanded: $showsApps
+        ) {
+            VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                HStack {
+                    Text("Pick the applications to mix in")
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                    Spacer()
+                    Button("Refresh") { model.refreshApps() }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                }
+
+                if model.availableApps.isEmpty {
+                    Text("No applications are producing audio right now.")
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                } else {
+                    ForEach(model.availableApps.prefix(6)) { process in
+                        appRow(process)
+                    }
+                }
+
+                if !model.capturedAppBundleIDs.isEmpty {
+                    YunDivider()
+                    HStack {
+                        Text("While routed")
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .frame(width: Self.labelColumn, alignment: .leading)
+                        YunSegmented(
+                            selection: $model.tapMuteBehavior,
+                            options: TapMuteBehavior.allCases.map { ($0, $0.title) })
+                    }
+                }
+            }
+        }
+    }
+
+    private func appRow(_ process: AudioProcess) -> some View {
+        let bundle = process.bundleID ?? ""
+        let isCaptured = model.capturedAppBundleIDs.contains(bundle)
+        return Button {
+            guard !bundle.isEmpty else { return }
+            if isCaptured {
+                model.capturedAppBundleIDs.remove(bundle)
+            } else {
+                model.capturedAppBundleIDs.insert(bundle)
+            }
+        } label: {
+            HStack(spacing: Yun.Space.sm) {
+                Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
+                Text(process.name)
+                    .font(Yun.Text.body)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                    .lineLimit(1)
+                if process.isPlaying {
+                    YunBadge("playing")
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .disabled(bundle.isEmpty)
+    }
+
+    // MARK: Route mixer
+
+    private var mixer: some View {
+        YunCard {
+            VStack(alignment: .leading, spacing: Yun.Space.md) {
+                Text("Mixer")
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
+                    routeRow(index: index, route: route)
+                    if index < model.activeRoutes.count - 1 { YunDivider() }
+                }
+            }
+        }
+    }
+
+    private func routeRow(index: Int, route: Route) -> some View {
+        let level = index < model.routeLevels.count ? model.routeLevels[index] : 0
+        let isMuted = index < model.routeMutes.count ? model.routeMutes[index] : false
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: Yun.Space.sm) {
+                Button {
+                    model.setMuted(!isMuted, forRouteAt: index)
+                } label: {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(
+                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary)
+                        .frame(width: 18, height: 18)
+                        .background(Yun.Palette.elevated, in: .rect(cornerRadius: 5))
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+
+                Text(model.label(for: route))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: Yun.Space.sm)
+
+                YunLevelMeter(level: isMuted ? 0 : level, segments: 12)
+                    .frame(width: 90)
+            }
+
+            YunFader(decibels: Binding(
+                get: { model.faderDecibels(forRouteAt: index) },
+                set: { model.setFaderDecibels($0, forRouteAt: index) }))
         }
     }
 
     // MARK: Voice isolation
 
     private var voiceIsolation: some View {
-        YunCard {
+        YunDisclosure(
+            "Processing",
+            subtitle: model.voiceIsolationEnabled ? "voice isolation on" : "bypass",
+            isExpanded: $showsProcessing
+        ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
                 Toggle("Voice isolation", isOn: $model.voiceIsolationEnabled)
                     .toggleStyle(YunToggleStyle())
