@@ -589,7 +589,6 @@ final class RouterModel {
 
     /// Global mute, applied through the lock-free command queue so it takes
     /// effect on the next IO cycle without rebuilding anything.
-    private(set) var isMuted = false
     private(set) var hotkeyFailures: [String] = []
 
     private let engine = RoutingEngine()
@@ -681,12 +680,17 @@ final class RouterModel {
         }
     }
 
-    func toggleMute() {
-        isMuted.toggle()
-        for index in routes.indices {
-            engine.setMuted(isMuted, forRouteAt: index)
-        }
-    }
+    /// What the mute hotkey does, and what the menu bar glyph reflects.
+    ///
+    /// It used to mute every route one by one, which meant the shortcut also
+    /// silenced any application audio being mixed in — pressing mute on a call
+    /// stopped the music you were sharing too. And it kept its own flag, so the
+    /// hotkey and the input mute button disagreed about whether the microphone
+    /// was muted. Both were the same bug: a mute key means the microphone.
+    func toggleMute() { isInputMuted.toggle() }
+
+    /// True when the microphone is muted, whichever way it was done.
+    var isMuted: Bool { isInputMuted }
 
     // MARK: Persistence
 

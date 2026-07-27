@@ -154,6 +154,16 @@ enum UIFlowCheck {
         await waitUntil("the rebuild settled", { !model.isBusy }, timeout: 8)
         check("the trim survived a rebuild", model.inputDecibels == -6)
         check("the master survived a rebuild", model.outputDecibels == -3)
+        // The mute hotkey and the input mute button used to be two different
+        // states, so pressing the shortcut left the button still reading
+        // unmuted — and it muted every route one by one, silencing any
+        // application audio being mixed in along with the microphone.
+        model.toggleMute()
+        check("the hotkey mutes the microphone", model.isInputMuted)
+        check("and the button agrees with it", model.isMuted == model.isInputMuted)
+        model.toggleMute()
+        check("and unmutes it again", !model.isInputMuted)
+
         model.inputDecibels = 0
         model.outputDecibels = 0
 

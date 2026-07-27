@@ -148,14 +148,20 @@ struct PanelView: View {
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 picker(
-                    "Input", selection: $model.selectedSourceUID,
+                    loc("Input"), selection: $model.selectedSourceUID,
                     devices: model.inputDevices, channelLabel: { "\($0.inputChannels)ch" })
+                levelRow(
+                    decibels: $model.inputDecibels, muted: $model.isInputMuted,
+                    label: loc("Input level"))
 
                 YunDivider()
 
                 picker(
-                    "Output", selection: $model.selectedDestinationUID,
+                    loc("Output"), selection: $model.selectedDestinationUID,
                     devices: model.outputDevices, channelLabel: { "\($0.outputChannels)ch" })
+                levelRow(
+                    decibels: $model.outputDecibels, muted: $model.isOutputMuted,
+                    label: loc("Output level"))
 
                 if let source = model.selectedSource, source.inputChannels > 1 {
                     YunDivider()
@@ -182,6 +188,43 @@ struct PanelView: View {
                 options: devices.map {
                     .init(value: $0.uid as String?, title: $0.name, detail: channelLabel($0))
                 })
+        }
+    }
+
+    /// The same trim and master the window carries, so the menu bar is not a
+    /// second-class view of the same application.
+    private func levelRow(
+        decibels: Binding<Float>, muted: Binding<Bool>, label: String
+    ) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Button {
+                muted.wrappedValue.toggle()
+            } label: {
+                Image(
+                    systemName: muted.wrappedValue
+                        ? "speaker.slash.fill" : "speaker.wave.2.fill"
+                )
+                .font(.system(size: 10))
+                .foregroundStyle(
+                    muted.wrappedValue ? Yun.Palette.danger : Yun.Palette.textSecondary
+                )
+                .frame(width: Self.labelColumn, height: 18, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled()
+            .accessibilityLabel(Text(label))
+
+            YunFader(decibels: decibels)
+                .opacity(muted.wrappedValue ? 0.4 : 1)
+
+            Text(
+                decibels.wrappedValue <= RouterModel.minimumDecibels
+                    ? "−∞" : String(format: "%+.1f", decibels.wrappedValue)
+            )
+            .font(Yun.Text.mono)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .monospacedDigit()
+            .frame(width: 40, alignment: .trailing)
         }
     }
 
