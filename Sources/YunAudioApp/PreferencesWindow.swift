@@ -178,10 +178,43 @@ struct PreferencesWindow: View {
 
     private var shortcutsSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(loc("Shortcuts"))
+            heading(loc("Anywhere"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
-                    ForEach(Array(model.hotkeyDescriptions.enumerated()), id: \.offset) {
+                    ForEach(
+                        Array(model.hotkeyDescriptions.filter(\.isGlobal).enumerated()),
+                        id: \.offset
+                    ) {
+                        _, entry in
+                        HStack {
+                            Text(entry.title)
+                                .font(Yun.Text.body)
+                                .foregroundStyle(Yun.Palette.textPrimary)
+                            Spacer()
+                            Text(entry.shortcut)
+                                .font(Yun.Text.mono)
+                                .foregroundStyle(Yun.Palette.textSecondary)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(
+                                    Yun.Palette.elevated, in: .rect(cornerRadius: 6)
+                                )
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(Yun.Palette.border, lineWidth: 1)
+                                }
+                        }
+                    }
+                }
+            }
+
+            heading(loc("In the window"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    ForEach(
+                        Array(model.hotkeyDescriptions.filter { !$0.isGlobal }.enumerated()),
+                        id: \.offset
+                    ) {
                         _, entry in
                         HStack {
                             Text(entry.title)
@@ -404,10 +437,32 @@ struct PreferencesWindow: View {
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(loc("YunAudio"))
+            HStack(spacing: Yun.Space.md) {
+                if let mark = YunAppIcon.image {
+                    Image(nsImage: mark)
+                        .resizable()
+                        .interpolation(.high)
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(loc("YunAudio"))
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                    Text(
+                        String(
+                            format: loc("Version %@"),
+                            Bundle.main.object(
+                                forInfoDictionaryKey: "CFBundleShortVersionString")
+                                as? String ?? "—")
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                }
+            }
+
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                    YunDetailRow(loc("Version"), value: "0.1.0")
                     YunDetailRow(
                         loc("Virtual device"),
                         value: loc(
@@ -416,6 +471,31 @@ struct PreferencesWindow: View {
                     YunDetailRow(loc("Licence"), value: "MIT")
                 }
             }
+
+            // What the project actually achieves, in the numbers it was
+            // measured at rather than in adjectives. The page said none of this
+            // — a version number, a licence and one sentence — for a thing
+            // whose entire argument is that it can prove what it claims.
+            heading(loc("Measured"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunDetailRow(
+                        loc("Signal path"), value: loc("bit-exact"), tone: .success)
+                    YunDetailRow(loc("Round trip"), value: loc("2.67 ms at 128 frames"))
+                    YunDetailRow(loc("Processor"), value: loc("0.40% of one core"))
+                    YunDetailRow(
+                        loc("IO thread allocations"), value: "0", tone: .success)
+                    Text(
+                        loc(
+                            "Run the integrity check under Diagnostics to measure your own path rather than taking these."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Text(
                 loc(
                     "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0."

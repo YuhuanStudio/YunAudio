@@ -196,3 +196,16 @@
 "Stop routing (⌘↩)" = "Stop routing (⌘↩)";
 "Record (⌘R)" = "Record (⌘R)";
 "Stop recording (⌘R)" = "Stop recording (⌘R)";
+"No free shortcut for %@ — every combination is taken." = "No free shortcut for %@ — every combination is taken.";
+"Anywhere" = "Anywhere";
+"In the window" = "In the window";
+"Version %@" = "Version %@";
+"Virtual device" = "Virtual device";
+"Licence" = "Licence";
+"Measured" = "Measured";
+"Signal path" = "Signal path";
+"Round trip" = "Round trip";
+"Processor" = "Processor";
+"Run the integrity check under Diagnostics to measure your own path rather than taking these." = "Run the integrity check under Diagnostics to measure your own path rather than taking these.";
+"2.67 ms at 128 frames" = "2.67 ms at 128 frames";
+"0.40% of one core" = "0.40% of one core";

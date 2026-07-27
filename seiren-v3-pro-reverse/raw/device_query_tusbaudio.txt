@@ -1,0 +1,9 @@
+﻿API version : 5.15
+DeviceCount : 1
+Open : 0x00000000 (TSTATUS_SUCCESS)  handle=0x10000
+step: GetCurrentSampleRate
+  -> 0x00000000 (TSTATUS_SUCCESS)  48000 Hz
+step: GetSupportedSampleRates
+  -> 0x00000000 (TSTATUS_SUCCESS)  count=2
+  rates: 48000, 96000 Hz
+closed.

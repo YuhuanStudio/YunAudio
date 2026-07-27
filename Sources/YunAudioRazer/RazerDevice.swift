@@ -144,6 +144,66 @@ public final class RazerDevice {
         return reply
     }
 
+    /// Sends a lighting command and reads the device's answer back.
+    ///
+    /// The answer arrives in the same feature report — the device keeps the
+    /// last command it was given — so success is checked by reading byte 1
+    /// rather than by assuming the write landed.
+    @discardableResult
+    public func send(
+        _ command: RazerLightingCommand
+    ) throws -> RazerLightingCommand.Status {
+        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+        else { throw RazerError.couldNotOpen }
+        defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        var outgoing = command.encoded()
+        let setResult = IOHIDDeviceSetReport(
+            device, kIOHIDReportTypeFeature, 0x07, &outgoing, outgoing.count)
+        guard setResult == kIOReturnSuccess else {
+            throw RazerError.transferFailed(setResult)
+        }
+
+        // The firmware needs a moment; reading straight back returns the
+        // request rather than the answer.
+        usleep(5000)
+
+        var incoming = [UInt8](repeating: 0, count: RazerLightingCommand.size)
+        var length = incoming.count
+        let getResult = IOHIDDeviceGetReport(
+            device, kIOHIDReportTypeFeature, 0x07, &incoming, &length)
+        guard getResult == kIOReturnSuccess else {
+            throw RazerError.transferFailed(getResult)
+        }
+        return RazerLightingCommand.Status(rawValue: incoming[1]) ?? .failed
+    }
+
+    /// Streams a sequence of frames without reopening the device for each one.
+    ///
+    /// Razer's own specification asks for two milliseconds between frames in a
+    /// batch, which caps the rate at roughly the twenty to thirty per second
+    /// Synapse itself uses. Opening and closing the device per frame would cost
+    /// far more than that.
+    public func stream(
+        frames: [[(r: UInt8, g: UInt8, b: UInt8)]], frameInterval: TimeInterval = 1.0 / 30
+    ) throws {
+        guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
+        else { throw RazerError.couldNotOpen }
+        defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
+
+        for (index, colours) in frames.enumerated() {
+            var buffer = RazerLightingCommand.frame(
+                colours, transactionID: UInt8(index % 0x1F)
+            ).encoded()
+            let result = IOHIDDeviceSetReport(
+                device, kIOHIDReportTypeFeature, 0x07, &buffer, buffer.count)
+            guard result == kIOReturnSuccess else {
+                throw RazerError.transferFailed(result)
+            }
+            Thread.sleep(forTimeInterval: frameInterval)
+        }
+    }
+
     /// Report ids and sizes the device declares, per usage page.
     ///
     /// This is the ground truth for whether a given protocol can even apply: if

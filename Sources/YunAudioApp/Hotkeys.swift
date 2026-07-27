@@ -25,12 +25,40 @@ final class HotkeyManager {
 
         /// Defaults chosen to avoid anything the system or common apps claim.
         /// Control-Option is largely unused territory.
-        var defaultShortcut: Shortcut {
+        var defaultShortcut: Shortcut { candidateShortcuts[0] }
+
+        /// Combinations to try, in order.
+        ///
+        /// One default was not enough: on this machine both of the originals
+        /// were already owned by something else, so the preferences page showed
+        /// two failures and offered no way to change them — a feature that
+        /// cannot be used and cannot be fixed. Falling through to the next
+        /// combination turns that into a shortcut that works, and the page says
+        /// which one it got.
+        var candidateShortcuts: [Shortcut] {
             switch self {
             case .toggleRouting:
-                Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: [.control, .option])
+                [
+                    Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: [.control, .option]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_ANSI_R),
+                        modifiers: [.control, .option, .shift]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_ANSI_Y), modifiers: [.control, .option]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_F13), modifiers: [.control, .option]),
+                ]
             case .toggleMute:
-                Shortcut(keyCode: UInt32(kVK_ANSI_M), modifiers: [.control, .option])
+                [
+                    Shortcut(keyCode: UInt32(kVK_ANSI_M), modifiers: [.control, .option]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_ANSI_M),
+                        modifiers: [.control, .option, .shift]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_ANSI_U), modifiers: [.control, .option]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_F14), modifiers: [.control, .option]),
+                ]
             }
         }
     }

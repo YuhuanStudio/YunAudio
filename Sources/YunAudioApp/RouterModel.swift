@@ -666,6 +666,9 @@ final class RouterModel {
     /// Global mute, applied through the lock-free command queue so it takes
     /// effect on the next IO cycle without rebuilding anything.
     private(set) var hotkeyFailures: [String] = []
+    /// The combination each action actually got, which is not always the first
+    /// one it asked for.
+    private(set) var activeShortcuts: [HotkeyManager.Action: HotkeyManager.Shortcut] = [:]
 
     private let engine = RoutingEngine()
     private let hotkeys = HotkeyManager()
@@ -740,20 +743,47 @@ final class RouterModel {
                     MainActor.assumeIsolated { self?.toggleMute() }
                 }
             }
-            if !hotkeys.register(action, shortcut: action.defaultShortcut, handler: handler) {
-                // Another application owns the combination. Say so — a shortcut
-                // that quietly does nothing is worse than none at all.
+            // Work down the candidates until one is free. Another application
+            // owning the first choice is common — both of the originals were
+            // taken on the machine this was written on.
+            let taken = action.candidateShortcuts.first { candidate in
+                hotkeys.register(action, shortcut: candidate, handler: handler)
+            }
+            if let taken {
+                activeShortcuts[action] = taken
+            } else {
+                // A shortcut that quietly does nothing is worse than none, so
+                // this is said out loud rather than swallowed.
                 hotkeyFailures.append(
-                    "\(action.defaultShortcut.displayName) could not be registered — "
-                        + "another application already owns it")
+                    String(
+                        format: loc("No free shortcut for %@ — every combination is taken."),
+                        action.title))
             }
         }
     }
 
-    var hotkeyDescriptions: [(title: String, shortcut: String)] {
-        HotkeyManager.Action.allCases.map {
-            ($0.title, $0.defaultShortcut.displayName)
+    /// What the shortcuts page lists: the global hot keys with whatever
+    /// combination they actually got, then the ones that work inside the
+    /// window.
+    ///
+    /// The in-window shortcuts were missing from this page entirely — they were
+    /// added to the views and nowhere else, which makes them undiscoverable
+    /// except by accident.
+    var hotkeyDescriptions: [(title: String, shortcut: String, isGlobal: Bool)] {
+        var entries = HotkeyManager.Action.allCases.map { action in
+            (
+                action.title,
+                (activeShortcuts[action] ?? action.defaultShortcut).displayName,
+                true
+            )
         }
+        entries.append((loc("Start / stop routing"), "⌘↩", false))
+        entries.append((loc("Record"), "⌘R", false))
+        entries.append((loc("Mute / unmute"), "⌘M", false))
+        for (index, preset) in RoutePreset.builtIn.enumerated() {
+            entries.append((preset.name, "⌘\(index + 1)", false))
+        }
+        return entries
     }
 
     /// What the mute hotkey does, and what the menu bar glyph reflects.

@@ -1077,6 +1077,102 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
     exit(0)
 }
 
+// Drives the Seiren V3 Pro's light ring.
+//
+// Every subcommand here writes to the microphone, so each one has to be asked
+// for by name. Nothing probes or sweeps on its own.
+//
+//   light off                     brightness to zero, which is the off switch
+//   light on [0-255]              brightness, default full
+//   light solid <rr> <gg> <bb>    every LED one colour
+//   light led <index> <r> <g> <b> one LED, the rest dark — this is how the
+//                                 physical order of the ring gets established
+//   light spectrum [seconds]      a hue circle, rendered here and streamed
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "light" {
+    guard let device = RazerDevice.discover().first else {
+        print("no Razer device exposing a vendor-defined HID usage page")
+        print("run `razer --dump` to see what is actually published")
+        exit(1)
+    }
+    let arguments = Array(CommandLine.arguments.dropFirst(2))
+    guard let verb = arguments.first else {
+        print("usage: light [off | on | solid | led | spectrum]")
+        exit(1)
+    }
+
+    func report(_ status: RazerLightingCommand.Status) {
+        print("device replied: \(status.description)")
+        if status != .success { exit(1) }
+    }
+
+    do {
+        switch verb {
+        case "off":
+            report(try device.send(RazerLightingCommand.brightness(0)))
+        case "on":
+            let level = arguments.count > 1 ? UInt8(arguments[1]) ?? 255 : 255
+            report(try device.send(RazerLightingCommand.brightness(level)))
+        case "solid":
+            guard arguments.count >= 4, let r = UInt8(arguments[1]),
+                let g = UInt8(arguments[2]), let b = UInt8(arguments[3])
+            else {
+                print("usage: light solid <r> <g> <b>   (0-255 each)")
+                exit(1)
+            }
+            // Stream mode first: the device is told the host is about to push
+            // frames before any frame arrives.
+            _ = try device.send(RazerLightingCommand.streamMode())
+            let colours = Array(
+                repeating: (r: r, g: g, b: b), count: RazerLightingCommand.ledCount)
+            report(try device.send(RazerLightingCommand.frame(colours)))
+        case "led":
+            guard arguments.count >= 5, let index = Int(arguments[1]),
+                let r = UInt8(arguments[2]), let g = UInt8(arguments[3]),
+                let b = UInt8(arguments[4])
+            else {
+                print("usage: light led <index 0-11> <r> <g> <b>")
+                exit(1)
+            }
+            _ = try device.send(RazerLightingCommand.streamMode())
+            var colours = Array(
+                repeating: (r: UInt8(0), g: UInt8(0), b: UInt8(0)),
+                count: RazerLightingCommand.ledCount)
+            guard colours.indices.contains(index) else {
+                print("index must be 0...\(RazerLightingCommand.ledCount - 1)")
+                exit(1)
+            }
+            colours[index] = (r, g, b)
+            report(try device.send(RazerLightingCommand.frame(colours)))
+        case "spectrum":
+            let seconds = arguments.count > 1 ? Double(arguments[1]) ?? 6 : 6
+            _ = try device.send(RazerLightingCommand.streamMode())
+            let fps = 30.0
+            let total = Int(seconds * fps)
+            // Rendered here rather than asked for: the device has no effects,
+            // so a hue circle is arithmetic on this side.
+            let frames = (0..<total).map { step -> [(r: UInt8, g: UInt8, b: UInt8)] in
+                (0..<RazerLightingCommand.ledCount).map { led in
+                    let hue =
+                        (Double(step) / fps / 3.0
+                        + Double(led) / Double(RazerLightingCommand.ledCount))
+                        .truncatingRemainder(dividingBy: 1)
+                    return hueToRGB(hue)
+                }
+            }
+            print("streaming \(total) frames at \(Int(fps))fps…")
+            try device.stream(frames: frames, frameInterval: 1 / fps)
+            print("done")
+        default:
+            print("usage: light [off | on | solid | led | spectrum]")
+            exit(1)
+        }
+    } catch {
+        print("failed: \(error)")
+        exit(1)
+    }
+    exit(0)
+}
+
 // A tappable noise source, for verifying capture paths against a known signal.
 //
 // `afplay` looks like the obvious tool and is not: it never appears in
@@ -1584,4 +1680,20 @@ do {
 /// main thread creates it, hands it over and then sleeps.
 final class TonePhase: @unchecked Sendable {
     var value = 0.0
+}
+
+/// Hue at full saturation and value, for the spectrum sweep.
+func hueToRGB(_ hue: Double) -> (r: UInt8, g: UInt8, b: UInt8) {
+    let sector = hue * 6
+    let offset = sector - sector.rounded(.down)
+    let rising = UInt8(offset * 255)
+    let falling = UInt8((1 - offset) * 255)
+    switch Int(sector) % 6 {
+    case 0: return (255, rising, 0)
+    case 1: return (falling, 255, 0)
+    case 2: return (0, 255, rising)
+    case 3: return (0, falling, 255)
+    case 4: return (rising, 0, 255)
+    default: return (255, 0, falling)
+    }
 }

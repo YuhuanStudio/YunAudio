@@ -196,3 +196,16 @@
 "Stop routing (⌘↩)" = "停止路由（⌘↩）";
 "Record (⌘R)" = "開始錄音（⌘R）";
 "Stop recording (⌘R)" = "停止錄音（⌘R）";
+"No free shortcut for %@ — every combination is taken." = "「%@」找不到可用的快捷鍵——所有組合都被佔用了。";
+"Anywhere" = "全域";
+"In the window" = "視窗內";
+"Version %@" = "版本 %@";
+"Virtual device" = "虛擬裝置";
+"Licence" = "授權";
+"Measured" = "實測數據";
+"Signal path" = "訊號路徑";
+"Round trip" = "來回延遲";
+"Processor" = "處理器";
+"Run the integrity check under Diagnostics to measure your own path rather than taking these." = "到「診斷」執行完整性檢查,量測你自己的路徑,而不是直接相信這些數字。";
+"2.67 ms at 128 frames" = "2.67 毫秒（128 frames）";
+"0.40% of one core" = "單核心的 0.40%";

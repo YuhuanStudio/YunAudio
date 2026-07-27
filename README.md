@@ -191,23 +191,46 @@ preferences sidebar sitting in English beside Chinese content.
 
 ## Razer hardware control
 
-The transport for Razer's vendor HID interface is implemented and verified
-against a Seiren V3 Pro. What it found is worth recording, because the obvious
-starting point is wrong:
+The Seiren V3 Pro's light ring is implemented. Getting there took a capture of
+Synapse driving the device on Windows — polling the same feature report every
+three milliseconds while the lighting was changed — and the result is in
+`seiren-v3-pro-reverse/`.
 
-- The device's vendor usage pages are `0xFF90`, `0xFF82` and `0xFF53` — its
-  *primary* page is Consumer Control, so matching on `kIOHIDPrimaryUsagePageKey`
-  misses it entirely.
-- **The openrazer 90-byte protocol does not apply.** Parsing the report
-  descriptor shows no 90-byte report anywhere on the device. Sending one gets
-  echoed back untouched, and no transaction id fixes that.
-- The control channel is the device's only feature report: `0xFF53`, report id
-  `0x07`, 63 bytes.
+What that established, in order of how much time it saves anyone else:
 
-`yunaudio-cli razer` prints the descriptor and reads that report. Everything is
-read-only: the command format still needs a USB capture of Synapse on Windows,
-and guessing at command bytes on hardware that stores configuration is not a
-reasonable substitute.
+- **The openrazer protocol does not apply.** That format is 90 bytes on report
+  id 0; this device declares no 90-byte report anywhere, so the frame is echoed
+  back untouched. The real channel is a **64-byte feature report on id `0x07`**
+  under usage page `0xFF53`.
+- **The checksum covers the transaction id.** openrazer starts its XOR one byte
+  later. A port that keeps that line produces frames the device rejects, and
+  nothing says why.
+- **The device has no effects.** Switching Synapse to Spectrum produced 961
+  distinct RGB values streamed one frame at a time along a continuous hue
+  circle. The animation runs on the host. So there is no effect protocol to
+  reverse: `0x0F 0x03` writes twelve LEDs, `0x0F 0x04` sets brightness with zero
+  meaning off, and every effect is ours to write.
+
+The encoder is checked against two frames taken off the device, byte for byte,
+including both checksums — which is how the checksum rule was confirmed before
+anything was written to the microphone.
+
+```bash
+swift run -c release yunaudio-cli light on            # brightness
+swift run -c release yunaudio-cli light solid 255 0 0
+swift run -c release yunaudio-cli light led 0 255 255 255   # one LED, to map the ring
+swift run -c release yunaudio-cli light spectrum 6
+swift run -c release yunaudio-cli light off
+```
+
+Every one of those writes to the device, so each has to be asked for by name.
+Nothing sweeps or probes on its own.
+
+Still open: the physical order of the twelve LEDs, which needs `light led`
+walked from 0 to 11 with the ring in view. And the same capture established
+that Synapse's EQ, noise reduction, voice gate and vocal clarity are **host-side
+THX processing rather than device commands** — there is nothing to send for
+those, which is why this project implements its own.
 
 ## Known limits
 

@@ -66,6 +66,17 @@ enum UIFlowCheck {
             "its frame is remembered between launches",
             window?.frameAutosaveName == "YunAudioMainWindow")
 
+        // A shortcut that cannot be registered and cannot be changed is a dead
+        // feature. Both of the original combinations were already owned by
+        // something else on this machine, so it falls through candidates now.
+        check("every global shortcut found a free combination", model.hotkeyFailures.isEmpty)
+        for (action, shortcut) in model.activeShortcuts {
+            note("\(action.title): \(shortcut.displayName)")
+        }
+        check(
+            "the in-window shortcuts are listed too",
+            model.hotkeyDescriptions.contains { !$0.isGlobal })
+
         print("\nappearance")
         // The look was half Apple's material and half the source design system:
         // the menu bar panel floated on glass while the window was flat cards,

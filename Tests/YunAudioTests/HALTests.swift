@@ -207,3 +207,82 @@ struct SampleRateRestorationTests {
         #expect(previous.isEmpty)
     }
 }
+
+// MARK: - Razer lighting protocol
+
+/// Checks the encoder against frames taken off the device itself.
+///
+/// These two buffers are exactly what the Seiren V3 Pro returned when Synapse
+/// had set the ring to a solid red, captured by polling the same feature report
+/// every three milliseconds. Encoding the same intent has to reproduce them
+/// byte for byte — which is the only way to know the checksum rule is right
+/// before writing to somebody's microphone.
+@Suite("Razer lighting")
+struct RazerLightingTests {
+
+    /// Twelve LEDs of 0xC0 0x00 0x00, which is what the samples hold.
+    private var solidRed: [(r: UInt8, g: UInt8, b: UInt8)] {
+        Array(repeating: (r: 0xC0, g: 0, b: 0), count: RazerLightingCommand.ledCount)
+    }
+
+    private func captured(transaction: UInt8, checksum: UInt8) -> [UInt8] {
+        var bytes = [UInt8](repeating: 0, count: 64)
+        bytes[0] = 0x07
+        bytes[1] = 0x02  // the device's own status on read-back
+        bytes[2] = transaction
+        bytes[6] = 0x29  // data size, 41
+        bytes[7] = 0x0F
+        bytes[8] = 0x03
+        bytes[13] = 0x0B  // the frame prefix's last byte
+        for led in 0..<12 { bytes[14 + led * 3] = 0xC0 }
+        bytes[62] = checksum
+        bytes[63] = checksum
+        return bytes
+    }
+
+    @Test("the encoder reproduces a captured frame byte for byte")
+    func matchesCapture() {
+        // Two samples with different transaction ids and therefore different
+        // checksums, which is what pins the checksum to covering that byte.
+        for (transaction, checksum) in [(UInt8(0x00), UInt8(0x2E)), (0x0A, 0x24)] {
+            var mine = RazerLightingCommand.frame(
+                solidRed, transactionID: transaction
+            ).encoded()
+            // Byte 1 is what the device wrote back; ours is zero on the way out.
+            mine[1] = 0x02
+            #expect(mine == captured(transaction: transaction, checksum: checksum))
+        }
+    }
+
+    /// openrazer starts the XOR after the transaction id. This device includes
+    /// it, and the two captured frames differ only in that byte — so a port
+    /// that kept openrazer's rule would produce the same checksum for both and
+    /// be wrong about at least one.
+    @Test("the checksum covers the transaction id")
+    func checksumIncludesTransaction() {
+        let first = RazerLightingCommand.frame(solidRed, transactionID: 0x00).encoded()
+        let second = RazerLightingCommand.frame(solidRed, transactionID: 0x0A).encoded()
+        #expect(first[63] != second[63])
+        #expect(first[63] == 0x2E)
+        #expect(second[63] == 0x24)
+    }
+
+    @Test("brightness carries its level and zero means off")
+    func brightnessFrame() {
+        let frame = RazerLightingCommand.brightness(0x99, transactionID: 0x04).encoded()
+        #expect(frame[6] == 0x03)  // data size
+        #expect(frame[8] == 0x04)  // command id
+        #expect(Array(frame[9...11]) == [0x01, 0x00, 0x99])
+        // Zero is the off switch; there is no separate command for it.
+        let off = RazerLightingCommand.brightness(0).encoded()
+        #expect(off[11] == 0x00)
+    }
+
+    @Test("a short colour list pads with black rather than repeating")
+    func shortColourList() {
+        let frame = RazerLightingCommand.frame([(r: 255, g: 0, b: 0)]).encoded()
+        #expect(Array(frame[14...16]) == [255, 0, 0])
+        // Everything after the first LED stays dark.
+        #expect(Array(frame[17...49]).allSatisfy { $0 == 0 })
+    }
+}
