@@ -257,3 +257,15 @@
 "Music" = "Music";
 "Room noise" = "Room noise";
 "Quiet" = "Quiet";
+"Duck under my voice" = "Duck under my voice";
+"Turns these down while you talk. The level triggers it instantly and the sound model confirms it was speech, so a cough or a keyboard does not pull the music down." = "Turns these down while you talk. The level triggers it instantly and the sound model confirms it was speech, so a cough or a keyboard does not pull the music down.";
+"Leaving" = "Leaving";
+"Clear" = "Clear";
+"Clipped %@ times. Lower the input level or the master — this is already distortion the far end can hear." = "Clipped %@ times. Lower the input level or the master — this is already distortion the far end can hear.";
+"Very close to full scale. A little headroom is worth keeping." = "Very close to full scale. A little headroom is worth keeping.";
+"A healthy level to send." = "A healthy level to send.";
+"Quiet. The other end will run its own automatic gain over this and amplify the room with it — raise the microphone's own gain first, then the input level." = "Quiet. The other end will run its own automatic gain over this and amplify the room with it — raise the microphone's own gain first, then the input level.";
+"Far too quiet to send. Raise the microphone's own gain, then the input level." = "Far too quiet to send. Raise the microphone's own gain, then the input level.";
+"Nothing is reaching the output." = "Nothing is reaching the output.";
+"Quiet. The other end will run its own automatic gain over this and amplify the room with it. This microphone exposes no gain to macOS, so turn the knob on the device itself, then raise the input level." = "Quiet. The other end will run its own automatic gain over this and amplify the room with it. This microphone exposes no gain to macOS, so turn the knob on the device itself, then raise the input level.";
+"Far too quiet to send. Turn up the knob on the microphone itself — it exposes no gain to macOS — then raise the input level." = "Far too quiet to send. Turn up the knob on the microphone itself — it exposes no gain to macOS — then raise the input level.";

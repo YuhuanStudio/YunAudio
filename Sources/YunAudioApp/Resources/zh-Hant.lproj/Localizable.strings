@@ -257,3 +257,15 @@
 "Music" = "音樂";
 "Room noise" = "環境噪音";
 "Quiet" = "安靜";
+"Duck under my voice" = "說話時自動壓低";
+"Turns these down while you talk. The level triggers it instantly and the sound model confirms it was speech, so a cough or a keyboard does not pull the music down." = "你講話時把這些音量壓下去。由電平即時觸發，再由聲音模型確認那真的是說話，所以咳嗽或打字不會把音樂拉下來。";
+"Leaving" = "送出電平";
+"Clear" = "清除";
+"Clipped %@ times. Lower the input level or the master — this is already distortion the far end can hear." = "已削波 %@ 次。請降低輸入電平或主輸出——這已經是對方聽得到的失真。";
+"Very close to full scale. A little headroom is worth keeping." = "非常接近滿刻度。留一點餘裕比較保險。";
+"A healthy level to send." = "送出的電平很健康。";
+"Quiet. The other end will run its own automatic gain over this and amplify the room with it — raise the microphone's own gain first, then the input level." = "偏小聲。對方的 App 會用自己的自動增益去補，連房間噪音一起放大——請先調高麥克風自己的增益，再調輸入電平。";
+"Far too quiet to send. Raise the microphone's own gain, then the input level." = "太小聲了，不適合送出。請先調高麥克風自己的增益，再調輸入電平。";
+"Nothing is reaching the output." = "沒有任何訊號到達輸出。";
+"Quiet. The other end will run its own automatic gain over this and amplify the room with it. This microphone exposes no gain to macOS, so turn the knob on the device itself, then raise the input level." = "偏小聲。對方的 App 會用自己的自動增益去補，連房間噪音一起放大。這支麥克風沒有對 macOS 公開任何增益控制，請直接轉機身上的旋鈕，再調高輸入電平。";
+"Far too quiet to send. Turn up the knob on the microphone itself — it exposes no gain to macOS — then raise the input level." = "太小聲了，不適合送出。請直接轉大麥克風機身上的旋鈕——它沒有對 macOS 公開增益控制——再調高輸入電平。";

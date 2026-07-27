@@ -400,6 +400,68 @@ enum UIFlowCheck {
             "confidence is a probability",
             model.heardConfidence >= 0 && model.heardConfidence <= 1)
 
+        print("\nwhat is actually leaving")
+        // The measurement that did not exist: every meter in the graph is taken
+        // before gain, so nothing could see the trim or the master pushing the
+        // signal past full scale. The far end heard distortion and this side
+        // read healthy.
+        note(
+            String(
+                format: "output peak %.1f dBFS, %@ clipped samples",
+                model.outputPeakDecibels, "\(model.outputClippedSamples)"))
+        check("the output level is being measured", model.outputPeak >= 0)
+        check("a quiet room is not reported as clipping", model.outputClippedSamples == 0)
+        // Deliberately pushed into clipping and back, because an indicator that
+        // has never been seen to light is not an indicator.
+        //
+        // Both stages pushed to the top rather than just the trim: a quiet room
+        // sat at −50 dBFS, so +40 dB of trim still landed ten decibels short of
+        // full scale and the check failed for want of signal rather than for
+        // want of detection.
+        let trimBeforeClip = model.inputDecibels
+        let masterBeforeClip = model.outputDecibels
+        model.inputDecibels = 40
+        model.outputDecibels = 40
+        await pause(0.6)
+        check("clipping is detected once it happens", model.outputClippedSamples > 0)
+        check("and it is called clipping", model.outputVerdict == .clipping)
+        model.inputDecibels = trimBeforeClip
+        model.outputDecibels = masterBeforeClip
+        model.clearClipping()
+        await pause(0.3)
+        check("the latch can be cleared", model.outputClippedSamples == 0)
+
+        print("\nducking")
+        // The rule that matters more than any other: it must never touch the
+        // microphone. A ducker that reached the voice would be a gate keyed off
+        // a classifier that reports twice a second, and it would cut the front
+        // of every word.
+        model.isDucking = true
+        await pause(0.5)
+        check("no rebuild was needed", model.isRunning && !model.isBusy)
+        check("no error was reported", model.lastError == nil)
+        check(
+            "no microphone route is marked duckable",
+            !model.activeRoutes.contains {
+                $0.isDuckable && $0.source.deviceUID == model.selectedSourceUID
+            })
+        note("\(model.activeRoutes.filter(\.isDuckable).count) duckable route(s)")
+        model.isDucking = false
+        check("switching it off changed nothing else", model.isRunning && !model.isBusy)
+
+        print("\nidle cost")
+        // With the panel closed and nothing switched on, none of the analysis
+        // machinery should exist and the IO thread should not be folding a bus
+        // for nobody.
+        model.isAnalysisVisible = false
+        model.isAutoLevelling = false
+        model.isDucking = false
+        await pause(0.4)
+        check("nothing is being analysed when nothing asked", model.analysisIsIdle)
+        model.isAnalysisVisible = true
+        await pause(0.4)
+        check("and it comes back when the panel opens", !model.analysisIsIdle)
+
         print("\nautomatic levelling")
         let trimBefore = model.inputDecibels
         model.isAutoLevelling = true

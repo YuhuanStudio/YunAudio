@@ -45,19 +45,56 @@ public final class SignalAnalyser {
 
     private var loudness: LoudnessMeter
     private var spectrum: SpectrumAnalyser?
-    /// Apple's on-device sound model. Optional because it can fail to build,
-    /// and everything here still works without it — the levelling simply holds
-    /// still rather than guessing.
-    public let classifier: SoundClassifier?
+    /// Apple's on-device sound model.
+    ///
+    /// Built on first use and torn down when nothing wants it. That is not
+    /// tidiness: the classifier holds a CoreML model and an analysis queue, and
+    /// the FFT below owns a transform setup and two window tables. Somebody who
+    /// never opens the analysis panel and never switches on levelling should
+    /// not be paying for either — a router that quietly loads a neural network
+    /// to forward audio between two devices has misunderstood its own job.
+    public private(set) var classifier: SoundClassifier?
     private let sampleRate: Double
     private var buffer: [Float]
     private var measuredFrames: Int = 0
 
+    /// What the caller currently wants computed. Everything not asked for is
+    /// not merely skipped but not allocated.
+    public struct Needs: OptionSet, Sendable {
+        public let rawValue: Int
+        public init(rawValue: Int) { self.rawValue = rawValue }
+        /// Loudness only. Cheap, and the levelling and the readout both need it.
+        public static let loudness = Needs(rawValue: 1 << 0)
+        /// The FFT and its window tables.
+        public static let spectrum = Needs(rawValue: 1 << 1)
+        /// Apple's sound model.
+        public static let classification = Needs(rawValue: 1 << 2)
+    }
+
+    private var needs: Needs = []
+
+    /// Declares what is wanted. Building and releasing happen here rather than
+    /// on every drain.
+    public func require(_ wanted: Needs) {
+        guard wanted != needs else { return }
+        needs = wanted
+
+        if wanted.contains(.spectrum) {
+            if spectrum == nil { spectrum = SpectrumAnalyser(sampleRate: sampleRate) }
+        } else {
+            spectrum = nil
+        }
+
+        if wanted.contains(.classification) {
+            if classifier == nil { classifier = SoundClassifier(sampleRate: sampleRate) }
+        } else {
+            classifier = nil
+        }
+    }
+
     public init(sampleRate: Double) {
         self.sampleRate = sampleRate
         loudness = LoudnessMeter(sampleRate: sampleRate)
-        spectrum = SpectrumAnalyser(sampleRate: sampleRate)
-        classifier = SoundClassifier(sampleRate: sampleRate)
         // A quarter of a second at 96 kHz. The drain runs far more often than
         // that; the headroom is for the case where the main thread was busy and
         // several polls' worth piled up.
@@ -85,6 +122,10 @@ public final class SignalAnalyser {
             if taken < buffer.count { return }
         }
     }
+
+    /// True when nothing at all is wanted, so the drain can skip the ring
+    /// entirely rather than copying audio nobody will look at.
+    public var isIdle: Bool { needs.isEmpty }
 
     public func reading() -> Reading {
         Reading(

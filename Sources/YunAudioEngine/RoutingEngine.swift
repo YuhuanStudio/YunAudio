@@ -36,15 +36,19 @@ public struct Route: Sendable, Hashable {
     public let destination: ChannelRef
     public var gain: Float
     public var isMuted: Bool
+    /// True when this route should step out of the way while somebody is
+    /// talking. Set for application audio, never for the microphone.
+    public var isDuckable: Bool
 
     public init(
         source: ChannelRef, destination: ChannelRef,
-        gain: Float = 1.0, isMuted: Bool = false
+        gain: Float = 1.0, isMuted: Bool = false, isDuckable: Bool = false
     ) {
         self.source = source
         self.destination = destination
         self.gain = gain
         self.isMuted = isMuted
+        self.isDuckable = isDuckable
     }
 }
 
@@ -429,7 +433,8 @@ public final class RoutingEngine: @unchecked Sendable {
                 muted: route.isMuted,
                 usesIsolatedSource: isIsolated,
                 usesCancelledSource: fromMicrophone && !isIsolated,
-                appliesInputTrim: route.source.deviceUID == sourceDeviceUID)
+                appliesInputTrim: route.source.deviceUID == sourceDeviceUID,
+                isDuckable: route.isDuckable)
         }
 
         let clock = RTGraph.SharedClock.allocate()
@@ -725,6 +730,33 @@ public final class RoutingEngine: @unchecked Sendable {
         return recorder.url
     }
 
+    /// Configures ducking. Takes effect on the next cycle without a rebuild.
+    public func setDucking(enabled: Bool, depth: Float) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.duckEnabled = enabled ? 1 : 0
+        graph?.pointee.duckDepth = max(0, min(1, depth))
+    }
+
+    /// Tells the realtime side whether the classifier's recent verdict permits
+    /// ducking at all. The envelope decides the instant; this decides whether
+    /// that instant counts.
+    public func setDuckingAllowed(_ allowed: Bool) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.duckAllowed = allowed ? 1 : 0
+    }
+
+    /// Switches the mono fold that feeds the analysers on or off.
+    ///
+    /// Off by default. Nothing should be folding the output bus every cycle for
+    /// a panel nobody has open.
+    public func setAnalysisEnabled(_ enabled: Bool) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.analysisEnabled = enabled ? 1 : 0
+    }
+
     /// Takes whatever the IO thread has folded to mono since the last call.
     ///
     /// Returns the number of samples written into `destination`. A short read
@@ -789,7 +821,8 @@ public final class RoutingEngine: @unchecked Sendable {
                 usesCancelledSource: previous.pointee.routes[0].usesCancelledSource != 0
                     && route.source == activeRoutes.first?.source,
                 appliesInputTrim: previous.pointee.routes.pointee.appliesInputTrim != 0
-                    && route.source == activeRoutes.first?.source)
+                    && route.source == activeRoutes.first?.source,
+                isDuckable: route.isDuckable)
         }
         guard rtRoutes.count == routes.count else { return false }
 
@@ -814,6 +847,13 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.outputGain = previous.pointee.outputGain
         next.pointee.outputMuted = previous.pointee.outputMuted
         next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
+        next.pointee.outputClipped = previous.pointee.outputClipped
+        next.pointee.analysisEnabled = previous.pointee.analysisEnabled
+        next.pointee.duckEnabled = previous.pointee.duckEnabled
+        next.pointee.duckDepth = previous.pointee.duckDepth
+        next.pointee.duckThreshold = previous.pointee.duckThreshold
+        next.pointee.duckAllowed = previous.pointee.duckAllowed
+        next.pointee.duckGain = previous.pointee.duckGain
         next.pointee.masterExemptBuffer = previous.pointee.masterExemptBuffer
 
         // The analysis ring is handed over rather than replaced. Its consumer
@@ -1025,6 +1065,24 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     // MARK: Introspection
+
+    /// Loudest sample leaving on the destination bus, after every gain stage.
+    ///
+    /// The one number that says whether what the far end receives is too quiet,
+    /// about right, or already damaged. Nothing else in the engine measures
+    /// after the multiply.
+    public var outputPeak: Float { graph?.pointee.outputPeak ?? 0 }
+
+    /// Samples that reached or passed full scale on the destination bus since
+    /// routing started.
+    public var outputClippedSamples: UInt64 { graph?.pointee.outputClipped ?? 0 }
+
+    /// Clears the clip count, so a latch can be reset without restarting.
+    public func clearOutputClipping() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.outputClipped = 0
+    }
 
     /// Peak magnitude of each active route since the last read.
     public var routePeaks: [Float] {

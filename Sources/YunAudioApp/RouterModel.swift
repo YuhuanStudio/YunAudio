@@ -584,7 +584,48 @@ final class RouterModel {
 
     /// Clears the clip latches. Deliberately manual: a latch that clears itself
     /// is a latch nobody sees.
-    func clearClipping() { clipped = clipped.map { _ in false } }
+    func clearClipping() {
+        clipped = clipped.map { _ in false }
+        engine.clearOutputClipping()
+        outputClippedSamples = 0
+    }
+
+    // MARK: What actually leaves
+
+    /// Loudest sample on the destination bus after every gain stage, and how
+    /// many have already been truncated.
+    ///
+    /// The route meters are taken before gain on purpose — a meter should show
+    /// what arrived. The consequence was that nothing in the application could
+    /// see the trim or the master pushing the signal past full scale: the far
+    /// end heard distortion and every meter here read healthy.
+    private(set) var outputPeak: Float = 0
+    private(set) var outputClippedSamples: UInt64 = 0
+
+    var outputPeakDecibels: Double {
+        outputPeak > 0 ? Double(20 * log10(outputPeak)) : -.infinity
+    }
+
+    /// A one-line verdict on the level going out, which is the question behind
+    /// "why does this sound bad on the call".
+    ///
+    /// Both failure modes are silent otherwise. Too loud is truncation, which
+    /// no meter here was watching for. Too quiet is worse in practice: a
+    /// conferencing application will run its own automatic gain over whatever
+    /// it is given, so a signal 30 dB down arrives as amplified room noise, and
+    /// nothing about that looks wrong from this side.
+    enum OutputVerdict: Sendable { case clipping, hot, good, quiet, veryQuiet, silent }
+
+    var outputVerdict: OutputVerdict {
+        if outputClippedSamples > 0 { return .clipping }
+        let decibels = outputPeakDecibels
+        guard decibels.isFinite else { return .silent }
+        if decibels > -1 { return .clipping }
+        if decibels > -3 { return .hot }
+        if decibels > -24 { return .good }
+        if decibels > -36 { return .quiet }
+        return .veryQuiet
+    }
 
     /// The level on a particular route, for the patchbay to draw on its cable.
     func level(of route: Route) -> Float {
@@ -1084,6 +1125,8 @@ final class RouterModel {
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
         monitorDecibels = saved.monitorDecibels ?? -6
         isAutoLevelling = saved.isAutoLevelling ?? false
+        duckDecibels = saved.duckDecibels ?? -14
+        isDucking = saved.isDucking ?? false
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1141,7 +1184,9 @@ final class RouterModel {
                 loudnessTarget: loudnessTarget.rawValue,
                 monitorDeviceUID: monitorDeviceUID,
                 monitorDecibels: monitorDecibels,
-                isAutoLevelling: isAutoLevelling))
+                isAutoLevelling: isAutoLevelling,
+                isDucking: isDucking,
+                duckDecibels: duckDecibels))
     }
 
     // MARK: Devices
@@ -1313,7 +1358,10 @@ final class RouterModel {
                         Route(
                             source: ChannelRef(deviceUID: tap.uid, channel: channel),
                             destination: ChannelRef(
-                                deviceUID: destination, channel: channel)))
+                                deviceUID: destination, channel: channel),
+                            // Only application audio gets out of the way. The
+                            // microphone never does.
+                            isDuckable: true))
                 }
             } else {
                 lastError = loc("The selected applications could not be captured.")
@@ -1569,17 +1617,18 @@ final class RouterModel {
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio
         refreshRecordingState()
+        outputPeak = engine.outputPeak
+        outputClippedSamples = engine.outputClippedSamples
         // Drained every poll whether or not the analysis panel is open. The ring
         // is finite, so a consumer that only ran while a view was visible would
         // hand the loudness meter a stream with holes in it and report an
         // integrated figure for audio it never saw.
-        analyser?.drain(from: engine)
-        // The reading is published whenever the window wants it, and also
-        // whenever the levelling loop needs it — it cannot act on a number
-        // nobody refreshed.
-        if isAnalysisVisible || isAutoLevelling {
-            analysis = analyser?.reading() ?? .silent
+        refreshAnalysisNeeds()
+        if let analyser, !analyser.isIdle {
+            analyser.drain(from: engine)
+            analysis = analyser.reading()
         }
+        refreshDucking()
         if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
@@ -1620,6 +1669,66 @@ final class RouterModel {
         return analysis.integrated - loudnessTarget.lufs
     }
 
+    // MARK: Ducking
+
+    /// Application audio steps out of the way while somebody is talking.
+    ///
+    /// Every sidechain ducker works off an envelope, and an envelope cannot
+    /// tell a sentence from a cough, a chair or a keyboard — all of which pull
+    /// the music down for no reason. The classifier can tell them apart but
+    /// reports twice a second, far too slow to catch the front of a word. So
+    /// each is used for what it is good at: the envelope decides *when*,
+    /// instantly, on the IO thread; the model decides *whether*, over the last
+    /// few seconds.
+    ///
+    /// Deliberately never applied to the microphone. Ducking is the music
+    /// getting out of the way of a voice; a voice that ducked itself would be a
+    /// gate with extra steps, and it is exactly how this feature would end up
+    /// cutting the beginning of words.
+    var isDucking = false {
+        didSet {
+            guard oldValue != isDucking else { return }
+            engine.setDucking(enabled: isDucking, depth: Self.gain(fromDecibels: duckDecibels))
+            persist()
+        }
+    }
+
+    /// How far application audio drops while somebody is talking.
+    var duckDecibels: Float = -14 {
+        didSet {
+            guard oldValue != duckDecibels else { return }
+            engine.setDucking(enabled: isDucking, depth: Self.gain(fromDecibels: duckDecibels))
+            persist()
+        }
+    }
+
+    /// The duck depth as a 0...1 travel, from silent to no attenuation at all.
+    var duckFraction: Float {
+        get { max(0, min(1, (duckDecibels + 40) / 40)) }
+        set { duckDecibels = -40 + max(0, min(1, newValue)) * 40 }
+    }
+
+    /// How long the classifier's verdict is trusted for after it last said
+    /// speech.
+    ///
+    /// Speech is not continuous — there are gaps inside every sentence longer
+    /// than the model's own window — so a verdict that expired the instant it
+    /// stopped saying "speech" would let the music surge back between words.
+    private static let speechHold: TimeInterval = 2.5
+    @ObservationIgnored private var lastSpeechAt: Date?
+
+    /// True while the model's verdict still counts.
+    var isSpeechRecent: Bool {
+        guard let lastSpeechAt else { return false }
+        return Date().timeIntervalSince(lastSpeechAt) < Self.speechHold
+    }
+
+    private func refreshDucking() {
+        guard isDucking else { return }
+        if analyser?.classifier?.hearsSpeech == true { lastSpeechAt = Date() }
+        engine.setDuckingAllowed(isSpeechRecent)
+    }
+
     // MARK: Automatic levelling
 
     /// Holds the microphone at the chosen platform's loudness, by itself.
@@ -1658,6 +1767,8 @@ final class RouterModel {
     var autoLevelIsWaiting: Bool { autoLevel.isWaiting }
     /// True when it has run out of range and the setup needs a human.
     var autoLevelIsAtLimit: Bool { autoLevel.isAtLimit }
+    /// True when the peak, not the loudness, is what is stopping it.
+    var autoLevelIsHeldByHeadroom: Bool { autoLevel.isHeldByHeadroom }
 
     /// What the on-device model hears right now.
     var heardVerdict: SoundClassifier.Verdict { analysis.verdict }
@@ -1678,11 +1789,20 @@ final class RouterModel {
         let master = isOutputMuted ? Double.infinity : Double(outputDecibels)
         let preMaster = analysis.shortTerm - master
 
+        // How much more gain the peak has room for. Measured after every gain
+        // stage, so it already includes whatever the loop has added so far;
+        // one decibel of headroom is left rather than aiming at exactly full
+        // scale, because the peak here is a sample peak and the true peak
+        // between samples is always a little higher.
+        let headroom = outputPeakDecibels.isFinite ? -1 - outputPeakDecibels : .infinity
+        let ceiling = autoLevelOffset + headroom
+
         let offset = autoLevel.update(
             loudness: preMaster,
             target: loudnessTarget.lufs,
             hearsSpeech: analyser?.classifier?.hearsSpeech ?? false,
-            elapsed: elapsed)
+            elapsed: elapsed,
+            ceiling: ceiling)
         autoLevelOffset = offset
 
         let wanted = autoLevelBase + Float(offset)
@@ -1698,14 +1818,45 @@ final class RouterModel {
         analysis = .silent
     }
 
+    /// Declares what the analysers should actually be computing.
+    ///
+    /// Nothing is built until something asks for it, and everything is released
+    /// when the last thing that wanted it goes away. With the panel closed and
+    /// levelling off this leaves no FFT, no sound model and no per-cycle fold
+    /// on the IO thread — a router forwarding audio between two devices should
+    /// not be holding a neural network open in case somebody looks.
+    private func refreshAnalysisNeeds() {
+        var wanted: SignalAnalyser.Needs = []
+        if isAnalysisVisible { wanted.formUnion([.loudness, .spectrum, .classification]) }
+        if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
+        if isDucking { wanted.formUnion([.classification]) }
+
+        guard wanted != analysisNeeds else { return }
+        analysisNeeds = wanted
+        analyser?.require(wanted)
+        engine.setAnalysisEnabled(!wanted.isEmpty)
+        if wanted.isEmpty { analysis = .silent }
+    }
+
+    @ObservationIgnored private var analysisNeeds: SignalAnalyser.Needs = []
+
+    /// True when no analysis is being computed at all.
+    var analysisIsIdle: Bool { analyser?.isIdle ?? true }
+
     private func startAnalysis(sampleRate: Double) {
         analyser = SignalAnalyser(sampleRate: sampleRate)
         analysis = .silent
+        // Whatever was already switched on has to be re-declared against the
+        // new analyser, or turning routing off and on again would silently stop
+        // the levelling.
+        analysisNeeds = []
+        refreshAnalysisNeeds()
     }
 
     private func stopAnalysis() {
         analyser = nil
         analysis = .silent
+        analysisNeeds = []
     }
 
     /// Sample rates both selected devices can present.

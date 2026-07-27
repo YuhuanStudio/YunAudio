@@ -1058,6 +1058,10 @@ struct IOProcTests {
     func analysisReadsDestination() throws {
         let graph = twoDestinationGraph()
         defer { RTGraph.deallocate(graph) }
+        // Explicitly, because the fold is off unless something is consuming it:
+        // with the panel closed and levelling off there is no consumer and the
+        // IO thread should not be doing the work.
+        graph.pointee.analysisEnabled = 1
         // Destination muted by the master, monitor still loud.
         graph.pointee.outputMuted = 1
 
@@ -1084,6 +1088,7 @@ struct IOProcTests {
     func analysisAverages() throws {
         let graph = twoDestinationGraph()
         defer { RTGraph.deallocate(graph) }
+        graph.pointee.analysisEnabled = 1
         // A second route so both destination channels carry the signal.
         graph.pointee.routes[1] = RTRoute(
             sourceBuffer: 0, sourceChannel: 0,
@@ -1648,5 +1653,556 @@ struct ClassifierSpeechTests {
         tone.withUnsafeBufferPointer { classifier.add($0.baseAddress!, count: $0.count) }
         try await Task.sleep(for: .seconds(1))
         #expect(!classifier.hearsSpeech)
+    }
+}
+
+// MARK: - Levelling must never be what clips you
+
+/// Loudness and peak are different questions, and answering only the first is
+/// how a leveller hands the far end distortion in exchange for hitting a
+/// number. Quiet-but-clean beats correct-but-clipped every time.
+@Suite("Levelling headroom")
+struct AutoLevelHeadroomTests {
+
+    @Test("it stops short when the peak has no room left")
+    func respectsCeiling() {
+        var loop = AutoLevel()
+        // Wants +10, but the measured peak allows only +3.
+        for _ in 0..<400 {
+            loop.update(
+                loudness: -28, target: -18, hearsSpeech: true, elapsed: 0.05,
+                ceiling: 3)
+        }
+        #expect(loop.offset <= 3.0001)
+        #expect(loop.isHeldByHeadroom)
+    }
+
+    /// A ceiling below where it already sits means the peak grew underneath it.
+    /// The answer is to stop adding, not to lunge downwards — a sudden drop is
+    /// far more audible than staying put.
+    @Test("a ceiling below the current offset does not force it down")
+    func ceilingDoesNotPush() {
+        var loop = AutoLevel()
+        for _ in 0..<200 {
+            loop.update(loudness: -28, target: -18, hearsSpeech: true, elapsed: 0.05)
+        }
+        let before = loop.offset
+        #expect(before > 2)
+        loop.update(
+            loudness: -28, target: -18, hearsSpeech: true, elapsed: 0.05, ceiling: -5)
+        #expect(loop.offset == before)
+    }
+
+    /// Turning down is always allowed, whatever the ceiling says: coming down
+    /// can never cause clipping.
+    @Test("the ceiling never blocks a reduction")
+    func reductionAlwaysAllowed() {
+        var loop = AutoLevel()
+        for _ in 0..<200 {
+            loop.update(
+                loudness: -6, target: -18, hearsSpeech: true, elapsed: 0.05, ceiling: 0)
+        }
+        #expect(loop.offset < -5)
+    }
+
+    /// With headroom to spare it behaves exactly as it did before the ceiling
+    /// existed.
+    @Test("plenty of headroom changes nothing")
+    func generousCeiling() {
+        var unbounded = AutoLevel()
+        var bounded = AutoLevel()
+        for _ in 0..<200 {
+            unbounded.update(loudness: -28, target: -18, hearsSpeech: true, elapsed: 0.05)
+            bounded.update(
+                loudness: -28, target: -18, hearsSpeech: true, elapsed: 0.05,
+                ceiling: 40)
+        }
+        #expect(abs(unbounded.offset - bounded.offset) < 0.0001)
+        #expect(!bounded.isHeldByHeadroom)
+    }
+}
+
+// MARK: - What actually leaves
+
+/// Every meter in the graph is taken before gain, which is right for a fader
+/// and meant nothing could see the trim or the master pushing the signal past
+/// full scale. The far end heard distortion and this side read healthy.
+@Suite("Output measurement")
+struct OutputMeasurementTests {
+
+    private final class Bus {
+        let list: UnsafeMutableAudioBufferListPointer
+        private var storage: [UnsafeMutablePointer<Float>] = []
+        let frames: Int
+
+        init(channelCounts: [Int], frames: Int) {
+            self.frames = frames
+            list = AudioBufferList.allocate(maximumBuffers: channelCounts.count)
+            for (index, channels) in channelCounts.enumerated() {
+                let samples = frames * channels
+                let pointer = UnsafeMutablePointer<Float>.allocate(capacity: samples)
+                pointer.initialize(repeating: 0, count: samples)
+                storage.append(pointer)
+                list[index] = AudioBuffer(
+                    mNumberChannels: UInt32(channels),
+                    mDataByteSize: UInt32(samples * MemoryLayout<Float>.size),
+                    mData: UnsafeMutableRawPointer(pointer))
+            }
+        }
+
+        func set(_ buffer: Int, _ channel: Int, to value: Float) {
+            let stride = Int(list[buffer].mNumberChannels)
+            for frame in 0..<frames { storage[buffer][frame * stride + channel] = value }
+        }
+
+        deinit {
+            for pointer in storage { pointer.deallocate() }
+            free(list.unsafeMutablePointer)
+        }
+    }
+
+    private func cycle(
+        graph: UnsafeMutablePointer<RTGraph>, input: Bus, output: Bus, cycles: Int = 1
+    ) {
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        for _ in 0..<cycles {
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+                output.list.unsafeMutablePointer, &time,
+                UnsafeMutableRawPointer(cell))
+        }
+    }
+
+    private func graph(gain: Float) -> UnsafeMutablePointer<RTGraph> {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    gain: gain, appliesInputTrim: true)
+            ], bufferFrames: 64)
+        return graph
+    }
+
+    /// The case that was invisible: a route gain pushing an in-range signal
+    /// past full scale.
+    @Test("gain-induced clipping is counted")
+    func gainClips() {
+        let graph = graph(gain: 4)
+        defer { RTGraph.deallocate(graph) }
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputClipped == 64)
+        #expect(graph.pointee.outputPeak >= 0.999)
+        // And the route meter still reads the arriving level, unchanged: that
+        // is the behaviour worth keeping, and the reason the second measurement
+        // had to exist rather than replace it.
+        #expect(abs(graph.pointee.peaks[0] - 0.5) < 0.0001)
+    }
+
+    /// The master is applied after the routes, so it has to be inside the
+    /// measurement too.
+    @Test("master-induced clipping is counted")
+    func masterClips() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.outputGain = 3
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputClipped == 64)
+    }
+
+    /// And the input trim, which is applied before the routes read.
+    @Test("trim-induced clipping is counted")
+    func trimClips() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.inputGain = 5
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.4)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputClipped == 64)
+    }
+
+    /// A signal inside full scale must not be reported as clipping, or the
+    /// indicator means nothing.
+    @Test("a signal with headroom is not reported as clipping")
+    func cleanSignal() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 10)
+        #expect(graph.pointee.outputClipped == 0)
+        #expect(abs(graph.pointee.outputPeak - 0.5) < 0.0001)
+    }
+
+    /// The count latches across cycles: a clip two seconds ago is exactly the
+    /// event a meter that only falls would hide.
+    @Test("the clip count accumulates rather than resetting each cycle")
+    func latches() {
+        let graph = graph(gain: 4)
+        defer { RTGraph.deallocate(graph) }
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 3)
+        #expect(graph.pointee.outputClipped == 192)
+    }
+
+    /// Negative excursions clip just as hard as positive ones, and taking a
+    /// signed maximum rather than a magnitude is an easy way to miss half of
+    /// them.
+    @Test("clipping on the negative half is counted too")
+    func negativeClips() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: -1.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputClipped == 64)
+        #expect(graph.pointee.outputPeak >= 0.999)
+    }
+}
+
+// MARK: - Ducking
+
+/// Music getting out of the way of a voice. The rule that matters more than any
+/// other here is what it must *not* touch: the microphone. A ducker that ever
+/// reached the voice would be a gate, and a gate keyed off a classifier that
+/// reports twice a second would cut the front of every word — which is exactly
+/// how this feature would ruin the thing it exists to improve.
+@Suite("Ducking")
+struct DuckingTests {
+
+    private final class Bus {
+        let list: UnsafeMutableAudioBufferListPointer
+        private var storage: [UnsafeMutablePointer<Float>] = []
+        let frames: Int
+
+        init(channelCounts: [Int], frames: Int) {
+            self.frames = frames
+            list = AudioBufferList.allocate(maximumBuffers: channelCounts.count)
+            for (index, channels) in channelCounts.enumerated() {
+                let samples = frames * channels
+                let pointer = UnsafeMutablePointer<Float>.allocate(capacity: samples)
+                pointer.initialize(repeating: 0, count: samples)
+                storage.append(pointer)
+                list[index] = AudioBuffer(
+                    mNumberChannels: UInt32(channels),
+                    mDataByteSize: UInt32(samples * MemoryLayout<Float>.size),
+                    mData: UnsafeMutableRawPointer(pointer))
+            }
+        }
+
+        func channel(_ buffer: Int, _ channel: Int, _ frame: Int) -> Float {
+            let stride = Int(list[buffer].mNumberChannels)
+            return storage[buffer][frame * stride + channel]
+        }
+
+        func set(_ buffer: Int, _ channel: Int, to value: Float) {
+            let stride = Int(list[buffer].mNumberChannels)
+            for frame in 0..<frames { storage[buffer][frame * stride + channel] = value }
+        }
+
+        deinit {
+            for pointer in storage { pointer.deallocate() }
+            free(list.unsafeMutablePointer)
+        }
+    }
+
+    private func cycle(
+        graph: UnsafeMutablePointer<RTGraph>, input: Bus, output: Bus, cycles: Int = 1
+    ) {
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        for _ in 0..<cycles {
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+                output.list.unsafeMutablePointer, &time,
+                UnsafeMutableRawPointer(cell))
+        }
+    }
+
+    /// Channel 0 of the input is the microphone, channel 1 an application. Both
+    /// land on their own output channel so each can be read back separately.
+    private func duckingGraph() -> UnsafeMutablePointer<RTGraph> {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    appliesInputTrim: true),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 1,
+                    isDuckable: true),
+            ], bufferFrames: 64)
+        graph.pointee.duckEnabled = 1
+        graph.pointee.duckDepth = 0.2
+        graph.pointee.duckThreshold = 0.02
+        return graph
+    }
+
+    /// The whole point, and the one assertion worth writing first: whatever
+    /// ducking does to the music, the voice comes through untouched.
+    @Test("the microphone is never ducked")
+    func microphoneUntouched() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 1
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.5)  // voice
+        input.set(0, 1, to: 0.5)  // music
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        // Long enough for the duck to be fully engaged.
+        cycle(graph: graph, input: input, output: output, cycles: 200)
+        #expect(abs(output.channel(0, 0, 0) - 0.5) < 0.0001)
+        // And the music really did move, or this proves nothing.
+        #expect(output.channel(0, 1, 0) < 0.3)
+    }
+
+    /// Both conditions have to hold. An envelope on its own ducks for a cough,
+    /// a chair and a keyboard.
+    @Test("a loud microphone alone does not duck without the model's agreement")
+    func envelopeAloneDoesNotDuck() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 0
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.9)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 200)
+        #expect(abs(output.channel(0, 1, 0) - 0.5) < 0.0001)
+    }
+
+    /// And the model's agreement alone is not enough either: between sentences
+    /// the verdict is still held, and the music has to come back up.
+    @Test("the model's verdict alone does not duck a silent microphone")
+    func verdictAloneDoesNotDuck() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 1
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.001)  // below the trigger
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 200)
+        #expect(abs(output.channel(0, 1, 0) - 0.5) < 0.0001)
+    }
+
+    /// Muting the microphone means nobody is talking, whatever the envelope
+    /// picked up before the mute landed.
+    @Test("a muted microphone does not duck")
+    func mutedDoesNotDuck() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 1
+        graph.pointee.inputMuted = 1
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.9)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 200)
+        #expect(abs(output.channel(0, 1, 0) - 0.5) < 0.0001)
+    }
+
+    /// Switched off it is exactly a no-op, not a very shallow duck.
+    @Test("with ducking off nothing is attenuated")
+    func disabled() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckEnabled = 0
+        graph.pointee.duckAllowed = 1
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.9)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 50)
+        #expect(output.channel(0, 1, 0) == 0.5)
+    }
+
+    /// It arrives smoothly rather than as a step. A duck that landed in one
+    /// cycle would be a click.
+    @Test("the duck fades in rather than stepping")
+    func smoothAttack() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 1
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.5)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        // One cycle is 1.3 ms at 64 frames; the attack is 80 ms, so almost
+        // nothing may have happened yet.
+        cycle(graph: graph, input: input, output: output, cycles: 2)
+        #expect(output.channel(0, 1, 0) > 0.45)
+        cycle(graph: graph, input: input, output: output, cycles: 400)
+        #expect(output.channel(0, 1, 0) < 0.15)
+    }
+
+    /// And it comes back slowly, or the music surges between every word.
+    @Test("the music returns gradually when talking stops")
+    func slowRelease() {
+        let graph = duckingGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.duckAllowed = 1
+
+        let talking = Bus(channelCounts: [2], frames: 64)
+        talking.set(0, 0, to: 0.5)
+        talking.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+        cycle(graph: graph, input: talking, output: output, cycles: 400)
+        #expect(output.channel(0, 1, 0) < 0.15)
+
+        // Silence on the microphone, music still playing.
+        let quiet = Bus(channelCounts: [2], frames: 64)
+        quiet.set(0, 0, to: 0)
+        quiet.set(0, 1, to: 0.5)
+        cycle(graph: graph, input: quiet, output: output, cycles: 5)
+        // Barely moved after 7 ms of a 600 ms release.
+        #expect(output.channel(0, 1, 0) < 0.2)
+        cycle(graph: graph, input: quiet, output: output, cycles: 3000)
+        #expect(output.channel(0, 1, 0) > 0.45)
+    }
+
+    /// The smoothing is expressed in seconds, so the same setting has to behave
+    /// the same at any buffer size — the mistake the meter ballistics already
+    /// made once.
+    @Test("the attack takes the same time whatever the buffer size")
+    func rateIsIndependentOfBufferSize() {
+        for frames in [64, 128, 256, 512] {
+            let coefficient = RTGraph.coefficient(
+                seconds: 0.08, bufferFrames: frames, sampleRate: 48000)
+            // Cycles to fall to 1/e, times the cycle duration, is the time
+            // constant.
+            let cycles = -1.0 / log(Double(coefficient))
+            let seconds = cycles * Double(frames) / 48000
+            #expect(abs(seconds - 0.08) < 0.001)
+        }
+    }
+}
+
+// MARK: - Doing nothing costs nothing
+
+/// A router forwarding audio between two devices should not be folding buses,
+/// running an FFT or holding a neural network open in case somebody looks at a
+/// panel. These assert that the work genuinely does not happen.
+@Suite("Idle cost")
+struct IdleCostTests {
+
+    /// Nothing is built until something asks for it.
+    @Test("an analyser with no declared needs builds nothing")
+    func nothingBuiltByDefault() {
+        let analyser = SignalAnalyser(sampleRate: 48000)
+        #expect(analyser.isIdle)
+        #expect(analyser.classifier == nil)
+    }
+
+    @Test("declaring a need builds exactly that")
+    func buildsOnDemand() {
+        let analyser = SignalAnalyser(sampleRate: 48000)
+        analyser.require([.loudness])
+        #expect(!analyser.isIdle)
+        // Loudness alone must not drag the sound model in with it.
+        #expect(analyser.classifier == nil)
+
+        analyser.require([.loudness, .classification])
+        #expect(analyser.classifier != nil)
+    }
+
+    /// And releasing it really releases it, rather than leaving it built for
+    /// the next time.
+    @Test("withdrawing a need releases what it built")
+    func releasesOnWithdrawal() {
+        let analyser = SignalAnalyser(sampleRate: 48000)
+        analyser.require([.classification])
+        #expect(analyser.classifier != nil)
+        analyser.require([])
+        #expect(analyser.classifier == nil)
+        #expect(analyser.isIdle)
+    }
+
+    /// The IO thread's own share: with nothing consuming, the fold does not run
+    /// and the ring stays empty.
+    @Test("the output fold does not run when nothing is consuming it")
+    func foldIsSkipped() throws {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let list = AudioBufferList.allocate(maximumBuffers: 1)
+        defer { free(list.unsafeMutablePointer) }
+        let storage = UnsafeMutablePointer<Float>.allocate(capacity: 64)
+        storage.initialize(repeating: 0.5, count: 64)
+        defer { storage.deallocate() }
+        list[0] = AudioBuffer(
+            mNumberChannels: 1, mDataByteSize: UInt32(64 * MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(storage))
+
+        let outList = AudioBufferList.allocate(maximumBuffers: 1)
+        defer { free(outList.unsafeMutablePointer) }
+        let outStorage = UnsafeMutablePointer<Float>.allocate(capacity: 64)
+        outStorage.initialize(repeating: 0, count: 64)
+        defer { outStorage.deallocate() }
+        outList[0] = AudioBuffer(
+            mNumberChannels: 1, mDataByteSize: UInt32(64 * MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(outStorage))
+
+        let cell = try #require(yun_rt_cell_create(UnsafeMutableRawPointer(graph)))
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        for _ in 0..<20 {
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(list.unsafeMutablePointer), &time,
+                outList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+        }
+
+        let ring = try #require(graph.pointee.analysisRing)
+        #expect(yun_rt_ring_written(ring) == 0)
+
+        // And it does run once something is listening, so the check above is
+        // about the gate rather than about the fold being broken.
+        graph.pointee.analysisEnabled = 1
+        _ = yunAudioIOProc(
+            0, &now, UnsafePointer(list.unsafeMutablePointer), &time,
+            outList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+        #expect(yun_rt_ring_written(ring) == 64)
     }
 }

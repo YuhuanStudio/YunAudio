@@ -108,6 +108,8 @@ struct LoudnessReadout: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
+            outgoing
+            YunDivider()
             HStack(alignment: .firstTextBaseline, spacing: Yun.Space.lg) {
                 figure(
                     loc("Short-term"), model.analysis.shortTerm, unit: loc("LUFS"),
@@ -243,6 +245,94 @@ struct LoudnessReadout: View {
         case .music: Yun.Palette.info
         case .noise: Yun.Palette.textTertiary
         case .quiet: Yun.Palette.textMuted
+        }
+    }
+
+    /// The level actually leaving, and a sentence about it.
+    ///
+    /// This is the first thing in the card because it is the first thing to
+    /// check when a call sounds wrong, and until now the application could not
+    /// answer it at all: every meter here was taken before the gain stages, so
+    /// a signal being truncated on the way out looked perfectly healthy. Both
+    /// failure modes are silent otherwise — too loud is distortion nothing was
+    /// watching for, and too quiet means the far end's own automatic gain
+    /// amplifies the room noise along with the voice.
+    @ViewBuilder
+    private var outgoing: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+            Text(loc("Leaving"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            Text(
+                model.outputPeakDecibels.isFinite
+                    ? String(format: "%.1f", model.outputPeakDecibels) : "—"
+            )
+            .font(.system(size: 15, weight: .medium, design: .monospaced))
+            .foregroundStyle(outputTint)
+            .monospacedDigit()
+            Text(loc("dBFS"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textMuted)
+            Spacer(minLength: 0)
+            if model.outputClippedSamples > 0 {
+                Button(loc("Clear")) { model.clearClipping() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+        }
+        HStack(spacing: Yun.Space.sm) {
+            Circle().fill(outputTint).frame(width: 6, height: 6)
+            Text(outputAdvice)
+                .font(Yun.Text.caption)
+                .foregroundStyle(
+                    model.outputVerdict == .good
+                        ? Yun.Palette.textTertiary : Yun.Palette.textSecondary
+                )
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var outputTint: Color {
+        switch model.outputVerdict {
+        case .clipping: Yun.Palette.danger
+        case .hot: Yun.Palette.warning
+        case .good: Yun.Palette.success
+        case .quiet: Yun.Palette.warning
+        case .veryQuiet: Yun.Palette.danger
+        case .silent: Yun.Palette.textMuted
+        }
+    }
+
+    private var outputAdvice: String {
+        switch model.outputVerdict {
+        case .clipping:
+            String(
+                format: loc(
+                    "Clipped %@ times. Lower the input level or the master — this is already distortion the far end can hear."
+                ), "\(model.outputClippedSamples)")
+        case .hot: loc("Very close to full scale. A little headroom is worth keeping.")
+        case .good: loc("A healthy level to send.")
+        // The advice differs by what the hardware actually offers. Telling
+        // somebody to raise their microphone's gain is useless when the device
+        // publishes none to macOS — the Seiren V3 Pro is exactly that case, and
+        // its only pre-converter gain is the knob on the front.
+        case .quiet:
+            model.hardwareGain?.isSettable == true
+                ? loc(
+                    "Quiet. The other end will run its own automatic gain over this and amplify the room with it — raise the microphone's own gain first, then the input level."
+                )
+                : loc(
+                    "Quiet. The other end will run its own automatic gain over this and amplify the room with it. This microphone exposes no gain to macOS, so turn the knob on the device itself, then raise the input level."
+                )
+        case .veryQuiet:
+            model.hardwareGain?.isSettable == true
+                ? loc(
+                    "Far too quiet to send. Raise the microphone's own gain, then the input level."
+                )
+                : loc(
+                    "Far too quiet to send. Turn up the knob on the microphone itself — it exposes no gain to macOS — then raise the input level."
+                )
+        case .silent: loc("Nothing is reaching the output.")
         }
     }
 

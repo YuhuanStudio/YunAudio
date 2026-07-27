@@ -49,6 +49,10 @@ public struct AutoLevel: Sendable {
     public private(set) var offset: Double = 0
     /// True while the loop is holding still because it has nothing to act on.
     public private(set) var isWaiting = true
+    /// True when it wanted more gain and the peak would not allow it. Worth
+    /// surfacing: it means the source is quiet *and* peaky, which is a
+    /// microphone placement problem rather than a gain one.
+    public private(set) var isHeldByHeadroom = false
 
     public init() {}
 
@@ -64,10 +68,17 @@ public struct AutoLevel: Sendable {
     ///   - hearsSpeech: The classifier's verdict.
     ///   - elapsed: Seconds since the last call. The slew limit is per second,
     ///     so this cannot be assumed.
+    ///   - ceiling: The largest offset the signal has headroom for right now,
+    ///     from the measured peak. Loudness and peak are different questions,
+    ///     and a leveller that only answered the first would happily add 12 dB
+    ///     to something already peaking at −2 dBFS and hand the far end
+    ///     distortion in exchange for hitting a number. Quiet-but-clean always
+    ///     beats correct-but-clipped.
     /// - Returns: The new total offset in decibels.
     @discardableResult
     public mutating func update(
-        loudness: Double, target: Double, hearsSpeech: Bool, elapsed: Double
+        loudness: Double, target: Double, hearsSpeech: Bool, elapsed: Double,
+        ceiling: Double = .infinity
     ) -> Double {
         guard hearsSpeech, loudness.isFinite, loudness > Self.floor, elapsed > 0 else {
             isWaiting = true
@@ -82,7 +93,13 @@ public struct AutoLevel: Sendable {
         // the whole error in one step and be heard; the slew is what makes the
         // correction arrive under the threshold of noticing.
         let step = max(-Self.slewPerSecond * elapsed, min(Self.slewPerSecond * elapsed, error))
-        offset = max(-Self.limit, min(Self.limit, offset + step))
+        var next = max(-Self.limit, min(Self.limit, offset + step))
+        // The ceiling only ever holds it back, never pushes it up: a ceiling
+        // below where the loop already is means the peak has grown since, and
+        // the answer to that is to stop adding, not to lunge downwards.
+        if next > offset { next = min(next, max(offset, ceiling)) }
+        isHeldByHeadroom = next < offset + step - 0.0001
+        offset = next
         return offset
     }
 
@@ -93,5 +110,6 @@ public struct AutoLevel: Sendable {
     public mutating func reset() {
         offset = 0
         isWaiting = true
+        isHeldByHeadroom = false
     }
 }

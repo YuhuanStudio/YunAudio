@@ -338,9 +338,57 @@ struct MainWindow: View {
                             YunSegmented(
                                 selection: $model.tapMuteBehavior,
                                 options: TapMuteBehavior.allCases.map { ($0, loc($0.title)) })
+
+                            YunDivider()
+                            ducking
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// Application audio stepping out of the way of a voice.
+    ///
+    /// Placed with the applications rather than with the processing, because it
+    /// is a property of what those applications do rather than a stage in the
+    /// microphone's chain — and because it never touches the microphone at all.
+    @ViewBuilder
+    private var ducking: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Toggle(isOn: $model.isDucking) { EmptyView() }
+                .toggleStyle(YunToggleStyle())
+                .labelsHidden()
+            VStack(alignment: .leading, spacing: 1) {
+                Text(loc("Duck under my voice"))
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                Text(
+                    loc(
+                        "Turns these down while you talk. The level triggers it instantly and the sound model confirms it was speech, so a cough or a keyboard does not pull the music down."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        if model.isDucking {
+            HStack(spacing: Yun.Space.sm) {
+                Image(systemName: "arrow.down.right")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Yun.Palette.textMuted)
+                    .frame(width: 22, height: 22)
+                YunSlider(
+                    fraction: Binding(
+                        get: { Double(model.duckFraction) },
+                        set: { model.duckFraction = Float($0) }))
+                Text(String(format: "%.0f dB", model.duckDecibels))
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .monospacedDigit()
+                    .frame(width: 58, alignment: .trailing)
             }
         }
     }

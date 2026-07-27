@@ -50,6 +50,9 @@ struct Preferences: Codable, Equatable, Sendable {
     var monitorDecibels: Float?
     /// Hold the microphone at the target loudness automatically.
     var isAutoLevelling: Bool?
+    /// Application audio steps out of the way while somebody is talking.
+    var isDucking: Bool?
+    var duckDecibels: Float?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -77,7 +80,9 @@ struct Preferences: Codable, Equatable, Sendable {
         loudnessTarget: LoudnessTarget.discord.rawValue,
         monitorDeviceUID: nil,
         monitorDecibels: -6,
-        isAutoLevelling: false)
+        isAutoLevelling: false,
+        isDucking: false,
+        duckDecibels: -14)
 }
 
 @MainActor

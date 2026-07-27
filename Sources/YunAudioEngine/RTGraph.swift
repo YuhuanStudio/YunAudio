@@ -30,6 +30,12 @@ public struct RTRoute: Sendable, Equatable {
     /// also moved the applications would be a master, and there is one of
     /// those already.
     public var appliesInputTrim: Int32
+    /// Non-zero when this route gets out of the way while somebody is talking.
+    ///
+    /// Set for application audio, never for the microphone: ducking is the
+    /// music going quiet under a voice, and a voice that ducked itself would be
+    /// a gate with extra steps.
+    public var isDuckable: Int32
 
     public init(
         sourceBuffer: Int32, sourceChannel: Int32,
@@ -38,7 +44,8 @@ public struct RTRoute: Sendable, Equatable {
         muted: Bool = false,
         usesIsolatedSource: Bool = false,
         usesCancelledSource: Bool = false,
-        appliesInputTrim: Bool = false
+        appliesInputTrim: Bool = false,
+        isDuckable: Bool = false
     ) {
         self.sourceBuffer = sourceBuffer
         self.sourceChannel = sourceChannel
@@ -49,6 +56,7 @@ public struct RTRoute: Sendable, Equatable {
         self.usesIsolatedSource = usesIsolatedSource ? 1 : 0
         self.usesCancelledSource = usesCancelledSource ? 1 : 0
         self.appliesInputTrim = appliesInputTrim ? 1 : 0
+        self.isDuckable = isDuckable ? 1 : 0
     }
 }
 
@@ -124,6 +132,57 @@ struct RTGraph {
     /// so buffer zero can perfectly well be the headphones.
     var mainOutputBuffer: Int32
 
+    // MARK: Ducking
+
+    /// Non-zero when application audio should get out of the way of a voice.
+    var duckEnabled: Int32
+    /// The gain duckable routes fall to while somebody is talking.
+    var duckDepth: Float
+    /// Microphone magnitude above which ducking triggers.
+    var duckThreshold: Float
+    /// Set by the control thread from Apple's sound classifier: non-zero while
+    /// what the microphone is hearing has recently been speech.
+    ///
+    /// This is what separates it from a sidechain compressor. An envelope alone
+    /// cannot tell a sentence from a cough, a keyboard or a chair, and every one
+    /// of those would pull the music down. The model can, but it reports twice a
+    /// second — far too slow to catch the front of a word. So the two are used
+    /// for what each is good at: the envelope decides *when*, instantly, and the
+    /// model decides *whether*, over the last few seconds.
+    var duckAllowed: Int32
+    /// Current smoothed duck gain, 1 when nothing is talking.
+    var duckGain: Float
+    /// Per-cycle smoothing coefficients. Attack is fast enough not to clip the
+    /// first syllable, release slow enough that the music does not pump between
+    /// words.
+    var duckAttack: Float
+    var duckRelease: Float
+    /// Loudest microphone sample seen last cycle, which is what the trigger
+    /// reads.
+    ///
+    /// Last cycle rather than this one because the duck has to be applied to a
+    /// route in the same pass that reads it, and the microphone's level is not
+    /// known until that pass is over. One buffer of lag is 2.7 ms at 128 frames,
+    /// which is nothing next to an attack measured in tens of milliseconds.
+    var micPeak: Float
+
+    // MARK: What actually leaves
+
+    /// Loudest sample on the destination bus after every gain stage, decayed
+    /// like the route meters.
+    ///
+    /// The route meters are deliberately taken *before* gain, so that a meter
+    /// shows what arrived rather than what the fader did to it. That is right
+    /// for a fader, and it meant nothing in the application could see the one
+    /// thing that ruins a call: the trim, the master or a route gain pushing
+    /// the signal past full scale. Everything downstream truncates it, the far
+    /// end hears distortion, and every meter here reads healthy because none of
+    /// them was looking after the multiply.
+    var outputPeak: Float
+    /// Samples at or beyond full scale on the destination bus since the last
+    /// read. Non-zero means audible damage has already happened.
+    var outputClipped: UInt64
+
     /// An output buffer the master fader does not apply to, or -1 for none.
     ///
     /// This is the monitor. The master is the level going to the far end, and
@@ -160,6 +219,14 @@ struct RTGraph {
     /// Frames drained this cycle. Zero while the canceller is still filling.
     var cancelledFrames: Int32
 
+    /// Non-zero while something is actually consuming the analysis ring.
+    ///
+    /// The fold below is cheap but it is not free, and it runs on the IO thread
+    /// every cycle. With the panel closed and levelling off there is no
+    /// consumer, so the work — and the ring traffic behind it — is skipped
+    /// rather than performed for nobody.
+    var analysisEnabled: Int32
+
     /// Ring carrying a mono fold of the output bus to the analysers.
     ///
     /// Separate from `recordRing` even though both come off the same bus,
@@ -189,6 +256,19 @@ struct RTGraph {
         guard bufferFrames > 0, sampleRate > 0 else { return 0.85 }
         let secondsPerCycle = Double(bufferFrames) / sampleRate
         return Float(pow(10.0, -20.0 * secondsPerCycle / 20.0))
+    }
+
+    /// One-pole smoothing coefficient for a given time constant.
+    ///
+    /// Expressed in seconds rather than as a per-cycle number for the same
+    /// reason the meter decay is: a fixed factor would make the attack four
+    /// times faster at 128 frames than at 512, for the same setting.
+    static func coefficient(
+        seconds: Double, bufferFrames: Int, sampleRate: Double
+    ) -> Float {
+        guard seconds > 0, bufferFrames > 0, sampleRate > 0 else { return 0.5 }
+        let perCycle = Double(bufferFrames) / sampleRate
+        return Float(exp(-perCycle / seconds))
     }
 
     /// Storage whose lifetime is the route's rather than any one graph's.
@@ -296,6 +376,18 @@ struct RTGraph {
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
                 mainOutputBuffer: 0,
+                duckEnabled: 0,
+                duckDepth: 0.1,
+                duckThreshold: 0.02,
+                duckAllowed: 0,
+                duckGain: 1,
+                duckAttack: coefficient(
+                    seconds: 0.08, bufferFrames: bufferFrames, sampleRate: sampleRate),
+                duckRelease: coefficient(
+                    seconds: 0.6, bufferFrames: bufferFrames, sampleRate: sampleRate),
+                micPeak: 0,
+                outputPeak: 0,
+                outputClipped: 0,
                 masterExemptBuffer: -1,
                 inputGain: 1,
                 inputMuted: 0,
@@ -309,6 +401,7 @@ struct RTGraph {
                 // practical rate finds a whole 400 ms loudness block waiting,
                 // short enough that a stalled consumer discards stale audio
                 // rather than showing a reading from a second ago.
+                analysisEnabled: 0,
                 analysisRing: yun_rt_ring_create(131_072),
                 analysisScratch: analysisScratch,
                 analysisCapacity: Int32(analysisCapacity),
@@ -509,9 +602,35 @@ func yunAudioIOProc(
         }
     }
 
+    // Ducking, decided once for the whole cycle.
+    //
+    // The trigger is last cycle's microphone peak, and the qualifier is the
+    // classifier's recent verdict. Both have to agree: an envelope alone ducks
+    // for a cough or a keyboard, and the model alone is half a second late for
+    // the front of a word.
+    if graph.pointee.duckEnabled != 0 {
+        let talking =
+            graph.pointee.duckAllowed != 0
+            && graph.pointee.micPeak > graph.pointee.duckThreshold
+            && graph.pointee.inputMuted == 0
+        let target = talking ? graph.pointee.duckDepth : 1
+        // Falling towards the duck uses the attack, coming back uses the
+        // release. One coefficient for both would either clip the first
+        // syllable or leave the music down for a second after every word.
+        let coefficient =
+            target < graph.pointee.duckGain
+            ? graph.pointee.duckAttack : graph.pointee.duckRelease
+        graph.pointee.duckGain =
+            target + (graph.pointee.duckGain - target) * coefficient
+    } else {
+        graph.pointee.duckGain = 1
+    }
+    let duckGain = graph.pointee.duckGain
+
     let routeCount = Int(graph.pointee.routeCount)
     let routes = graph.pointee.routes
     let peaks = graph.pointee.peaks
+    var micPeak: Float = 0
 
     for index in 0..<routeCount {
         let route = routes[index]
@@ -575,7 +694,8 @@ func yunAudioIOProc(
         let trim =
             route.appliesInputTrim != 0
             ? (graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain) : 1
-        let gain = route.muted != 0 ? 0 : route.gain * trim
+        let duck = route.isDuckable != 0 ? duckGain : 1
+        let gain = route.muted != 0 ? 0 : route.gain * trim * duck
 
         var peak: Float = 0
         for frame in 0..<frames {
@@ -588,11 +708,23 @@ func yunAudioIOProc(
             if magnitude > peak { peak = magnitude }
         }
 
+        // The microphone's own level, for next cycle's duck trigger. Taken
+        // before the trim so that turning the trim down does not stop the duck
+        // firing — the question it answers is "is somebody talking", not "how
+        // loud did we make them".
+        if route.appliesInputTrim != 0, peak > micPeak { micPeak = peak }
+
         // Decay towards the new peak so the meter falls smoothly instead of
         // flickering, without needing any timer on the UI side.
+        //
+        // The maximum of the two rather than a strict comparison: with a held
+        // note the new peak equals the old one exactly, and `peak > previous`
+        // is then false, so the meter decayed a step and climbed back on the
+        // next cycle. A sustained tone made the bar wobble.
         let previous = peaks[index]
-        peaks[index] = peak > previous ? peak : previous * graph.pointee.peakDecay
+        peaks[index] = max(peak, previous * graph.pointee.peakDecay)
     }
+    graph.pointee.micPeak = micPeak
 
     // The master, over the whole output bus once everything has been mixed
     // into it. After the routes and before the recorder, so what lands on disk
@@ -610,6 +742,27 @@ func yunAudioIOProc(
         }
     }
 
+    // What actually leaves, measured after every gain stage.
+    //
+    // This is the only measurement in the whole graph taken after the multiply,
+    // and it exists because every other one is taken before it. Full scale in
+    // float is 1.0; anything at or past it has already been truncated by
+    // whatever converts downstream, so it is counted rather than merely peaked.
+    if mainIndex < output.count, let data = output[mainIndex].mData {
+        let samples = Int(output[mainIndex].mDataByteSize) / MemoryLayout<Float>.size
+        let pointer = data.assumingMemoryBound(to: Float.self)
+        var peak: Float = 0
+        var clipped: UInt64 = 0
+        for index in 0..<samples {
+            let magnitude = abs(pointer[index])
+            if magnitude > peak { peak = magnitude }
+            if magnitude >= 0.999 { clipped &+= 1 }
+        }
+        let previous = graph.pointee.outputPeak
+        graph.pointee.outputPeak = max(peak, previous * graph.pointee.peakDecay)
+        graph.pointee.outputClipped &+= clipped
+    }
+
     // Fold the output bus to mono for the analysers. After the master, because
     // a loudness reading that ignored the master would tell the far end's story
     // wrong, and before the self-test, which overwrites a channel with a test
@@ -618,8 +771,8 @@ func yunAudioIOProc(
     // Averaged rather than summed: two copies of one signal are the same
     // loudness, not twice it, and summing would read three units high on
     // anything panned centre.
-    if let ring = graph.pointee.analysisRing, mainIndex < output.count,
-        let data = output[mainIndex].mData
+    if graph.pointee.analysisEnabled != 0, let ring = graph.pointee.analysisRing,
+        mainIndex < output.count, let data = output[mainIndex].mData
     {
         let stride = Int(output[mainIndex].mNumberChannels)
         if stride > 0 {
