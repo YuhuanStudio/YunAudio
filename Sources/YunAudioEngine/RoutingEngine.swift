@@ -148,6 +148,7 @@ public final class RoutingEngine: @unchecked Sendable {
         destinationDeviceUID: String,
         routes: [Route],
         taps: [ProcessTap] = [],
+        preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
         voiceIsolation: VoiceIsolationSettings? = nil,
         selftest: Bool = false
@@ -165,8 +166,19 @@ public final class RoutingEngine: @unchecked Sendable {
 
         // Align rates before assembling: a mismatch inside the aggregate forces
         // conversion on paths that would otherwise be clean.
+        //
+        // The caller's preferred rate wins when both devices support it. Falling
+        // back to the highest common rate would quietly put a voice chat at
+        // 96 kHz, which only buys a resample back to 48 kHz at the far end.
         let members = [source, destination]
-        guard let rate = AggregateDevice.highestCommonSampleRate(among: members) else {
+        let shared = Set(source.availableSampleRates)
+            .intersection(destination.availableSampleRates)
+        let rate: Double
+        if let preferred = preferredSampleRate, shared.contains(preferred) {
+            rate = preferred
+        } else if let highest = shared.max() {
+            rate = highest
+        } else {
             throw RoutingError.noCommonSampleRate
         }
         try AggregateDevice.alignSampleRate(rate, across: members)

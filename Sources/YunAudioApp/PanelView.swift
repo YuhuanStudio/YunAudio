@@ -20,6 +20,7 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 header
                 if model.isDriverInstalled {
+                    presets
                     signalPath
                     devicePickers
                     if model.isRunning { runtimeDetail }
@@ -48,6 +49,24 @@ struct PanelView: View {
             YunStatusPill(
                 model.isRunning ? "Routing" : "Idle",
                 tone: model.isRunning ? .success : .neutral)
+        }
+    }
+
+    // MARK: Presets
+
+    private var presets: some View {
+        HStack(spacing: 6) {
+            ForEach(RoutePreset.builtIn) { preset in
+                let isActive = model.matches(preset)
+                Button {
+                    model.apply(preset)
+                } label: {
+                    Text(preset.name)
+                }
+                .buttonStyle(YunButtonStyle(isActive ? .primary : .secondary, small: true))
+                .help(preset.note)
+            }
+            Spacer(minLength: 0)
         }
     }
 

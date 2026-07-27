@@ -16,6 +16,7 @@ struct Preferences: Codable, Equatable, Sendable {
     var autoStart: Bool
     var voiceIsolationEnabled: Bool
     var voiceIsolationMix: Float
+    var preferredSampleRate: Double
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -25,7 +26,8 @@ struct Preferences: Codable, Equatable, Sendable {
         bufferFrames: 128,
         autoStart: false,
         voiceIsolationEnabled: false,
-        voiceIsolationMix: 100)
+        voiceIsolationMix: 100,
+        preferredSampleRate: 48000)
 }
 
 @MainActor

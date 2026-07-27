@@ -73,6 +73,14 @@ final class RouterModel {
         didSet { if oldValue != voiceIsolationMix { persist(); restartIfRunning() } }
     }
 
+    /// Sample rate a preset asked for. Applied when both devices support it.
+    var preferredSampleRate: Double = 48000 {
+        didSet { if oldValue != preferredSampleRate { persist(); restartIfRunning() } }
+    }
+    /// Name of the preset last applied, cleared when a setting is changed by
+    /// hand so the UI never claims a preset is active when it is not.
+    var activePresetName: String?
+
     /// Latency the isolation stage adds, in milliseconds.
     var voiceIsolationLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
@@ -141,6 +149,7 @@ final class RouterModel {
         autoStart = saved.autoStart
         voiceIsolationEnabled = saved.voiceIsolationEnabled
         voiceIsolationMix = saved.voiceIsolationMix
+        preferredSampleRate = saved.preferredSampleRate
         monoChannel = saved.monoChannel
         channelMode = SourceChannelMode(rawValue: saved.channelMode) ?? .mono
 
@@ -164,7 +173,8 @@ final class RouterModel {
             bufferFrames: 128,
             autoStart: autoStart,
             voiceIsolationEnabled: voiceIsolationEnabled,
-            voiceIsolationMix: voiceIsolationMix))
+            voiceIsolationMix: voiceIsolationMix,
+            preferredSampleRate: preferredSampleRate))
     }
 
     // MARK: Devices
@@ -272,6 +282,7 @@ final class RouterModel {
                 sourceDeviceUID: source,
                 destinationDeviceUID: destination,
                 routes: routeList,
+                preferredSampleRate: preferredSampleRate,
                 voiceIsolation: voiceIsolationEnabled
                     ? VoiceIsolationSettings(mixPercent: voiceIsolationMix)
                     : nil)
