@@ -120,6 +120,24 @@ enum UIFlowCheck {
                 check("\(mode.rawValue) applied", model.lightingMode == mode)
                 check("no error from \(mode.rawValue)", model.lighting.lastError == nil)
             }
+            // What only the device can answer: that frames actually reach
+            // it and it holds what was sent. What the ring *shows* is checked
+            // in the unit tests, where the router's own metering cannot
+            // overwrite the level mid-assertion.
+            model.lightingMode = .spectrum
+            await pause(0.5)
+            // Sampled several times rather than twice. Reading the device
+            // competes with the render thread for it, so a single pair can come
+            // back identical without the ring having stopped.
+            var samples: [[UInt8]] = []
+            for _ in 0..<6 {
+                if let frame = model.lighting.currentFrame() { samples.append(frame) }
+                await pause(0.25)
+            }
+            check("the device holds the frames it is sent", !samples.isEmpty)
+            check("and they keep arriving", Set(samples).count > 1)
+            note("\(Set(samples).count) distinct frames in \(samples.count) reads")
+
             // Left dark: hardware state outlives the process, and a ring stuck
             // on a colour after quitting looks like a fault.
             model.lightingMode = .off

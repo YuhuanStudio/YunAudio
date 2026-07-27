@@ -74,13 +74,28 @@ final class LightingController {
     /// it traps, which is exactly how the first version of this died.
     nonisolated(unsafe) private var level: Float = 0
     nonisolated(unsafe) private var isMuted = false
-    nonisolated(unsafe) private var running = false
+    /// Which render thread is the current one.
+    ///
+    /// A single boolean was not enough: `restart` cleared it and set it again,
+    /// so a thread that had not yet noticed the clear carried on and two
+    /// threads wrote frames at once. Each thread keeps the generation it was
+    /// started with and stops as soon as that stops being the current one.
+    nonisolated(unsafe) private var generation = 0
     nonisolated(unsafe) private var renderMode: LightingMode = .off
     nonisolated(unsafe) private var renderColour: (r: UInt8, g: UInt8, b: UInt8) =
         (0, 120, 255)
 
     private var device: RazerDevice?
     private var thread: Thread?
+
+    /// One owner of the device at a time.
+    ///
+    /// `IOHIDDeviceOpen` fails while somebody else holds the device open, so a
+    /// mode change that sent its setup while the outgoing render thread was
+    /// mid-frame came back `couldNotOpen` and the interface reported an error
+    /// for a ring that was working. Contention is one HID round trip, about a
+    /// millisecond, and nothing here is realtime.
+    private let deviceLock = NSLock()
 
     init() { refreshDevice() }
 
@@ -97,23 +112,30 @@ final class LightingController {
     }
 
     func stop() {
-        running = false
+        generation &+= 1
         thread = nil
         guard let device else { return }
         // Left dark rather than holding the last frame: a ring stuck on a
         // colour after the application quit would look like a fault.
+        deviceLock.lock()
+        defer { deviceLock.unlock() }
         _ = try? device.send(RazerLightingCommand.brightness(0))
     }
 
     private func applyBrightness() {
         guard let device, mode != .off else { return }
+        deviceLock.lock()
+        defer { deviceLock.unlock() }
         _ = try? device.send(RazerLightingCommand.brightness(brightness))
     }
 
     private func restart() {
-        running = false
+        generation &+= 1
         thread = nil
         guard let device else { return }
+
+        deviceLock.lock()
+        defer { deviceLock.unlock() }
 
         guard mode != .off else {
             _ = try? device.send(RazerLightingCommand.brightness(0))
@@ -129,8 +151,8 @@ final class LightingController {
             return
         }
 
-        running = true
-        let thread = Thread { [weak self] in self?.render(device: device) }
+        let mine = generation
+        let thread = Thread { [weak self] in self?.render(device: device, generation: mine) }
         thread.name = "com.yuhuanstudio.yunaudio.lighting"
         // Below the audio threads and above nothing: a late frame is a late
         // frame, and this must never compete with the IO cycle.
@@ -141,7 +163,7 @@ final class LightingController {
 
     /// The render loop. Runs off the main actor and touches only the two
     /// scalars above.
-    nonisolated private func render(device: RazerDevice) {
+    nonisolated private func render(device: RazerDevice, generation mine: Int) {
         let count = RazerLightingCommand.ledCount
         var step = 0
         // The ring's own smoothing. The meters fall at 20 dB a second, which is
@@ -149,72 +171,54 @@ final class LightingController {
         // vision — it reads as flicker.
         var smoothed: Float = 0
 
-        while running {
+        while generation == mine {
             let target = level
             smoothed = target > smoothed ? target : smoothed * 0.88 + target * 0.12
 
-            var colours = [(r: UInt8, g: UInt8, b: UInt8)]()
-            colours.reserveCapacity(count)
-
-            let colour = renderColour
-            switch renderMode {
-            case .off:
-                colours = Array(repeating: (0, 0, 0), count: count)
-            case .solid:
-                colours = Array(repeating: colour, count: count)
-            case .level:
-                if isMuted {
-                    colours = Array(repeating: (r: 255, g: 0, b: 0), count: count)
-                } else {
-                    // Compressed the same way the meters are, so the ring and
-                    // the bars agree about what "half" means.
-                    let filled = Double(min(1, pow(min(1, smoothed * 4), 0.5)))
-                    for index in 0..<count {
-                        // By height rather than by index. Index 0 is at six
-                        // o'clock and they run clockwise, so filling by index
-                        // sweeps round the ring like a chase; filling by height
-                        // rises up both sides at once, which is what a level
-                        // looks like.
-                        let height = RazerLightingCommand.height(ofLED: index)
-                        guard height <= filled else {
-                            colours.append((0, 0, 0))
-                            continue
-                        }
-                        colours.append(
-                            height > 0.92
-                                ? (255, 40, 0)
-                                : (height > 0.75 ? (255, 170, 0) : colour))
-                    }
-                }
-            case .spectrum:
-                for index in 0..<count {
-                    let hue =
-                        (Double(step) / 90.0 + Double(index) / Double(count))
-                        .truncatingRemainder(dividingBy: 1)
-                    colours.append(Self.hue(hue))
-                }
-            }
+            let colours = Self.frame(
+                mode: renderMode, colour: renderColour, level: smoothed,
+                isMuted: isMuted, step: step)
 
             let frame = RazerLightingCommand.frame(
                 colours, transactionID: UInt8(step % 0x1F))
+            deviceLock.lock()
             _ = try? device.send(frame)
+            deviceLock.unlock()
             step &+= 1
             Thread.sleep(forTimeInterval: 1.0 / 30)
         }
     }
 
-    nonisolated private static func hue(_ hue: Double) -> (r: UInt8, g: UInt8, b: UInt8) {
-        let sector = hue * 6
-        let offset = sector - sector.rounded(.down)
-        let rising = UInt8(offset * 255)
-        let falling = UInt8((1 - offset) * 255)
-        switch Int(sector) % 6 {
-        case 0: return (255, rising, 0)
-        case 1: return (falling, 255, 0)
-        case 2: return (0, 255, rising)
-        case 3: return (0, falling, 255)
-        case 4: return (rising, 0, 255)
-        default: return (255, 0, falling)
+    /// The frame the device is currently holding, read back off it.
+    ///
+    /// Used to check that the ring is following the signal rather than assuming
+    /// it: the device keeps the last frame it was given, so two reads a moment
+    /// apart say whether anything is moving.
+    func currentFrame() -> [UInt8]? {
+        guard let device else { return nil }
+        // 64 including the report id, as the frame is written.
+        deviceLock.lock()
+        defer { deviceLock.unlock() }
+        guard let bytes = try? device.readFeatureReport(id: 0x07, size: 63),
+            bytes.count >= 50
+        else { return nil }
+        // The device returns the report id as byte 0, so the buffer it hands
+        // back has the same layout as the one that was written: nine bytes of
+        // header, then the five-byte prefix, then the twelve triples at 14.
+        return Array(bytes[14..<50])
+    }
+
+    /// Dispatches to the ring renderer, which lives beside the protocol
+    /// because the ring's geometry is device knowledge.
+    nonisolated static func frame(
+        mode: LightingMode, colour: RazerRing.Colour,
+        level: Float, isMuted: Bool, step: Int
+    ) -> [RazerRing.Colour] {
+        switch mode {
+        case .off: RazerRing.solid(RazerRing.dark)
+        case .solid: RazerRing.solid(colour)
+        case .level: RazerRing.level(level, colour: colour, isMuted: isMuted)
+        case .spectrum: RazerRing.spectrum(step: step)
         }
     }
 }

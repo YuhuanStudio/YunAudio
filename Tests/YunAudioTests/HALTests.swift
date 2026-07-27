@@ -359,3 +359,76 @@ struct LightRingGeometryTests {
         }
     }
 }
+
+/// What the ring shows, checked directly rather than through the device.
+///
+/// The first version of these checks read frames back off the hardware while
+/// the router was running, and the router pushes the real level twenty times a
+/// second — so anything a test set was overwritten within a frame and the check
+/// was measuring read latency rather than behaviour.
+@Suite("Light ring rendering")
+struct LightRingRenderingTests {
+    private let blue: RazerRing.Colour = (0, 120, 255)
+
+    private func litCount(_ frame: [RazerRing.Colour]) -> Int {
+        frame.filter { $0 != RazerRing.dark }.count
+    }
+
+    @Test("silence leaves the ring dark")
+    func silence() {
+        #expect(litCount(RazerRing.level(0, colour: blue, isMuted: false)) == 0)
+    }
+
+    @Test("more of the ring lights as the level rises")
+    func rises() {
+        let quiet = litCount(RazerRing.level(0.05, colour: blue, isMuted: false))
+        let loud = litCount(RazerRing.level(0.5, colour: blue, isMuted: false))
+        let full = litCount(RazerRing.level(1, colour: blue, isMuted: false))
+        #expect(quiet > 0)
+        #expect(loud > quiet)
+        #expect(full == RazerLightingCommand.ledCount)
+    }
+
+    /// The ring has to fill evenly up both sides. Filling by index instead of
+    /// by height would light one side first, which reads as a chase rather than
+    /// a level.
+    @Test("the ring fills symmetrically rather than sweeping round")
+    func symmetric() {
+        let frame = RazerRing.level(0.3, colour: blue, isMuted: false)
+        for index in 1...5 {
+            #expect((frame[index] != RazerRing.dark) == (frame[12 - index] != RazerRing.dark))
+        }
+    }
+
+    /// Muted and quiet must not look alike: an unlit ring is already what
+    /// silence looks like, so muting is the whole ring in red.
+    @Test("muting is unmistakable, whatever the level")
+    func muted() {
+        for level in [Float(0), 0.3, 1] {
+            let frame = RazerRing.level(level, colour: blue, isMuted: true)
+            #expect(frame.allSatisfy { $0 == RazerRing.muted })
+        }
+    }
+
+    @Test("the top of the ring warns before it clips")
+    func headroom() {
+        let full = RazerRing.level(1, colour: blue, isMuted: false)
+        #expect(full.contains { $0 == RazerRing.danger })
+        #expect(full.contains { $0 == RazerRing.warning })
+    }
+
+    @Test("the spectrum turns rather than standing still")
+    func spectrumTurns() {
+        func flatten(_ frame: [RazerRing.Colour]) -> [UInt8] {
+            frame.flatMap { [$0.r, $0.g, $0.b] }
+        }
+        #expect(flatten(RazerRing.spectrum(step: 0)) != flatten(RazerRing.spectrum(step: 30)))
+        // Ninety steps is one full turn, so it comes back to itself — within a
+        // unit, because the wrap goes through a floating point remainder and
+        // asserting exactness would be claiming something the code never
+        // promised.
+        let start = flatten(RazerRing.spectrum(step: 0))
+        let turned = flatten(RazerRing.spectrum(step: 90))
+        #expect(zip(start, turned).allSatisfy { abs(Int($0) - Int($1)) <= 1 })
+    }
+}
