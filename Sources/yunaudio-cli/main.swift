@@ -889,6 +889,142 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
     exit(0)
 }
 
+// Routes for a long time and watches for the things that only appear after one.
+//
+// Everything else here measures a few seconds. This application is meant to
+// hold a call for hours, and nothing was checking what happens over that: a
+// leak of a few kilobytes a minute, a cycle rate that drifts, a clock lock that
+// quietly gives up an hour in. None of those are visible in an eight-second
+// run, and all of them ruin the thing this is for.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
+    let minutes = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
+    let all = (try? AudioDevices.all()) ?? []
+    guard
+        let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let destination = all.first(where: {
+            $0.uid == ClockAnchorPublisher.driverDeviceUID
+        }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
+    else {
+        print("need a real input and a loopback output")
+        exit(1)
+    }
+
+    print("source       \(source.name)")
+    print("destination  \(destination.name)")
+    print("duration     \(minutes) minutes\n")
+
+    let routes = (0..<min(2, destination.outputChannels)).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    }
+
+    RoutingEngine.enableAllocationTripwire()
+    let violationsBefore = RoutingEngine.allocationViolations
+    let engine = RoutingEngine()
+    do {
+        try engine.start(
+            sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid,
+            routes: routes, preferredSampleRate: 48000)
+    } catch {
+        print("could not start: \(error)")
+        exit(1)
+    }
+
+    /// Resident size in bytes, from the task itself rather than from `ps`.
+    func residentBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(
+            MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.phys_footprint : 0
+    }
+
+    // Settle first: the first seconds allocate buffers and warm caches, and
+    // counting those as growth would report a leak in every run.
+    Thread.sleep(forTimeInterval: 10)
+    let baselineBytes = residentBytes()
+    let baselineCycles = engine.cycleCount
+    let started = Date()
+
+    print("      elapsed   cycles/s   footprint      Δ    clock")
+    var samples: [(seconds: Double, cycles: Double, bytes: UInt64)] = []
+    var lastCycles = baselineCycles
+    var lastAt = started
+
+    while Date().timeIntervalSince(started) < minutes * 60 {
+        Thread.sleep(forTimeInterval: 15)
+        let now = Date()
+        let cycles = engine.cycleCount
+        let rate = Double(cycles - lastCycles) / now.timeIntervalSince(lastAt)
+        let bytes = residentBytes()
+        let delta = Int64(bytes) - Int64(baselineBytes)
+        samples.append((now.timeIntervalSince(started), rate, bytes))
+        print(
+            String(
+                format: "  %10.0fs %10.1f %10.2f MB %+7.2f MB   %@",
+                now.timeIntervalSince(started), rate,
+                Double(bytes) / 1_048_576, Double(delta) / 1_048_576,
+                engine.isClockLocked
+                    ? String(format: "locked %.6f", engine.measuredRateRatio) : "free"))
+        lastCycles = cycles
+        lastAt = now
+    }
+
+    let violations = RoutingEngine.allocationViolations - violationsBefore
+    let quality = engine.pathQuality
+    engine.stop()
+
+    print("")
+    print("allocations on the IO thread  \(violations)")
+    print("path at the end               \(quality?.integrityKey ?? "—")")
+
+    guard samples.count >= 3 else {
+        print("not enough samples to judge")
+        exit(1)
+    }
+    // Growth measured over the second half against the first, so a single
+    // outlier does not decide it.
+    let half = samples.count / 2
+    let earlyTotal = samples[..<half].map { Double($0.bytes) }.reduce(0, +)
+    let lateTotal = samples[half...].map { Double($0.bytes) }.reduce(0, +)
+    let early = earlyTotal / Double(half)
+    let late = lateTotal / Double(samples.count - half)
+    let growthPerMinute = (late - early) / (minutes / 2) / 1024
+    print(String(format: "memory growth                 %+.1f kB/min", growthPerMinute))
+
+    let rates = samples.map(\.cycles)
+    let meanRate = rates.reduce(0, +) / Double(rates.count)
+    let worst = rates.map { abs($0 - meanRate) }.max() ?? 0
+    print(
+        String(
+            format: "cycle rate                    %.1f/s, worst deviation %.1f",
+            meanRate, worst))
+
+    var failed = false
+    // A megabyte an hour is 17 kB a minute; anything under that is noise from
+    // the allocator rather than a leak.
+    if growthPerMinute > 17 {
+        print("\nmemory is growing — that is a leak, not jitter")
+        failed = true
+    }
+    if worst > meanRate * 0.05 {
+        print("\nthe cycle rate is not steady")
+        failed = true
+    }
+    if violations > 0 {
+        print("\nthe realtime contract broke during the run")
+        failed = true
+    }
+    if failed { exit(1) }
+    print("\nsteady for \(minutes) minutes")
+    exit(0)
+}
+
 // A tappable noise source, for verifying capture paths against a known signal.
 //
 // `afplay` looks like the obvious tool and is not: it never appears in

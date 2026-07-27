@@ -106,7 +106,27 @@ swift run -c release yunaudio-cli tone 12 &           # a tappable noise source
 swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
 swift run -c release yunaudio-cli aec-route           # route through the canceller
 swift run -c release yunaudio-cli volume 0.5         # move the device's own level
+swift run -c release yunaudio-cli soak 30            # hold a route for half an hour
 ```
+
+`soak` is the only check that runs long enough to see what a call actually does
+to this. Everything else here measures a few seconds; a leak of a few kilobytes
+a minute, a cycle rate that wanders, or a clock lock that gives up an hour in
+are all invisible at that scale and all ruin the thing this is for. Measured
+over six minutes against the real driver:
+
+```
+cycle rate                    375.0/s, worst deviation 0.1
+memory growth                 +4.0 kB/min
+allocations on the IO thread  0
+path at the end               bit-exact
+clock                         locked, 0.999983 – 0.999985 throughout
+```
+
+375.0 is 48000/128 exactly. The 4 kB a minute is allocator noise rather than
+growth — the footprint ends lower than its own midpoint — and the whole process
+sits at 4.7 MB. It fails the run if memory climbs past a megabyte an hour, if
+the cycle rate wanders more than 5%, or if the realtime contract breaks once.
 
 `aec-route` is the integration check. With the canceller in the path the
 microphone belongs to `AUVoiceProcessingIO` rather than to the router's
