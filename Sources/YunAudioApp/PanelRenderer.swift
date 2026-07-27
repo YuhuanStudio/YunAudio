@@ -6,12 +6,30 @@ import SwiftUI
 @MainActor
 enum PanelRenderer {
     static func write(to directory: String, model: RouterModel) {
+        render(PanelView(model: model), basename: "panel", directory: directory)
+        // The preferences window scrolls, and a ScrollView has no intrinsic
+        // height offscreen — without an explicit size it renders as an empty
+        // pane. Pinned to the window's minimum size.
+        for section in PreferencesWindow.Section.allCases {
+            render(
+                PreferencesWindow(model: model, initialSection: section, isRendering: true),
+                basename: "prefs-\(section.rawValue)",
+                directory: directory,
+                size: CGSize(width: 620, height: 440))
+        }
+    }
+
+    private static func render(
+        _ view: some View, basename: String, directory: String, size: CGSize? = nil
+    ) {
         for scheme in [ColorScheme.light, .dark] {
-            let name = scheme == .light ? "panel-light.png" : "panel-dark.png"
+            let name = "\(basename)-\(scheme == .light ? "light" : "dark").png"
             // The rendered tree is wrapped in the same background the glass
             // shell sits on, so contrast is judged against a real surface
             // rather than transparency.
-            let content = PanelView(model: model)
+            let sized = size.map { AnyView(view.frame(width: $0.width, height: $0.height)) }
+                ?? AnyView(view)
+            let content = sized
                 .environment(\.colorScheme, scheme)
                 .background(scheme == .light
                     ? Color(hex: 0xF2F2F4) : Color(hex: 0x0C0C0E))

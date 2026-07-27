@@ -101,6 +101,26 @@ swift run -c release yunaudio-cli tap Discord         # route an app's audio
 Run the audio tests against a release build. Debug builds report hundreds of
 allocations per IO cycle that come from Swift's own checking machinery.
 
+## Razer hardware control
+
+The transport for Razer's vendor HID interface is implemented and verified
+against a Seiren V3 Pro. What it found is worth recording, because the obvious
+starting point is wrong:
+
+- The device's vendor usage pages are `0xFF90`, `0xFF82` and `0xFF53` — its
+  *primary* page is Consumer Control, so matching on `kIOHIDPrimaryUsagePageKey`
+  misses it entirely.
+- **The openrazer 90-byte protocol does not apply.** Parsing the report
+  descriptor shows no 90-byte report anywhere on the device. Sending one gets
+  echoed back untouched, and no transaction id fixes that.
+- The control channel is the device's only feature report: `0xFF53`, report id
+  `0x07`, 63 bytes.
+
+`yunaudio-cli razer` prints the descriptor and reads that report. Everything is
+read-only: the command format still needs a USB capture of Synapse on Windows,
+and guessing at command bytes on hardware that stores configuration is not a
+reasonable substitute.
+
 ## Known limits
 
 - The driver is ad-hoc signed. Distribution needs a Developer ID identity and

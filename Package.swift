@@ -21,11 +21,13 @@ let package = Package(
 
         .target(name: "YunDesign"),
 
+        .target(name: "YunAudioRazer"),
+
         .executableTarget(
             name: "YunAudioApp",
             dependencies: ["YunAudioHAL", "YunAudioEngine", "YunDesign"]),
 
-        .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine"]),
+        .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
 
     ]
 )

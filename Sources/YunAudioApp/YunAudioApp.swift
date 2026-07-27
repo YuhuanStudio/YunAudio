@@ -19,6 +19,10 @@ struct YunAudioApp: App {
     }
 
     var body: some Scene {
+        Settings {
+            PreferencesWindow(model: model)
+        }
+
         MenuBarExtra {
             PanelView(model: model)
         } label: {

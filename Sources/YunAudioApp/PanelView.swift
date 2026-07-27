@@ -26,7 +26,6 @@ struct PanelView: View {
                     if model.isRunning { runtimeDetail }
                     if let error = model.lastError { errorRow(error) }
                     voiceIsolation
-                    settings
                     footer
                 } else {
                     driverMissing
@@ -252,27 +251,6 @@ struct PanelView: View {
         }
     }
 
-    // MARK: Settings
-
-    private var settings: some View {
-        YunCard {
-            VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Toggle("Start routing at launch", isOn: $model.autoStart)
-                    .toggleStyle(YunToggleStyle())
-                Toggle("Open at login", isOn: Binding(
-                    get: { model.launchesAtLogin },
-                    set: { model.launchesAtLogin = $0 }))
-                    .toggleStyle(YunToggleStyle())
-                if let error = model.loginItemError {
-                    Text(error)
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
     // MARK: Footer
 
     private var footer: some View {
@@ -284,6 +262,11 @@ struct PanelView: View {
                 .buttonStyle(YunButtonStyle(.secondary, small: true))
 
             Spacer()
+
+            SettingsLink {
+                Text("Settings")
+            }
+            .buttonStyle(YunButtonStyle(.ghost, small: true))
 
             Button("Quit") { NSApplication.shared.terminate(nil) }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))

@@ -98,7 +98,13 @@ final class RouterModel {
     private(set) var measuredRateRatio: Double = 1
     private(set) var clockLockFailed = false
 
+    /// Global mute, applied through the lock-free command queue so it takes
+    /// effect on the next IO cycle without rebuilding anything.
+    private(set) var isMuted = false
+    private(set) var hotkeyFailures: [String] = []
+
     private let engine = RoutingEngine()
+    private let hotkeys = HotkeyManager()
     private var levelTimer: Timer?
     private var deviceWatcher: DeviceChangeWatcher?
 
@@ -131,8 +137,45 @@ final class RouterModel {
             Task { @MainActor in self?.handleDeviceChange() }
         }
 
+        // The tripwire is on from launch so the diagnostics page reports a real
+        // number rather than zero-because-nobody-was-counting.
+        RoutingEngine.enableAllocationTripwire()
+        installHotkeys()
+
         if autoStart, selectedSource != nil, selectedDestination != nil {
             start()
+        }
+    }
+
+    // MARK: Hotkeys
+
+    private func installHotkeys() {
+        for action in HotkeyManager.Action.allCases {
+            let handler: () -> Void
+            switch action {
+            case .toggleRouting: handler = { [weak self] in self?.toggle() }
+            case .toggleMute: handler = { [weak self] in self?.toggleMute() }
+            }
+            if !hotkeys.register(action, shortcut: action.defaultShortcut, handler: handler) {
+                // Another application owns the combination. Say so — a shortcut
+                // that quietly does nothing is worse than none at all.
+                hotkeyFailures.append(
+                    "\(action.defaultShortcut.displayName) could not be registered — "
+                        + "another application already owns it")
+            }
+        }
+    }
+
+    var hotkeyDescriptions: [(title: String, shortcut: String)] {
+        HotkeyManager.Action.allCases.map {
+            ($0.title, $0.defaultShortcut.displayName)
+        }
+    }
+
+    func toggleMute() {
+        isMuted.toggle()
+        for index in routes.indices {
+            engine.setMuted(isMuted, forRouteAt: index)
         }
     }
 
@@ -337,6 +380,20 @@ final class RouterModel {
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio
     }
+
+    /// Sample rates both selected devices can present.
+    var availableSampleRates: [Double] {
+        guard let source = selectedSource, let destination = selectedDestination else {
+            return [44100, 48000, 96000]
+        }
+        let shared = Set(source.availableSampleRates)
+            .intersection(destination.availableSampleRates)
+        return shared.sorted()
+    }
+
+    /// Allocations recorded on the IO thread. Surfaced in diagnostics because
+    /// the number is only meaningful if someone looks at it.
+    var allocationViolations: UInt64 { RoutingEngine.allocationViolations }
 
     /// Loudest route, for the menu bar icon and the signal path graphic.
     var peakLevel: Float { levels.max() ?? 0 }

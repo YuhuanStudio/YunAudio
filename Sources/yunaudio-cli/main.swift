@@ -2,6 +2,7 @@ import CoreAudio
 import Foundation
 import YunAudioEngine
 import YunAudioHAL
+import YunAudioRazer
 
 // A verification harness for the HAL layer. Everything the GUI will rely on is
 // readable here first, so device quirks surface before any UI exists.
@@ -294,6 +295,40 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 }
 
 // MARK: - Run
+
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "razer" {
+    if CommandLine.arguments.contains("--dump") {
+        RazerDevice.dumpCandidates()
+        exit(0)
+    }
+    let devices = RazerDevice.discover()
+    guard !devices.isEmpty else {
+        print("no Razer device exposing a vendor-defined HID usage page")
+        print("run with --dump to see what the Razer devices actually publish")
+        exit(1)
+    }
+    for device in devices {
+        print("\(device.productName)  ·  0x\(String(format: "%04X", device.productID))")
+        print("  vendor pages " + device.vendorUsagePages
+            .map { String(format: "0x%04X", $0) }.joined(separator: " "))
+        for line in device.reportDescriptorSummary() { print("  \(line)") }
+        // Read-only throughout. Reading a feature report asks the device for its
+        // current state; the write side would mean guessing command bytes on
+        // hardware that keeps persistent configuration.
+        do {
+            let bytes = try device.readFeatureReport(id: 0x07, size: 63)
+            print("  feature 0x07 (\(bytes.count) bytes):")
+            for offset in stride(from: 0, to: bytes.count, by: 16) {
+                let slice = bytes[offset..<min(offset + 16, bytes.count)]
+                let hex = slice.map { String(format: "%02X", $0) }.joined(separator: " ")
+                print(String(format: "    %04X  %@", offset, hex))
+            }
+        } catch {
+            print("  feature 0x07  \(error)")
+        }
+    }
+    exit(0)
+}
 
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "apps" {
     do {
