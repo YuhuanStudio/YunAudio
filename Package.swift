@@ -29,5 +29,8 @@ let package = Package(
 
         .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
 
+        .testTarget(
+            name: "YunAudioTests",
+            dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer"]),
     ]
 )
