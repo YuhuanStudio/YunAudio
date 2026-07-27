@@ -122,3 +122,12 @@
 "Click to start a cable from this channel." = "Click to start a cable from this channel.";
 "Click to pull every cable reaching this channel." = "Click to pull every cable reaching this channel.";
 "Click to land the pending cable here." = "Click to land the pending cable here.";
+"Echo cancellation" = "Echo cancellation";
+"Remove the speakers from the microphone" = "Remove the speakers from the microphone";
+"For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way." = "For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way.";
+"Cancel against" = "Cancel against";
+"Reference" = "Reference";
+"present" = "present";
+"absent" = "absent";
+"Buffered" = "Buffered";
+"Dropped" = "Dropped";

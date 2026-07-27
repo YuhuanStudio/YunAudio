@@ -122,3 +122,12 @@
 "Click to start a cable from this channel." = "點擊以從此聲道拉出接線。";
 "Click to pull every cable reaching this channel." = "點擊以拔除通往此聲道的所有接線。";
 "Click to land the pending cable here." = "點擊以將待接的線接到這裡。";
+"Echo cancellation" = "回音消除";
+"Remove the speakers from the microphone" = "從麥克風中移除喇叭的聲音";
+"For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way." = "適用於喇叭而非耳機。Apple 的消除器會接管麥克風，因此路徑會失去時鐘鎖定，並在來回各增加一個緩衝區的延遲。";
+"Cancel against" = "消除對象";
+"Reference" = "參考訊號";
+"present" = "已取得";
+"absent" = "未取得";
+"Buffered" = "緩衝中";
+"Dropped" = "遺失";

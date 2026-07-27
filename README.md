@@ -98,7 +98,21 @@ swift run -c release yunaudio-cli apps                # list tappable processes
 swift run -c release yunaudio-cli tap Discord         # route an app's audio
 swift run -c release yunaudio-cli tone 12 &           # a tappable noise source
 swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
+swift run -c release yunaudio-cli aec-route           # route through the canceller
 ```
+
+`aec-route` is the integration check. With the canceller in the path the
+microphone belongs to `AUVoiceProcessingIO` rather than to the router's
+aggregate, and the cancelled signal reaches the routes across a lock-free ring,
+so the thing worth measuring is the seam: the ring's fill should stay flat. A
+fill that climbs means the router is the slower of the two and latency is
+growing; one that falls to zero means it is starving and the audio has gaps.
+Measured over eight seconds: 388,096 frames at 48 kHz, none dropped, −128 frames
+of drift, and zero allocations on the IO thread.
+
+That checks the plumbing, not the depth. `aec-measure` is what measures how much
+is actually removed, by running the same acoustic path twice with the canceller
+active and bypassed.
 
 `far-end` checks the thing inspection cannot: that real frames cross the ring
 between the tap's IO thread and the canceller's. Against `tone`, whose amplitude
@@ -160,6 +174,12 @@ reasonable substitute.
   but the realtime contract is broken while it is on.
 - A driver fault takes `coreaudiod` down with all system audio attached. Keep the
   uninstall command above to hand.
+- Echo cancellation costs the clock lock and bit-exactness, and adds a buffer of
+  latency in each direction. That is not a defect to be fixed later: the
+  canceller has to own the microphone and the speaker together, so the microphone
+  leaves the router's aggregate and the clock master becomes the destination.
+  Worth it on laptop speakers, worth nothing on headphones, so it is off by
+  default and the interface says what it costs before it is switched on.
 
 ## Licence
 

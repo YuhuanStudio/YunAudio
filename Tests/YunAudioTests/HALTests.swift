@@ -167,7 +167,12 @@ struct RazerReportTests {
 
 // MARK: - Sample rate restoration
 
-@Suite("Sample rate restoration")
+/// Serialised because both tests reach for the same physical device — the first
+/// one the system lists — and mutate its sample rate. Run in parallel, which is
+/// Swift Testing's default, one test sets a rate while the other is asserting
+/// that nothing changed, and the failure looks like a bug in the code under
+/// test rather than in the suite.
+@Suite("Sample rate restoration", .serialized)
 struct SampleRateRestorationTests {
     /// Routing has to align sample rates, and that change persists on the
     /// hardware after the process exits. Handing back what was there before is

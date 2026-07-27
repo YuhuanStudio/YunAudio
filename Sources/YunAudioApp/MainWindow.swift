@@ -293,6 +293,54 @@ struct MainWindow: View {
                     }
                 }
 
+                sectionHeading(loc("Echo cancellation"))
+                YunCard {
+                    VStack(alignment: .leading, spacing: Yun.Space.md) {
+                        Toggle(
+                            loc("Remove the speakers from the microphone"),
+                            isOn: $model.cancelsEcho
+                        )
+                        .toggleStyle(YunToggleStyle())
+
+                        Text(
+                            loc(
+                                "For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        if model.cancelsEcho {
+                            YunDivider()
+                            Text(loc("Cancel against"))
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                            YunSelect(
+                                selection: $model.echoSpeakerUID,
+                                options: model.echoSpeakerOptions.map {
+                                    .init(
+                                        value: $0.uid as String?, title: $0.name,
+                                        detail: "\($0.outputChannels)ch")
+                                })
+                            if let status = model.echoStatus {
+                                YunDetailRow(
+                                    loc("Reference"),
+                                    value: status.hasReference
+                                        ? loc("present") : loc("absent"),
+                                    tone: status.hasReference ? .success : .warning)
+                                YunDetailRow(
+                                    loc("Buffered"), value: "\(status.buffered) frames")
+                                if status.dropped > 0 {
+                                    YunDetailRow(
+                                        loc("Dropped"), value: "\(status.dropped)",
+                                        tone: .danger)
+                                }
+                            }
+                        }
+                    }
+                }
+
                 sectionHeading(loc("Signal path"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {

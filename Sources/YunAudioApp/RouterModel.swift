@@ -134,6 +134,58 @@ final class RouterModel {
         didSet { if oldValue != tapMuteBehavior { persist(); restartIfRunning() } }
     }
 
+    // MARK: Echo cancellation
+
+    /// Whether the microphone is captured through the echo canceller.
+    ///
+    /// Off by default and deliberately not a preset: it takes the microphone
+    /// out of the router's own aggregate, which costs the clock lock, bit
+    /// exactness and a buffer of latency each way. Worth every bit of that on
+    /// laptop speakers, worth none of it on headphones.
+    var cancelsEcho = false {
+        didSet { if oldValue != cancelsEcho { persist(); restartIfRunning() } }
+    }
+
+    /// The speaker the canceller listens for. Nil means the current default.
+    var echoSpeakerUID: String? {
+        didSet { if oldValue != echoSpeakerUID { persist(); restartIfRunning() } }
+    }
+
+    /// Outputs worth cancelling against: real hardware only. Cancelling against
+    /// a virtual endpoint removes nothing, because nothing acoustic came out
+    /// of it.
+    var echoSpeakerOptions: [AudioDevice] {
+        outputDevices.filter { !$0.transport.isVirtual }
+    }
+
+    var resolvedEchoSpeaker: AudioDevice? {
+        echoSpeakerOptions.first { $0.uid == echoSpeakerUID }
+            ?? (try? AudioDevices.defaultOutput()).flatMap { device in
+                device.transport.isVirtual ? nil : device
+            }
+            ?? echoSpeakerOptions.first
+    }
+
+    private func echoSettings(
+        fallbackProcessIDs: [AudioObjectID]
+    ) -> EchoCancellationSettings? {
+        guard cancelsEcho, let speaker = resolvedEchoSpeaker else { return nil }
+        let reference =
+            fallbackProcessIDs.isEmpty
+            ? availableApps.filter(\.isPlaying).flatMap(\.processIDs)
+            : fallbackProcessIDs
+        // Unmuted: the applications keep playing to the speaker themselves. The
+        // alternative routes their audio through the canceller instead, which
+        // cancels better but puts this app in the path of everything the user
+        // hears — too much to take without being asked.
+        return EchoCancellationSettings(
+            speakerUID: speaker.uid, farEndProcessIDs: reference,
+            tapMuteBehavior: .unmuted)
+    }
+
+    /// What the canceller is doing, or nil when it is not in the path.
+    var echoStatus: EchoCancellationStatus? { engine.echoCancellationStatus }
+
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
     func prepareForRendering() {
@@ -513,6 +565,8 @@ final class RouterModel {
         capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
         enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
         effectValues = saved.effectValues
+        cancelsEcho = saved.cancelsEcho ?? false
+        echoSpeakerUID = saved.echoSpeakerUID
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
@@ -545,7 +599,9 @@ final class RouterModel {
                 preferredSampleRate: preferredSampleRate,
                 capturedAppBundleIDs: Array(capturedAppBundleIDs),
                 enabledEffects: enabledEffects.map(\.rawValue),
-                effectValues: effectValues))
+                effectValues: effectValues,
+                cancelsEcho: cancelsEcho,
+                echoSpeakerUID: echoSpeakerUID))
     }
 
     // MARK: Devices
@@ -695,6 +751,12 @@ final class RouterModel {
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
         let handle = TapHandle(taps: taps)
+        // The far end is whatever the user chose to mix in. If they picked
+        // nothing, every application currently making noise is used instead:
+        // the point of the reference is to know what came out of the speaker,
+        // and asking someone to name that twice would be asking them to do the
+        // app's job.
+        let echo = echoSettings(fallbackProcessIDs: processIDs)
         // Copied so the queue closure and the main actor are not reading and
         // writing the same array. Route is a value type, so this is a real copy.
         let routes = routeList
@@ -710,7 +772,8 @@ final class RouterModel {
                     taps: handle.taps,
                     effects: effects,
                     preferredSampleRate: rate,
-                    voiceIsolation: isolation)
+                    voiceIsolation: isolation,
+                    echoCancellation: echo)
             } catch {
                 failure = String(describing: error)
             }

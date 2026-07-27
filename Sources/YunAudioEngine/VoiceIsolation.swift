@@ -168,9 +168,14 @@ final class VoiceIsolationUnit {
 struct RTVoiceIsolation {
     /// Non-zero when the stage should run.
     var enabled: Int32
-    /// Which input buffer and channel feed the model.
+    /// Which input buffer and channel feed the model. Ignored when
+    /// `sourceIsCancelled` is set, since that signal is not in the input list.
     var sourceBuffer: Int32
     var sourceChannel: Int32
+    /// Non-zero when the model should read the echo-cancelled microphone
+    /// instead. Processing the aggregate's input while the canceller owns the
+    /// microphone would process the wrong signal and then discard it.
+    var sourceIsCancelled: Int32
     /// `Unmanaged<VoiceIsolationUnit>.toOpaque()`.
     var unit: UnsafeMutableRawPointer
     var inputBuffer: UnsafeMutablePointer<Float>

@@ -110,6 +110,46 @@ enum UIFlowCheck {
         check("the route set changed", model.activeRoutes.count != before || before > 0)
         check("still running", model.isRunning)
 
+        print("\nswitching the echo canceller on while running")
+        if model.echoSpeakerOptions.isEmpty {
+            note("no hardware output to cancel against — skipped")
+        } else {
+            model.cancelsEcho = true
+            // `isBusy` is the only flag that spans the whole reconfigure, and
+            // both alternatives are races. `isRunning` never goes false during
+            // one, so waiting on it returns the state from before the change;
+            // the canceller becomes visible partway through `engine.start`, so
+            // waiting on the status alone lands in the middle of a start. Both
+            // produced failures that looked like bugs in the engine.
+            await waitUntil(
+                "the canceller entered the path",
+                { !model.isBusy && model.echoStatus != nil }, timeout: 12)
+            check("no error was reported", model.lastError == nil)
+            check("the route is up", model.isRunning)
+            if let status = model.echoStatus {
+                note("reference \(status.hasReference ? "present" : "absent")")
+            }
+            // The microphone belongs to the canceller now, so nothing may be
+            // reading it off the aggregate: a route still pointed at a buffer
+            // index would be reading whatever landed in that slot instead.
+            let faderPerRoute = model.routeGains.count == model.activeRoutes.count
+            check("routes still resolve", !model.activeRoutes.isEmpty && faderPerRoute)
+            await pause(1.5)
+            let produced = model.echoStatus?.produced ?? 0
+            await pause(1.0)
+            check(
+                "the canceller keeps producing",
+                (model.echoStatus?.produced ?? 0) > produced)
+
+            model.cancelsEcho = false
+            await waitUntil(
+                "the canceller left the path",
+                { !model.isBusy && model.echoStatus == nil && model.isRunning },
+                timeout: 12)
+            check("no error on the way out", model.lastError == nil)
+            check("routing continues without it", !model.activeRoutes.isEmpty)
+        }
+
         print("\napplying a preset while running")
         model.apply(.recording)
         await pause(1.0)

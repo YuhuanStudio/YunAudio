@@ -759,6 +759,136 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     exit(0)
 }
 
+// Routes with the echo canceller in the path, and reports what crossed.
+//
+// This is the integration the rest of the echo-cancellation work was building
+// towards: the microphone belongs to AUVoiceProcessingIO rather than to the
+// router's aggregate, and the cancelled signal reaches the routes across a ring.
+// What it checks is that the seam holds — that frames keep arriving at the rate
+// the router consumes them, with no standing drift in either direction.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
+    let micMatch =
+        CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "MacBook Pro的麥克風"
+    let destinationMatch =
+        CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "BlackHole"
+    let speakerMatch =
+        CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : "MacBook Pro的揚聲器"
+    let seconds = CommandLine.arguments.count > 5 ? Double(CommandLine.arguments[5]) ?? 8 : 8
+
+    let all = (try? AudioDevices.all()) ?? []
+    guard let mic = all.first(where: { $0.name.contains(micMatch) && $0.hasInput }) else {
+        print("no input matching \"\(micMatch)\"")
+        exit(1)
+    }
+    guard
+        let destination = all.first(where: {
+            $0.name.contains(destinationMatch) && $0.hasOutput
+        })
+    else {
+        print("no output matching \"\(destinationMatch)\"")
+        exit(1)
+    }
+    guard let speaker = all.first(where: { $0.name.contains(speakerMatch) && $0.hasOutput })
+    else {
+        print("no speaker matching \"\(speakerMatch)\"")
+        exit(1)
+    }
+
+    // Whatever is audible becomes the far end. Nothing playing is a valid run —
+    // the canceller works, it simply has no voice to remove.
+    let applications = ((try? AudioApplications.grouped()) ?? []).filter(\.isPlaying)
+    let farEndIDs = applications.flatMap(\.processIDs)
+
+    print("microphone   \(mic.name)   (through the canceller)")
+    print("speaker      \(speaker.name)")
+    print("destination  \(destination.name)")
+    print(
+        "far end      "
+            + (applications.isEmpty
+                ? "nothing is playing — running without a reference"
+                : applications.map(\.name).joined(separator: ", ")))
+
+    let pairs = min(2, destination.outputChannels)
+    let routes = (0..<pairs).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: mic.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    }
+
+    RoutingEngine.enableAllocationTripwire()
+    let before = RoutingEngine.allocationViolations
+
+    let engine = RoutingEngine()
+    do {
+        try engine.start(
+            sourceDeviceUID: mic.uid,
+            destinationDeviceUID: destination.uid,
+            routes: routes,
+            preferredSampleRate: 48000,
+            echoCancellation: EchoCancellationSettings(
+                speakerUID: speaker.uid, farEndProcessIDs: farEndIDs,
+                tapMuteBehavior: .unmuted))
+    } catch {
+        print("\ncould not start: \(error)")
+        exit(1)
+    }
+
+    guard engine.cancelsEcho else {
+        print("\nthe canceller is not in the path: \(engine.lastEchoCancellationError ?? "—")")
+        engine.stop()
+        exit(1)
+    }
+    print("\nrouting for \(Int(seconds))s…\n")
+
+    var samples: [(produced: UInt32, buffered: UInt32)] = []
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        Thread.sleep(forTimeInterval: 1)
+        guard let status = engine.echoCancellationStatus else { continue }
+        samples.append((status.produced, status.buffered))
+        print(
+            String(
+                format: "  produced %8u   buffered %5u   dropped %llu   levels %@",
+                status.produced, status.buffered, status.dropped,
+                engine.routePeaks.map { String(format: "%.3f", $0) }
+                    .joined(separator: " ")))
+    }
+
+    let status = engine.echoCancellationStatus
+    engine.stop()
+
+    let violations = RoutingEngine.allocationViolations - before
+    print("")
+    print("allocations on the IO thread  \(violations)")
+    print(
+        "far-end reference             "
+            + (status?.hasReference == true ? "present" : "absent"))
+
+    // A ring whose fill is flat is the whole claim: the canceller and the
+    // router are consuming each other's output at the same rate. A fill that
+    // climbs means the router is slower and latency is growing; one that falls
+    // to zero means it is starving and the audio has gaps.
+    guard samples.count >= 3 else {
+        print("\nnot enough samples to judge the seam")
+        exit(1)
+    }
+    let fills = samples.map { Int($0.buffered) }
+    let drift = fills[fills.count - 1] - fills[1]
+    print("ring fill                     \(fills.map(String.init).joined(separator: " → "))")
+    print("drift over the run            \(drift) frames")
+
+    if samples.last!.produced == samples.first!.produced {
+        print("\nthe canceller stopped producing")
+        exit(1)
+    }
+    if abs(drift) > 4800 {
+        print("\nthe two ends are running at different rates — 100 ms of drift or more")
+        exit(1)
+    }
+    print("\nthe seam holds: the canceller and the router consume each other in step")
+    exit(0)
+}
+
 // A tappable noise source, for verifying capture paths against a known signal.
 //
 // `afplay` looks like the obvious tool and is not: it never appears in

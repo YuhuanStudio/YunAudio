@@ -21,13 +21,18 @@ public struct RTRoute: Sendable, Equatable {
     /// Non-zero when this route should read the voice-isolated signal instead
     /// of the raw input buffer.
     public var usesIsolatedSource: Int32
+    /// Non-zero when this route should read the echo-cancelled microphone,
+    /// which arrives across a ring from another IO thread rather than in this
+    /// cycle's input buffer list.
+    public var usesCancelledSource: Int32
 
     public init(
         sourceBuffer: Int32, sourceChannel: Int32,
         destinationBuffer: Int32, destinationChannel: Int32,
         gain: Float = 1.0,
         muted: Bool = false,
-        usesIsolatedSource: Bool = false
+        usesIsolatedSource: Bool = false,
+        usesCancelledSource: Bool = false
     ) {
         self.sourceBuffer = sourceBuffer
         self.sourceChannel = sourceChannel
@@ -36,6 +41,7 @@ public struct RTRoute: Sendable, Equatable {
         self.gain = gain
         self.muted = muted ? 1 : 0
         self.usesIsolatedSource = usesIsolatedSource ? 1 : 0
+        self.usesCancelledSource = usesCancelledSource ? 1 : 0
     }
 }
 
@@ -93,6 +99,22 @@ struct RTGraph {
     var recordScratch: UnsafeMutablePointer<Float>
     var recordScratchCapacity: Int32
 
+    /// Echo-cancelled microphone frames, or null when the canceller is off.
+    ///
+    /// The microphone is not in this aggregate when echo cancellation is on —
+    /// `AUVoiceProcessingIO` owns it, bound to an aggregate of its own holding
+    /// the microphone and the speaker, because it can only cancel a speaker it
+    /// is also driving. So the cancelled signal arrives across a ring from that
+    /// unit's IO thread instead of in this cycle's input buffer list, and a
+    /// route reads it through `usesCancelledSource` rather than by buffer index.
+    var cancelledRing: OpaquePointer?
+    /// Mono, packed. Drained once per cycle so several routes share one read;
+    /// draining per route would give each a different slice of the stream.
+    var cancelledBuffer: UnsafeMutablePointer<Float>
+    var cancelledCapacity: Int32
+    /// Frames drained this cycle. Zero while the canceller is still filling.
+    var cancelledFrames: Int32
+
     /// Parameter changes waiting to be applied. Drained at the top of each
     /// cycle so a fader move lands without rebuilding anything.
     var commands: OpaquePointer?
@@ -119,7 +141,7 @@ struct RTGraph {
             repeating: RTRoute(
                 sourceBuffer: 0, sourceChannel: 0,
                 destinationBuffer: 0, destinationChannel: 0, gain: 0, muted: true,
-                usesIsolatedSource: false), count: count)
+                usesIsolatedSource: false, usesCancelledSource: false), count: count)
         for (index, route) in routeList.enumerated() {
             routeStorage[index] = route
         }
@@ -135,6 +157,13 @@ struct RTGraph {
         let scratchCapacity = max(bufferFrames, 4096) * 2
         let scratchStorage = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         scratchStorage.initialize(repeating: 0, count: scratchCapacity)
+
+        // Sized for the largest block the device is likely to ask for. Mono, so
+        // no channel factor.
+        let cancelledCapacity = max(bufferFrames, 4096)
+        let cancelledStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: cancelledCapacity)
+        cancelledStorage.initialize(repeating: 0, count: cancelledCapacity)
 
         let clockSampleStorage = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
         clockSampleStorage.initialize(to: 0)
@@ -157,6 +186,10 @@ struct RTGraph {
                 recordChannels: 0,
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
+                cancelledRing: nil,
+                cancelledBuffer: cancelledStorage,
+                cancelledCapacity: Int32(cancelledCapacity),
+                cancelledFrames: 0,
                 commands: yun_rt_queue_create(256),
                 selftest: nil))
         return graph
@@ -173,6 +206,9 @@ struct RTGraph {
         graph.pointee.recordScratch.deinitialize(
             count: Int(graph.pointee.recordScratchCapacity))
         graph.pointee.recordScratch.deallocate()
+        graph.pointee.cancelledBuffer.deinitialize(
+            count: Int(graph.pointee.cancelledCapacity))
+        graph.pointee.cancelledBuffer.deallocate()
         graph.pointee.clockSampleTime.deinitialize(count: 1)
         graph.pointee.clockSampleTime.deallocate()
         graph.pointee.clockHostTime.deinitialize(count: 1)
@@ -250,20 +286,54 @@ func yunAudioIOProc(
         }
     }
 
+    // Drain the echo-cancelled microphone once, before anything reads it. Doing
+    // it per route would hand each route a different slice of the same stream.
+    //
+    // A short read is normal for the first cycles while the canceller fills, and
+    // the remainder is silenced rather than left holding the previous cycle:
+    // repeating audio here would be heard as a stutter and would also give the
+    // canceller a phantom to chase.
+    graph.pointee.cancelledFrames = 0
+    if let ring = graph.pointee.cancelledRing, output.count > 0 {
+        let stride = max(1, Int(output[0].mNumberChannels))
+        let wanted = min(
+            Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride),
+            Int(graph.pointee.cancelledCapacity))
+        if wanted > 0 {
+            let buffer = graph.pointee.cancelledBuffer
+            let taken = Int(yun_rt_ring_read(ring, buffer, UInt32(wanted)))
+            if taken < wanted {
+                buffer.advanced(by: taken).update(repeating: 0, count: wanted - taken)
+            }
+            graph.pointee.cancelledFrames = Int32(wanted)
+        }
+    }
+    let cancelledFrames = Int(graph.pointee.cancelledFrames)
+
     // Voice isolation runs once per cycle, ahead of routing, so several routes
     // can share one pass over the model rather than each paying for it.
     var isolatedFrames = 0
     if let isolation = graph.pointee.voiceIsolation, isolation.pointee.enabled != 0 {
+        // With the canceller in front, the model has to see what it produced;
+        // reading the aggregate's input would process the uncancelled signal and
+        // then throw it away.
+        let fromCancelled = isolation.pointee.sourceIsCancelled != 0 && cancelledFrames > 0
         let sourceIndex = Int(isolation.pointee.sourceBuffer)
-        if sourceIndex < input.count, let data = input[sourceIndex].mData {
-            let stride = Int(input[sourceIndex].mNumberChannels)
-            let channel = Int(isolation.pointee.sourceChannel)
+        if fromCancelled || (sourceIndex < input.count && input[sourceIndex].mData != nil) {
+            let stride = fromCancelled ? 1 : Int(input[sourceIndex].mNumberChannels)
+            let channel = fromCancelled ? 0 : Int(isolation.pointee.sourceChannel)
             if stride > 0, channel < stride {
                 let available =
-                    Int(input[sourceIndex].mDataByteSize)
-                    / (MemoryLayout<Float>.size * stride)
+                    fromCancelled
+                    ? cancelledFrames
+                    : Int(input[sourceIndex].mDataByteSize)
+                        / (MemoryLayout<Float>.size * stride)
                 let frames = min(available, Int(isolation.pointee.maximumFrames))
-                let source = data.assumingMemoryBound(to: Float.self)
+                let source =
+                    fromCancelled
+                    ? UnsafePointer(graph.pointee.cancelledBuffer)
+                    : UnsafePointer(
+                        input[sourceIndex].mData!.assumingMemoryBound(to: Float.self))
                 let staging = isolation.pointee.inputBuffer
                 for frame in 0..<frames {
                     staging[frame] = source[frame * stride + channel]
@@ -294,22 +364,28 @@ func yunAudioIOProc(
     for index in 0..<routeCount {
         let route = routes[index]
 
-        let sourceIndex = Int(route.sourceBuffer)
         let destinationIndex = Int(route.destinationBuffer)
-        guard sourceIndex < input.count, destinationIndex < output.count else { continue }
+        guard destinationIndex < output.count else { continue }
 
-        let sourceBuffer = input[sourceIndex]
-        let destinationBuffer = output[destinationIndex]
-        guard let sourceData = sourceBuffer.mData,
-            let destinationData = destinationBuffer.mData
-        else { continue }
-
-        // An isolated route reads the model's mono output, which is packed, so
-        // its stride is one and its channel index is zero.
+        // Both the isolated signal and the cancelled microphone are mono and
+        // packed, so their stride is one and their channel index zero. Neither
+        // is in the input buffer list at all, which is why the buffer index is
+        // only consulted for a route reading the aggregate directly.
         let useIsolated = route.usesIsolatedSource != 0 && isolatedFrames > 0
-        let sourceStride = useIsolated ? 1 : Int(sourceBuffer.mNumberChannels)
+        let useCancelled =
+            !useIsolated && route.usesCancelledSource != 0 && cancelledFrames > 0
+        let readsInput = !useIsolated && !useCancelled
+
+        let sourceIndex = Int(route.sourceBuffer)
+        if readsInput && sourceIndex >= input.count { continue }
+        let sourceBuffer = readsInput ? input[sourceIndex] : AudioBuffer()
+        let destinationBuffer = output[destinationIndex]
+        guard let destinationData = destinationBuffer.mData else { continue }
+        if readsInput && sourceBuffer.mData == nil { continue }
+
+        let sourceStride = readsInput ? Int(sourceBuffer.mNumberChannels) : 1
         let destinationStride = Int(destinationBuffer.mNumberChannels)
-        let sourceChannel = useIsolated ? 0 : Int(route.sourceChannel)
+        let sourceChannel = readsInput ? Int(route.sourceChannel) : 0
         let destinationChannel = Int(route.destinationChannel)
         guard sourceChannel < sourceStride, destinationChannel < destinationStride,
             sourceStride > 0, destinationStride > 0
@@ -317,20 +393,30 @@ func yunAudioIOProc(
 
         // Both endpoints present 32-bit float physical formats, and the HAL's
         // virtual format is float32 regardless, so no conversion is needed.
-        let sourceFrames =
-            useIsolated
-            ? isolatedFrames
-            : Int(sourceBuffer.mDataByteSize) / (MemoryLayout<Float>.size * sourceStride)
+        let sourceFrames: Int
+        if useIsolated {
+            sourceFrames = isolatedFrames
+        } else if useCancelled {
+            sourceFrames = cancelledFrames
+        } else {
+            sourceFrames =
+                Int(sourceBuffer.mDataByteSize) / (MemoryLayout<Float>.size * sourceStride)
+        }
         let destinationFrames =
             Int(destinationBuffer.mDataByteSize)
             / (MemoryLayout<Float>.size * destinationStride)
         let frames = min(sourceFrames, destinationFrames)
         guard frames > 0 else { continue }
 
-        let source =
-            useIsolated
-            ? graph.pointee.voiceIsolation!.pointee.outputBuffer
-            : sourceData.assumingMemoryBound(to: Float.self)
+        let source: UnsafePointer<Float>
+        if useIsolated {
+            source = UnsafePointer(graph.pointee.voiceIsolation!.pointee.outputBuffer)
+        } else if useCancelled {
+            source = UnsafePointer(graph.pointee.cancelledBuffer)
+        } else {
+            source = UnsafePointer(
+                sourceBuffer.mData!.assumingMemoryBound(to: Float.self))
+        }
         let destination = destinationData.assumingMemoryBound(to: Float.self)
         let gain = route.muted != 0 ? 0 : route.gain
 

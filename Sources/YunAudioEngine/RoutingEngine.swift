@@ -144,6 +144,33 @@ public final class RoutingEngine: @unchecked Sendable {
     public var onClockLockFailure: (@Sendable () -> Void)?
 
     public private(set) var lastIsolationError: String?
+    /// Why the echo canceller is not running, when it was asked for.
+    public private(set) var lastEchoCancellationError: String?
+
+    /// The canceller, while it is in the path. Retained here so it outlives the
+    /// ring pointer the IO thread holds.
+    private var echoBridge: EchoCancellationBridge?
+
+    /// True when the microphone is reaching the routes through the canceller
+    /// rather than through this aggregate.
+    public var cancelsEcho: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return echoBridge != nil
+    }
+
+    /// What the canceller is doing, for the diagnostics view. Nil when it is
+    /// not in the path.
+    public var echoCancellationStatus: EchoCancellationStatus? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let bridge = echoBridge else { return nil }
+        return EchoCancellationStatus(
+            produced: bridge.producedFrames,
+            buffered: bridge.bufferedFrames,
+            dropped: bridge.droppedFrames,
+            hasReference: bridge.hasFarEndReference && !bridge.farEndReferenceFailed)
+    }
 
     public init() {}
 
@@ -169,6 +196,8 @@ public final class RoutingEngine: @unchecked Sendable {
     ///     above 48 kHz.
     ///   - bufferFrames: IO cycle size. 128 frames is 2.7 ms at 48 kHz.
     ///   - voiceIsolation: Single-stage isolation settings, or nil for none.
+    ///   - echoCancellation: Speaker and far-end reference for the canceller,
+    ///     or nil to leave the microphone in this aggregate.
     ///   - selftest: Installs the loopback integrity check.
     /// - Throws: `RoutingError` when a device is missing, a channel cannot be
     ///   mapped, the devices share no sample rate, or CoreAudio refuses to
@@ -183,6 +212,7 @@ public final class RoutingEngine: @unchecked Sendable {
         preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
         voiceIsolation: VoiceIsolationSettings? = nil,
+        echoCancellation: EchoCancellationSettings? = nil,
         selftest: Bool = false
     ) throws {
         stateLock.lock()
@@ -209,7 +239,10 @@ public final class RoutingEngine: @unchecked Sendable {
             additionalDestinationUIDs
             .filter { $0 != sourceDeviceUID && $0 != destinationDeviceUID }
             .compactMap { try? AudioDevices.device(uid: $0) }
-        let members = [source, destination] + extras
+        // Every device involved is aligned, including the microphone even when
+        // it is about to belong to the canceller rather than to this aggregate:
+        // a rate mismatch there would be resampled somewhere regardless.
+        let alignedDevices = [source, destination] + extras
         let shared = Set(source.availableSampleRates)
             .intersection(destination.availableSampleRates)
         let rate: Double
@@ -223,7 +256,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // Remembered so the devices go back the way they were found. Merged
         // rather than replaced: a restart must not forget what the first start
         // changed.
-        let changed = try AggregateDevice.alignSampleRate(rate, across: members)
+        let changed = try AggregateDevice.alignSampleRate(rate, across: alignedDevices)
         for (uid, previous) in changed where originalSampleRates[uid] == nil {
             originalSampleRates[uid] = previous
         }
@@ -238,6 +271,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // parts per million out accumulates only microseconds in that window.
         let clockLockAvailable =
             !clockLockAbandoned
+            && echoCancellation == nil
             && destinationDeviceUID == ClockAnchorPublisher.driverDeviceUID
             && (ClockAnchorPublisher(driverDeviceUID: destinationDeviceUID)?
                 .driverSupportsClockLocking ?? false)
@@ -246,16 +280,45 @@ public final class RoutingEngine: @unchecked Sendable {
             sourceDeviceUID, destinationDeviceUID, routes, bufferFrames
         )
 
+        // Echo cancellation takes the microphone away from this aggregate:
+        // AUVoiceProcessingIO can only cancel a speaker it is itself driving, so
+        // it needs the microphone and the speaker bound together in an aggregate
+        // of its own. What arrives here instead is the cancelled signal, across
+        // a ring, and the clock master becomes the destination.
+        //
+        // Everything that costs is given up honestly rather than quietly: no
+        // clock lock, no bit-exactness, a buffer of latency each way. None of
+        // that is a regression, because a cancelled signal is arithmetic on the
+        // microphone by definition.
+        var bridge: EchoCancellationBridge?
+        if let settings = echoCancellation {
+            bridge = EchoCancellationBridge(
+                microphoneUID: sourceDeviceUID, settings: settings,
+                maximumFrames: Int(bufferFrames) * 4)
+            if bridge == nil {
+                lastEchoCancellationError = "the echo canceller could not be built"
+            }
+        }
+        let cancelsEcho = bridge != nil
+        if cancelsEcho { requiresClockLock = false }
+
+        let members = cancelsEcho ? [destination] + extras : [source, destination] + extras
+        let routedSubDevices: [AggregateDevice.SubDevice] =
+            cancelsEcho
+            ? [.init(uid: destinationDeviceUID, driftCompensation: true)]
+                + extras.map { .init(uid: $0.uid, driftCompensation: true) }
+            : [
+                .init(uid: sourceDeviceUID, driftCompensation: false),
+                .init(uid: destinationDeviceUID, driftCompensation: !clockLockAvailable),
+            ] + extras.map { .init(uid: $0.uid, driftCompensation: true) }
+
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying
         // to carry intact.
         let aggregate = try AggregateDevice(
             name: "YunAudio Route",
-            subDevices: [
-                .init(uid: sourceDeviceUID, driftCompensation: false),
-                .init(uid: destinationDeviceUID, driftCompensation: !clockLockAvailable),
-            ] + extras.map { .init(uid: $0.uid, driftCompensation: true) },
-            clockMasterUID: sourceDeviceUID,
+            subDevices: routedSubDevices,
+            clockMasterUID: cancelsEcho ? destinationDeviceUID : sourceDeviceUID,
             taps: taps)
         self.aggregate = aggregate
 
@@ -301,8 +364,21 @@ public final class RoutingEngine: @unchecked Sendable {
         }
 
         let rtRoutes = try routes.map { route -> RTRoute in
-            guard let sourcePoint = inputMap[route.source] else {
-                throw RoutingError.channelNotFound(route.source, isInput: true)
+            // With the canceller in front, the microphone's channels are not in
+            // this aggregate at all, so they have no entry in the input map and
+            // must not be looked for in it.
+            let fromMicrophone = cancelsEcho && route.source.deviceUID == sourceDeviceUID
+            // An isolated route reads the model's output whether or not the
+            // canceller fed it, so the two flags are exclusive: the cancelled
+            // buffer is what the model consumed, not what this route wants.
+            let isIsolated = isolatedSource != nil && route.source == isolatedSource
+
+            var sourcePoint: (buffer: Int32, channel: Int32) = (0, 0)
+            if !fromMicrophone {
+                guard let point = inputMap[route.source] else {
+                    throw RoutingError.channelNotFound(route.source, isInput: true)
+                }
+                sourcePoint = point
             }
             guard let destinationPoint = outputMap[route.destination] else {
                 throw RoutingError.channelNotFound(route.destination, isInput: false)
@@ -314,7 +390,8 @@ public final class RoutingEngine: @unchecked Sendable {
                 destinationChannel: destinationPoint.channel,
                 gain: route.gain,
                 muted: route.isMuted,
-                usesIsolatedSource: isolatedSource != nil && route.source == isolatedSource)
+                usesIsolatedSource: isIsolated,
+                usesCancelledSource: fromMicrophone && !isIsolated)
         }
 
         let graph = RTGraph.allocate(
@@ -322,9 +399,17 @@ public final class RoutingEngine: @unchecked Sendable {
         self.graph = graph
         activeRoutes = routes
 
-        if let chain = effectChain, let reference = isolatedSource,
-            let point = inputMap[reference]
+        // When the canceller owns the microphone the reference has no entry in
+        // the input map, so an absent point is expected rather than fatal.
+        let isolationFromCancelled =
+            cancelsEcho && isolatedSource?.deviceUID == sourceDeviceUID
+        let isolationPoint =
+            isolatedSource.flatMap { inputMap[$0] } ?? (buffer: Int32(0), channel: Int32(0))
+
+        if let chain = effectChain, isolatedSource != nil,
+            isolationFromCancelled || isolatedSource.flatMap({ inputMap[$0] }) != nil
         {
+            let point = isolationPoint
             let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             failures.initialize(to: 0)
             isolationFailureCounter = failures
@@ -335,6 +420,7 @@ public final class RoutingEngine: @unchecked Sendable {
                     enabled: 1,
                     sourceBuffer: point.buffer,
                     sourceChannel: point.channel,
+                    sourceIsCancelled: isolationFromCancelled ? 1 : 0,
                     unit: Unmanaged.passUnretained(chain).toOpaque(),
                     inputBuffer: chain.inputBuffer,
                     outputBuffer: chain.outputBuffer,
@@ -343,9 +429,10 @@ public final class RoutingEngine: @unchecked Sendable {
             isolationBlock = block
             graph.pointee.voiceIsolation = block
             graph.pointee.isolationIsChain = 1
-        } else if let unit = isolationUnit, let reference = isolatedSource,
-            let point = inputMap[reference]
+        } else if let unit = isolationUnit, isolatedSource != nil,
+            isolationFromCancelled || isolatedSource.flatMap({ inputMap[$0] }) != nil
         {
+            let point = isolationPoint
             let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             failures.initialize(to: 0)
             isolationFailureCounter = failures
@@ -356,6 +443,7 @@ public final class RoutingEngine: @unchecked Sendable {
                     enabled: 1,
                     sourceBuffer: point.buffer,
                     sourceChannel: point.channel,
+                    sourceIsCancelled: isolationFromCancelled ? 1 : 0,
                     unit: Unmanaged.passUnretained(unit).toOpaque(),
                     inputBuffer: unit.inputBuffer,
                     outputBuffer: unit.outputBuffer,
@@ -384,6 +472,19 @@ public final class RoutingEngine: @unchecked Sendable {
                 captureFrames: 262_144)
             selftestBlock = block
             graph.pointee.selftest = block
+        }
+
+        // The canceller has to be producing before the router starts reading,
+        // or the first cycles find an empty ring. Started here rather than in
+        // the constructor so a failure to build the graph does not leave a unit
+        // running with nothing to consume it.
+        if let bridge {
+            guard bridge.start() else {
+                lastEchoCancellationError = "the echo canceller would not start"
+                throw RoutingError.echoCancellerFailed
+            }
+            echoBridge = bridge
+            graph.pointee.cancelledRing = bridge.ring
         }
 
         let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))
@@ -451,6 +552,12 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         ioProcID = nil
         isRunning = false
+
+        // Before the graph is freed, since the graph holds this object's ring.
+        // Stopping the unit first also puts the microphone and the speaker back
+        // in the hands of whatever wants them next.
+        echoBridge?.stop()
+        echoBridge = nil
 
         aggregate?.destroy()
         aggregate = nil
@@ -829,6 +936,7 @@ public enum RoutingError: Error, CustomStringConvertible {
     case aggregateUnavailable
     case ioProcFailed(OSStatus)
     case startFailed(OSStatus)
+    case echoCancellerFailed
 
     public var description: String {
         switch self {
@@ -844,6 +952,8 @@ public enum RoutingError: Error, CustomStringConvertible {
             "AudioDeviceCreateIOProcID failed with \(fourCharDescription(status))"
         case let .startFailed(status):
             "AudioDeviceStart failed with \(fourCharDescription(status))"
+        case .echoCancellerFailed:
+            "the echo canceller could not take the microphone and the speaker"
         }
     }
 }

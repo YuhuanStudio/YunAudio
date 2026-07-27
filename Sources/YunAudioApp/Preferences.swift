@@ -23,6 +23,11 @@ struct Preferences: Codable, Equatable, Sendable {
     var enabledEffects: [String]
     /// Knob positions, keyed by "<stage>.<parameter>".
     var effectValues: [String: Float]
+    /// Capture the microphone through the echo canceller. Optional so a
+    /// preferences file written before this existed still decodes.
+    var cancelsEcho: Bool?
+    /// The speaker the canceller listens for. Nil means the current default.
+    var echoSpeakerUID: String?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -36,7 +41,9 @@ struct Preferences: Codable, Equatable, Sendable {
         preferredSampleRate: 48000,
         capturedAppBundleIDs: [],
         enabledEffects: [],
-        effectValues: [:])
+        effectValues: [:],
+        cancelsEcho: false,
+        echoSpeakerUID: nil)
 }
 
 @MainActor
