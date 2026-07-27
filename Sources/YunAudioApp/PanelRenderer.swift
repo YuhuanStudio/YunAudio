@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import SwiftUI
+import YunDesign
 
 /// Renders the panel to PNGs so its layout and colours can actually be looked
 /// at. Reading the view code is not verification.
@@ -9,15 +10,24 @@ enum PanelRenderer {
     static func write(to directory: String, model: RouterModel) {
         verifyPipeline()
         model.prepareForRendering()
+        // Flat only. A material has nothing to be a material over in an
+        // offscreen rasteriser: rendered here, every glass card comes out as
+        // near-nothing and the capture shows an empty window. Glass is judged
+        // from the live window capture, which has a real backdrop.
+        YunTheme.shared.style = .flat
+        write(directory: directory, model: model, suffix: "")
+    }
+
+    private static func write(directory: String, model: RouterModel, suffix: String) {
         render(
             PanelView(model: model, forcesRoutedLayout: true),
-            basename: "panel", directory: directory)
+            basename: "panel\(suffix)", directory: directory)
         // The preferences window scrolls, and a ScrollView has no intrinsic
         // height offscreen — without an explicit size it renders as an empty
         // pane. Pinned to the window's minimum size.
         render(
             MainWindow(model: model, isRendering: true),
-            basename: "window", directory: directory,
+            basename: "window\(suffix)", directory: directory,
             // Taller than the window's minimum so the whole layout is visible
             // at once. The columns scroll in the running app; here they do not,
             // and a clipped capture hides exactly the defects this exists to
@@ -27,7 +37,7 @@ enum PanelRenderer {
         for section in PreferencesWindow.Section.allCases {
             render(
                 PreferencesWindow(model: model, initialSection: section, isRendering: true),
-                basename: "prefs-\(section.rawValue)",
+                basename: "prefs-\(section.rawValue)\(suffix)",
                 directory: directory,
                 size: CGSize(width: 620, height: 440))
         }

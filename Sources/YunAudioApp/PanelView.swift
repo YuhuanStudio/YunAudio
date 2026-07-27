@@ -35,42 +35,50 @@ struct PanelView: View {
     private static let labelColumn: CGFloat = 62
 
     var body: some View {
-        GlassEffectContainer {
-            VStack(alignment: .leading, spacing: Yun.Space.md) {
-                header
-                // The onboarding card sits above the controls rather than
-                // replacing them. Another loopback endpoint routes audio
-                // perfectly well, so hiding everything behind "install the
-                // driver" turned a working configuration into a dead end.
-                if !model.isDriverInstalled && !forcesRoutedLayout {
-                    DriverOnboarding(model: model)
-                }
-                if model.selectedDestination != nil || forcesRoutedLayout {
-                    // A menu bar panel can be long — it scrolls, and the ones
-                    // people actually use are. Sections that are read rather
-                    // than watched still collapse, so the height is the user's
-                    // choice instead of a fixed cost.
-                    presets
-                    signalPath
-                    devicePickers
-                    appSources
-                    if !model.activeRoutes.isEmpty { mixer }
-                    if model.isRunning { runtimeDetail }
-                    if let error = model.lastError { errorRow(error) }
-                    voiceIsolation
-                    echoCancellation
-                    recording
-                    footer
-                }
-            }
+        // Under glass the whole panel is one material; flat, it is a plain
+        // surface the cards sit on. Wrapping a flat panel in a glass container
+        // is what made the menu bar look like a different application from the
+        // window.
+        panelBody
             .padding(Yun.Space.lg)
             .frame(width: 340)
+            .yunPanelShell()
+            // Covers the whole subtree. The system focus effect is a blue ring,
+            // and blue is the one colour this design system never uses; the
+            // controls that can take focus draw their own ring in
+            // --border-strong instead.
+            .focusEffectDisabled()
+    }
+
+    @ViewBuilder
+    private var panelBody: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            header
+            // The onboarding card sits above the controls rather than
+            // replacing them. Another loopback endpoint routes audio
+            // perfectly well, so hiding everything behind "install the
+            // driver" turned a working configuration into a dead end.
+            if !model.isDriverInstalled && !forcesRoutedLayout {
+                DriverOnboarding(model: model)
+            }
+            if model.selectedDestination != nil || forcesRoutedLayout {
+                // A menu bar panel can be long — it scrolls, and the ones
+                // people actually use are. Sections that are read rather
+                // than watched still collapse, so the height is the user's
+                // choice instead of a fixed cost.
+                presets
+                signalPath
+                devicePickers
+                appSources
+                if !model.activeRoutes.isEmpty { mixer }
+                if model.isRunning { runtimeDetail }
+                if let error = model.lastError { errorRow(error) }
+                voiceIsolation
+                echoCancellation
+                recording
+                footer
+            }
         }
-        .background(.clear)
-        // Covers the whole subtree. The system focus effect is a blue ring, and
-        // blue is the one colour this design system never uses; the controls
-        // that can take focus draw their own ring in --border-strong instead.
-        .focusEffectDisabled()
     }
 
     // MARK: Header

@@ -33,6 +33,11 @@ struct MainWindow: View {
                 content()
                     .padding(.bottom, Yun.Space.xl)
             }
+            // The system scroller is drawn in a style this design has no
+            // relationship to — a thick grey bar on a light track — and with
+            // three columns there would be three of them, laid over the content
+            // rather than beside it. The fade below is the cue instead.
+            .scrollIndicators(.never)
             .mask(
                 LinearGradient(
                     stops: [
@@ -51,7 +56,11 @@ struct MainWindow: View {
     /// wordmark hanging seventy points to the right of every column heading
     /// beneath it, and that shared left edge is doing more work than the few
     /// points of height it costs to keep.
-    private var trafficLightInset: CGFloat { isRendering ? Yun.Space.lg : 40 }
+    /// A hidden title bar still reserves its height, so the header only has to
+    /// clear the traffic lights inside that reserved band — not start below it.
+    /// Forty points on top of the reservation put the wordmark seventy-five
+    /// points down an eight-hundred-point window.
+    private var trafficLightInset: CGFloat { isRendering ? Yun.Space.lg : Yun.Space.xs }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -81,7 +90,7 @@ struct MainWindow: View {
             statusBar
         }
         .frame(minWidth: 980, minHeight: 600)
-        .background(Yun.Palette.windowBackground)
+        .yunWindowBackground()
         .focusEffectDisabled()
     }
 
@@ -563,9 +572,18 @@ struct MainWindow: View {
         .font(Yun.Text.mono)
         .frame(height: 26)
         .padding(.horizontal, Yun.Space.xl)
-        .background(Yun.Palette.card)
+        .background(statusBarBackground)
         .overlay(alignment: .top) {
             Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var statusBarBackground: some View {
+        if YunTheme.shared.style == .glass {
+            Rectangle().fill(.ultraThinMaterial)
+        } else {
+            Rectangle().fill(Yun.Palette.card)
         }
     }
 

@@ -16,14 +16,7 @@ public struct YunCard<Content: View>: View {
     public var body: some View {
         content
             .padding(padding)
-            .background(Yun.Palette.card, in: .rect(cornerRadius: Yun.Radius.card))
-            .overlay {
-                RoundedRectangle(cornerRadius: Yun.Radius.card)
-                    .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
-            }
-            // shadow-xs from the source system. Small enough to read as a lift
-            // rather than a drop, which is what keeps the surface calm.
-            .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
+            .yunSurface()
     }
 }
 

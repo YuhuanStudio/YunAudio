@@ -12,6 +12,11 @@ import YunDesign
 final class StatusItemController: NSObject, NSPopoverDelegate {
     private let item: NSStatusItem
     private let popover = NSPopover()
+
+    private static let panelWidth: CGFloat = 340
+    /// Leaves room for the menu bar and a margin on the shortest Mac display
+    /// still supported; beyond this the panel scrolls.
+    private static let maximumPanelHeight: CGFloat = 680
     private let model: RouterModel
     private var levelObserver: Timer?
 
@@ -21,9 +26,23 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         super.init()
 
         popover.behavior = .transient
-        popover.contentSize = NSSize(width: 340, height: 560)
-        popover.contentViewController = NSHostingController(
-            rootView: PanelView(model: model))
+        // The panel is taller than any fixed height worth choosing: it grows
+        // with the number of routes, and every disclosure in it expands. Hosted
+        // flat at 560 points it was 639 points tall with everything collapsed,
+        // so the last section was simply unreachable — and there was nothing to
+        // say so, because a popover clips rather than scrolls.
+        let host = NSHostingController(
+            rootView: ScrollView {
+                PanelView(model: model)
+            }
+            .scrollIndicators(.never)
+            .frame(width: Self.panelWidth)
+            .frame(maxHeight: Self.maximumPanelHeight)
+        )
+        // Lets the popover shrink to a short panel instead of always claiming
+        // the maximum, while the frame above stops it growing past the screen.
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
         popover.delegate = self
 
         if let button = item.button {

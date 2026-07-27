@@ -147,3 +147,8 @@
 "Watch the IO thread for allocations" = "Watch the IO thread for allocations";
 "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running." = "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running.";
 "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships." = "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships.";
+"Appearance" = "Appearance";
+"Flat" = "Flat";
+"Glass" = "Glass";
+"Opaque cards and hairline borders." = "Opaque cards and hairline borders.";
+"Translucent surfaces that pick up the desktop behind them." = "Translucent surfaces that pick up the desktop behind them.";

@@ -61,6 +61,7 @@ struct PreferencesWindow: View {
                         .padding(Yun.Space.xl)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .scrollIndicators(.never)
             }
         }
         .frame(minWidth: 620, minHeight: 440)
@@ -136,6 +137,19 @@ struct PreferencesWindow: View {
                             .foregroundStyle(Yun.Palette.warning)
                             .fixedSize(horizontal: false, vertical: true)
                     }
+                }
+            }
+
+            heading(loc("Appearance"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    YunSegmented(
+                        selection: $model.style,
+                        options: YunStyle.allCases.map { ($0, $0.title) })
+                    Text(model.style.detail)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 

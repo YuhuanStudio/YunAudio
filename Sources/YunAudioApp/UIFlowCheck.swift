@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import YunAudioEngine
 import YunAudioHAL
+import YunDesign
 
 /// Drives the model through the sequences a person actually performs.
 ///
@@ -50,6 +51,22 @@ enum UIFlowCheck {
             }
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
+
+        print("\nappearance")
+        // The look was half Apple's material and half the source design system:
+        // the menu bar panel floated on glass while the window was flat cards,
+        // so the same application looked like two applications. It is one
+        // setting now, and both surfaces follow it.
+        check("the default is the source design system", model.style == .flat)
+        for style in YunStyle.allCases {
+            model.style = style
+            check(
+                "\(style.rawValue) applies to the shared theme",
+                YunTheme.shared.style == style)
+            check("\(style.rawValue) has a title", !style.title.isEmpty)
+            check("\(style.rawValue) says what it costs", !style.detail.isEmpty)
+        }
+        model.style = .flat
 
         print("\nrealtime tripwire")
         // The hook is process-wide, so leaving it armed taxes every allocation

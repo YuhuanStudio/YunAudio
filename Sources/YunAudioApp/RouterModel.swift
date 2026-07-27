@@ -659,6 +659,8 @@ final class RouterModel {
         effectValues = saved.effectValues
         cancelsEcho = saved.cancelsEcho ?? false
         echoSpeakerUID = saved.echoSpeakerUID
+        style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
+        YunTheme.shared.style = style
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
@@ -693,7 +695,8 @@ final class RouterModel {
                 enabledEffects: enabledEffects.map(\.rawValue),
                 effectValues: effectValues,
                 cancelsEcho: cancelsEcho,
-                echoSpeakerUID: echoSpeakerUID))
+                echoSpeakerUID: echoSpeakerUID,
+                style: style.rawValue))
     }
 
     // MARK: Devices
@@ -1035,6 +1038,20 @@ final class RouterModel {
     /// True in an unoptimised build, where the count is Swift's own checking
     /// machinery rather than anything about the code that ships.
     var isDebugBuild: Bool { RoutingEngine.isDebugBuild }
+
+    /// Which of the two looks the whole application wears.
+    ///
+    /// Stored here and mirrored onto the shared theme rather than read straight
+    /// off it: the menu bar panel is hosted outside this model's view tree, so
+    /// the theme is what that panel follows, while this is what the preferences
+    /// window binds to.
+    var style: YunStyle = .flat {
+        didSet {
+            guard oldValue != style else { return }
+            YunTheme.shared.style = style
+            persist()
+        }
+    }
 
     /// IO cycles completed. Only used by the flow check, which needs to know
     /// whether audio survived a change rather than merely whether the model

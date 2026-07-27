@@ -147,3 +147,8 @@
 "Watch the IO thread for allocations" = "監看 IO 執行緒的記憶體配置";
 "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running." = "這個攔截器會攔下整個程序的每一次記憶體配置，所以它是要用時才開啟的量測工具，不該一直開著。";
 "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships." = "這是未最佳化的建置，計數來自 Swift 自己的邊界與獨佔性檢查機具，與出貨的程式碼無關。";
+"Appearance" = "外觀";
+"Flat" = "扁平";
+"Glass" = "玻璃";
+"Opaque cards and hairline borders." = "不透明卡片與髮絲邊框。";
+"Translucent surfaces that pick up the desktop behind them." = "半透明表面，會透出後方的桌面。";

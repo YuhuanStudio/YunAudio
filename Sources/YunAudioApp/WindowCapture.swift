@@ -1,6 +1,7 @@
 import AppKit
 import ImageIO
 import SwiftUI
+import YunDesign
 
 /// Photographs the real window, as the window server draws it.
 ///
@@ -33,7 +34,15 @@ enum WindowCapture {
             return
         }
 
-        photograph(window, sizes: sizes, into: directory)
+        // Both looks. Glass can only be judged here — an offscreen rasteriser
+        // gives a material no backdrop, so every glass card renders as nothing.
+        for style in YunStyle.allCases {
+            YunTheme.shared.style = style
+            photograph(
+                window, sizes: sizes, into: directory,
+                suffix: style == .flat ? "" : "-glass")
+        }
+        YunTheme.shared.style = .flat
 
         // The state that matters most is the one nothing else can show: meters
         // moving, the status strip carrying real numbers, a mixer with strips
@@ -64,13 +73,14 @@ enum WindowCapture {
     }
 
     private static func photograph(
-        _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String
+        _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String,
+        suffix: String = ""
     ) {
         for (label, size) in sizes {
             window.setContentSize(size)
             for scheme in [NSAppearance.Name.aqua, .darkAqua] {
                 let isLight = scheme == .aqua
-                let name = "live-\(label)-\(isLight ? "light" : "dark").png"
+                let name = "live-\(label)\(suffix)-\(isLight ? "light" : "dark").png"
 
                 // Retried because an appearance change does not always reach
                 // the view tree within one settle: the second size came out

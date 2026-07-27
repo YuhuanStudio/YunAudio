@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import YunDesign
 
 /// Everything the app remembers between launches.
 ///
@@ -28,6 +29,9 @@ struct Preferences: Codable, Equatable, Sendable {
     var cancelsEcho: Bool?
     /// The speaker the canceller listens for. Nil means the current default.
     var echoSpeakerUID: String?
+    /// Which look the application wears. Optional so a file written before the
+    /// setting existed still decodes.
+    var style: String?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -43,7 +47,8 @@ struct Preferences: Codable, Equatable, Sendable {
         enabledEffects: [],
         effectValues: [:],
         cancelsEcho: false,
-        echoSpeakerUID: nil)
+        echoSpeakerUID: nil,
+        style: YunStyle.flat.rawValue)
 }
 
 @MainActor
