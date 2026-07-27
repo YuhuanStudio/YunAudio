@@ -42,33 +42,23 @@ else
 fi
 
 echo
-echo "==> building the app"
-swift build -c release --product YunAudioApp
-
 echo "==> building the driver"
 ./Driver/build-driver.sh >/dev/null
+
+# The app is assembled by build-app.sh and copied, never rebuilt here.
+#
+# This script used to lay out the bundle itself, and the two copies drifted:
+# when build-app.sh learned to include the SwiftPM resource bundle, the disk
+# image kept shipping an app without it — one that dies on launch on any
+# machine but this one. There is one place that knows how to build the app.
+echo "==> building the app"
+./App/build-app.sh --release >/dev/null
 
 rm -rf "${STAGING}" "${IMAGE}"
 mkdir -p "${STAGING}"
 
-# The app bundle.
 APP="${STAGING}/YunAudio.app"
-mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
-./App/make-icon.sh >/dev/null
-cp build/YunAudio.icns "${APP}/Contents/Resources/"
-cp App/Info.plist "${APP}/Contents/Info.plist"
-cp .build/release/YunAudioApp "${APP}/Contents/MacOS/YunAudioApp"
-
-cat >build/yunaudio.entitlements <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>com.apple.security.device.audio-input</key>
-	<true/>
-</dict>
-</plist>
-PLIST
+cp -R build/YunAudio.app "${APP}"
 
 codesign --force "${SIGN_ARGS[@]}" \
 	--entitlements build/yunaudio.entitlements "${APP}"
