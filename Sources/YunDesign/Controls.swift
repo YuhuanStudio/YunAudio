@@ -331,13 +331,24 @@ public struct YunFader: View {
     @Binding private var decibels: Float
     private let range: ClosedRange<Float>
 
-    public init(decibels: Binding<Float>, range: ClosedRange<Float> = -40...12) {
+    /// Where a double-click and an option-click put it back to.
+    private let unity: Float
+    @State private var isDragging = false
+
+    public init(
+        decibels: Binding<Float>, range: ClosedRange<Float> = -40...12, unity: Float = 0
+    ) {
         _decibels = decibels
         self.range = range
+        self.unity = unity
     }
 
     private var fraction: Double {
         Double((decibels - range.lowerBound) / (range.upperBound - range.lowerBound))
+    }
+
+    private var unityFraction: Double {
+        Double((unity - range.lowerBound) / (range.upperBound - range.lowerBound))
     }
 
     public var body: some View {
@@ -350,9 +361,21 @@ public struct YunFader: View {
                 Capsule()
                     .fill(Yun.Palette.accent)
                     .frame(width: max(0, min(width, width * fraction)), height: 4)
+                // A tick at unity, so the one position that matters can be
+                // found without reading the number beside it.
+                if range.contains(unity) {
+                    Capsule()
+                        .fill(Yun.Palette.borderStrong)
+                        .frame(width: 1, height: 8)
+                        .offset(x: width * unityFraction - 0.5)
+                }
                 Circle()
                     .fill(Yun.Palette.card)
-                    .overlay { Circle().strokeBorder(Yun.Palette.borderStrong, lineWidth: 1) }
+                    .overlay {
+                        Circle().strokeBorder(
+                            isDragging ? Yun.Palette.accent : Yun.Palette.borderStrong,
+                            lineWidth: isDragging ? 2 : 1)
+                    }
                     .frame(width: 12, height: 12)
                     .offset(x: max(0, min(width - 12, width * fraction - 6)))
             }
@@ -361,11 +384,25 @@ public struct YunFader: View {
             .gesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
+                        isDragging = true
                         let ratio = Float(max(0, min(1, value.location.x / width)))
-                        decibels =
+                        let target =
                             range.lowerBound
                             + ratio * (range.upperBound - range.lowerBound)
-                    })
+                        // Snap to unity within half a decibel. Every mixer does
+                        // this, and without it exactly 0.0 dB is unreachable by
+                        // hand on a fader a hundred points wide.
+                        decibels = abs(target - unity) < 0.5 ? unity : target
+                    }
+                    .onEnded { _ in isDragging = false }
+            )
+            // Back to unity. Both gestures because both are muscle memory:
+            // option-click is the Apple convention, double-click is the audio
+            // one, and neither costs anything to support.
+            .onTapGesture(count: 2) { decibels = unity }
+            .modifier(
+                OptionClickReset { decibels = unity }
+            )
         }
         .frame(height: 14)
         .accessibilityElement()
@@ -482,5 +519,20 @@ public struct YunToggleStyle: ToggleStyle {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .animation(.easeOut(duration: 0.18), value: configuration.isOn)
+    }
+}
+
+/// Runs an action on an option-click, leaving every other click alone.
+///
+/// SwiftUI's tap gestures carry no modifier flags, so the state of the option
+/// key has to be read from the event itself at the moment of the click.
+private struct OptionClickReset: ViewModifier {
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        content.onTapGesture {
+            guard NSEvent.modifierFlags.contains(.option) else { return }
+            action()
+        }
     }
 }

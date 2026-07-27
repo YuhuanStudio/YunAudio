@@ -157,7 +157,15 @@ enum UIFlowCheck {
         check(
             "the fader reads back what was set",
             abs(model.faderDecibels(forRouteAt: 0) - -12) < 0.5)
+        // Exactly unity has to be reachable. On a fader a hundred points wide
+        // the difference between 0.0 and 0.2 dB is a single pixel, so without a
+        // snap it can only be got at by typing.
+        model.setFaderDecibels(0.3, forRouteAt: 0)
+        check(
+            "a value near unity is not silently snapped by the model",
+            abs(model.faderDecibels(forRouteAt: 0) - 0.3) < 0.01)
         model.setFaderDecibels(0, forRouteAt: 0)
+        check("unity reads back as exactly unity", model.faderDecibels(forRouteAt: 0) == 0)
 
         print("\ninput trim and master")
         // The two controls anybody looks for first, and the app had neither —
