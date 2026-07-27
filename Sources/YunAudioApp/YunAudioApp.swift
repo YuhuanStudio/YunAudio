@@ -68,7 +68,7 @@ struct YunAudioApp: App {
             exit(0)
         }
         // The .lproj folders ship with this module, not with the main bundle.
-        YunStrings.bundle = Bundle.module
+        YunStrings.bundle = AppResources.bundle
 
         // Design verification path. A menu bar popover cannot be opened without
         // accessibility permission, so the panel is rendered offscreen instead —

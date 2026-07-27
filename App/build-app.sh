@@ -9,6 +9,7 @@
 #   ./build-app.sh              debug build
 #   ./build-app.sh --release    optimised build
 #   ./build-app.sh --run        build, then launch
+#   ./build-app.sh --verify     build, then prove the bundle is self-contained
 #
 set -euo pipefail
 
@@ -16,10 +17,12 @@ cd "$(dirname "$0")/.."
 
 CONFIGURATION="debug"
 LAUNCH=0
+VERIFY=0
 for argument in "$@"; do
 	case "${argument}" in
 	--release) CONFIGURATION="release" ;;
 	--run) LAUNCH=1 ;;
+	--verify) VERIFY=1 ;;
 	esac
 done
 
@@ -33,6 +36,18 @@ rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
 ./App/make-icon.sh >/dev/null
 cp build/YunAudio.icns "${BUNDLE}/Contents/Resources/"
+
+# The SwiftPM resource bundle carries the icon and both string tables, and
+# nothing was copying it in. `Bundle.module` falls back to the build directory
+# when it cannot find the bundle beside the executable, so the app worked
+# perfectly on this machine and would have shipped with no icon and no
+# translations at all — a defect only visible on somebody else's Mac.
+MODULE_BUNDLE=".build/${CONFIGURATION}/YunAudioKit_YunAudioApp.bundle"
+if [[ ! -d "${MODULE_BUNDLE}" ]]; then
+	echo "error: ${MODULE_BUNDLE} is missing — the app would ship untranslated" >&2
+	exit 1
+fi
+cp -R "${MODULE_BUNDLE}" "${BUNDLE}/Contents/Resources/"
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
 
@@ -62,6 +77,33 @@ codesign --force --sign - \
 	"${BUNDLE}"
 
 echo "built ${BUNDLE}"
+
+if [[ "${VERIFY}" == "1" ]]; then
+	# The one check that matters for shipping, and the only one that can find
+	# this class of defect: run a copy of the app with the build tree moved out
+	# of reach. SwiftPM's `Bundle.module` quietly falls back to the build
+	# directory, so an app missing its resource bundle entirely works on the
+	# machine that built it and dies on launch everywhere else.
+	echo "verifying the bundle is self-contained…"
+	ISOLATED="$(mktemp -d)"
+	cp -R "${BUNDLE}" "${ISOLATED}/"
+	mv .build "${ISOLATED}/.build-hidden"
+	set +e
+	YUNAUDIO_FLOWCHECK=1 "${ISOLATED}/YunAudio.app/Contents/MacOS/YunAudioApp" \
+		>"${ISOLATED}/out.txt" 2>&1
+	STATUS=$?
+	set -e
+	mv "${ISOLATED}/.build-hidden" .build
+	if [[ "${STATUS}" != "0" ]]; then
+		echo "error: the app is not self-contained" >&2
+		head -5 "${ISOLATED}/out.txt" >&2
+		rm -rf "${ISOLATED}"
+		exit 1
+	fi
+	grep -E "keys in each table" "${ISOLATED}/out.txt" || true
+	rm -rf "${ISOLATED}"
+	echo "self-contained: it runs with the build tree out of reach"
+fi
 
 if [[ "${LAUNCH}" == "1" ]]; then
 	# Replace any running copy so the new binary is the one under test.

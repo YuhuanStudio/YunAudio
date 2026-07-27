@@ -462,7 +462,7 @@ enum UIFlowCheck {
     /// English anyway. Nothing catches that but comparing the two sides, so it
     /// is compared on every run.
     private static func checkLocalisation() {
-        guard let bundle = Bundle(path: Bundle.module.bundlePath) else {
+        guard let bundle = Bundle(path: AppResources.bundle.bundlePath) else {
             note("could not open the resource bundle")
             return
         }

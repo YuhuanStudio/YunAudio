@@ -53,3 +53,14 @@ jobs:
       # preferences sidebar.
       - name: Check that every user-facing string is localised
         run: ./App/check-strings.sh
+
+  bundle:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # SwiftPM's Bundle.module falls back to the build directory, so an app
+      # that never copied its resource bundle in works perfectly on the machine
+      # that built it and dies on launch on every other one. Only running it
+      # with the build tree out of reach can tell the difference.
+      - name: Check the app bundle is self-contained
+        run: ./App/build-app.sh --verify

@@ -8,7 +8,7 @@ import AppKit
 /// silently returns nil.
 enum YunAppIcon {
     static let image: NSImage? = {
-        guard let url = Bundle.module.url(forResource: "Icon", withExtension: "png"),
+        guard let url = AppResources.bundle.url(forResource: "Icon", withExtension: "png"),
             let loaded = NSImage(contentsOf: url)
         else { return nil }
         // Template rendering is deliberately off: the mark is a gradient, and a
