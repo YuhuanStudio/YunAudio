@@ -36,13 +36,29 @@ enum WindowCapture {
         for (label, size) in sizes {
             window.setContentSize(size)
             for scheme in [NSAppearance.Name.aqua, .darkAqua] {
-                window.appearance = NSAppearance(named: scheme)
-                settle()
+                let isLight = scheme == .aqua
+                let name = "live-\(label)-\(isLight ? "light" : "dark").png"
 
-                let name =
-                    "live-\(label)-\(scheme == .aqua ? "light" : "dark").png"
-                guard let png = capture(window) else {
-                    FileHandle.standardError.write(Data("failed to capture \(name)\n".utf8))
+                // Retried because an appearance change does not always reach
+                // the view tree within one settle: the second size came out
+                // dark in both passes, which is a capture that looks like a
+                // design decision. Cheap to check, so it is checked.
+                var png: Data?
+                for attempt in 0..<4 {
+                    NSApp.appearance = NSAppearance(named: scheme)
+                    window.appearance = NSAppearance(named: scheme)
+                    settle(turns: 8 + attempt * 8)
+                    png = capture(window)
+                    if let png, matches(png, isLight: isLight) { break }
+                    png = nil
+                }
+
+                guard let png else {
+                    let appearance = isLight ? "light" : "dark"
+                    let message =
+                        "\(name) never came out in the \(appearance) appearance"
+                        + " — not written\n"
+                    FileHandle.standardError.write(Data(message.utf8))
                     continue
                 }
                 let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
@@ -50,6 +66,37 @@ enum WindowCapture {
                 print("photographed \(url.path)")
             }
         }
+        NSApp.appearance = nil
+    }
+
+    /// Whether a capture is actually in the appearance it claims.
+    ///
+    /// The window's background is near-white in one and near-black in the
+    /// other, so one pixel well inside the content settles it. Sampled below
+    /// the title bar, which is translucent and would answer for neither.
+    private static func matches(_ png: Data, isLight: Bool) -> Bool {
+        guard let source = CGImageSourceCreateWithData(png as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return false }
+        var bytes = [UInt8](repeating: 0, count: 4)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+            let context = bytes.withUnsafeMutableBytes({ raw in
+                CGContext(
+                    data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+                    bytesPerRow: 4, space: space,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            })
+        else { return false }
+        // A point a little way down the left edge: past the title bar, inside
+        // the window's own background rather than any card.
+        let x = 6.0
+        let y = Double(image.height) - 120
+        context.draw(
+            image,
+            in: CGRect(
+                x: -x, y: -(Double(image.height) - y - 1),
+                width: Double(image.width), height: Double(image.height)))
+        return isLight ? bytes[0] > 160 : bytes[0] < 96
     }
 
     private static func mainWindow() -> NSWindow? {
@@ -60,8 +107,8 @@ enum WindowCapture {
     ///
     /// A capture taken in the same turn as `setContentSize` photographs the old
     /// layout, which is a subtle enough lie to be worse than a failure.
-    private static func settle() {
-        for _ in 0..<8 {
+    private static func settle(turns: Int = 8) {
+        for _ in 0..<turns {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
     }

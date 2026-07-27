@@ -110,6 +110,39 @@ enum UIFlowCheck {
         check("the route set changed", model.activeRoutes.count != before || before > 0)
         check("still running", model.isRunning)
 
+        print("\nrecording")
+        check("recording is offered while routing", model.isRunning)
+        model.toggleRecording()
+        check("the recording started", model.isRecording)
+        check("no error was reported", model.lastError == nil)
+        let file = model.recordingURL
+        check("a file was named", file != nil)
+        await pause(2.0)
+        check("the elapsed time is advancing", model.recordingSeconds > 0.5)
+        model.toggleRecording()
+        check("the recording stopped", !model.isRecording)
+        // The duration has to survive the stop. Reading it after releasing the
+        // recorder returned zero, so the elapsed time snapped to 00:00 at
+        // exactly the moment anyone would look at it.
+        check("the elapsed time survived the stop", model.recordingSeconds > 0.5)
+
+        if let file {
+            // The recorder drains on its own thread, so the last frames land
+            // shortly after the stop.
+            await pause(0.5)
+            let attributes = try? FileManager.default.attributesOfItem(
+                atPath: file.path)
+            let size = attributes?[.size] as? Int ?? 0
+            check("the file exists and is not empty", size > 0)
+            // Two seconds of stereo float at 48 kHz is about 768 kB. A file
+            // that exists but holds a header and nothing else is the failure
+            // this catches — it happened once before, when the de-stride branch
+            // wrote into the meter array.
+            note("\(size) bytes for \(String(format: "%.1f", model.recordingSeconds))s")
+            check("the file holds real audio, not just a header", size > 100_000)
+            try? FileManager.default.removeItem(at: file)
+        }
+
         print("\nswitching the echo canceller on while running")
         if model.echoSpeakerOptions.isEmpty {
             note("no hardware output to cancel against — skipped")

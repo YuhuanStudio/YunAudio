@@ -21,6 +21,8 @@ struct PanelView: View {
     @State private var showsDevices: Bool?
     @State private var showsApps = false
     @State private var showsProcessing = false
+    @State private var showsEchoCancellation = false
+    @State private var showsRecording = false
 
     private var devicesExpanded: Binding<Bool> {
         Binding(
@@ -56,6 +58,8 @@ struct PanelView: View {
                     if model.isRunning { runtimeDetail }
                     if let error = model.lastError { errorRow(error) }
                     voiceIsolation
+                    echoCancellation
+                    recording
                     footer
                 }
             }
@@ -331,6 +335,73 @@ struct PanelView: View {
                 decibels: Binding(
                     get: { model.faderDecibels(forRouteAt: index) },
                     set: { model.setFaderDecibels($0, forRouteAt: index) }))
+        }
+    }
+
+    // MARK: Echo cancellation
+
+    private var echoCancellation: some View {
+        YunDisclosure(
+            loc("Echo cancellation"),
+            subtitle: model.cancelsEcho ? loc("on") : loc("off"),
+            isExpanded: $showsEchoCancellation
+        ) {
+            VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                Toggle(
+                    loc("Remove the speakers from the microphone"),
+                    isOn: $model.cancelsEcho
+                )
+                .toggleStyle(YunToggleStyle())
+
+                Text(
+                    loc(
+                        "For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if model.cancelsEcho {
+                    HStack {
+                        Text(loc("Cancel against"))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .frame(width: Self.labelColumn, alignment: .leading)
+                        YunSelect(
+                            selection: $model.echoSpeakerUID,
+                            options: model.echoSpeakerOptions.map {
+                                .init(value: $0.uid as String?, title: $0.name)
+                            }
+                        )
+                    }
+                    if let status = model.echoStatus {
+                        Text(
+                            status.hasReference
+                                ? loc("The far-end reference is present.")
+                                : loc("No far-end reference: only steady noise is removed.")
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(
+                            status.hasReference
+                                ? Yun.Palette.success : Yun.Palette.warning
+                        )
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Recording
+
+    private var recording: some View {
+        YunDisclosure(
+            loc("Recording"),
+            subtitle: model.isRecording ? loc("recording") : loc("idle"),
+            isExpanded: $showsRecording
+        ) {
+            RecordingControls(model: model, isCompact: true)
         }
     }
 

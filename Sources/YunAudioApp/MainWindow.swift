@@ -293,6 +293,11 @@ struct MainWindow: View {
                     }
                 }
 
+                sectionHeading(loc("Recording"))
+                YunCard {
+                    RecordingControls(model: model)
+                }
+
                 sectionHeading(loc("Echo cancellation"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {

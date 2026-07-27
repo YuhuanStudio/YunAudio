@@ -1,3 +1,4 @@
+import AppKit
 import CoreAudio
 import Foundation
 import Observation
@@ -185,6 +186,73 @@ final class RouterModel {
 
     /// What the canceller is doing, or nil when it is not in the path.
     var echoStatus: EchoCancellationStatus? { engine.echoCancellationStatus }
+
+    // MARK: Recording
+
+    /// Container to write. WAV keeps a bit-exact path bit-exact on disk; AAC is
+    /// a quarter the size and a lossy copy of the thing this project spends
+    /// most of its effort keeping intact.
+    var recordingFormat: Recorder.Format = .wav
+
+    private(set) var isRecording = false
+    private(set) var recordingURL: URL?
+    private(set) var recordingSeconds: TimeInterval = 0
+
+    /// Where files go. The user's Music folder rather than a folder of our own:
+    /// a recording is theirs, and burying it somewhere only this app knows
+    /// about is how recordings get lost.
+    var recordingDirectory: URL {
+        FileManager.default.urls(for: .musicDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+    }
+
+    func toggleRecording() {
+        if isRecording {
+            // Read the duration first: stopping releases the recorder, and
+            // asking a released recorder how long it ran returns zero, so the
+            // elapsed time snapped back to 00:00 exactly when someone would
+            // look at it.
+            recordingSeconds = engine.recordingDuration
+            engine.stopRecording()
+            isRecording = false
+            return
+        }
+        guard isRunning else {
+            lastError = loc("Start routing before recording.")
+            return
+        }
+        do {
+            recordingURL = try engine.startRecording(
+                to: recordingDirectory, format: recordingFormat)
+            isRecording = true
+            recordingSeconds = 0
+            lastError = nil
+        } catch {
+            lastError = String(describing: error)
+        }
+    }
+
+    /// Shows the finished file in the Finder, which is the only thing anyone
+    /// wants to do with a recording the moment it stops.
+    func revealRecording() {
+        guard let url = recordingURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Called from the same tick that drives the meters, so the elapsed time
+    /// comes from frames actually written rather than from a wall clock that
+    /// would keep counting through a stalled writer.
+    private func refreshRecordingState() {
+        guard isRecording else { return }
+        recordingSeconds = engine.recordingDuration
+        // The writer stops itself on a file-system error. Left unnoticed, the
+        // button would go on saying "recording" over a file that stopped
+        // growing minutes ago.
+        if !engine.isRecording {
+            isRecording = false
+            lastError = loc("Recording stopped: the file could not be written.")
+        }
+    }
 
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
@@ -841,6 +909,15 @@ final class RouterModel {
 
     private func finishStop() {
         isRunning = false
+        // The engine tore the recorder down with the route, so the flag has to
+        // follow or the button would claim a recording is still running against
+        // a file nothing is writing to.
+        if isRecording {
+            // Same ordering trap as above, one step removed: by the time this
+            // runs the engine has already stopped and the recorder is gone, so
+            // the last polled value is the honest one to keep.
+            isRecording = false
+        }
         stopPolling()
         levels = []
         activeRoutes = []
@@ -923,6 +1000,7 @@ final class RouterModel {
         pathQuality = engine.pathQuality
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio
+        refreshRecordingState()
     }
 
     /// Sample rates both selected devices can present.

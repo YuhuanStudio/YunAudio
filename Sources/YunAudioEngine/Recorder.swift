@@ -24,9 +24,9 @@ public final class Recorder: @unchecked Sendable {
         /// this project spends most of its effort keeping intact.
         case aac
 
-        var fileExtension: String { self == .wav ? "wav" : "m4a" }
+        public var fileExtension: String { self == .wav ? "wav" : "m4a" }
 
-        var title: String { self == .wav ? "WAV" : "AAC" }
+        public var title: String { self == .wav ? "WAV" : "AAC" }
     }
 
     public let url: URL

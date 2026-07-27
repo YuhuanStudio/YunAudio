@@ -133,3 +133,14 @@
 "Dropped" = "遺失";
 "Show %d more channels" = "再顯示 %d 個聲道";
 "Fewer channels" = "收合聲道";
+"Recording" = "錄音";
+"Record" = "開始錄音";
+"Stop recording" = "停止錄音";
+"Start routing before recording." = "請先開始路由再錄音。";
+"Recording stopped: the file could not be written." = "錄音已停止：檔案無法寫入。";
+"The far-end reference is present." = "已取得遠端參考訊號。";
+"No far-end reference: only steady noise is removed." = "沒有遠端參考訊號，只能消除穩定的環境噪音。";
+"on" = "開啟";
+"off" = "關閉";
+"recording" = "錄音中";
+"idle" = "閒置";
