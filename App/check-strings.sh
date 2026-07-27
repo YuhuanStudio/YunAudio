@@ -32,12 +32,19 @@ CONSTRUCTED = re.compile(
 # Assignments to something the interface displays. Five user-facing error
 # messages sat in English behind these for the life of the project, because an
 # assignment is not a view argument and the constructor scan could not see them.
-ASSIGNED = re.compile(
-    r"\b(\w*[Ee]rror|\w*[Mm]essage|\w*[Tt]itle|\w*[Ss]ubtitle|\w*[Dd]etail)"
-    r"\s*=\s*(\"(?:[^\"\\]|\\.)+\")"
-)
+LABELS = r"\w*[Ee]rror|\w*[Mm]essage|\w*[Tt]itle|\w*[Ss]ubtitle|\w*[Dd]etail|value"
+ASSIGNED = re.compile(r"\b(" + LABELS + r")\s*=\s*(\"(?:[^\"\\]|\\.)+\")")
+
+# Named arguments carrying a literal. "none captured" sat in the menu bar panel
+# in English behind `subtitle:` for the life of the project, because a colon is
+# not an equals sign and the assignment scan could not see it either.
+ARGUMENT = re.compile(r"\b(" + LABELS + r")\s*:\s*(\"(?:[^\"\\]|\\.)+\")")
 
 INTERPOLATION = re.compile(r"\\\((?:[^()]|\([^()]*\))*\)")
+
+# Units and proper nouns read the same in both languages, so wrapping them buys
+# a table entry and nothing else.
+UNITS = {"ch", "hz", "khz", "db", "dbfs", "ms", "ppm", "f", "mit", "wav", "aac", "rec"}
 
 
 def carries_words(literal):
@@ -45,7 +52,8 @@ def carries_words(literal):
     # An interpolated value is not a label: "\(count) items" is one, "×\(count)"
     # is not, and the difference is whether any letters survive the strip.
     text = INTERPOLATION.sub("", literal[1:-1])
-    return any(character.isalpha() for character in text)
+    words = re.findall(r"[A-Za-z]+", text)
+    return any(word.lower() not in UNITS for word in words)
 
 
 # The verification harnesses print for whoever is running them, not for the
@@ -58,7 +66,7 @@ for directory in ("Sources/YunAudioApp", "Sources/YunDesign"):
         if path.name in HARNESSES:
             continue
         source = path.read_text()
-        for pattern in (CONSTRUCTED, ASSIGNED):
+        for pattern in (CONSTRUCTED, ASSIGNED, ARGUMENT):
             for match in pattern.finditer(source):
                 literal = match.group(2)
                 if not carries_words(literal):

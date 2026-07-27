@@ -25,6 +25,11 @@ public struct RTRoute: Sendable, Equatable {
     /// which arrives across a ring from another IO thread rather than in this
     /// cycle's input buffer list.
     public var usesCancelledSource: Int32
+    /// Non-zero when the input trim applies to this route — that is, when its
+    /// source is the microphone rather than a tapped application. A trim that
+    /// also moved the applications would be a master, and there is one of
+    /// those already.
+    public var appliesInputTrim: Int32
 
     public init(
         sourceBuffer: Int32, sourceChannel: Int32,
@@ -32,7 +37,8 @@ public struct RTRoute: Sendable, Equatable {
         gain: Float = 1.0,
         muted: Bool = false,
         usesIsolatedSource: Bool = false,
-        usesCancelledSource: Bool = false
+        usesCancelledSource: Bool = false,
+        appliesInputTrim: Bool = false
     ) {
         self.sourceBuffer = sourceBuffer
         self.sourceChannel = sourceChannel
@@ -42,6 +48,7 @@ public struct RTRoute: Sendable, Equatable {
         self.muted = muted ? 1 : 0
         self.usesIsolatedSource = usesIsolatedSource ? 1 : 0
         self.usesCancelledSource = usesCancelledSource ? 1 : 0
+        self.appliesInputTrim = appliesInputTrim ? 1 : 0
     }
 }
 
@@ -79,6 +86,14 @@ struct RTGraph {
     /// counter either side of its read got a consistent pair.
     var clockSampleTime: UnsafeMutablePointer<Float64>
     var clockHostTime: UnsafeMutablePointer<UInt64>
+    /// Zero when this graph borrowed the counter and clock storage above from
+    /// the engine rather than allocating its own.
+    ///
+    /// A patchbay edit swaps in a new graph and frees the old one, and the
+    /// clock publisher reads that storage from its own queue — so storage tied
+    /// to a single graph's lifetime is read after it is freed the first time
+    /// anybody moves a cable. It belongs to the route, not to the graph.
+    var ownsClockStorage: Int32
 
     /// The voice isolation stage, or null when it is not in use.
     var voiceIsolation: UnsafeMutablePointer<RTVoiceIsolation>?
@@ -98,6 +113,17 @@ struct RTGraph {
     /// sixteen channels for a two-channel capture.
     var recordScratch: UnsafeMutablePointer<Float>
     var recordScratchCapacity: Int32
+
+    /// Trim on the microphone, applied before any route reads it, and the
+    /// master on the output bus, applied after everything is mixed into it.
+    ///
+    /// The per-route faders are for balancing sources against each other. These
+    /// two are the ones anybody expects to find first: how loud the microphone
+    /// is, and how loud the whole thing comes out.
+    var inputGain: Float
+    var inputMuted: Int32
+    var outputGain: Float
+    var outputMuted: Int32
 
     /// Echo-cancelled microphone frames, or null when the canceller is off.
     ///
@@ -131,8 +157,35 @@ struct RTGraph {
         return Float(pow(10.0, -20.0 * secondsPerCycle / 20.0))
     }
 
+    /// Storage whose lifetime is the route's rather than any one graph's.
+    struct SharedClock {
+        var cycleCounter: UnsafeMutablePointer<UInt64>
+        var sampleTime: UnsafeMutablePointer<Float64>
+        var hostTime: UnsafeMutablePointer<UInt64>
+
+        static func allocate() -> SharedClock {
+            let counter = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+            counter.initialize(to: 0)
+            let sample = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
+            sample.initialize(to: 0)
+            let host = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+            host.initialize(to: 0)
+            return SharedClock(cycleCounter: counter, sampleTime: sample, hostTime: host)
+        }
+
+        func deallocate() {
+            cycleCounter.deinitialize(count: 1)
+            cycleCounter.deallocate()
+            sampleTime.deinitialize(count: 1)
+            sampleTime.deallocate()
+            hostTime.deinitialize(count: 1)
+            hostTime.deallocate()
+        }
+    }
+
     static func allocate(
-        routes routeList: [RTRoute], bufferFrames: Int = 128, sampleRate: Double = 48000
+        routes routeList: [RTRoute], bufferFrames: Int = 128, sampleRate: Double = 48000,
+        sharedClock: SharedClock? = nil
     ) -> UnsafeMutablePointer<RTGraph> {
         let count = max(routeList.count, 1)
 
@@ -141,7 +194,8 @@ struct RTGraph {
             repeating: RTRoute(
                 sourceBuffer: 0, sourceChannel: 0,
                 destinationBuffer: 0, destinationChannel: 0, gain: 0, muted: true,
-                usesIsolatedSource: false, usesCancelledSource: false), count: count)
+                usesIsolatedSource: false, usesCancelledSource: false,
+                appliesInputTrim: false), count: count)
         for (index, route) in routeList.enumerated() {
             routeStorage[index] = route
         }
@@ -149,8 +203,13 @@ struct RTGraph {
         let peakStorage = UnsafeMutablePointer<Float>.allocate(capacity: count)
         peakStorage.initialize(repeating: 0, count: count)
 
-        let counterStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-        counterStorage.initialize(to: 0)
+        let counterStorage =
+            sharedClock?.cycleCounter
+            ?? {
+                let storage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+                storage.initialize(to: 0)
+                return storage
+            }()
 
         // Sized for the largest block the device is likely to ask for, times a
         // stereo frame.
@@ -165,10 +224,20 @@ struct RTGraph {
             capacity: cancelledCapacity)
         cancelledStorage.initialize(repeating: 0, count: cancelledCapacity)
 
-        let clockSampleStorage = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
-        clockSampleStorage.initialize(to: 0)
-        let clockHostStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-        clockHostStorage.initialize(to: 0)
+        let clockSampleStorage =
+            sharedClock?.sampleTime
+            ?? {
+                let storage = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
+                storage.initialize(to: 0)
+                return storage
+            }()
+        let clockHostStorage =
+            sharedClock?.hostTime
+            ?? {
+                let storage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+                storage.initialize(to: 0)
+                return storage
+            }()
 
         let graph = UnsafeMutablePointer<RTGraph>.allocate(capacity: 1)
         graph.initialize(
@@ -180,12 +249,17 @@ struct RTGraph {
                 peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
                 clockSampleTime: clockSampleStorage,
                 clockHostTime: clockHostStorage,
+                ownsClockStorage: sharedClock == nil ? 1 : 0,
                 voiceIsolation: nil,
                 isolationIsChain: 0,
                 recordRing: nil,
                 recordChannels: 0,
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
+                inputGain: 1,
+                inputMuted: 0,
+                outputGain: 1,
+                outputMuted: 0,
                 cancelledRing: nil,
                 cancelledBuffer: cancelledStorage,
                 cancelledCapacity: Int32(cancelledCapacity),
@@ -201,18 +275,22 @@ struct RTGraph {
         graph.pointee.routes.deallocate()
         graph.pointee.peaks.deinitialize(count: count)
         graph.pointee.peaks.deallocate()
-        graph.pointee.cycleCounter.deinitialize(count: 1)
-        graph.pointee.cycleCounter.deallocate()
+        if graph.pointee.ownsClockStorage != 0 {
+            graph.pointee.cycleCounter.deinitialize(count: 1)
+            graph.pointee.cycleCounter.deallocate()
+        }
         graph.pointee.recordScratch.deinitialize(
             count: Int(graph.pointee.recordScratchCapacity))
         graph.pointee.recordScratch.deallocate()
         graph.pointee.cancelledBuffer.deinitialize(
             count: Int(graph.pointee.cancelledCapacity))
         graph.pointee.cancelledBuffer.deallocate()
-        graph.pointee.clockSampleTime.deinitialize(count: 1)
-        graph.pointee.clockSampleTime.deallocate()
-        graph.pointee.clockHostTime.deinitialize(count: 1)
-        graph.pointee.clockHostTime.deallocate()
+        if graph.pointee.ownsClockStorage != 0 {
+            graph.pointee.clockSampleTime.deinitialize(count: 1)
+            graph.pointee.clockSampleTime.deallocate()
+            graph.pointee.clockHostTime.deinitialize(count: 1)
+            graph.pointee.clockHostTime.deallocate()
+        }
         if let commands = graph.pointee.commands { yun_rt_queue_free(commands) }
         graph.deinitialize(count: 1)
         graph.deallocate()
@@ -260,6 +338,25 @@ func yunAudioIOProc(
     if let commands = graph.pointee.commands {
         var command = YunRTCommand(kind: 0, index: 0, value: 0)
         while yun_rt_queue_pop(commands, &command) {
+            // The trim and the master are one control each rather than one per
+            // route, so they are handled before the index is range-checked —
+            // they do not carry one.
+            switch command.kind {
+            case Int32(kYunRTCommandSetInputGain.rawValue):
+                graph.pointee.inputGain = command.value
+                continue
+            case Int32(kYunRTCommandSetInputMute.rawValue):
+                graph.pointee.inputMuted = command.value != 0 ? 1 : 0
+                continue
+            case Int32(kYunRTCommandSetOutputGain.rawValue):
+                graph.pointee.outputGain = command.value
+                continue
+            case Int32(kYunRTCommandSetOutputMute.rawValue):
+                graph.pointee.outputMuted = command.value != 0 ? 1 : 0
+                continue
+            default:
+                break
+            }
             let index = Int(command.index)
             guard index >= 0, index < Int(graph.pointee.routeCount) else { continue }
             switch command.kind {
@@ -418,7 +515,12 @@ func yunAudioIOProc(
                 sourceBuffer.mData!.assumingMemoryBound(to: Float.self))
         }
         let destination = destinationData.assumingMemoryBound(to: Float.self)
-        let gain = route.muted != 0 ? 0 : route.gain
+        // The trim rides on the route's own fader rather than being a separate
+        // pass over the samples: one multiply either way, and no second walk.
+        let trim =
+            route.appliesInputTrim != 0
+            ? (graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain) : 1
+        let gain = route.muted != 0 ? 0 : route.gain * trim
 
         var peak: Float = 0
         for frame in 0..<frames {
@@ -435,6 +537,21 @@ func yunAudioIOProc(
         // flickering, without needing any timer on the UI side.
         let previous = peaks[index]
         peaks[index] = peak > previous ? peak : previous * graph.pointee.peakDecay
+    }
+
+    // The master, over the whole output bus once everything has been mixed
+    // into it. After the routes and before the recorder, so what lands on disk
+    // is what the far end hears — which is the recorder's whole premise.
+    let master = graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain
+    if master != 1 {
+        for index in 0..<output.count {
+            guard let data = output[index].mData else { continue }
+            let samples = Int(output[index].mDataByteSize) / MemoryLayout<Float>.size
+            let pointer = data.assumingMemoryBound(to: Float.self)
+            for sample in 0..<samples {
+                pointer[sample] *= master
+            }
+        }
     }
 
     // Loopback integrity check. Overwrites the destination channel with a

@@ -135,6 +135,51 @@ final class RouterModel {
         didSet { if oldValue != tapMuteBehavior { persist(); restartIfRunning() } }
     }
 
+    // MARK: Input trim and master
+
+    /// How loud the microphone is, and how loud the whole mix comes out.
+    ///
+    /// The per-route faders balance sources against each other; these are the
+    /// two controls anybody looks for first, and the app had neither. Stored in
+    /// decibels because that is what the fader shows and what gets persisted —
+    /// a scalar would round-trip badly through the −40 dB floor.
+    var inputDecibels: Float = 0 {
+        didSet {
+            guard oldValue != inputDecibels else { return }
+            engine.setInputGain(Self.gain(fromDecibels: inputDecibels))
+            persist()
+        }
+    }
+    var isInputMuted = false {
+        didSet {
+            guard oldValue != isInputMuted else { return }
+            engine.setInputMuted(isInputMuted)
+            persist()
+        }
+    }
+    var outputDecibels: Float = 0 {
+        didSet {
+            guard oldValue != outputDecibels else { return }
+            engine.setOutputGain(Self.gain(fromDecibels: outputDecibels))
+            persist()
+        }
+    }
+    var isOutputMuted = false {
+        didSet {
+            guard oldValue != isOutputMuted else { return }
+            engine.setOutputMuted(isOutputMuted)
+            persist()
+        }
+    }
+
+    /// Below this the fader reads as −∞ and the gain is exactly zero, so the
+    /// bottom of the travel is silence rather than something very quiet.
+    static let minimumDecibels: Float = -40
+
+    static func gain(fromDecibels decibels: Float) -> Float {
+        decibels <= minimumDecibels ? 0 : pow(10, decibels / 20)
+    }
+
     // MARK: Echo cancellation
 
     /// Whether the microphone is captured through the echo canceller.
@@ -659,6 +704,10 @@ final class RouterModel {
         effectValues = saved.effectValues
         cancelsEcho = saved.cancelsEcho ?? false
         echoSpeakerUID = saved.echoSpeakerUID
+        inputDecibels = saved.inputDecibels ?? 0
+        isInputMuted = saved.isInputMuted ?? false
+        outputDecibels = saved.outputDecibels ?? 0
+        isOutputMuted = saved.isOutputMuted ?? false
         style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
         YunTheme.shared.style = style
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
@@ -696,7 +745,11 @@ final class RouterModel {
                 effectValues: effectValues,
                 cancelsEcho: cancelsEcho,
                 echoSpeakerUID: echoSpeakerUID,
-                style: style.rawValue))
+                style: style.rawValue,
+                inputDecibels: inputDecibels,
+                isInputMuted: isInputMuted,
+                outputDecibels: outputDecibels,
+                isOutputMuted: isOutputMuted))
     }
 
     // MARK: Devices
@@ -898,6 +951,12 @@ final class RouterModel {
                 }
                 self.isRunning = true
                 self.lastError = nil
+                // The engine holds these across a restart, but the model is the
+                // one that knows what the user set, so it re-asserts them.
+                self.engine.setInputGain(Self.gain(fromDecibels: self.inputDecibels))
+                self.engine.setInputMuted(self.isInputMuted)
+                self.engine.setOutputGain(Self.gain(fromDecibels: self.outputDecibels))
+                self.engine.setOutputMuted(self.isOutputMuted)
                 self.activeRoutes = routes
                 self.routeGains = routes.map(\.gain)
                 self.routeMutes = routes.map(\.isMuted)

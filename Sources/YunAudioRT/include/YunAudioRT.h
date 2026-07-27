@@ -92,6 +92,13 @@ typedef struct {
 typedef enum {
     kYunRTCommandSetGain = 0,
     kYunRTCommandSetMute = 1,
+    /// Trim on the input before anything reads it, and the master on the
+    /// output bus after everything has been mixed into it. `index` is unused
+    /// for these — they are one control each, not one per route.
+    kYunRTCommandSetInputGain = 2,
+    kYunRTCommandSetInputMute = 3,
+    kYunRTCommandSetOutputGain = 4,
+    kYunRTCommandSetOutputMute = 5,
 } YunRTCommandKind;
 
 /// Single-producer, single-consumer ring. The producer is whichever thread the

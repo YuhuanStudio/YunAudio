@@ -56,14 +56,18 @@ enum {
     kObjectID_Stream_Output = 5,
     kObjectID_Volume_Input_Master = 6,
     kObjectID_Mute_Input_Master = 7,
+    kObjectID_Volume_Output_Master = 8,
+    kObjectID_Mute_Output_Master = 9,
 };
 
-/// Range of the input level control, in decibels.
+/// Range of the level controls, in decibels.
 ///
-/// The control lives on the input scope because that is the side anything else
-/// reads: an application capturing this device, System Settings' input slider,
-/// the volume keys while it is the default input. Nothing that writes into the
-/// device needs a control, since whatever wrote it already had a fader.
+/// Both scopes carry one. The first attempt gave only the input scope a
+/// control, on the reasoning that whatever writes into the device already had a
+/// fader of its own — but this device appears in both the input and the output
+/// list, and macOS draws a slider on whichever tab you are looking at whether
+/// the device implements one or not. A scope without a control is a slider that
+/// moves and does nothing, which is worse than the problem it was avoiding.
 #define kVolume_MinimumDecibels (-64.0f)
 #define kVolume_MaximumDecibels (0.0f)
 
@@ -121,12 +125,15 @@ typedef struct {
     Float64 pendingSampleRate;
 
     // Output control state
-    /// Scalar 0...1, as the control reports it.
+    /// Scalar 0...1, as the controls report it.
     Float32 inputVolume;
-    /// Linear gain derived from `inputVolume`, kept alongside it so the IO
-    /// thread never has to call powf or take the lock to find it.
+    Float32 outputVolume;
+    /// Linear gain derived from the scalar, kept alongside it so the IO thread
+    /// never has to call powf or take the lock to find it.
     Float32 inputGain;
+    Float32 outputGain;
     bool inputMuted;
+    bool outputMuted;
 
     // Zero timestamp bookkeeping
     /// Host ticks per frame actually used to emit timestamps. Starts at the

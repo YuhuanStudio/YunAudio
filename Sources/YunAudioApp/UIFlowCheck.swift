@@ -131,6 +131,32 @@ enum UIFlowCheck {
             abs(model.faderDecibels(forRouteAt: 0) - -12) < 0.5)
         model.setFaderDecibels(0, forRouteAt: 0)
 
+        print("\ninput trim and master")
+        // The two controls anybody looks for first, and the app had neither —
+        // only the per-route strips, which balance sources against each other
+        // rather than answering "how loud is the microphone".
+        let cyclesBeforeLevels = model.cycleCountForDiagnostics
+        model.inputDecibels = -6
+        model.outputDecibels = -3
+        model.isInputMuted = true
+        await pause(0.5)
+        check("the values read back", model.inputDecibels == -6 && model.outputDecibels == -3)
+        check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBeforeLevels)
+        check("no rebuild was needed", model.isRunning && !model.isBusy)
+
+        // Muting the input has to reach the samples, not just the model.
+        await pause(0.6)
+        check("the meters fell while muted", model.routeLevels.allSatisfy { $0 < 0.02 })
+        model.isInputMuted = false
+
+        // And a restart must not quietly reset them, since the graph is rebuilt.
+        model.channelMode = model.channelMode == .mono ? .stereo : .mono
+        await waitUntil("the rebuild settled", { !model.isBusy }, timeout: 8)
+        check("the trim survived a rebuild", model.inputDecibels == -6)
+        check("the master survived a rebuild", model.outputDecibels == -3)
+        model.inputDecibels = 0
+        model.outputDecibels = 0
+
         print("\nswitching channel mode while running")
         let before = model.activeRoutes.count
         let cyclesBefore = model.cycleCountForDiagnostics
@@ -267,24 +293,54 @@ enum UIFlowCheck {
         check("the canvas offers sources", !sourcePorts.isEmpty)
         check("the canvas offers destinations", !destinationPorts.isEmpty)
 
-        if let source = sourcePorts.first, let destination = destinationPorts.first,
-            let lastChannel = destination.channels.last
-        {
-            let newCable = ChannelRef(deviceUID: destination.uid, channel: lastChannel)
-            let before = model.activeRoutes.count
+        // Both operations, in whichever order the current patch allows.
+        //
+        // The first version always added to the last channel, which only worked
+        // because BlackHole shows sixteen of them. Against the two-channel
+        // YunAudio device every channel is already carrying one side of the
+        // mono split, `connect` correctly does nothing, and the check reported
+        // a product failure that was its own — then, once that was "fixed" by
+        // requiring a free channel, it skipped the patchbay entirely and
+        // reported success while testing none of it.
+        let sourcePort = sourcePorts.first
+        let ports = destinationPorts.first.map { group in
+            group.channels.map { ChannelRef(deviceUID: group.uid, channel: $0) }
+        }
+        let free = ports?.first { reference in
+            !model.activeRoutes.contains { $0.destination == reference }
+        }
+        let occupied = ports?.first { reference in
+            model.activeRoutes.contains { $0.destination == reference }
+        }
+
+        if let source = sourcePort, let newCable = free ?? occupied {
+            let from = ChannelRef(deviceUID: source.uid, channel: source.channels[0])
             let cyclesBefore = model.cycleCountForDiagnostics
-            model.connect(
-                source: ChannelRef(deviceUID: source.uid, channel: source.channels[0]),
-                destination: newCable)
-            await pause(0.4)
-            check("a cable was added", model.activeRoutes.count > before)
+
+            // Start from whichever end is available: pull it out first if it is
+            // in use, otherwise put it in first. Both halves run either way.
+            if free == nil {
+                let connected = model.activeRoutes.count
+                model.disconnect(destination: newCable)
+                await pause(0.4)
+                check("the cable was pulled", model.activeRoutes.count < connected)
+                let pulled = model.activeRoutes.count
+                model.connect(source: from, destination: newCable)
+                await pause(0.4)
+                check("a cable was added", model.activeRoutes.count > pulled)
+            } else {
+                let before = model.activeRoutes.count
+                model.connect(source: from, destination: newCable)
+                await pause(0.4)
+                check("a cable was added", model.activeRoutes.count > before)
+                model.disconnect(destination: newCable)
+                await pause(0.4)
+                check("the cable was pulled", model.activeRoutes.count == before)
+            }
+
             check(
                 "audio kept flowing while patching",
                 model.cycleCountForDiagnostics > cyclesBefore)
-
-            model.disconnect(destination: newCable)
-            await pause(0.4)
-            check("the cable was pulled", model.activeRoutes.count == before)
             check("still running after patching", model.isRunning)
 
             // A sixteen-channel destination must not put sixteen empty ports on
@@ -306,7 +362,7 @@ enum UIFlowCheck {
             check(
                 "every connected channel is on the canvas",
                 model.activeRoutes
-                    .filter { $0.destination.deviceUID == destination.uid }
+                    .filter { $0.destination.deviceUID == newCable.deviceUID }
                     .allSatisfy { offered.contains($0.destination.channel) })
         }
 

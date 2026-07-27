@@ -3,15 +3,19 @@ import Foundation
 import YunAudioHAL
 import YunAudioRT
 
-/// Carries the realtime graph pointer onto the clock publisher's queue.
+/// Carries the clock storage onto the publisher's queue.
 ///
-/// The `@unchecked` is claimed deliberately, not to quiet the compiler: the
-/// storage is allocated before the device starts and freed only after both the
-/// IOProc has been destroyed and the publisher's queue has been drained, and
-/// the only field read across threads is guarded by the graph's cycle counter
-/// acting as a sequence number.
+/// It carries the storage rather than the graph, and that distinction is the
+/// whole point: a patchbay edit swaps in a new graph and frees the old one, so
+/// a captured graph pointer is dangling the first time anybody moves a cable.
+/// This storage belongs to the route and outlives every graph in it.
+///
+/// The `@unchecked` is claimed deliberately, not to quiet the compiler: it is
+/// allocated before the device starts and freed only after both the IOProc has
+/// been destroyed and the publisher's queue has been drained, and the values
+/// are read through the cycle counter acting as a sequence number.
 private struct GraphHandle: @unchecked Sendable {
-    let pointer: UnsafeMutablePointer<RTGraph>
+    let clock: RTGraph.SharedClock
 }
 
 /// Where a signal comes from, in device terms rather than buffer terms.
@@ -153,6 +157,18 @@ public final class RoutingEngine: @unchecked Sendable {
 
     /// The destination as a device, for reading controls back off it.
     private var destinationDevice: AudioDevice?
+
+    /// Cycle counter and clock anchor, owned by the route rather than by any
+    /// one graph, so a patchbay edit does not free storage the clock publisher
+    /// is still reading from its own queue.
+    private var sharedClock: RTGraph.SharedClock?
+
+    /// Held here as well as in the graph, because the graph is replaced on
+    /// every restart and would come back at unity otherwise.
+    public private(set) var inputGain: Float = 1
+    public private(set) var isInputMuted = false
+    public private(set) var outputGain: Float = 1
+    public private(set) var isOutputMuted = false
 
     /// True when the microphone is reaching the routes through the canceller
     /// rather than through this aggregate.
@@ -395,11 +411,15 @@ public final class RoutingEngine: @unchecked Sendable {
                 gain: route.gain,
                 muted: route.isMuted,
                 usesIsolatedSource: isIsolated,
-                usesCancelledSource: fromMicrophone && !isIsolated)
+                usesCancelledSource: fromMicrophone && !isIsolated,
+                appliesInputTrim: route.source.deviceUID == sourceDeviceUID)
         }
 
+        let clock = RTGraph.SharedClock.allocate()
+        sharedClock = clock
         let graph = RTGraph.allocate(
-            routes: rtRoutes, bufferFrames: Int(bufferFrames), sampleRate: rate)
+            routes: rtRoutes, bufferFrames: Int(bufferFrames), sampleRate: rate,
+            sharedClock: clock)
         self.graph = graph
         activeRoutes = routes
 
@@ -508,6 +528,13 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         isRunning = true
 
+        // A restart builds a fresh graph, which starts at unity. Without this
+        // every reconfiguration would quietly undo the trim and the master.
+        graph.pointee.inputGain = inputGain
+        graph.pointee.inputMuted = isInputMuted ? 1 : 0
+        graph.pointee.outputGain = outputGain
+        graph.pointee.outputMuted = isOutputMuted ? 1 : 0
+
         // When the destination is our own driver, hand it the master's clock so
         // it can lock to the microphone. Any other destination — BlackHole, a
         // physical device — has no such channel, and the path stays honestly
@@ -519,7 +546,7 @@ public final class RoutingEngine: @unchecked Sendable {
             // Captures the graph pointer, not self: the closure runs on the
             // publisher's own queue, and stop() drains that queue before the
             // graph is freed, so the pointer stays valid for every call.
-            let handle = GraphHandle(pointer: graph)
+            let handle = GraphHandle(clock: clock)
             let anchorRate = rate
 
             // Drift correction is off because the driver promised to track the
@@ -533,7 +560,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 self.recoveryQueue.async { self.recoverFromClockLockLoss() }
             }
             publisher.start {
-                RoutingEngine.anchor(from: handle.pointer, sampleRate: anchorRate)
+                RoutingEngine.anchor(from: handle.clock, sampleRate: anchorRate)
             }
         }
     }
@@ -571,6 +598,10 @@ public final class RoutingEngine: @unchecked Sendable {
         // the graph any more.
         if let graph { RTGraph.deallocate(graph) }
         graph = nil
+        // After the graph, and after the publisher was stopped and drained
+        // above — this is the storage it reads.
+        sharedClock?.deallocate()
+        sharedClock = nil
         if let graphCell { yun_rt_cell_free(graphCell) }
         graphCell = nil
         stopRecordingLocked()
@@ -710,6 +741,10 @@ public final class RoutingEngine: @unchecked Sendable {
                 gain: route.gain,
                 muted: route.isMuted,
                 usesIsolatedSource: previous.pointee.routes[0].usesIsolatedSource != 0
+                    && route.source == activeRoutes.first?.source,
+                usesCancelledSource: previous.pointee.routes[0].usesCancelledSource != 0
+                    && route.source == activeRoutes.first?.source,
+                appliesInputTrim: previous.pointee.routes.pointee.appliesInputTrim != 0
                     && route.source == activeRoutes.first?.source)
         }
         guard rtRoutes.count == routes.count else { return false }
@@ -717,12 +752,23 @@ public final class RoutingEngine: @unchecked Sendable {
         let next = RTGraph.allocate(
             routes: rtRoutes,
             bufferFrames: Int(aggregate?.device?.currentBufferFrameSize ?? 128),
-            sampleRate: aggregate?.device?.currentSampleRate ?? 48000)
-        // Carry the processing and self-test blocks across: they belong to the
-        // engine's lifetime, not to any one graph.
+            sampleRate: aggregate?.device?.currentSampleRate ?? 48000,
+            sharedClock: sharedClock)
+        // Everything that belongs to the route rather than to this particular
+        // graph has to come across, or moving one cable silently turns it off.
+        // Recording and echo cancellation were both being dropped here: a
+        // patchbay edit stopped the recorder writing and cut the canceller out
+        // of the path, with nothing to say so.
         next.pointee.voiceIsolation = previous.pointee.voiceIsolation
         next.pointee.isolationIsChain = previous.pointee.isolationIsChain
         next.pointee.selftest = previous.pointee.selftest
+        next.pointee.recordRing = previous.pointee.recordRing
+        next.pointee.recordChannels = previous.pointee.recordChannels
+        next.pointee.cancelledRing = previous.pointee.cancelledRing
+        next.pointee.inputGain = previous.pointee.inputGain
+        next.pointee.inputMuted = previous.pointee.inputMuted
+        next.pointee.outputGain = previous.pointee.outputGain
+        next.pointee.outputMuted = previous.pointee.outputMuted
 
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         graph = next
@@ -753,6 +799,48 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         return push(kind: kYunRTCommandSetMute, index: index, value: muted ? 1 : 0)
+    }
+
+    /// Trim on the microphone, ahead of every route that reads it.
+    @discardableResult
+    public func setInputGain(_ gain: Float) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        inputGain = gain
+        return pushGlobal(kind: kYunRTCommandSetInputGain, value: gain)
+    }
+
+    @discardableResult
+    public func setInputMuted(_ muted: Bool) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        isInputMuted = muted
+        return pushGlobal(kind: kYunRTCommandSetInputMute, value: muted ? 1 : 0)
+    }
+
+    /// The master, over the whole output bus after everything is mixed in.
+    @discardableResult
+    public func setOutputGain(_ gain: Float) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        outputGain = gain
+        return pushGlobal(kind: kYunRTCommandSetOutputGain, value: gain)
+    }
+
+    @discardableResult
+    public func setOutputMuted(_ muted: Bool) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        isOutputMuted = muted
+        return pushGlobal(kind: kYunRTCommandSetOutputMute, value: muted ? 1 : 0)
+    }
+
+    /// Neither of these carries a route index, so they skip the range check
+    /// that `push` does — there is no route to check against.
+    private func pushGlobal(kind: YunRTCommandKind, value: Float) -> Bool {
+        guard let graph, let commands = graph.pointee.commands else { return false }
+        return yun_rt_queue_push(
+            commands, YunRTCommand(kind: Int32(kind.rawValue), index: 0, value: value))
     }
 
     private func push(kind: YunRTCommandKind, index: Int, value: Float) -> Bool {
@@ -895,23 +983,23 @@ public final class RoutingEngine: @unchecked Sendable {
     /// The clock master's most recent timestamp, read through the cycle counter
     /// as a sequence number so a half-updated pair is never published.
     public var masterClockAnchor: ClockAnchor? {
-        guard let graph, isRunning else { return nil }
+        guard let sharedClock, isRunning else { return nil }
         let rate = aggregate?.device?.currentSampleRate ?? 0
         guard rate > 0 else { return nil }
-        return Self.anchor(from: graph, sampleRate: rate)
+        return Self.anchor(from: sharedClock, sampleRate: rate)
     }
 
     /// Reads the anchor pair using the cycle counter as a sequence number. The
     /// realtime thread writes both values before bumping the counter, so an
     /// unchanged counter either side of the read means the pair is consistent.
     static func anchor(
-        from graph: UnsafeMutablePointer<RTGraph>, sampleRate: Double
+        from clock: RTGraph.SharedClock, sampleRate: Double
     ) -> ClockAnchor? {
         for _ in 0..<8 {
-            let before = graph.pointee.cycleCounter.pointee
-            let sampleTime = graph.pointee.clockSampleTime.pointee
-            let hostTime = graph.pointee.clockHostTime.pointee
-            let after = graph.pointee.cycleCounter.pointee
+            let before = clock.cycleCounter.pointee
+            let sampleTime = clock.sampleTime.pointee
+            let hostTime = clock.hostTime.pointee
+            let after = clock.cycleCounter.pointee
             if before == after, hostTime != 0 {
                 return ClockAnchor(
                     sampleTime: sampleTime, hostTime: hostTime, sampleRate: sampleRate)

@@ -276,7 +276,9 @@ struct PanelView: View {
         YunDisclosure(
             loc("Application audio"),
             subtitle: model.capturedAppBundleIDs.isEmpty
-                ? "none captured" : "\(model.capturedAppBundleIDs.count) captured",
+                ? loc("none captured")
+                : String(
+                    format: loc("%d captured"), model.capturedAppBundleIDs.count),
             isExpanded: $showsApps
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {

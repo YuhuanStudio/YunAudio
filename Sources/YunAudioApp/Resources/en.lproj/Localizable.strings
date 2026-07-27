@@ -183,3 +183,9 @@
 "Those two devices share no usable channels." = "Those two devices share no usable channels.";
 "Speakers" = "Speakers";
 "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way." = "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way.";
+"Input level" = "Input level";
+"Output level" = "Output level";
+"Muted" = "Muted";
+"Unmuted" = "Unmuted";
+"none captured" = "none captured";
+"%d captured" = "%d captured";

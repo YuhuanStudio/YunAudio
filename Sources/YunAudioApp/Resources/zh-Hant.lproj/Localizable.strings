@@ -183,3 +183,9 @@
 "Those two devices share no usable channels." = "這兩個裝置之間沒有可用的聲道。";
 "Speakers" = "外放通話";
 "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way." = "從麥克風中移除喇叭的聲音。代價是失去時鐘鎖定，並在來回各增加一個緩衝區的延遲。";
+"Input level" = "輸入音量";
+"Output level" = "輸出音量";
+"Muted" = "已靜音";
+"Unmuted" = "未靜音";
+"none captured" = "未擷取任何程式";
+"%d captured" = "已擷取 %d 個";

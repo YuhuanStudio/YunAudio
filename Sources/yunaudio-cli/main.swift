@@ -908,46 +908,61 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "volume" {
         print("the YunAudio device is not installed")
         exit(1)
     }
-    let input = kAudioObjectPropertyScopeInput
+    // Both scopes, because the device appears in both lists and macOS draws a
+    // slider on whichever tab you are looking at.
+    let scopes: [(name: String, scope: AudioObjectPropertyScope)] = [
+        ("input", kAudioObjectPropertyScopeInput),
+        ("output", kAudioObjectPropertyScopeOutput),
+    ]
+    var chosen = scopes
+    var arguments = Array(CommandLine.arguments.dropFirst(2))
+    if let first = arguments.first, let match = scopes.first(where: { $0.name == first }) {
+        chosen = [match]
+        arguments.removeFirst()
+    }
 
-    if CommandLine.arguments.count > 2 {
-        let argument = CommandLine.arguments[2]
-        if argument == "mute" || argument == "unmute" {
-            let muted: UInt32 = argument == "mute" ? 1 : 0
-            do {
-                try device.id.setValue(
-                    muted, for: AudioProperty<UInt32>.mute.scoped(to: input))
-            } catch {
-                print("could not set mute: \(error)")
+    if let argument = arguments.first {
+        for entry in chosen {
+            let input = entry.scope
+            if argument == "mute" || argument == "unmute" {
+                let muted: UInt32 = argument == "mute" ? 1 : 0
+                do {
+                    try device.id.setValue(
+                        muted, for: AudioProperty<UInt32>.mute.scoped(to: input))
+                } catch {
+                    print("could not set mute: \(error)")
+                    exit(1)
+                }
+            } else if let scalar = Float(argument) {
+                do {
+                    try device.id.setValue(
+                        scalar, for: AudioProperty<Float32>.volumeScalar.scoped(to: input))
+                } catch {
+                    print("could not set the volume: \(error)")
+                    exit(1)
+                }
+            } else {
+                print("usage: volume [input|output] [0...1 | mute | unmute]")
                 exit(1)
             }
-        } else if let scalar = Float(argument) {
-            do {
-                try device.id.setValue(
-                    scalar, for: AudioProperty<Float32>.volumeScalar.scoped(to: input))
-            } catch {
-                print("could not set the volume: \(error)")
-                exit(1)
-            }
-        } else {
-            print("usage: volume [0...1 | mute | unmute]")
-            exit(1)
         }
         // Re-read rather than trusting the write: the HAL can refuse.
         Thread.sleep(forTimeInterval: 0.1)
     }
 
     let fresh = (try? AudioDevices.device(uid: device.uid)) ?? device
-    guard let scalar = fresh.volumeScalar(scope: input) else {
-        print("the device publishes no input volume control")
-        exit(1)
+    for entry in scopes {
+        guard let scalar = fresh.volumeScalar(scope: entry.scope) else {
+            print("\(entry.name)   no volume control published")
+            continue
+        }
+        let muted = fresh.isMuted(scope: entry.scope) ? "muted" : "unmuted"
+        let verdict = fresh.alters(scope: entry.scope) ? "  ← alters the signal" : ""
+        print(
+            String(
+                format: "%-7s %.3f  %@%@", (entry.name as NSString).utf8String!,
+                scalar, muted, verdict))
     }
-    print(String(format: "volume  %.3f", scalar))
-    print("mute    \(fresh.isMuted(scope: input) ? "on" : "off")")
-    let verdict =
-        fresh.alters(scope: input)
-        ? "yes — the path is no longer bit-exact" : "no"
-    print("alters  \(verdict)")
     exit(0)
 }
 

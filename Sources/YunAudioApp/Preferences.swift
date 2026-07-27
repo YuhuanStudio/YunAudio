@@ -32,6 +32,12 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Which look the application wears. Optional so a file written before the
     /// setting existed still decodes.
     var style: String?
+    /// The input trim and the master, in decibels. Optional for the same
+    /// reason.
+    var inputDecibels: Float?
+    var isInputMuted: Bool?
+    var outputDecibels: Float?
+    var isOutputMuted: Bool?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -48,7 +54,11 @@ struct Preferences: Codable, Equatable, Sendable {
         effectValues: [:],
         cancelsEcho: false,
         echoSpeakerUID: nil,
-        style: YunStyle.flat.rawValue)
+        style: YunStyle.flat.rawValue,
+        inputDecibels: 0,
+        isInputMuted: false,
+        outputDecibels: 0,
+        isOutputMuted: false)
 }
 
 @MainActor

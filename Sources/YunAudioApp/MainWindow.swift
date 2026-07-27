@@ -163,6 +163,48 @@ struct MainWindow: View {
         .accessibilityLabel(Text(label))
     }
 
+    /// A mute button, a fader and the value, for one end of the signal.
+    ///
+    /// The per-route strips balance sources against each other; this is the
+    /// plain "how loud is the microphone" that the window did not have.
+    private func levelRow(
+        decibels: Binding<Float>, muted: Binding<Bool>, label: String
+    ) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Button {
+                muted.wrappedValue.toggle()
+            } label: {
+                Image(
+                    systemName: muted.wrappedValue
+                        ? "speaker.slash.fill" : "speaker.wave.2.fill"
+                )
+                .font(.system(size: 10))
+                .foregroundStyle(
+                    muted.wrappedValue ? Yun.Palette.danger : Yun.Palette.textSecondary
+                )
+                .frame(width: 22, height: 22)
+                .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
+            }
+            .buttonStyle(.plain)
+            .focusEffectDisabled()
+            .accessibilityLabel(Text(label))
+            .accessibilityValue(Text(muted.wrappedValue ? loc("Muted") : loc("Unmuted")))
+
+            YunFader(decibels: decibels)
+                .accessibilityLabel(Text(label))
+                .opacity(muted.wrappedValue ? 0.4 : 1)
+
+            Text(
+                decibels.wrappedValue <= RouterModel.minimumDecibels
+                    ? "−∞" : String(format: "%+.1f dB", decibels.wrappedValue)
+            )
+            .font(Yun.Text.mono)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .monospacedDigit()
+            .frame(width: 58, alignment: .trailing)
+        }
+    }
+
     // MARK: Sources
 
     private var sources: some View {
@@ -184,6 +226,12 @@ struct MainWindow: View {
                                         detail: "\($0.inputChannels)ch")
                                 })
                         }
+                        levelRow(
+                            decibels: $model.inputDecibels, muted: $model.isInputMuted,
+                            label: loc("Input level"))
+
+                        YunDivider()
+
                         deviceRow(loc("Out"), symbol: "arrow.right.to.line") {
                             YunSelect(
                                 selection: $model.selectedDestinationUID,
@@ -193,6 +241,9 @@ struct MainWindow: View {
                                         detail: "\($0.outputChannels)ch")
                                 })
                         }
+                        levelRow(
+                            decibels: $model.outputDecibels, muted: $model.isOutputMuted,
+                            label: loc("Output level"))
 
                         if let source = model.selectedSource, source.inputChannels > 1 {
                             YunDivider()
@@ -390,7 +441,9 @@ struct MainWindow: View {
                                         ? loc("present") : loc("absent"),
                                     tone: status.hasReference ? .success : .warning)
                                 YunDetailRow(
-                                    loc("Buffered"), value: "\(status.buffered) frames")
+                                    loc("Buffered"),
+                                    value: String(
+                                        format: loc("%d frames"), Int(status.buffered)))
                                 if status.dropped > 0 {
                                     YunDetailRow(
                                         loc("Dropped"), value: "\(status.dropped)",
