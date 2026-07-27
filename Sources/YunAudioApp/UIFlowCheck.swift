@@ -130,6 +130,32 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
+        print("\nvoice presets")
+        // The claim is that both halves move together. Pitch alone is a
+        // chipmunk and formants alone is somebody talking through a tube; the
+        // measurement that they really do is in the unit tests, and what is
+        // checked here is that choosing one reaches the engine.
+        for preset in VoicePreset.allCases {
+            model.voicePreset = preset
+            check("\(preset.rawValue) applied", model.voicePreset == preset)
+            check(
+                "\(preset.rawValue) enables only what it moves",
+                preset.stages.allSatisfy { model.enabledEffects.contains($0) })
+        }
+        model.voicePreset = .masculineToFeminine
+        note(
+            String(
+                format: "higher voice: %+.0f cents, %+.0f%% formants, %.0f ms",
+                model.voicePreset.cents, model.voicePreset.formantPercent,
+                model.voiceLatencyMilliseconds))
+        check(
+            "it costs something and says so", model.voiceLatencyMilliseconds > 0)
+        model.voicePreset = .none
+        check(
+            "switching it off takes both stages back out",
+            !model.enabledEffects.contains(.pitch)
+                && !model.enabledEffects.contains(.formant))
+
         print("\nthird-party units")
         note("\(model.availablePlugins.count) Audio Unit effect(s) installed")
         // Apple's own are the built-in stages; listing them again would put

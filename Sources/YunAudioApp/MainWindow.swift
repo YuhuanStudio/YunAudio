@@ -396,6 +396,60 @@ struct MainWindow: View {
         }
     }
 
+    /// A whole voice, rather than the two stages it is made of.
+    ///
+    /// Pitch and formants are separate stages below because they are separate
+    /// physical facts. Nobody wants to be told that: they want to sound like
+    /// somebody else, and that is a specific pair of settings rather than one
+    /// control. The stages stay available for anybody who wants to move them by
+    /// hand.
+    @ViewBuilder
+    private var voice: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            YunSelect(
+                selection: $model.voicePreset,
+                options: VoicePreset.allCases.map {
+                    .init(value: $0, title: loc($0.title))
+                })
+            Text(loc(model.voicePreset.detail))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if model.voicePreset != .none {
+                HStack(spacing: Yun.Space.md) {
+                    figure(
+                        loc("Pitch"),
+                        String(format: "%+.0f", model.voicePreset.cents), loc("cents"))
+                    figure(
+                        loc("Formants"),
+                        String(format: "%+.0f", model.voicePreset.formantPercent), "%")
+                    figure(
+                        loc("Latency"),
+                        String(format: "%.0f", model.voiceLatencyMilliseconds), loc("ms"))
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+    }
+
+    private func figure(_ title: String, _ value: String, _ unit: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value)
+                    .font(.system(size: 14, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                    .monospacedDigit()
+                Text(unit)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textMuted)
+            }
+        }
+    }
+
     /// Third-party Audio Units.
     ///
     /// The one place in this application where somebody else's code runs, and
@@ -461,23 +515,27 @@ struct MainWindow: View {
 
             if !model.enabledPlugins.isEmpty { YunDivider() }
 
-            Menu {
-                ForEach(model.availablePlugins) { plugin in
-                    Button("\(plugin.manufacturerName) — \(plugin.name)") {
+            // The application's own picker rather than a `Menu`.
+            //
+            // Two reasons, and the second is the one that decided it: a system
+            // menu is styled by AppKit and looks like nothing else here, and it
+            // does not render at all in the offscreen design captures — it
+            // came out as a yellow bar with a prohibitory sign across it, so
+            // the one card that could not be checked was the newest.
+            YunSelect(
+                selection: Binding(
+                    get: { String?.none },
+                    set: { id in
+                        guard let plugin = model.availablePlugins.first(where: { $0.id == id })
+                        else { return }
                         model.addPlugin(plugin)
-                    }
-                    .disabled(model.enabledPlugins.contains(plugin))
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 10))
-                    Text(loc("Add an Audio Unit"))
-                }
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .disabled(model.availablePlugins.isEmpty)
+                    }),
+                placeholder: loc("Add an Audio Unit"),
+                options: model.availablePlugins.map {
+                    .init(
+                        value: $0.id as String?, title: $0.name,
+                        detail: $0.manufacturerName)
+                })
 
             Text(
                 String(
@@ -653,6 +711,9 @@ struct MainWindow: View {
     private var inspector: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                sectionHeading(loc("Voice"))
+                YunCard { voice }
+
                 sectionHeading(loc("Processing"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {

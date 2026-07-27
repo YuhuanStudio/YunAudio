@@ -70,11 +70,16 @@ struct RecordingControls: View {
                             .foregroundStyle(Yun.Palette.warning)
                     }
                 } else {
+                    // No fixed width. It was pinned at 140 points, which fitted
+                    // two formats and truncated three the day FLAC was added —
+                    // the picker read "W… F… …" and nothing in the code said
+                    // so. A segmented control should be as wide as its
+                    // segments.
                     YunSegmented(
                         selection: $model.recordingFormat,
                         options: Recorder.Format.allCases.map { ($0, $0.title) }
                     )
-                    .frame(width: isCompact ? 120 : 140)
+                    .fixedSize()
                 }
 
                 Spacer(minLength: 0)

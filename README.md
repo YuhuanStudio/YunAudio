@@ -111,6 +111,25 @@ resonances moved would pass for a plain pitch shifter. Alongside it, a character
 stage built on ring modulation, decimation and soft clipping: robot, radio,
 monster, bitcrush, alien.
 
+**A voice change that is a voice, not two knobs.** Pitch and formants are
+separate stages because they are separate physical facts, and nobody wants to be
+told that — they want to sound like somebody else, and that is a specific pair
+of settings. An adult male speaking voice sits around 110 to 130 Hz and an adult
+female around 200 to 220, roughly a fifth; but a fifth of pitch shift alone is
+unmistakably processed, because the resonances did not move with it. Female
+formants run about 15 to 20 per cent higher, from a vocal tract about that much
+shorter. Shift both and the ear stops hearing an effect.
+
+The presets are measured rather than asserted: a synthetic male voice through
+the higher-voice preset comes out with its pitch up by the stated 500 cents and
+its spectral centroid up with it, in the same signal, through the real chain.
+
+What this is not is neural voice conversion. Something like fish-speech or RVC
+learns a target speaker and resynthesises, which is a different and better thing
+— and needs a model, a GPU pipeline and well over a hundred milliseconds. None
+of that fits inside a 2.7 ms IO deadline. Every real-time voice changer that
+ships today does what this does; this one says so.
+
 **Third-party Audio Units.** This is what a plugin means in audio, and it is the
 one place where loading somebody else's code is the right answer rather than an
 elaborate way to avoid a configuration file: the format exists, the system vets

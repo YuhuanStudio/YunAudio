@@ -36,6 +36,24 @@ public final class SignalAnalyser {
         /// The model's own label, which is finer than the verdict.
         public var verdictLabel: String
 
+        public init(
+            momentary: Double, shortTerm: Double, integrated: Double, range: Double,
+            peak: Double, bands: [Float], duration: Double,
+            verdict: SoundClassifier.Verdict, verdictConfidence: Double,
+            verdictLabel: String
+        ) {
+            self.momentary = momentary
+            self.shortTerm = shortTerm
+            self.integrated = integrated
+            self.range = range
+            self.peak = peak
+            self.bands = bands
+            self.duration = duration
+            self.verdict = verdict
+            self.verdictConfidence = verdictConfidence
+            self.verdictLabel = verdictLabel
+        }
+
         public static let silent = Reading(
             momentary: -.infinity, shortTerm: -.infinity, integrated: -.infinity,
             range: 0, peak: -.infinity,

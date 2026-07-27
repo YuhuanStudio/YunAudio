@@ -76,6 +76,52 @@ final class RouterModel {
         didSet { if oldValue != autoStart { persist() } }
     }
 
+    // MARK: Voice
+
+    /// A whole voice, rather than two knobs somebody has to find the
+    /// combination of.
+    ///
+    /// Pitch and formants are separate stages because they are separate
+    /// physical facts. Nobody wants to be told that — they want to sound like
+    /// somebody else, and that is a specific pair of settings rather than one
+    /// control.
+    var voicePreset: VoicePreset = .none {
+        didSet {
+            guard oldValue != voicePreset else { return }
+            applyVoicePreset()
+            persist()
+        }
+    }
+
+    private func applyVoicePreset() {
+        let wanted = voicePreset.stages
+        // Only the stages the preset actually moves. An idle stage still costs
+        // its latency, so switching on a formant shifter set to zero would add
+        // twenty-one milliseconds for nothing.
+        var effects = enabledEffects
+        effects.remove(.pitch)
+        effects.remove(.formant)
+        effects.formUnion(wanted)
+
+        effectValues["pitch.cents"] = voicePreset.cents
+        effectValues["formant.shift"] = voicePreset.formantPercent
+
+        if effects != enabledEffects {
+            enabledEffects = effects
+        } else {
+            // Same stages, different numbers: push them without a rebuild.
+            engine.setEffectParameter("cents", of: .pitch, to: voicePreset.cents)
+            engine.setEffectParameter("shift", of: .formant, to: voicePreset.formantPercent)
+        }
+    }
+
+    /// What the chosen voice costs, in milliseconds.
+    var voiceLatencyMilliseconds: Double {
+        let rate = pathQuality?.sampleRate ?? 48000
+        guard rate > 0 else { return 0 }
+        return Double(voicePreset.latencyFrames(sampleRate: rate)) / rate * 1000
+    }
+
     // MARK: Third-party units
 
     /// Every Audio Unit effect installed on this machine, minus Apple's own —
@@ -591,6 +637,23 @@ final class RouterModel {
         routeGains = [1.0, 0.7]
         routeMutes = [false, true]
         levels = [0.28, 0.0]
+        // A populated state rather than a blank one. A design capture of every
+        // panel at its default shows none of the things worth looking at — the
+        // voice card in particular renders as one picker reading "None", which
+        // says nothing about what it does.
+        voicePreset = .masculineToFeminine
+        analysis = SignalAnalyser.Reading(
+            momentary: -19.4, shortTerm: -18.6, integrated: -18.2, range: 6.4,
+            peak: -8.1,
+            bands: (0..<SpectrumAnalyser.bandCount).map { band in
+                // A voice-shaped curve, so the analyser looks like a voice
+                // rather than like noise.
+                let position = Double(band) / Double(SpectrumAnalyser.bandCount - 1)
+                return Float(max(0.05, 0.85 * exp(-pow((position - 0.34) / 0.28, 2))))
+            },
+            duration: 42, verdict: .speech, verdictConfidence: 0.86,
+            verdictLabel: "speech")
+        outputPeak = 0.39
     }
 
     // MARK: Driver
@@ -1373,6 +1436,7 @@ final class RouterModel {
         isPushToTalkEnabled = saved.isPushToTalkEnabled ?? false
         enabledPlugins = saved.plugins ?? []
         pluginValues = saved.pluginValues ?? [:]
+        voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1436,7 +1500,8 @@ final class RouterModel {
                 sourceRoles: sourceRoles.mapValues(\.rawValue),
                 isPushToTalkEnabled: isPushToTalkEnabled,
                 plugins: enabledPlugins,
-                pluginValues: pluginValues))
+                pluginValues: pluginValues,
+                voicePreset: voicePreset.rawValue))
     }
 
     // MARK: Devices

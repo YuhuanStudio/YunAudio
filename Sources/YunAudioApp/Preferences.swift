@@ -60,6 +60,8 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Third-party Audio Units in the chain, and their knob positions.
     var plugins: [AudioUnitPlugin]?
     var pluginValues: [String: Float]?
+    /// A whole voice, rather than the two stages it is made of.
+    var voicePreset: String?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -93,7 +95,8 @@ struct Preferences: Codable, Equatable, Sendable {
         sourceRoles: [:],
         isPushToTalkEnabled: false,
         plugins: [],
-        pluginValues: [:])
+        pluginValues: [:],
+        voicePreset: VoicePreset.none.rawValue)
 }
 
 @MainActor

@@ -3093,3 +3093,179 @@ struct AudioUnitPluginTests {
         #expect(Bool(true))
     }
 }
+
+// MARK: - Sounding like somebody else
+
+/// Whether the voice change actually works, measured rather than asserted.
+///
+/// The claim is specific: a male speaking voice through the higher-voice preset
+/// comes out with both its pitch and its resonances moved, by the amounts the
+/// preset says. Either one alone is a well-known failure — pitch alone is a
+/// chipmunk, formants alone is somebody talking through a tube — so both are
+/// measured, in the same signal, through the real chain.
+@Suite("Voice presets")
+struct VoicePresetTests {
+
+    /// A male speaking voice: 120 Hz fundamental under male formants.
+    private func maleVoice(seconds: Double, sampleRate: Double = 48000) -> [Float] {
+        let count = Int(sampleRate * seconds)
+        var samples = [Float](repeating: 0, count: count)
+        let formants = [700.0, 1220.0, 2600.0]
+        var harmonic = 1
+        while Double(harmonic) * 120 < sampleRate / 2 - 1000 {
+            let frequency = 120 * Double(harmonic)
+            var weight = 0.02
+            for (index, formant) in formants.enumerated() {
+                let bandwidth = 110.0 + Double(index) * 60
+                let distance = (frequency - formant) / bandwidth
+                weight += (1 / (1 + distance * distance)) / Double(index + 1)
+            }
+            for index in 0..<count {
+                samples[index] +=
+                    Float(weight * sin(2 * Double.pi * frequency * Double(index) / sampleRate))
+            }
+            harmonic += 1
+        }
+        let peak = samples.map(abs).max() ?? 1
+        return samples.map { $0 / peak * 0.4 }
+    }
+
+    /// Runs a signal through a real chain carrying the preset's stages.
+    private func through(_ preset: VoicePreset, _ input: [Float]) throws -> [Float] {
+        let kinds = Array(preset.stages)
+        guard !kinds.isEmpty else { return input }
+        let chain = try #require(
+            EffectChain(kinds: kinds, sampleRate: 48000, maximumFrames: 512))
+        chain.set("cents", of: .pitch, to: preset.cents)
+        chain.set("shift", of: .formant, to: preset.formantPercent)
+
+        var output: [Float] = []
+        var offset = 0
+        while offset + 512 <= input.count {
+            for index in 0..<512 { chain.inputBuffer[index] = input[offset + index] }
+            guard chain.render(frames: 512, sampleTime: Float64(offset)) else {
+                Issue.record("render failed")
+                return []
+            }
+            for index in 0..<512 { output.append(chain.outputBuffer[index]) }
+            offset += 512
+        }
+        // Past the fill of both stages.
+        return Array(output.dropFirst(8192))
+    }
+
+    /// Where the harmonics are, by autocorrelation. Shortest period that
+    /// correlates nearly as well as the best, so an octave down is not mistaken
+    /// for the answer.
+    private static func pitch(of samples: [Float], sampleRate: Double = 48000) -> Double {
+        let window = Array(samples.prefix(16384))
+        guard window.count > 900 else { return 0 }
+        var scores: [Int: Float] = [:]
+        var best: Float = 0
+        for lag in 90...800 {
+            var score: Float = 0
+            var energy: Float = 0
+            for index in 0..<(window.count - lag) {
+                score += window[index] * window[index + lag]
+                energy += window[index + lag] * window[index + lag]
+            }
+            let normalised = energy > 0 ? score / energy.squareRoot() : 0
+            scores[lag] = normalised
+            best = max(best, normalised)
+        }
+        let shortest = (90...800).first { (scores[$0] ?? 0) > best * 0.9 } ?? 90
+        return sampleRate / Double(shortest)
+    }
+
+    /// Where the energy sits, which moves with the resonances.
+    private func centroid(_ samples: [Float]) throws -> Double {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        samples.withUnsafeBufferPointer { analyser.add($0.baseAddress!, count: $0.count) }
+        var weighted = 0.0
+        var total = 0.0
+        for band in 0..<SpectrumAnalyser.bandCount {
+            let decibels = Double(analyser.decibels(ofBand: band))
+            guard decibels > -70 else { continue }
+            let amplitude = pow(10, decibels / 20)
+            weighted += analyser.centreFrequency(ofBand: band) * amplitude
+            total += amplitude
+        }
+        return total > 0 ? weighted / total : 0
+    }
+
+    /// The whole claim, in one test: both things move, by roughly the amounts
+    /// the preset says, in the same signal.
+    @Test("a male voice through the higher preset moves pitch and resonances together")
+    func higherVoice() throws {
+        let input = maleVoice(seconds: 1.2)
+        let output = try through(.masculineToFeminine, input)
+        try #require(!output.isEmpty)
+
+        let originalPitch = Self.pitch(of: input)
+        let shiftedPitch = Self.pitch(of: output)
+        #expect(abs(originalPitch - 120) < 6, "fixture pitch is \(originalPitch)")
+
+        // +500 cents is a factor of 2^(500/1200) = 1.335.
+        let expected = originalPitch * pow(2, 500.0 / 1200)
+        #expect(
+            abs(shiftedPitch - expected) / expected < 0.12,
+            "pitch \(originalPitch) → \(shiftedPitch), wanted about \(expected)")
+
+        // And the resonances went up too, which is the half that makes it a
+        // person rather than a chipmunk. Not by the formant ratio alone: the
+        // pitch stage moves the whole spectrum as well, so the centroid rises
+        // by more than 17%.
+        let before = try centroid(input)
+        let after = try centroid(output)
+        #expect(after > before * 1.1, "centroid \(before) → \(after)")
+    }
+
+    /// The other direction has to work too, and it is the one where a mistake
+    /// in the sign is invisible until somebody uses it.
+    @Test("the lower preset moves both the other way")
+    func lowerVoice() throws {
+        let input = maleVoice(seconds: 1.2)
+        let output = try through(.feminineToMasculine, input)
+        try #require(!output.isEmpty)
+        #expect(Self.pitch(of: output) < Self.pitch(of: input) * 0.9)
+        #expect(try centroid(output) < (try centroid(input)) * 0.98)
+    }
+
+    /// Every preset moves both in the same direction, which is the entire point
+    /// — one of them going the wrong way is what a chipmunk is.
+    @Test("pitch and formants always move the same way")
+    func directionsAgree() {
+        for preset in VoicePreset.allCases where preset != .none {
+            #expect(
+                preset.cents.sign == preset.formantPercent.sign,
+                "\(preset.rawValue) moves them in opposite directions")
+        }
+    }
+
+    /// Nothing enabled means nothing switched on, because an idle stage still
+    /// costs its latency.
+    @Test("the empty preset enables no stages at all")
+    func noneIsFree() {
+        #expect(VoicePreset.none.stages.isEmpty)
+        #expect(VoicePreset.none.latencyFrames(sampleRate: 48000) == 0)
+        for preset in VoicePreset.allCases where preset != .none {
+            #expect(!preset.stages.isEmpty)
+            #expect(preset.latencyFrames(sampleRate: 48000) > 0)
+        }
+    }
+
+    @Test("every preset is named and explained")
+    func described() {
+        for preset in VoicePreset.allCases {
+            #expect(!preset.title.isEmpty)
+            #expect(!preset.detail.isEmpty)
+        }
+    }
+
+    /// Stored names have to stay put or a saved setting stops loading.
+    @Test("stored names are stable")
+    func storedNames() {
+        #expect(VoicePreset.masculineToFeminine.rawValue == "masculineToFeminine")
+        #expect(VoicePreset(rawValue: "child") == .child)
+    }
+}
