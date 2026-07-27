@@ -69,7 +69,14 @@ final class RouterModel {
     /// and by definition ends bit-exactness, so it is a deliberate trade rather
     /// than something to enable quietly on the user's behalf.
     var voiceIsolationEnabled = false {
-        didSet { if oldValue != voiceIsolationEnabled { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != voiceIsolationEnabled else { return }
+            if voiceIsolationEnabled {
+                enabledEffects.insert(.voiceIsolation)
+            } else {
+                enabledEffects.remove(.voiceIsolation)
+            }
+        }
     }
     var voiceIsolationMix: Float = 100 {
         didSet { if oldValue != voiceIsolationMix { persist(); restartIfRunning() } }
@@ -234,6 +241,29 @@ final class RouterModel {
         persist()
     }
 
+    // MARK: Processing chain
+
+    /// Effects switched on, in whatever order they were toggled. The engine
+    /// sorts them into signal order — a limiter ahead of a compressor is a
+    /// configuration mistake, not a preference.
+    var enabledEffects: Set<EffectKind> = [] {
+        didSet { if oldValue != enabledEffects { persist(); restartIfRunning() } }
+    }
+
+    func setEffect(_ kind: EffectKind, enabled: Bool) {
+        if enabled { enabledEffects.insert(kind) } else { enabledEffects.remove(kind) }
+        // The old single toggle stays in step so saved settings and the menu bar
+        // panel keep working.
+        voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
+    }
+
+    /// Latency every enabled stage adds together, in milliseconds.
+    var addedLatencyMilliseconds: Double {
+        let rate = pathQuality?.sampleRate ?? 48000
+        guard rate > 0 else { return 0 }
+        return Double(engine.effectLatencyFrames) / rate * 1000
+    }
+
     /// Latency the isolation stage adds, in milliseconds.
     var voiceIsolationLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
@@ -346,7 +376,8 @@ final class RouterModel {
         let saved = PreferencesStore.load()
         autoStart = saved.autoStart
         capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
-        voiceIsolationEnabled = saved.voiceIsolationEnabled
+        enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
+        voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
         monoChannel = saved.monoChannel
@@ -374,7 +405,8 @@ final class RouterModel {
             voiceIsolationEnabled: voiceIsolationEnabled,
             voiceIsolationMix: voiceIsolationMix,
             preferredSampleRate: preferredSampleRate,
-            capturedAppBundleIDs: Array(capturedAppBundleIDs)))
+            capturedAppBundleIDs: Array(capturedAppBundleIDs),
+            enabledEffects: enabledEffects.map(\.rawValue)))
     }
 
     // MARK: Devices
@@ -506,8 +538,9 @@ final class RouterModel {
                 destinationDeviceUID: destination,
                 routes: routeList,
                 taps: taps,
+                effects: Array(enabledEffects),
                 preferredSampleRate: preferredSampleRate,
-                voiceIsolation: voiceIsolationEnabled
+                voiceIsolation: enabledEffects.contains(.voiceIsolation)
                     ? VoiceIsolationSettings(mixPercent: voiceIsolationMix)
                     : nil)
             isRunning = true

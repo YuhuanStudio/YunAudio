@@ -108,6 +108,9 @@ public final class RoutingEngine: @unchecked Sendable {
 
     /// Latency the isolation model adds, in frames. Zero when it is off.
     public private(set) var voiceIsolationLatencyFrames = 0
+    /// Latency every enabled processing stage adds together, in frames.
+    public private(set) var effectLatencyFrames = 0
+    private var effectChain: EffectChain?
     /// Renders the model refused. Non-zero means audio passed through
     /// unprocessed, which the UI should surface rather than hide.
     public var voiceIsolationFailures: UInt64 { isolationFailureCounter?.pointee ?? 0 }
@@ -148,6 +151,7 @@ public final class RoutingEngine: @unchecked Sendable {
         destinationDeviceUID: String,
         routes: [Route],
         taps: [ProcessTap] = [],
+        effects: [EffectKind] = [],
         preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
         voiceIsolation: VoiceIsolationSettings? = nil,
@@ -220,8 +224,23 @@ public final class RoutingEngine: @unchecked Sendable {
         // up before the routes are resolved: a route that reads the model's
         // output has a different stride and channel index from one that reads
         // the raw device buffer.
+        // A chain of more than one stage supersedes the single isolation slot:
+        // it renders the same model plus whatever else is switched on, so
+        // running both would process the signal twice.
         var isolatedSource: ChannelRef?
-        if let settings = voiceIsolation, let first = routes.first {
+        if effects.count > 1, let first = routes.first {
+            isolatedSource = first.source
+            if let chain = EffectChain(
+                kinds: effects, sampleRate: rate, maximumFrames: Int(bufferFrames)) {
+                effectChain = chain
+                effectLatencyFrames = chain.latencyFrames
+                voiceIsolationLatencyFrames =
+                    effects.contains(.voiceIsolation) ? chain.latencyFrames : 0
+            } else {
+                isolatedSource = nil
+                lastIsolationError = "the processing chain could not be built"
+            }
+        } else if let settings = voiceIsolation, let first = routes.first {
             isolatedSource = first.source
             let unit = VoiceIsolationUnit(
                 sampleRate: rate, maximumFrames: Int(bufferFrames))
@@ -258,7 +277,26 @@ public final class RoutingEngine: @unchecked Sendable {
         self.graph = graph
         activeRoutes = routes
 
-        if let unit = isolationUnit, let reference = isolatedSource,
+        if let chain = effectChain, let reference = isolatedSource,
+           let point = inputMap[reference] {
+            let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+            failures.initialize(to: 0)
+            isolationFailureCounter = failures
+
+            let block = UnsafeMutablePointer<RTVoiceIsolation>.allocate(capacity: 1)
+            block.initialize(to: RTVoiceIsolation(
+                enabled: 1,
+                sourceBuffer: point.buffer,
+                sourceChannel: point.channel,
+                unit: Unmanaged.passUnretained(chain).toOpaque(),
+                inputBuffer: chain.inputBuffer,
+                outputBuffer: chain.outputBuffer,
+                maximumFrames: Int32(chain.maximumFrames),
+                renderFailures: failures))
+            isolationBlock = block
+            graph.pointee.voiceIsolation = block
+            graph.pointee.isolationIsChain = 1
+        } else if let unit = isolationUnit, let reference = isolatedSource,
            let point = inputMap[reference] {
             let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             failures.initialize(to: 0)
@@ -382,7 +420,9 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         isolationFailureCounter = nil
         isolationUnit = nil
+        effectChain = nil
         voiceIsolationLatencyFrames = 0
+        effectLatencyFrames = 0
 
         inputMap.removeAll()
         outputMap.removeAll()
@@ -588,7 +628,7 @@ public final class RoutingEngine: @unchecked Sendable {
     public var pathQuality: PathQuality? {
         guard let aggregate, let device = aggregate.device else { return nil }
         let drifted = aggregate.driftCorrectedUIDs
-        let processing = isolationUnit != nil
+        let processing = isolationUnit != nil || effectChain != nil
         return PathQuality(
             // Nothing is being drift-corrected, nothing is processing the
             // signal, and where the first was only true because the driver

@@ -13,6 +13,11 @@ enum PanelRenderer {
         // The preferences window scrolls, and a ScrollView has no intrinsic
         // height offscreen — without an explicit size it renders as an empty
         // pane. Pinned to the window's minimum size.
+        render(
+            MainWindow(model: model, isRendering: true),
+            basename: "window", directory: directory,
+            size: CGSize(width: 1000, height: 620))
+
         for section in PreferencesWindow.Section.allCases {
             render(
                 PreferencesWindow(model: model, initialSection: section, isRendering: true),

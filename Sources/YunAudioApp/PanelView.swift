@@ -14,6 +14,7 @@ struct PanelView: View {
     /// otherwise shows the onboarding card whenever the driver is absent, which
     /// hides everything worth inspecting.
     var forcesRoutedLayout = false
+    @Environment(\.openWindow) private var openWindow
 
     // Only the mixer starts open: it is the one section watched while routing.
     // Devices open on first run, when there is nothing configured to collapse.
@@ -36,21 +37,19 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 header
                 if model.isDriverInstalled || forcesRoutedLayout {
-                    presets
+                    // Deliberately thin. This drops from the status item and has
+                    // to stay glanceable; everything that needs room lives in
+                    // the main window.
                     signalPath
-                    devicePickers
-                    appSources
-                    if !model.activeRoutes.isEmpty { mixer }
                     if model.isRunning { runtimeDetail }
                     if let error = model.lastError { errorRow(error) }
-                    voiceIsolation
                     footer
                 } else {
                     driverMissing
                 }
             }
             .padding(Yun.Space.lg)
-            .frame(width: 340)
+            .frame(width: 320)
         }
         .background(.clear)
     }
@@ -434,7 +433,7 @@ struct PanelView: View {
             Button(model.isRunning ? "Stop" : "Start") { model.toggle() }
                 .buttonStyle(YunButtonStyle(.primary))
 
-            Button("Refresh") { model.refreshDevices() }
+            Button("Open YunAudio") { openWindow(id: "main") }
                 .buttonStyle(YunButtonStyle(.secondary, small: true))
 
             Spacer()

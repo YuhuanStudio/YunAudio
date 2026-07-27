@@ -19,6 +19,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var preferredSampleRate: Double
     /// Bundle identifiers of applications captured as routing sources.
     var capturedAppBundleIDs: [String]
+    /// Raw values of the enabled processing stages.
+    var enabledEffects: [String]
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -30,7 +32,8 @@ struct Preferences: Codable, Equatable, Sendable {
         voiceIsolationEnabled: false,
         voiceIsolationMix: 100,
         preferredSampleRate: 48000,
-        capturedAppBundleIDs: [])
+        capturedAppBundleIDs: [],
+        enabledEffects: [])
 }
 
 @MainActor

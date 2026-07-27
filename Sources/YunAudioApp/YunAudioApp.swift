@@ -19,6 +19,14 @@ struct YunAudioApp: App {
     }
 
     var body: some Scene {
+        // The application proper. A routing tool wants width — sources, mixer
+        // and signal path side by side — not a tall column.
+        Window("YunAudio", id: "main") {
+            MainWindow(model: model)
+        }
+        .defaultSize(width: 1000, height: 620)
+        .windowResizability(.contentMinSize)
+
         Settings {
             PreferencesWindow(model: model)
         }

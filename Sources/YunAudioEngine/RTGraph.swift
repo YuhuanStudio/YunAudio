@@ -68,6 +68,9 @@ struct RTGraph {
 
     /// The voice isolation stage, or null when it is not in use.
     var voiceIsolation: UnsafeMutablePointer<RTVoiceIsolation>?
+    /// Non-zero when the isolation slot holds a multi-stage chain rather than
+    /// the single isolation unit. They render through different types.
+    var isolationIsChain: Int32
 
     /// Parameter changes waiting to be applied. Drained at the top of each
     /// cycle so a fader move lands without rebuilding anything.
@@ -109,6 +112,7 @@ struct RTGraph {
             clockSampleTime: clockSampleStorage,
             clockHostTime: clockHostStorage,
             voiceIsolation: nil,
+            isolationIsChain: 0,
             commands: yun_rt_queue_create(256),
             selftest: nil))
         return graph
@@ -210,9 +214,17 @@ func yunAudioIOProc(
                 for frame in 0..<frames {
                     staging[frame] = source[frame * stride + channel]
                 }
-                let unit = Unmanaged<VoiceIsolationUnit>
-                    .fromOpaque(isolation.pointee.unit).takeUnretainedValue()
-                if unit.render(frames: frames, sampleTime: inputTime.pointee.mSampleTime) {
+                let rendered: Bool
+                if graph.pointee.isolationIsChain != 0 {
+                    rendered = Unmanaged<EffectChain>
+                        .fromOpaque(isolation.pointee.unit).takeUnretainedValue()
+                        .render(frames: frames, sampleTime: inputTime.pointee.mSampleTime)
+                } else {
+                    rendered = Unmanaged<VoiceIsolationUnit>
+                        .fromOpaque(isolation.pointee.unit).takeUnretainedValue()
+                        .render(frames: frames, sampleTime: inputTime.pointee.mSampleTime)
+                }
+                if rendered {
                     isolatedFrames = frames
                 } else {
                     isolation.pointee.renderFailures.pointee &+= 1
