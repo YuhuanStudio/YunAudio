@@ -113,7 +113,9 @@ struct PanelView: View {
     private var devicePickers: some View {
         YunDisclosure(
             "Devices",
-            subtitle: model.selectedSource.map { "\($0.name) → \(model.selectedDestination?.name ?? "none")" },
+            subtitle: model.selectedSource.map {
+                "\($0.name) → \(model.selectedDestination?.name ?? "none")"
+            },
             isExpanded: devicesExpanded
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
@@ -180,10 +182,12 @@ struct PanelView: View {
                 }
                 // The Seiren V3 Pro presents three input channels with only the
                 // first carrying the capsule, so this is not an exotic case.
-                Text("This device reports \(source.inputChannels) input channels; not all of them necessarily carry audio.")
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "This device reports \(source.inputChannels) input channels; not all of them necessarily carry audio."
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -214,10 +218,12 @@ struct PanelView: View {
                         tone: .success)
                 }
                 if model.clockLockFailed {
-                    Text("The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -238,10 +244,12 @@ struct PanelView: View {
                 Text("The YunAudio device is not installed")
                     .font(Yun.Text.label)
                     .foregroundStyle(Yun.Palette.textPrimary)
-                Text("Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio.")
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio."
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: Yun.Space.sm) {
                     if model.canInstallDriver {
                         Button(model.isInstallingDriver ? "Installing…" : "Install") {
@@ -254,10 +262,12 @@ struct PanelView: View {
                         .buttonStyle(YunButtonStyle(.secondary, small: true))
                 }
                 if !model.canInstallDriver {
-                    Text("Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
                 if let message = model.driverMessage {
                     Text(message)
@@ -373,7 +383,8 @@ struct PanelView: View {
                     Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(
-                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary)
+                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary
+                        )
                         .frame(width: 18, height: 18)
                         .background(Yun.Palette.elevated, in: .rect(cornerRadius: 5))
                 }
@@ -392,9 +403,10 @@ struct PanelView: View {
                     .frame(width: 90)
             }
 
-            YunFader(decibels: Binding(
-                get: { model.faderDecibels(forRouteAt: index) },
-                set: { model.setFaderDecibels($0, forRouteAt: index) }))
+            YunFader(
+                decibels: Binding(
+                    get: { model.faderDecibels(forRouteAt: index) },
+                    set: { model.setFaderDecibels($0, forRouteAt: index) }))
         }
     }
 
@@ -414,19 +426,24 @@ struct PanelView: View {
                     // The cost is stated up front. Enabling this is a different
                     // product from the 1.3 ms bypass path, and the panel should
                     // not let that happen quietly.
-                    Text(model.isRunning
-                        ? String(
-                            format: "Apple's on-device model. Adds %.0f ms and ends bit-exactness.",
-                            model.voiceIsolationLatencyMilliseconds)
-                        : "Apple's on-device model. Adds about 56 ms and ends bit-exactness.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        model.isRunning
+                            ? String(
+                                format:
+                                    "Apple's on-device model. Adds %.0f ms and ends bit-exactness.",
+                                model.voiceIsolationLatencyMilliseconds)
+                            : "Apple's on-device model. Adds about 56 ms and ends bit-exactness."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text("Removes background noise using the model behind FaceTime's Voice Isolation.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        "Removes background noise using the model behind FaceTime's Voice Isolation."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

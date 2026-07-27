@@ -79,7 +79,8 @@ public struct StreamFormat: Sendable, Hashable, CustomStringConvertible {
 
     public var description: String {
         let rate = sampleRate == 0 ? "any" : "\(Int(sampleRate)) Hz"
-        return "\(rate) · \(channels)ch · \(encoding)\(isInterleaved ? "" : " · non-interleaved")"
+        return
+            "\(rate) · \(channels)ch · \(encoding)\(isInterleaved ? "" : " · non-interleaved")"
     }
 }
 
@@ -125,7 +126,9 @@ extension AudioDevice {
     /// Every distinct physical format the device can present on input.
     public var availableInputFormats: [StreamFormat] {
         var seen: Set<StreamFormat> = []
-        return inputStreams.flatMap(\.availablePhysicalFormats).filter { seen.insert($0).inserted }
+        return inputStreams.flatMap(\.availablePhysicalFormats).filter {
+            seen.insert($0).inserted
+        }
     }
 
     /// True when the hardware will hand us 32-bit float directly, so no

@@ -43,7 +43,8 @@ public struct AudioProcess: Sendable, Identifiable, Hashable {
         self.pid = pid
         bundleID = id.optionalString(of: .processBundleID)
         isPlaying = (id.optionalValue(of: .processIsRunningOutput) ?? 0) != 0
-        name = names[pid]
+        name =
+            names[pid]
             ?? bundleID?.split(separator: ".").last.map(String.init)
             ?? "PID \(pid)"
     }
@@ -69,6 +70,8 @@ public final class ProcessTap {
     ///   - muteBehavior: Whether the tapped application keeps playing through
     ///     the speakers. `.mutedWhenTapped` is the useful one for streaming: the
     ///     audio reaches the mix without also reaching the room.
+    /// - Throws: `ProcessTapError.creationFailed` when CoreAudio refuses, which
+    ///   happens when the process has gone away between listing and tapping.
     public init(processIDs: [AudioObjectID], muteBehavior: TapMuteBehavior = .unmuted) throws {
         // NS_REFINED_FOR_SWIFT turns the NSNumber array in the header into a
         // plain [AudioObjectID] on this side.
@@ -161,7 +164,8 @@ public enum AudioProcesses {
     public static func all(includingSilent: Bool = false) throws -> [AudioProcess] {
         let names = runningApplicationNames()
         let ids = try AudioObjectID.system.array(of: .processList)
-        return ids
+        return
+            ids
             .compactMap { AudioProcess(id: $0, names: names) }
             .filter { includingSilent || $0.isPlaying || $0.bundleID != nil }
             .sorted { lhs, rhs in

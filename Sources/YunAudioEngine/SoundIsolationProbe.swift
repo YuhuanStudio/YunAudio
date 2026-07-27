@@ -49,7 +49,8 @@ public struct SoundIsolationReport: Sendable {
             worstDeadlineUse * 100,
             fitsInline
                 ? "safe to render inline on the IO thread"
-                : "too slow for the IO thread — must run on a workgroup thread with latency compensation")
+                : "too slow for the IO thread — must run on a workgroup thread with latency compensation"
+        )
     }
 }
 
@@ -78,7 +79,7 @@ public enum SoundIsolation {
 
         var instance: AudioComponentInstance?
         guard AudioComponentInstanceNew(component, &instance) == noErr,
-              let unit = instance
+            let unit = instance
         else {
             return .init(
                 isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,

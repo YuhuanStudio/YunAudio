@@ -38,7 +38,8 @@ public final class RazerDevice {
 
     /// Every Razer device exposing the vendor HID interface.
     public static func discover() -> [RazerDevice] {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let manager = IOHIDManagerCreate(
+            kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         // Matching on the vendor alone, then filtering by usage page below:
         // asking IOKit for both at once misses devices whose usage page lives on
         // a collection rather than the top level.
@@ -54,7 +55,8 @@ public final class RazerDevice {
             // Seiren V3 Pro the primary is Consumer Control — so the usage pairs
             // are what decide.
             let pairs = (property(device, kIOHIDDeviceUsagePairsKey) as? [[String: Int]]) ?? []
-            let vendorPages = pairs
+            let vendorPages =
+                pairs
                 .compactMap { $0[kIOHIDDeviceUsagePageKey] }
                 .filter(isVendorUsagePage)
             let primary = property(device, kIOHIDPrimaryUsagePageKey) as? Int ?? 0
@@ -76,13 +78,15 @@ public final class RazerDevice {
     /// Prints what every Razer HID device publishes, for working out which
     /// interface carries the vendor protocol on a given model.
     public static func dumpCandidates() {
-        let manager = IOHIDManagerCreate(kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
+        let manager = IOHIDManagerCreate(
+            kCFAllocatorDefault, IOOptionBits(kIOHIDOptionsTypeNone))
         IOHIDManagerSetDeviceMatching(
             manager, [kIOHIDVendorIDKey: vendorID] as CFDictionary)
         IOHIDManagerOpen(manager, IOOptionBits(kIOHIDOptionsTypeNone))
         defer { IOHIDManagerClose(manager, IOOptionBits(kIOHIDOptionsTypeNone)) }
 
-        guard let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, !set.isEmpty else {
+        guard let set = IOHIDManagerCopyDevices(manager) as? Set<IOHIDDevice>, !set.isEmpty
+        else {
             print("no HID devices from vendor 0x1532")
             return
         }
@@ -91,9 +95,10 @@ public final class RazerDevice {
             let productID = property(device, kIOHIDProductIDKey) as? Int ?? 0
             let usagePage = property(device, kIOHIDPrimaryUsagePageKey) as? Int ?? 0
             let usage = property(device, kIOHIDPrimaryUsageKey) as? Int ?? 0
-            print(String(
-                format: "%@  pid 0x%04X  primary usage page 0x%04X usage 0x%02X",
-                name, productID, usagePage, usage))
+            print(
+                String(
+                    format: "%@  pid 0x%04X  primary usage page 0x%04X usage 0x%02X",
+                    name, productID, usagePage, usage))
             if let pairs = property(device, kIOHIDDeviceUsagePairsKey) as? [[String: Int]] {
                 for pair in pairs {
                     let page = pair[kIOHIDDeviceUsagePageKey] ?? 0
@@ -170,21 +175,23 @@ public final class RazerDevice {
             }
 
             switch tag {
-            case 0x04: usagePage = value                       // Usage Page
-            case 0x84: reportID = value                        // Report ID
-            case 0x74: reportSize = value                      // Report Size
-            case 0x94: reportCount = value                     // Report Count
-            case 0xB0:                                          // Feature
+            case 0x04: usagePage = value  // Usage Page
+            case 0x84: reportID = value  // Report ID
+            case 0x74: reportSize = value  // Report Size
+            case 0x94: reportCount = value  // Report Count
+            case 0xB0:  // Feature
                 let bytesPerReport = (reportSize * reportCount + 7) / 8
-                lines.append(String(
-                    format: "  feature report id 0x%02X · %d bytes · usage page 0x%04X",
-                    reportID, bytesPerReport, usagePage))
-            case 0x80, 0x90:                                    // Input / Output
+                lines.append(
+                    String(
+                        format: "  feature report id 0x%02X · %d bytes · usage page 0x%04X",
+                        reportID, bytesPerReport, usagePage))
+            case 0x80, 0x90:  // Input / Output
                 let bytesPerReport = (reportSize * reportCount + 7) / 8
                 let kind = tag == 0x80 ? "input" : "output"
-                lines.append(String(
-                    format: "  %@ report id 0x%02X · %d bytes · usage page 0x%04X",
-                    kind, reportID, bytesPerReport, usagePage))
+                lines.append(
+                    String(
+                        format: "  %@ report id 0x%02X · %d bytes · usage page 0x%04X",
+                        kind, reportID, bytesPerReport, usagePage))
             default: break
             }
             index += 1 + length

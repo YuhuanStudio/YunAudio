@@ -46,6 +46,10 @@ public final class AggregateDevice {
     ///     device: virtual endpoints follow the host clock and adapt cheaply,
     ///     whereas resampling the microphone would touch the signal we are
     ///     trying to keep intact.
+    ///   - taps: Process taps to fold in as members. Their channels appear
+    ///     after the sub-devices' own, on the input side only.
+    /// - Throws: `AggregateError` when the member list is empty, the named clock
+    ///   master is not among them, or CoreAudio refuses to build the device.
     public init(
         name: String,
         subDevices: [SubDevice],
@@ -158,7 +162,8 @@ public final class AggregateDevice {
     /// Highest sample rate every device in the list can present.
     public static func highestCommonSampleRate(among devices: [AudioDevice]) -> Double? {
         guard let first = devices.first else { return nil }
-        let shared = devices.dropFirst().reduce(Set(first.availableSampleRates)) { common, device in
+        let shared = devices.dropFirst().reduce(Set(first.availableSampleRates)) {
+            common, device in
             common.intersection(device.availableSampleRates)
         }
         return shared.max()

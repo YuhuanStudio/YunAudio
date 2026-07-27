@@ -89,8 +89,10 @@ struct CommandQueueTests {
         defer { yun_rt_queue_free(queue) }
 
         var accepted = 0
-        for index in 0..<100 where yun_rt_queue_push(
-            queue, YunRTCommand(kind: 0, index: Int32(index), value: 0)) {
+        for index in 0..<100
+        where yun_rt_queue_push(
+            queue, YunRTCommand(kind: 0, index: Int32(index), value: 0))
+        {
             accepted += 1
         }
         // Capacity rounds up to a power of two and one slot distinguishes full

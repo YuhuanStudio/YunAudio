@@ -35,12 +35,15 @@ enum PanelRenderer {
             // The rendered tree is wrapped in the same background the glass
             // shell sits on, so contrast is judged against a real surface
             // rather than transparency.
-            let sized = size.map { AnyView(view.frame(width: $0.width, height: $0.height)) }
+            let sized =
+                size.map { AnyView(view.frame(width: $0.width, height: $0.height)) }
                 ?? AnyView(view)
-            let content = sized
+            let content =
+                sized
                 .environment(\.colorScheme, scheme)
-                .background(scheme == .light
-                    ? Color(hex: 0xF2F2F4) : Color(hex: 0x0C0C0E))
+                .background(
+                    scheme == .light
+                        ? Color(hex: 0xF2F2F4) : Color(hex: 0x0C0C0E))
 
             let renderer = ImageRenderer(content: content)
             renderer.scale = 2
@@ -53,9 +56,9 @@ enum PanelRenderer {
             defer { NSApp?.appearance = previous }
 
             guard let image = renderer.nsImage,
-                  let tiff = image.tiffRepresentation,
-                  let bitmap = NSBitmapImageRep(data: tiff),
-                  let png = bitmap.representation(using: .png, properties: [:])
+                let tiff = image.tiffRepresentation,
+                let bitmap = NSBitmapImageRep(data: tiff),
+                let png = bitmap.representation(using: .png, properties: [:])
             else {
                 FileHandle.standardError.write(Data("failed to render \(name)\n".utf8))
                 continue

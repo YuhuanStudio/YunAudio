@@ -186,13 +186,14 @@ public struct YunLevelMeter: View {
 
                 // The top two segments read as clipping headroom, so they carry
                 // the warning and danger hues rather than the neutral accent.
-                let color: Color = if index >= segments - 1 {
-                    Yun.Palette.danger
-                } else if index >= segments - 3 {
-                    Yun.Palette.warning
-                } else {
-                    Yun.Palette.accent
-                }
+                let color: Color =
+                    if index >= segments - 1 {
+                        Yun.Palette.danger
+                    } else if index >= segments - 3 {
+                        Yun.Palette.warning
+                    } else {
+                        Yun.Palette.accent
+                    }
 
                 if isLit || isHold {
                     context.fill(shape, with: .color(color.opacity(isLit ? 1 : 0.45)))
@@ -229,7 +230,9 @@ public struct YunSignalPath: View {
 
             Image(systemName: "arrow.right")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(isActive ? Yun.Palette.textSecondary : Yun.Palette.textTertiary)
+                .foregroundStyle(
+                    isActive ? Yun.Palette.textSecondary : Yun.Palette.textTertiary
+                )
                 .frame(width: 14)
 
             endpoint(destinationName, systemImage: "waveform")

@@ -21,15 +21,17 @@ import YunAudioHAL
 /// to reconfigure anything.
 public final class EchoCancellingCapture {
     /// Frames of echo-cancelled microphone audio, mono float32.
-    public typealias CaptureHandler = @Sendable (
-        UnsafePointer<Float>, Int, AudioTimeStamp
-    ) -> Void
+    public typealias CaptureHandler =
+        @Sendable (
+            UnsafePointer<Float>, Int, AudioTimeStamp
+        ) -> Void
 
     /// Fills the far-end buffer with what should be played to the speaker.
     /// Return the number of frames written; anything short is treated as silence.
-    public typealias FarEndProvider = @Sendable (
-        UnsafeMutablePointer<Float>, Int
-    ) -> Int
+    public typealias FarEndProvider =
+        @Sendable (
+            UnsafeMutablePointer<Float>, Int
+        ) -> Int
 
     private let unit: AudioComponentInstance
     private let aggregate: AggregateDevice?
@@ -59,6 +61,8 @@ public final class EchoCancellingCapture {
     ///   - speakerUID: The speaker whose output should be cancelled out of it.
     ///     Pass nil to leave the unit on the system defaults, which the HAL will
     ///     pair for it.
+    ///   - maximumFrames: Largest block the unit will be asked to render. Sets
+    ///     the size of the buffers allocated here, so it must not be exceeded.
     public init?(microphoneUID: String, speakerUID: String?, maximumFrames: Int = 512) {
         self.maximumFrames = maximumFrames
 
@@ -68,15 +72,17 @@ public final class EchoCancellingCapture {
         var rate: Double = 48000
 
         if let speakerUID,
-           let microphone = try? AudioDevices.device(uid: microphoneUID),
-           let speaker = try? AudioDevices.device(uid: speakerUID) {
+            let microphone = try? AudioDevices.device(uid: microphoneUID),
+            let speaker = try? AudioDevices.device(uid: speakerUID)
+        {
             let members = [microphone, speaker]
             // 48 kHz unless neither device offers it: echo cancellation is a
             // voice feature and gains nothing from a higher rate.
             let shared = Set(microphone.availableSampleRates)
                 .intersection(speaker.availableSampleRates)
             rate = shared.contains(48000) ? 48000 : (shared.max() ?? 48000)
-            restorableRates = (try? AggregateDevice.alignSampleRate(rate, across: members)) ?? [:]
+            restorableRates =
+                (try? AggregateDevice.alignSampleRate(rate, across: members)) ?? [:]
 
             builtAggregate = try? AggregateDevice(
                 name: "YunAudio Echo Cancellation",
@@ -223,7 +229,8 @@ public final class EchoCancellingCapture {
         free(bufferList.unsafeMutablePointer)
     }
 
-    public func start(capture: @escaping CaptureHandler, farEnd: FarEndProvider? = nil) -> Bool {
+    public func start(capture: @escaping CaptureHandler, farEnd: FarEndProvider? = nil) -> Bool
+    {
         callbacks.capture = capture
         callbacks.farEnd = farEnd
         guard AudioOutputUnitStart(unit) == noErr else { return false }

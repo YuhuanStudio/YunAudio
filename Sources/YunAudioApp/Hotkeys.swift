@@ -26,8 +26,10 @@ final class HotkeyManager {
         /// Control-Option is largely unused territory.
         var defaultShortcut: Shortcut {
             switch self {
-            case .toggleRouting: Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: [.control, .option])
-            case .toggleMute: Shortcut(keyCode: UInt32(kVK_ANSI_M), modifiers: [.control, .option])
+            case .toggleRouting:
+                Shortcut(keyCode: UInt32(kVK_ANSI_R), modifiers: [.control, .option])
+            case .toggleMute:
+                Shortcut(keyCode: UInt32(kVK_ANSI_M), modifiers: [.control, .option])
             }
         }
     }
@@ -95,10 +97,11 @@ final class HotkeyManager {
             // input source active the current layout resolves R to ㄐ, which is
             // not what is printed on the key. This is the same source macOS
             // itself uses to draw shortcuts in menus.
-            guard let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?
+            guard
+                let source = TISCopyCurrentASCIICapableKeyboardLayoutInputSource()?
                     .takeRetainedValue(),
-                  let pointer = TISGetInputSourceProperty(
-                      source, kTISPropertyUnicodeKeyLayoutData)
+                let pointer = TISGetInputSourceProperty(
+                    source, kTISPropertyUnicodeKeyLayoutData)
             else { return nil }
             let data = Unmanaged<CFData>.fromOpaque(pointer).takeUnretainedValue() as Data
 

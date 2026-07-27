@@ -100,7 +100,8 @@ public struct YunSegmented<Value: Hashable>: View {
                     Text(option.title)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(
-                            isSelected ? Yun.Palette.textPrimary : Yun.Palette.textTertiary)
+                            isSelected ? Yun.Palette.textPrimary : Yun.Palette.textTertiary
+                        )
                         .lineLimit(1)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 5)
@@ -108,7 +109,8 @@ public struct YunSegmented<Value: Hashable>: View {
                             isSelected
                                 ? Yun.Palette.accentSubtle
                                 : Yun.Palette.elevated.opacity(0.5),
-                            in: .rect(cornerRadius: Yun.Radius.control))
+                            in: .rect(cornerRadius: Yun.Radius.control)
+                        )
                         .overlay {
                             RoundedRectangle(cornerRadius: Yun.Radius.control)
                                 .strokeBorder(
@@ -182,7 +184,8 @@ public struct YunSelect<Value: Hashable>: View {
                 Text(selected?.title ?? placeholder)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(
-                        selected == nil ? Yun.Palette.textMuted : Yun.Palette.textPrimary)
+                        selected == nil ? Yun.Palette.textMuted : Yun.Palette.textPrimary
+                    )
                     .lineLimit(1)
                     .truncationMode(.middle)
 
@@ -201,7 +204,8 @@ public struct YunSelect<Value: Hashable>: View {
             .padding(.vertical, 7)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                Yun.Palette.elevated.opacity(0.5), in: .rect(cornerRadius: Yun.Radius.control))
+                Yun.Palette.elevated.opacity(0.5), in: .rect(cornerRadius: Yun.Radius.control)
+            )
             .overlay {
                 RoundedRectangle(cornerRadius: Yun.Radius.control)
                     .strokeBorder(
@@ -257,7 +261,8 @@ public struct YunSelect<Value: Hashable>: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
                 isSelected ? Yun.Palette.accentSubtle : .clear,
-                in: .rect(cornerRadius: 6))
+                in: .rect(cornerRadius: 6)
+            )
             .contentShape(.rect(cornerRadius: 6))
         }
         .buttonStyle(.plain)
@@ -327,7 +332,8 @@ public struct YunFader: View {
                 DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         let ratio = Float(max(0, min(1, value.location.x / width)))
-                        decibels = range.lowerBound
+                        decibels =
+                            range.lowerBound
                             + ratio * (range.upperBound - range.lowerBound)
                     })
         }
@@ -362,7 +368,8 @@ public struct YunToggleStyle: ToggleStyle {
                     Capsule()
                         .fill(
                             configuration.isOn
-                                ? Yun.Palette.accent : Yun.Palette.elevated)
+                                ? Yun.Palette.accent : Yun.Palette.elevated
+                        )
                         .overlay {
                             Capsule().strokeBorder(
                                 configuration.isOn ? .clear : Yun.Palette.border, lineWidth: 1)
@@ -371,7 +378,8 @@ public struct YunToggleStyle: ToggleStyle {
                     Circle()
                         .fill(
                             configuration.isOn
-                                ? Yun.Palette.accentForeground : Yun.Palette.card)
+                                ? Yun.Palette.accentForeground : Yun.Palette.card
+                        )
                         .frame(width: 14, height: 14)
                         .padding(.horizontal, 2)
                         .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)

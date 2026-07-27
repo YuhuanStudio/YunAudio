@@ -25,7 +25,8 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         voiceIsolationEnabled: false,
         voiceIsolationMix: 100,
         channelMode: SourceChannelMode.mono.rawValue,
-        note: "48 kHz and a small buffer. Anything higher is resampled back down at the far end.")
+        note:
+            "48 kHz and a small buffer. Anything higher is resampled back down at the far end.")
 
     static let noisyRoom = RoutePreset(
         name: "Noisy room",

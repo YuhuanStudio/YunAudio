@@ -82,7 +82,9 @@ extension AudioObjectID {
     public func isSettable(_ property: AudioProperty<some Any>) -> Bool {
         var address = property.address
         var settable: DarwinBoolean = false
-        guard AudioObjectIsPropertySettable(self, &address, &settable) == noErr else { return false }
+        guard AudioObjectIsPropertySettable(self, &address, &settable) == noErr else {
+            return false
+        }
         return settable.boolValue
     }
 
@@ -112,7 +114,8 @@ extension AudioObjectID {
         }
         guard size == UInt32(MemoryLayout<Value>.size) else {
             throw AudioHALError.unexpectedSize(
-                expected: MemoryLayout<Value>.size, actual: Int(size), selector: property.selector)
+                expected: MemoryLayout<Value>.size, actual: Int(size),
+                selector: property.selector)
         }
         return buffer.pointee
     }
@@ -128,7 +131,8 @@ extension AudioObjectID {
         let buffer = UnsafeMutableBufferPointer<Value>.allocate(capacity: count)
         defer { buffer.deallocate() }
 
-        let status = AudioObjectGetPropertyData(self, &address, 0, nil, &size, buffer.baseAddress!)
+        let status = AudioObjectGetPropertyData(
+            self, &address, 0, nil, &size, buffer.baseAddress!)
         guard status == noErr else {
             throw AudioHALError.status(status, selector: property.selector, object: self)
         }

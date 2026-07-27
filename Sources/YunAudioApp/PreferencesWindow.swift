@@ -83,12 +83,14 @@ struct PreferencesWindow: View {
                     }
                     .foregroundStyle(
                         selection == section
-                            ? Yun.Palette.textPrimary : Yun.Palette.textSecondary)
+                            ? Yun.Palette.textPrimary : Yun.Palette.textSecondary
+                    )
                     .padding(.horizontal, Yun.Space.sm)
                     .padding(.vertical, 6)
                     .background(
                         selection == section ? Yun.Palette.accentSubtle : .clear,
-                        in: .rect(cornerRadius: Yun.Radius.control))
+                        in: .rect(cornerRadius: Yun.Radius.control)
+                    )
                     .contentShape(.rect(cornerRadius: Yun.Radius.control))
                 }
                 .buttonStyle(.plain)
@@ -117,10 +119,13 @@ struct PreferencesWindow: View {
             heading("General")
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
-                    Toggle("Open at login", isOn: Binding(
-                        get: { model.launchesAtLogin },
-                        set: { model.launchesAtLogin = $0 }))
-                        .toggleStyle(YunToggleStyle())
+                    Toggle(
+                        "Open at login",
+                        isOn: Binding(
+                            get: { model.launchesAtLogin },
+                            set: { model.launchesAtLogin = $0 })
+                    )
+                    .toggleStyle(YunToggleStyle())
                     YunDivider()
                     Toggle("Start routing at launch", isOn: $model.autoStart)
                         .toggleStyle(YunToggleStyle())
@@ -141,10 +146,12 @@ struct PreferencesWindow: View {
                         options: model.availableSampleRates.map {
                             ($0, "\(Int($0 / 1000)) kHz")
                         })
-                    Text("Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -157,7 +164,8 @@ struct PreferencesWindow: View {
             heading("Shortcuts")
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
-                    ForEach(Array(model.hotkeyDescriptions.enumerated()), id: \.offset) { _, entry in
+                    ForEach(Array(model.hotkeyDescriptions.enumerated()), id: \.offset) {
+                        _, entry in
                         HStack {
                             Text(entry.title)
                                 .font(Yun.Text.body)
@@ -169,7 +177,8 @@ struct PreferencesWindow: View {
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
                                 .background(
-                                    Yun.Palette.elevated, in: .rect(cornerRadius: 6))
+                                    Yun.Palette.elevated, in: .rect(cornerRadius: 6)
+                                )
                                 .overlay {
                                     RoundedRectangle(cornerRadius: 6)
                                         .strokeBorder(Yun.Palette.border, lineWidth: 1)
@@ -180,10 +189,12 @@ struct PreferencesWindow: View {
             }
 
             if model.hotkeyFailures.isEmpty {
-                Text("Registered with the window server, so they work without Input Monitoring permission.")
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    "Registered with the window server, so they work without Input Monitoring permission."
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(model.hotkeyFailures, id: \.self) { failure in
                     Text(failure)
@@ -242,10 +253,12 @@ struct PreferencesWindow: View {
                         "IO thread allocations",
                         value: "\(model.allocationViolations)",
                         tone: model.allocationViolations == 0 ? .success : .warning)
-                    Text("Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app.")
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    Text(
+                        "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app."
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -266,10 +279,12 @@ struct PreferencesWindow: View {
                     YunDetailRow("Licence", value: "MIT")
                 }
             }
-            Text("The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0.")
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(
+                "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0."
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 

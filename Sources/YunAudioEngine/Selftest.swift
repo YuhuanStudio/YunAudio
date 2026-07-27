@@ -57,15 +57,16 @@ struct RTSelftest {
         start.initialize(to: 0)
 
         let selftest = UnsafeMutablePointer<RTSelftest>.allocate(capacity: 1)
-        selftest.initialize(to: RTSelftest(
-            enabled: 1,
-            outBuffer: outBuffer, outChannel: outChannel,
-            inBuffer: inBuffer, inChannel: inChannel,
-            generatedFrames: generated,
-            capture: capture,
-            captureCapacity: Int32(captureFrames),
-            captureCount: count,
-            captureStartFrame: start))
+        selftest.initialize(
+            to: RTSelftest(
+                enabled: 1,
+                outBuffer: outBuffer, outChannel: outChannel,
+                inBuffer: inBuffer, inChannel: inChannel,
+                generatedFrames: generated,
+                capture: capture,
+                captureCapacity: Int32(captureFrames),
+                captureCount: count,
+                captureStartFrame: start))
         return selftest
     }
 
@@ -96,9 +97,12 @@ public struct SelftestResult: Sendable {
     public var isBitExact: Bool { comparedFrames > 0 && exactMatches == comparedFrames }
 
     public var summary: String {
-        guard comparedFrames > 0 else { return "no samples returned — the loopback never carried the signal" }
+        guard comparedFrames > 0 else {
+            return "no samples returned — the loopback never carried the signal"
+        }
         if isBitExact {
-            return "bit-exact: \(exactMatches)/\(comparedFrames) samples identical, delay \(delayFrames) frames"
+            return
+                "bit-exact: \(exactMatches)/\(comparedFrames) samples identical, delay \(delayFrames) frames"
         }
         let percentage = Double(exactMatches) / Double(comparedFrames) * 100
         return String(

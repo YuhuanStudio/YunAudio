@@ -65,7 +65,8 @@ enum DriverInstaller {
     ) -> Outcome {
         // Quoting matters here: the script is embedded in an AppleScript string
         // literal, so its own quotes and backslashes have to survive that layer.
-        let escaped = shellScript
+        let escaped =
+            shellScript
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let source = "do shell script \"\(escaped)\" with administrator privileges"
@@ -80,7 +81,8 @@ enum DriverInstaller {
         // -128 is the documented code for the user dismissing the dialog. That
         // is a decision, not a failure, and should not be reported as one.
         if (error[NSAppleScript.errorNumber] as? Int) == -128 { return .cancelled }
-        let message = error[NSAppleScript.errorMessage] as? String
+        let message =
+            error[NSAppleScript.errorMessage] as? String
             ?? "The \(action) did not complete."
         return .failed(message)
     }

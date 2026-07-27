@@ -51,30 +51,39 @@ func describe(_ device: AudioDevice, isDefaultInput: Bool, isDefaultOutput: Bool
         print("")
     }
     print("  channels     \(device.inputChannels) in / \(device.outputChannels) out")
-    print("  sample rate  \(Int(device.nominalSampleRate)) Hz  (available: \(rateList(device.availableSampleRates)))")
+    print(
+        "  sample rate  \(Int(device.nominalSampleRate)) Hz  (available: \(rateList(device.availableSampleRates)))"
+    )
 
     // Domains are four-char codes; 'main' is the Mac's own audio clock, which
     // built-in and synchronous USB devices slave to. A device with its own
     // crystal (asynchronous USB) publishes nothing.
-    let domain = device.clockDomain.map { "\(fourCharDescription($0)) (\($0))" } ?? "not published"
+    let domain =
+        device.clockDomain.map { "\(fourCharDescription($0)) (\($0))" } ?? "not published"
     print("  clock domain \(domain)")
 
     if let frames = device.currentBufferFrameSize {
-        let ms = device.nominalSampleRate > 0
-            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000) : ""
+        let ms =
+            device.nominalSampleRate > 0
+            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000)
+            : ""
         print("  buffer       \(frames) frames\(ms)")
     }
 
     if device.hasInput {
         let frames = device.latencyFrames(scope: kAudioObjectPropertyScopeInput)
-        let ms = device.nominalSampleRate > 0
-            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000) : ""
+        let ms =
+            device.nominalSampleRate > 0
+            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000)
+            : ""
         print("  in latency   \(frames) frames\(ms)")
     }
     if device.hasOutput {
         let frames = device.latencyFrames(scope: kAudioObjectPropertyScopeOutput)
-        let ms = device.nominalSampleRate > 0
-            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000) : ""
+        let ms =
+            device.nominalSampleRate > 0
+            ? String(format: " (%.2f ms)", Double(frames) / device.nominalSampleRate * 1000)
+            : ""
         print("  out latency  \(frames) frames\(ms)")
     }
 
@@ -83,7 +92,9 @@ func describe(_ device: AudioDevice, isDefaultInput: Bool, isDefaultOutput: Bool
         print("  input streams")
         for stream in inputStreams {
             let current = stream.currentPhysicalFormat.map(String.init(describing:)) ?? "—"
-            print("    · stream \(stream.id) starting at ch \(stream.startingChannel): \(current)")
+            print(
+                "    · stream \(stream.id) starting at ch \(stream.startingChannel): \(current)"
+            )
             for format in stream.availablePhysicalFormats {
                 let marker = format.encoding.isFloat ? "  ← FLOAT" : ""
                 print("        \(format)\(marker)")
@@ -105,13 +116,16 @@ func runRoute(
     voiceIsolation: Bool = false
 ) throws {
     let devices = try AudioDevices.all()
-    guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput }) else {
+    guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput })
+    else {
         print("no input device matching \"\(sourceMatch)\"")
         exit(1)
     }
-    guard let destination = devices.first(where: {
-        $0.name.contains(destinationMatch) && $0.hasOutput
-    }) else {
+    guard
+        let destination = devices.first(where: {
+            $0.name.contains(destinationMatch) && $0.hasOutput
+        })
+    else {
         print("no output device matching \"\(destinationMatch)\"")
         exit(1)
     }
@@ -125,7 +139,9 @@ func runRoute(
             source: ChannelRef(deviceUID: source.uid, channel: channel),
             destination: ChannelRef(deviceUID: destination.uid, channel: channel))
     }
-    print("routes      \(signalRoutes.map { "ch\($0.source.channel + 1)→ch\($0.destination.channel + 1)" }.joined(separator: ", "))")
+    print(
+        "routes      \(signalRoutes.map { "ch\($0.source.channel + 1)→ch\($0.destination.channel + 1)" }.joined(separator: ", "))"
+    )
 
     // BlackHole is a loopback: whatever is written to its output reappears on
     // its input. Since it is already a member of the aggregate, reading its
@@ -135,10 +151,11 @@ func runRoute(
     var allRoutes = signalRoutes
     let probeChannel = destination.outputChannels - 1
     if destination.inputChannels > 0 {
-        allRoutes.append(Route(
-            source: ChannelRef(deviceUID: destination.uid, channel: 0),
-            destination: ChannelRef(deviceUID: destination.uid, channel: probeChannel),
-            gain: 0))
+        allRoutes.append(
+            Route(
+                source: ChannelRef(deviceUID: destination.uid, channel: 0),
+                destination: ChannelRef(deviceUID: destination.uid, channel: probeChannel),
+                gain: 0))
         print("probe       \(destination.name) in ch1 (loopback verification)")
     }
     let routes = allRoutes
@@ -159,15 +176,20 @@ func runRoute(
     if let quality = engine.pathQuality {
         print("aggregate   \(engine.aggregate?.uid ?? "—")")
         print("rate        \(Int(quality.sampleRate)) Hz")
-        print(String(
-            format: "buffer      %d frames (%.2f ms)",
-            quality.bufferFrames, quality.bufferLatencyMilliseconds))
-        print("path        \(quality.isBitExact ? "bit-exact" : "resampled — drift correction on \(quality.driftCorrectedDeviceUIDs.joined(separator: ", "))")")
+        print(
+            String(
+                format: "buffer      %d frames (%.2f ms)",
+                quality.bufferFrames, quality.bufferLatencyMilliseconds))
+        print(
+            "path        \(quality.isBitExact ? "bit-exact" : "resampled — drift correction on \(quality.driftCorrectedDeviceUIDs.joined(separator: ", "))")"
+        )
     }
     if let publisher = ClockAnchorPublisher(), publisher.driverSupportsClockLocking {
         print("clock       YunAudio driver supports clock locking")
     } else {
-        print("clock       destination cannot be clock-locked (not the YunAudio driver, or it predates clock anchors)")
+        print(
+            "clock       destination cannot be clock-locked (not the YunAudio driver, or it predates clock anchors)"
+        )
     }
 
     print("\nrunning for \(Int(seconds))s — speak into the microphone\n")
@@ -185,7 +207,8 @@ func runRoute(
         }
         let delta = cycles - lastCycle
         lastCycle = cycles
-        let lock = engine.isClockLocked
+        let lock =
+            engine.isClockLocked
             ? String(format: "LOCKED %.6f", engine.measuredRateRatio) : "unlocked"
         print("  cycles +\(delta)  \(bars.joined(separator: "  "))  \(lock)")
     }
@@ -195,27 +218,33 @@ func runRoute(
     if let quality = engine.pathQuality {
         print("")
         if quality.isBitExact {
-            print(String(
-                format: "path        bit-exact — no resampling configured, clock locked at %.6f",
-                engine.measuredRateRatio))
-            print("            (configuration-level claim; --selftest is the sample-level proof)")
+            print(
+                String(
+                    format:
+                        "path        bit-exact — no resampling configured, clock locked at %.6f",
+                    engine.measuredRateRatio))
+            print(
+                "            (configuration-level claim; --selftest is the sample-level proof)")
         } else if quality.hasProcessing {
             print("path        processed — voice isolation is altering the signal by design")
         } else if quality.driftCorrectedDeviceUIDs.isEmpty {
-            print("path        no drift correction configured, but the clock lock is not holding")
+            print(
+                "path        no drift correction configured, but the clock lock is not holding")
         } else {
-            print("path        resampled — drift correction on "
-                + quality.driftCorrectedDeviceUIDs.joined(separator: ", "))
+            print(
+                "path        resampled — drift correction on "
+                    + quality.driftCorrectedDeviceUIDs.joined(separator: ", "))
         }
     }
 
     engine.stop()
     let violations = RoutingEngine.allocationViolations - violationsBefore
     print("stopped. total IO cycles: \(lastCycle)")
-    print(String(
-        format: "realtime path: %llu allocations over %llu cycles (%.1f per cycle)",
-        violations, lastCycle,
-        lastCycle > 0 ? Double(violations) / Double(lastCycle) : 0))
+    print(
+        String(
+            format: "realtime path: %llu allocations over %llu cycles (%.1f per cycle)",
+            violations, lastCycle,
+            lastCycle > 0 ? Double(violations) / Double(lastCycle) : 0))
     if voiceIsolation {
         print("isolation render failures: \(engine.voiceIsolationFailures)")
     }
@@ -233,11 +262,13 @@ func runRoute(
 func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     let devices = try AudioDevices.all()
     guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput }),
-          let destination = devices.first(where: {
-              $0.name.contains(destinationMatch) && $0.hasOutput && $0.inputChannels > 0
-          })
+        let destination = devices.first(where: {
+            $0.name.contains(destinationMatch) && $0.hasOutput && $0.inputChannels > 0
+        })
     else {
-        print("need an input device matching \"\(sourceMatch)\" and a loopback-capable output matching \"\(destinationMatch)\"")
+        print(
+            "need an input device matching \"\(sourceMatch)\" and a loopback-capable output matching \"\(destinationMatch)\""
+        )
         exit(1)
     }
 
@@ -258,18 +289,21 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 
     if let quality = engine.pathQuality {
         print("rate          \(Int(quality.sampleRate)) Hz")
-        print("drift correction  "
-            + (quality.driftCorrectedDeviceUIDs.isEmpty
-                ? "none" : quality.driftCorrectedDeviceUIDs.joined(separator: ", ")))
+        print(
+            "drift correction  "
+                + (quality.driftCorrectedDeviceUIDs.isEmpty
+                    ? "none" : quality.driftCorrectedDeviceUIDs.joined(separator: ", ")))
     }
 
     print("\ncapturing…")
     while engine.selftestProgress < 1.0 {
         Thread.sleep(forTimeInterval: 0.25)
-        print(String(format: "  %.0f%%  %@", engine.selftestProgress * 100,
-                     engine.isClockLocked
-                        ? String(format: "clock locked %.6f", engine.measuredRateRatio)
-                        : "clock unlocked"))
+        print(
+            String(
+                format: "  %.0f%%  %@", engine.selftestProgress * 100,
+                engine.isClockLocked
+                    ? String(format: "clock locked %.6f", engine.measuredRateRatio)
+                    : "clock unlocked"))
     }
 
     let result = engine.evaluateSelftest()
@@ -289,7 +323,9 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     if violations == 0 {
         print("realtime path: 0 allocations on the IO thread")
     } else {
-        print("realtime path: \(violations) ALLOCATIONS on the IO thread — the no-allocation rule is broken")
+        print(
+            "realtime path: \(violations) ALLOCATIONS on the IO thread — the no-allocation rule is broken"
+        )
     }
     exit(result.isBitExact && violations == 0 ? 0 : 1)
 }
@@ -307,13 +343,15 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
     let all = (try? AudioDevices.all()) ?? []
     guard let source = all.first(where: { $0.hasInput && $0.transport == .usb }),
-          let destination = all.first(where: { $0.hasOutput && $0.transport.isVirtual })
+        let destination = all.first(where: { $0.hasOutput && $0.transport.isVirtual })
     else { print("need a USB input and a virtual output"); exit(1) }
 
     print("source \(source.name) → \(destination.name)\n")
-    let routes = [Route(
-        source: ChannelRef(deviceUID: source.uid, channel: 0),
-        destination: ChannelRef(deviceUID: destination.uid, channel: 0))]
+    let routes = [
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: 0))
+    ]
 
     var startTimes: [Double] = []
     var stopTimes: [Double] = []
@@ -330,9 +368,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
     }
     func report(_ label: String, _ values: [Double]) {
         let sorted = values.sorted()
-        print(String(
-            format: "  %@  median %.0f ms, worst %.0f ms",
-            label, sorted[sorted.count / 2], sorted.last ?? 0))
+        print(
+            String(
+                format: "  %@  median %.0f ms, worst %.0f ms",
+                label, sorted[sorted.count / 2], sorted.last ?? 0))
     }
     report("start", startTimes)
     report("stop ", stopTimes)
@@ -362,12 +401,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
 }
 
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "reset" {
-    let target = CommandLine.arguments.count > 2
+    let target =
+        CommandLine.arguments.count > 2
         ? Double(CommandLine.arguments[2]) ?? 48000 : 48000
     do {
         for device in try AudioDevices.all() {
             guard device.availableSampleRates.contains(target),
-                  let current = device.currentSampleRate, current != target
+                let current = device.currentSampleRate, current != target
             else { continue }
             do {
                 try device.setNominalSampleRate(target)
@@ -397,8 +437,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "razer" {
     }
     for device in devices {
         print("\(device.productName)  ·  0x\(String(format: "%04X", device.productID))")
-        print("  vendor pages " + device.vendorUsagePages
-            .map { String(format: "0x%04X", $0) }.joined(separator: " "))
+        print(
+            "  vendor pages "
+                + device.vendorUsagePages
+                .map { String(format: "0x%04X", $0) }.joined(separator: " "))
         for line in device.reportDescriptorSummary() { print("  \(line)") }
         // Read-only throughout. Reading a feature report asks the device for its
         // current state; the write side would mean guessing command bytes on
@@ -424,7 +466,9 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "apps" {
         print("tappable processes — \(processes.count)\n")
         for process in processes {
             let marker = process.isPlaying ? "▶" : " "
-            print("  \(marker) \(process.name)  ·  pid \(process.pid)  ·  \(process.bundleID ?? "—")")
+            print(
+                "  \(marker) \(process.name)  ·  pid \(process.pid)  ·  \(process.bundleID ?? "—")"
+            )
         }
     } catch {
         print("could not enumerate processes: \(error)")
@@ -447,7 +491,9 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
         }
         print("tapping \(matches.count) process(es):")
         for process in matches {
-            print("  · \(process.name)  pid \(process.pid)\(process.isPlaying ? "  [playing]" : "")")
+            print(
+                "  · \(process.name)  pid \(process.pid)\(process.isPlaying ? "  [playing]" : "")"
+            )
         }
         let tap = try ProcessTap(
             processIDs: matches.map(\.id), muteBehavior: .unmuted)
@@ -510,11 +556,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
     let all = (try? AudioDevices.all()) ?? []
     guard let mic = all.first(where: { $0.name.contains("MacBook") && $0.hasInput }),
-          let speaker = all.first(where: { $0.name.contains("MacBook") && $0.hasOutput })
+        let speaker = all.first(where: { $0.name.contains("MacBook") && $0.hasOutput })
     else { print("need the built-in microphone and speakers"); exit(1) }
 
-    guard let capture = EchoCancellingCapture(
-        microphoneUID: mic.uid, speakerUID: speaker.uid)
+    guard
+        let capture = EchoCancellingCapture(
+            microphoneUID: mic.uid, speakerUID: speaker.uid)
     else { print("could not set up the unit"); exit(1) }
 
     // Accumulators are touched by the audio thread and the main thread, so they
@@ -523,7 +570,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
     // exactly what happened the first time this was written.
     final class State: @unchecked Sendable {
         private let lock = NSLock()
-        var phase: Float = 0        // audio thread only
+        var phase: Float = 0  // audio thread only
         private var sum: Double = 0
         private var count: Int = 0
         private var measuring = false
@@ -554,25 +601,27 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
     let amplitude: Float = 0.1
     let increment = 2 * Float.pi * 440 / rate
 
-    _ = capture.start(capture: { samples, count, _ in
-        var energy: Double = 0
-        for index in 0..<count {
-            let value = Double(samples[index])
-            energy += value * value
-        }
-        state.accumulate(energy, frames: count)
-    }, farEnd: { buffer, frames in
-        for index in 0..<frames {
-            buffer[index] = sin(state.phase) * amplitude
-            state.phase += increment
-            if state.phase > 2 * .pi { state.phase -= 2 * .pi }
-        }
-        return frames
-    })
+    _ = capture.start(
+        capture: { samples, count, _ in
+            var energy: Double = 0
+            for index in 0..<count {
+                let value = Double(samples[index])
+                energy += value * value
+            }
+            state.accumulate(energy, frames: count)
+        },
+        farEnd: { buffer, frames in
+            for index in 0..<frames {
+                buffer[index] = sin(state.phase) * amplitude
+                state.phase += increment
+                if state.phase > 2 * .pi { state.phase -= 2 * .pi }
+            }
+            return frames
+        })
 
     func measure(bypassed: Bool, label: String) -> Double {
         capture.setBypassed(bypassed)
-        Thread.sleep(forTimeInterval: 0.8)   // let the canceller settle
+        Thread.sleep(forTimeInterval: 0.8)  // let the canceller settle
         state.beginMeasuring()
         Thread.sleep(forTimeInterval: 2.0)
         let (sum, count) = state.endMeasuring()
@@ -603,11 +652,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
 
 // Runs echo-cancelled capture against a real microphone/speaker pair.
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
-    let micMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "MacBook Pro的麥克風"
-    let speakerMatch = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "MacBook Pro的揚聲器"
+    let micMatch =
+        CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "MacBook Pro的麥克風"
+    let speakerMatch =
+        CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "MacBook Pro的揚聲器"
     let all = (try? AudioDevices.all()) ?? []
     guard let mic = all.first(where: { $0.name.contains(micMatch) && $0.hasInput }),
-          let speaker = all.first(where: { $0.name.contains(speakerMatch) && $0.hasOutput })
+        let speaker = all.first(where: { $0.name.contains(speakerMatch) && $0.hasOutput })
     else {
         print("could not find both \"\(micMatch)\" and \"\(speakerMatch)\"")
         exit(1)
@@ -615,13 +666,16 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
     print("microphone  \(mic.name)  (\(mic.inputChannels) in / \(mic.outputChannels) out)")
     print("speaker     \(speaker.name)")
 
-    guard let capture = EchoCancellingCapture(
-        microphoneUID: mic.uid, speakerUID: speaker.uid)
+    guard
+        let capture = EchoCancellingCapture(
+            microphoneUID: mic.uid, speakerUID: speaker.uid)
     else {
         print("AUVoiceProcessingIO could not be set up for that pair")
         exit(1)
     }
-    print("bound to    \(capture.isBoundToDedicatedDevice ? "a private aggregate" : "the system defaults")")
+    print(
+        "bound to    \(capture.isBoundToDedicatedDevice ? "a private aggregate" : "the system defaults")"
+    )
     print("rate        \(Int(capture.sampleRate)) Hz")
 
     // Peak is published through an atomic-free box read on the main thread; a
@@ -632,15 +686,17 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
     }
     let meter = Meter()
 
-    guard capture.start(capture: { samples, count, _ in
-        var peak: Float = 0
-        for index in 0..<count {
-            let magnitude = abs(samples[index])
-            if magnitude > peak { peak = magnitude }
-        }
-        meter.peak = max(meter.peak * 0.8, peak)
-        meter.frames += count
-    }) else {
+    guard
+        capture.start(capture: { samples, count, _ in
+            var peak: Float = 0
+            for index in 0..<count {
+                let magnitude = abs(samples[index])
+                if magnitude > peak { peak = magnitude }
+            }
+            meter.peak = max(meter.peak * 0.8, peak)
+            meter.frames += count
+        })
+    else {
         print("could not start the unit")
         exit(1)
     }
@@ -650,7 +706,9 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
         Thread.sleep(forTimeInterval: 0.33)
         let db = meter.peak > 0 ? 20 * log10(meter.peak) : -120
         let filled = max(0, min(24, Int((db + 60) / 2.5)))
-        print("  \(String(repeating: "█", count: filled))\(String(repeating: "·", count: 24 - filled))  \(meter.frames) frames")
+        print(
+            "  \(String(repeating: "█", count: filled))\(String(repeating: "·", count: 24 - filled))  \(meter.frames) frames"
+        )
     }
     capture.stop()
     print("\ntotal frames captured: \(meter.frames)")
@@ -695,7 +753,8 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "selftest" {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "route" {
     let source = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Seiren V3 Pro"
     let destination = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "BlackHole"
-    let seconds = CommandLine.arguments.count > 4
+    let seconds =
+        CommandLine.arguments.count > 4
         ? Double(CommandLine.arguments[4]) ?? 5 : 5
     let isolation = CommandLine.arguments.contains("--isolate")
     do {
@@ -733,11 +792,12 @@ do {
     for source in sources {
         for destination in destinations where source.id != destination.id {
             let relationship = source.clockRelationship(to: destination)
-            let verdict = switch relationship {
-            case .sameDomain: "bit-exact"
-            case .differentDomains: "resampled (drift correction)"
-            case .unknown: "assume resampled (domain not published)"
-            }
+            let verdict =
+                switch relationship {
+                case .sameDomain: "bit-exact"
+                case .differentDomains: "resampled (drift correction)"
+                case .unknown: "assume resampled (domain not published)"
+                }
             print("  \(source.name) → \(destination.name): \(verdict)")
         }
     }

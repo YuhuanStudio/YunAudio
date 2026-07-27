@@ -42,7 +42,7 @@ enum PreferencesStore {
 
     static func load() -> Preferences {
         guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode(Preferences.self, from: data)
+            let decoded = try? JSONDecoder().decode(Preferences.self, from: data)
         else { return .default }
         return decoded
     }

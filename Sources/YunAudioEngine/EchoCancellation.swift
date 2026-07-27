@@ -76,11 +76,13 @@ public enum EchoCancellation {
 
     /// Instantiates the unit against a specific input device and reports what it
     /// will and will not do.
-    /// - Parameter deviceUID: The device the unit should bind to. It has to
+    /// - Parameter inputDeviceUID: The device the unit should bind to. It has to
     ///   carry both input and output channels: `AUVoiceProcessingIO` is a single
     ///   IO unit, so the microphone it cancels for and the speaker it cancels
     ///   against must be the same CoreAudio device. Passing nil leaves it on the
     ///   system defaults, which the HAL is willing to treat as a pair.
+    /// - Returns: What the unit accepted and what it costs, or a report marked
+    ///   unavailable with the reason it could not be set up.
     public static func probe(inputDeviceUID: String?) -> EchoCancellationReport {
         func failure(_ reason: String) -> EchoCancellationReport {
             .init(
@@ -152,7 +154,8 @@ public enum EchoCancellation {
             deviceBinding: binding,
             inputLatencySeconds: latency(scope: kAudioUnitScope_Input, element: 1),
             outputLatencySeconds: latency(scope: kAudioUnitScope_Output, element: 0),
-            supportsAGC: supports(AudioUnitPropertyID(kAUVoiceIOProperty_VoiceProcessingEnableAGC)),
+            supportsAGC: supports(
+                AudioUnitPropertyID(kAUVoiceIOProperty_VoiceProcessingEnableAGC)),
             // 2102 is kAUVoiceIOProperty_DuckNonVoiceAudio. Referenced by value
             // because the constant is declared behind an iOS-only guard even
             // though the property id itself is what the unit answers to.

@@ -104,7 +104,7 @@ final class EffectChain {
             guard let component = AudioComponentFindNext(nil, &description) else { continue }
             var instance: AudioComponentInstance?
             guard AudioComponentInstanceNew(component, &instance) == noErr,
-                  let unit = instance
+                let unit = instance
             else { continue }
 
             AudioUnitSetProperty(
@@ -232,9 +232,11 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, kDynamicsProcessorParam_HeadRoom, kAudioUnitScope_Global, 0, 5, 0)
                 AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_AttackTime, kAudioUnitScope_Global, 0, 0.01, 0)
+                    unit, kDynamicsProcessorParam_AttackTime, kAudioUnitScope_Global, 0, 0.01, 0
+                )
                 AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, 0.15, 0)
+                    unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, 0.15,
+                    0)
             case .limiter:
                 // Just below full scale, so nothing downstream ever sees a
                 // sample it has to clip.

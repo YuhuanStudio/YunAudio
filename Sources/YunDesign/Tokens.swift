@@ -12,10 +12,11 @@ public enum Yun {
 
     public enum Palette {
         static func adaptive(light: Color, dark: Color) -> Color {
-            Color(nsColor: NSColor(name: nil) { appearance in
-                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(dark) : NSColor(light)
-            })
+            Color(
+                nsColor: NSColor(name: nil) { appearance in
+                    appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                        ? NSColor(dark) : NSColor(light)
+                })
         }
 
         /// Page background.

@@ -102,10 +102,11 @@ struct RTGraph {
         let count = max(routeList.count, 1)
 
         let routeStorage = UnsafeMutablePointer<RTRoute>.allocate(capacity: count)
-        routeStorage.initialize(repeating: RTRoute(
-            sourceBuffer: 0, sourceChannel: 0,
-            destinationBuffer: 0, destinationChannel: 0, gain: 0, muted: true,
-            usesIsolatedSource: false), count: count)
+        routeStorage.initialize(
+            repeating: RTRoute(
+                sourceBuffer: 0, sourceChannel: 0,
+                destinationBuffer: 0, destinationChannel: 0, gain: 0, muted: true,
+                usesIsolatedSource: false), count: count)
         for (index, route) in routeList.enumerated() {
             routeStorage[index] = route
         }
@@ -122,18 +123,19 @@ struct RTGraph {
         clockHostStorage.initialize(to: 0)
 
         let graph = UnsafeMutablePointer<RTGraph>.allocate(capacity: 1)
-        graph.initialize(to: RTGraph(
-            routes: routeStorage,
-            routeCount: Int32(routeList.count),
-            peaks: peakStorage,
-            cycleCounter: counterStorage,
-            peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
-            clockSampleTime: clockSampleStorage,
-            clockHostTime: clockHostStorage,
-            voiceIsolation: nil,
-            isolationIsChain: 0,
-            commands: yun_rt_queue_create(256),
-            selftest: nil))
+        graph.initialize(
+            to: RTGraph(
+                routes: routeStorage,
+                routeCount: Int32(routeList.count),
+                peaks: peakStorage,
+                cycleCounter: counterStorage,
+                peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
+                clockSampleTime: clockSampleStorage,
+                clockHostTime: clockHostStorage,
+                voiceIsolation: nil,
+                isolationIsChain: 0,
+                commands: yun_rt_queue_create(256),
+                selftest: nil))
         return graph
     }
 
@@ -225,7 +227,8 @@ func yunAudioIOProc(
             let stride = Int(input[sourceIndex].mNumberChannels)
             let channel = Int(isolation.pointee.sourceChannel)
             if stride > 0, channel < stride {
-                let available = Int(input[sourceIndex].mDataByteSize)
+                let available =
+                    Int(input[sourceIndex].mDataByteSize)
                     / (MemoryLayout<Float>.size * stride)
                 let frames = min(available, Int(isolation.pointee.maximumFrames))
                 let source = data.assumingMemoryBound(to: Float.self)
@@ -266,7 +269,7 @@ func yunAudioIOProc(
         let sourceBuffer = input[sourceIndex]
         let destinationBuffer = output[destinationIndex]
         guard let sourceData = sourceBuffer.mData,
-              let destinationData = destinationBuffer.mData
+            let destinationData = destinationBuffer.mData
         else { continue }
 
         // An isolated route reads the model's mono output, which is packed, so
@@ -277,20 +280,23 @@ func yunAudioIOProc(
         let sourceChannel = useIsolated ? 0 : Int(route.sourceChannel)
         let destinationChannel = Int(route.destinationChannel)
         guard sourceChannel < sourceStride, destinationChannel < destinationStride,
-              sourceStride > 0, destinationStride > 0
+            sourceStride > 0, destinationStride > 0
         else { continue }
 
         // Both endpoints present 32-bit float physical formats, and the HAL's
         // virtual format is float32 regardless, so no conversion is needed.
-        let sourceFrames = useIsolated
+        let sourceFrames =
+            useIsolated
             ? isolatedFrames
             : Int(sourceBuffer.mDataByteSize) / (MemoryLayout<Float>.size * sourceStride)
-        let destinationFrames = Int(destinationBuffer.mDataByteSize)
+        let destinationFrames =
+            Int(destinationBuffer.mDataByteSize)
             / (MemoryLayout<Float>.size * destinationStride)
         let frames = min(sourceFrames, destinationFrames)
         guard frames > 0 else { continue }
 
-        let source = useIsolated
+        let source =
+            useIsolated
             ? graph.pointee.voiceIsolation!.pointee.outputBuffer
             : sourceData.assumingMemoryBound(to: Float.self)
         let destination = destinationData.assumingMemoryBound(to: Float.self)
@@ -324,7 +330,8 @@ func yunAudioIOProc(
             let stride = Int(output[outIndex].mNumberChannels)
             let channel = Int(selftest.pointee.outChannel)
             if stride > 0, channel < stride {
-                let frames = Int(output[outIndex].mDataByteSize)
+                let frames =
+                    Int(output[outIndex].mDataByteSize)
                     / (MemoryLayout<Float>.size * stride)
                 let pointer = data.assumingMemoryBound(to: Float.self)
                 var generated = selftest.pointee.generatedFrames.pointee
@@ -346,7 +353,8 @@ func yunAudioIOProc(
                     selftest.pointee.captureStartFrame.pointee =
                         selftest.pointee.generatedFrames.pointee
                 }
-                let frames = Int(input[inIndex].mDataByteSize)
+                let frames =
+                    Int(input[inIndex].mDataByteSize)
                     / (MemoryLayout<Float>.size * stride)
                 let pointer = data.assumingMemoryBound(to: Float.self)
                 let capture = selftest.pointee.capture

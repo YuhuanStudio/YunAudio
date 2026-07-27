@@ -137,3 +137,17 @@ reasonable substitute.
 MIT. Note that BlackHole, which this replaces, is GPL-3.0 — the driver here was
 written from scratch against `<CoreAudio/AudioServerPlugIn.h>` and shares no code
 with it.
+
+## Contributing
+
+```bash
+swift build && swift test
+"$(xcrun --find swift-format)" lint --recursive Sources Tests
+"$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
+```
+
+`swift-format` lives in the Xcode toolchain rather than on `PATH`, which is why
+the invocation goes through `xcrun`. CI runs the same three commands plus a
+build of the driver — a broken `AudioServerPlugIn` takes `coreaudiod` down with
+all system audio, so it is worth compiling on every change even though it
+cannot be loaded on a runner.

@@ -47,7 +47,7 @@ final class VoiceIsolationUnit {
 
         var instance: AudioComponentInstance?
         guard AudioComponentInstanceNew(component, &instance) == noErr,
-              let created = instance
+            let created = instance
         else { return nil }
         unit = created
 

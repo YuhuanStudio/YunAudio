@@ -120,8 +120,10 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Sample rates as they were before routing touched them.
     private var originalSampleRates: [String: Double] = [:]
     /// Enough of the last start() to bring the route back up unaided.
-    private var lastConfiguration: (
-        source: String, destination: String, routes: [Route], bufferFrames: UInt32)?
+    private var lastConfiguration:
+        (
+            source: String, destination: String, routes: [Route], bufferFrames: UInt32
+        )?
     /// Set once a lock failure has forced drift correction back on, so the
     /// recovery cannot loop.
     private var clockLockAbandoned = false
@@ -147,7 +149,18 @@ public final class RoutingEngine: @unchecked Sendable {
     ///     its samples are never resampled.
     ///   - destinationDeviceUID: The virtual output the routed signal lands in.
     ///   - routes: Channel-level connections between the two.
+    ///   - taps: Application captures to fold in as extra source channels.
+    ///   - effects: Processing stages to insert ahead of the routes. More than
+    ///     one supersedes `voiceIsolation`, which is the single-stage form.
+    ///   - preferredSampleRate: Used when both devices support it, rather than
+    ///     always taking the highest common rate — a voice chat gains nothing
+    ///     above 48 kHz.
     ///   - bufferFrames: IO cycle size. 128 frames is 2.7 ms at 48 kHz.
+    ///   - voiceIsolation: Single-stage isolation settings, or nil for none.
+    ///   - selftest: Installs the loopback integrity check.
+    /// - Throws: `RoutingError` when a device is missing, a channel cannot be
+    ///   mapped, the devices share no sample rate, or CoreAudio refuses to
+    ///   create or start the aggregate.
     public func start(
         sourceDeviceUID: String,
         destinationDeviceUID: String,
@@ -203,13 +216,15 @@ public final class RoutingEngine: @unchecked Sendable {
         // Turning it off up front rather than after the lock converges is safe:
         // convergence takes about a second and a half, and a crystal tens of
         // parts per million out accumulates only microseconds in that window.
-        let clockLockAvailable = !clockLockAbandoned
+        let clockLockAvailable =
+            !clockLockAbandoned
             && destinationDeviceUID == ClockAnchorPublisher.driverDeviceUID
             && (ClockAnchorPublisher(driverDeviceUID: destinationDeviceUID)?
                 .driverSupportsClockLocking ?? false)
         requiresClockLock = clockLockAvailable
         lastConfiguration = (
-            sourceDeviceUID, destinationDeviceUID, routes, bufferFrames)
+            sourceDeviceUID, destinationDeviceUID, routes, bufferFrames
+        )
 
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying
@@ -239,7 +254,8 @@ public final class RoutingEngine: @unchecked Sendable {
         if effects.count > 1, let first = routes.first {
             isolatedSource = first.source
             if let chain = EffectChain(
-                kinds: effects, sampleRate: rate, maximumFrames: Int(bufferFrames)) {
+                kinds: effects, sampleRate: rate, maximumFrames: Int(bufferFrames))
+            {
                 effectChain = chain
                 effectLatencyFrames = chain.latencyFrames
                 voiceIsolationLatencyFrames =
@@ -287,40 +303,44 @@ public final class RoutingEngine: @unchecked Sendable {
         activeRoutes = routes
 
         if let chain = effectChain, let reference = isolatedSource,
-           let point = inputMap[reference] {
+            let point = inputMap[reference]
+        {
             let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             failures.initialize(to: 0)
             isolationFailureCounter = failures
 
             let block = UnsafeMutablePointer<RTVoiceIsolation>.allocate(capacity: 1)
-            block.initialize(to: RTVoiceIsolation(
-                enabled: 1,
-                sourceBuffer: point.buffer,
-                sourceChannel: point.channel,
-                unit: Unmanaged.passUnretained(chain).toOpaque(),
-                inputBuffer: chain.inputBuffer,
-                outputBuffer: chain.outputBuffer,
-                maximumFrames: Int32(chain.maximumFrames),
-                renderFailures: failures))
+            block.initialize(
+                to: RTVoiceIsolation(
+                    enabled: 1,
+                    sourceBuffer: point.buffer,
+                    sourceChannel: point.channel,
+                    unit: Unmanaged.passUnretained(chain).toOpaque(),
+                    inputBuffer: chain.inputBuffer,
+                    outputBuffer: chain.outputBuffer,
+                    maximumFrames: Int32(chain.maximumFrames),
+                    renderFailures: failures))
             isolationBlock = block
             graph.pointee.voiceIsolation = block
             graph.pointee.isolationIsChain = 1
         } else if let unit = isolationUnit, let reference = isolatedSource,
-           let point = inputMap[reference] {
+            let point = inputMap[reference]
+        {
             let failures = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             failures.initialize(to: 0)
             isolationFailureCounter = failures
 
             let block = UnsafeMutablePointer<RTVoiceIsolation>.allocate(capacity: 1)
-            block.initialize(to: RTVoiceIsolation(
-                enabled: 1,
-                sourceBuffer: point.buffer,
-                sourceChannel: point.channel,
-                unit: Unmanaged.passUnretained(unit).toOpaque(),
-                inputBuffer: unit.inputBuffer,
-                outputBuffer: unit.outputBuffer,
-                maximumFrames: Int32(unit.maximumFrames),
-                renderFailures: failures))
+            block.initialize(
+                to: RTVoiceIsolation(
+                    enabled: 1,
+                    sourceBuffer: point.buffer,
+                    sourceChannel: point.channel,
+                    unit: Unmanaged.passUnretained(unit).toOpaque(),
+                    inputBuffer: unit.inputBuffer,
+                    outputBuffer: unit.outputBuffer,
+                    maximumFrames: Int32(unit.maximumFrames),
+                    renderFailures: failures))
             isolationBlock = block
             graph.pointee.voiceIsolation = block
         }
@@ -365,7 +385,8 @@ public final class RoutingEngine: @unchecked Sendable {
         // physical device — has no such channel, and the path stays honestly
         // marked as resampled.
         if clockLockAvailable,
-           let publisher = ClockAnchorPublisher(driverDeviceUID: destinationDeviceUID) {
+            let publisher = ClockAnchorPublisher(driverDeviceUID: destinationDeviceUID)
+        {
             clockPublisher = publisher
             // Captures the graph pointer, not self: the closure runs on the
             // publisher's own queue, and stop() drains that queue before the
@@ -383,7 +404,9 @@ public final class RoutingEngine: @unchecked Sendable {
                 guard !locked, let self else { return }
                 self.recoveryQueue.async { self.recoverFromClockLockLoss() }
             }
-            publisher.start { RoutingEngine.anchor(from: handle.pointer, sampleRate: anchorRate) }
+            publisher.start {
+                RoutingEngine.anchor(from: handle.pointer, sampleRate: anchorRate)
+            }
         }
     }
 
@@ -452,7 +475,7 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard requiresClockLock, !clockLockAbandoned,
-              let configuration = lastConfiguration
+            let configuration = lastConfiguration
         else { return }
         clockLockAbandoned = true
 
@@ -486,7 +509,7 @@ public final class RoutingEngine: @unchecked Sendable {
 
     private func push(kind: YunRTCommandKind, index: Int, value: Float) -> Bool {
         guard let graph, let commands = graph.pointee.commands,
-              index >= 0, index < Int(graph.pointee.routeCount)
+            index >= 0, index < Int(graph.pointee.routeCount)
         else { return false }
         return yun_rt_queue_push(
             commands,

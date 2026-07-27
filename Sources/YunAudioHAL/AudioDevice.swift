@@ -5,7 +5,9 @@ import Foundation
 
 extension AudioProperty {
     // System object
-    public static var devices: AudioProperty<AudioObjectID> { .init(kAudioHardwarePropertyDevices) }
+    public static var devices: AudioProperty<AudioObjectID> {
+        .init(kAudioHardwarePropertyDevices)
+    }
     public static var defaultInputDevice: AudioProperty<AudioObjectID> {
         .init(kAudioHardwarePropertyDefaultInputDevice)
     }
@@ -14,7 +16,9 @@ extension AudioProperty {
     }
 
     // Identity
-    public static var deviceUID: AudioProperty<CFString> { .init(kAudioDevicePropertyDeviceUID) }
+    public static var deviceUID: AudioProperty<CFString> {
+        .init(kAudioDevicePropertyDeviceUID)
+    }
     public static var deviceName: AudioProperty<CFString> {
         .init(kAudioObjectPropertyName)
     }
@@ -33,7 +37,9 @@ extension AudioProperty {
     public static var availableNominalSampleRates: AudioProperty<AudioValueRange> {
         .init(kAudioDevicePropertyAvailableNominalSampleRates)
     }
-    public static var clockDomain: AudioProperty<UInt32> { .init(kAudioDevicePropertyClockDomain) }
+    public static var clockDomain: AudioProperty<UInt32> {
+        .init(kAudioDevicePropertyClockDomain)
+    }
     public static var bufferFrameSize: AudioProperty<UInt32> {
         .init(kAudioDevicePropertyBufferFrameSize)
     }
@@ -46,11 +52,15 @@ extension AudioProperty {
     }
 
     // Streams and formats
-    public static var streams: AudioProperty<AudioObjectID> { .init(kAudioDevicePropertyStreams) }
+    public static var streams: AudioProperty<AudioObjectID> {
+        .init(kAudioDevicePropertyStreams)
+    }
     public static var streamConfiguration: AudioProperty<AudioBufferList> {
         .init(kAudioDevicePropertyStreamConfiguration)
     }
-    public static var isAlive: AudioProperty<UInt32> { .init(kAudioDevicePropertyDeviceIsAlive) }
+    public static var isAlive: AudioProperty<UInt32> {
+        .init(kAudioDevicePropertyDeviceIsAlive)
+    }
     public static var isRunningSomewhere: AudioProperty<UInt32> {
         .init(kAudioDevicePropertyDeviceIsRunningSomewhere)
     }
@@ -170,7 +180,8 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
             if range.mMinimum == range.mMaximum {
                 rates.insert(range.mMinimum)
             } else {
-                rates.formUnion(standard.filter { $0 >= range.mMinimum && $0 <= range.mMaximum })
+                rates.formUnion(
+                    standard.filter { $0 >= range.mMinimum && $0 <= range.mMaximum })
             }
         }
         return rates.sorted()
@@ -183,13 +194,16 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public var currentSampleRate: Double? { id.optionalValue(of: .nominalSampleRate) }
     public var currentBufferFrameSize: UInt32? { id.optionalValue(of: .bufferFrameSize) }
     public var isAlive: Bool { (id.optionalValue(of: .isAlive) ?? 0) != 0 }
-    public var isRunningSomewhere: Bool { (id.optionalValue(of: .isRunningSomewhere) ?? 0) != 0 }
+    public var isRunningSomewhere: Bool {
+        (id.optionalValue(of: .isRunningSomewhere) ?? 0) != 0
+    }
 
     /// Presentation latency in frames for a scope, combining the device's own
     /// latency with the safety offset the HAL keeps ahead of the IO cycle.
     public func latencyFrames(scope: AudioObjectPropertyScope) -> Int {
         let latency = id.optionalValue(of: AudioProperty<UInt32>.latency.scoped(to: scope)) ?? 0
-        let safety = id.optionalValue(of: AudioProperty<UInt32>.safetyOffset.scoped(to: scope)) ?? 0
+        let safety =
+            id.optionalValue(of: AudioProperty<UInt32>.safetyOffset.scoped(to: scope)) ?? 0
         return Int(latency) + Int(safety)
     }
 

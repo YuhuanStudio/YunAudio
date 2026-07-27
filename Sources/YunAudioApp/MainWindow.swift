@@ -66,7 +66,8 @@ struct MainWindow: View {
             ForEach(RoutePreset.builtIn) { preset in
                 Button(preset.name) { model.apply(preset) }
                     .buttonStyle(
-                        YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true))
+                        YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true)
+                    )
                     .help(preset.note)
             }
 
@@ -91,8 +92,9 @@ struct MainWindow: View {
                         YunSelect(
                             selection: $model.selectedSourceUID,
                             options: model.inputDevices.map {
-                                .init(value: $0.uid as String?, title: $0.name,
-                                      detail: "\($0.inputChannels)ch")
+                                .init(
+                                    value: $0.uid as String?, title: $0.name,
+                                    detail: "\($0.inputChannels)ch")
                             })
 
                         if let source = model.selectedSource, source.inputChannels > 1 {
@@ -106,10 +108,12 @@ struct MainWindow: View {
                                     options: (0..<source.inputChannels).map {
                                         ($0, "Ch \($0 + 1)")
                                     })
-                                Text("This device reports \(source.inputChannels) input channels; not all of them necessarily carry audio.")
-                                    .font(Yun.Text.caption)
-                                    .foregroundStyle(Yun.Palette.textTertiary)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                Text(
+                                    "This device reports \(source.inputChannels) input channels; not all of them necessarily carry audio."
+                                )
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
@@ -187,15 +191,18 @@ struct MainWindow: View {
 
                 if model.activeRoutes.isEmpty {
                     YunCard {
-                        Text(model.isRunning
-                            ? "No routes are carrying audio."
-                            : "Start routing to see the mix.")
-                            .font(Yun.Text.body)
-                            .foregroundStyle(Yun.Palette.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Text(
+                            model.isRunning
+                                ? "No routes are carrying audio."
+                                : "Start routing to see the mix."
+                        )
+                        .font(Yun.Text.body)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else {
-                    ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
+                    ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) {
+                        index, route in
                         routeStrip(index: index, route: route)
                     }
                 }
@@ -215,12 +222,15 @@ struct MainWindow: View {
                     Button {
                         model.setMuted(!isMuted, forRouteAt: index)
                     } label: {
-                        Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(
-                                isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary)
-                            .frame(width: 24, height: 24)
-                            .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
+                        Image(
+                            systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+                        )
+                        .font(.system(size: 11))
+                        .foregroundStyle(
+                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary
+                        )
+                        .frame(width: 24, height: 24)
+                        .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
                     }
                     .buttonStyle(.plain)
                     .focusEffectDisabled()
@@ -239,9 +249,10 @@ struct MainWindow: View {
 
                 YunLevelMeter(level: isMuted ? 0 : level, segments: 32)
 
-                YunFader(decibels: Binding(
-                    get: { model.faderDecibels(forRouteAt: index) },
-                    set: { model.setFaderDecibels($0, forRouteAt: index) }))
+                YunFader(
+                    decibels: Binding(
+                        get: { model.faderDecibels(forRouteAt: index) },
+                        set: { model.setFaderDecibels($0, forRouteAt: index) }))
             }
         }
     }
@@ -259,10 +270,12 @@ struct MainWindow: View {
                             if kind != EffectKind.allCases.last { YunDivider() }
                         }
                         if model.enabledEffects.contains(.voiceIsolation) {
-                            Text("Processing means the path is no longer bit-exact. That is the trade, not a fault.")
-                                .font(Yun.Text.caption)
-                                .foregroundStyle(Yun.Palette.warning)
-                                .fixedSize(horizontal: false, vertical: true)
+                            Text(
+                                "Processing means the path is no longer bit-exact. That is the trade, not a fault."
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
@@ -286,7 +299,8 @@ struct MainWindow: View {
                             if model.isClockLocked {
                                 YunDetailRow(
                                     "Clock",
-                                    value: String(format: "locked %.6f", model.measuredRateRatio),
+                                    value: String(
+                                        format: "locked %.6f", model.measuredRateRatio),
                                     tone: .success)
                                 YunDetailRow(
                                     "Crystal",
@@ -315,10 +329,13 @@ struct MainWindow: View {
 
     private func effectRow(_ kind: EffectKind) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Toggle(kind.title, isOn: Binding(
-                get: { model.enabledEffects.contains(kind) },
-                set: { model.setEffect(kind, enabled: $0) }))
-                .toggleStyle(YunToggleStyle())
+            Toggle(
+                kind.title,
+                isOn: Binding(
+                    get: { model.enabledEffects.contains(kind) },
+                    set: { model.setEffect(kind, enabled: $0) })
+            )
+            .toggleStyle(YunToggleStyle())
             Text(kind.detail)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
@@ -336,9 +353,11 @@ struct MainWindow: View {
             YunSelect(
                 selection: $model.selectedDestinationUID,
                 options: model.outputDevices.map {
-                    .init(value: $0.uid as String?, title: $0.name,
-                          detail: "\($0.outputChannels)ch")
-                })
+                    .init(
+                        value: $0.uid as String?, title: $0.name,
+                        detail: "\($0.outputChannels)ch")
+                }
+            )
             .frame(width: 280)
 
             if let error = model.lastError {

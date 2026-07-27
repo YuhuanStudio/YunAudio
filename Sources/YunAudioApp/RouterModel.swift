@@ -146,7 +146,8 @@ final class RouterModel {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
                 self.refreshDevices()
-                self.selectedDestinationUID = self.outputDevices
+                self.selectedDestinationUID =
+                    self.outputDevices
                     .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
                     ?? self.selectedDestinationUID
             }
@@ -169,7 +170,8 @@ final class RouterModel {
     /// the user picked.
     private var tappableProcessIDs: [AudioObjectID] {
         guard !capturedAppBundleIDs.isEmpty else { return [] }
-        return availableApps
+        return
+            availableApps
             .filter { process in
                 guard let bundle = process.bundleID else { return false }
                 return capturedAppBundleIDs.contains { bundle.hasPrefix($0) }
@@ -221,7 +223,8 @@ final class RouterModel {
             source = device.name
         } else if route.source.deviceUID.contains("-") {
             // Tap UIDs are UUIDs; name the applications they carry instead.
-            source = capturedAppBundleIDs.isEmpty
+            source =
+                capturedAppBundleIDs.isEmpty
                 ? "Application audio"
                 : availableApps
                     .first { process in
@@ -403,7 +406,8 @@ final class RouterModel {
             selectedSourceUID = uid
         }
         if let uid = saved.destinationDeviceUID,
-           outputDevices.contains(where: { $0.uid == uid }) {
+            outputDevices.contains(where: { $0.uid == uid })
+        {
             selectedDestinationUID = uid
         }
         selectDefaults()
@@ -411,18 +415,19 @@ final class RouterModel {
 
     private func persist() {
         guard !isRestoring else { return }
-        PreferencesStore.save(Preferences(
-            sourceDeviceUID: selectedSourceUID,
-            destinationDeviceUID: selectedDestinationUID,
-            channelMode: channelMode.rawValue,
-            monoChannel: monoChannel,
-            bufferFrames: 128,
-            autoStart: autoStart,
-            voiceIsolationEnabled: voiceIsolationEnabled,
-            voiceIsolationMix: voiceIsolationMix,
-            preferredSampleRate: preferredSampleRate,
-            capturedAppBundleIDs: Array(capturedAppBundleIDs),
-            enabledEffects: enabledEffects.map(\.rawValue)))
+        PreferencesStore.save(
+            Preferences(
+                sourceDeviceUID: selectedSourceUID,
+                destinationDeviceUID: selectedDestinationUID,
+                channelMode: channelMode.rawValue,
+                monoChannel: monoChannel,
+                bufferFrames: 128,
+                autoStart: autoStart,
+                voiceIsolationEnabled: voiceIsolationEnabled,
+                voiceIsolationMix: voiceIsolationMix,
+                preferredSampleRate: preferredSampleRate,
+                capturedAppBundleIDs: Array(capturedAppBundleIDs),
+                enabledEffects: enabledEffects.map(\.rawValue)))
     }
 
     // MARK: Devices
@@ -438,12 +443,14 @@ final class RouterModel {
             // Prefer the system input, but never the virtual endpoint we are
             // about to write into — that would be a feedback loop.
             let systemInput = try? AudioDevices.defaultInput()
-            selectedSourceUID = systemInput.map(\.uid)
+            selectedSourceUID =
+                systemInput.map(\.uid)
                 ?? inputDevices.first { $0.transport == .usb }?.uid
                 ?? inputDevices.first?.uid
         }
         if selectedDestinationUID == nil {
-            selectedDestinationUID = outputDevices
+            selectedDestinationUID =
+                outputDevices
                 .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
         }
         applyChannelDefaults()
@@ -458,19 +465,22 @@ final class RouterModel {
     private func applyChannelDefaults() {
         // Restoring must not overwrite what the user chose last time.
         guard !isRestoring, let source = selectedSource else { return }
-        channelMode = source.inputChannels % 2 == 0 && source.inputChannels >= 2
+        channelMode =
+            source.inputChannels % 2 == 0 && source.inputChannels >= 2
             ? .stereo : .mono
         monoChannel = 0
     }
 
     private func handleDeviceChange() {
         refreshDevices()
-        let sourceGone = selectedSourceUID.map { uid in
-            !inputDevices.contains { $0.uid == uid }
-        } ?? false
-        let destinationGone = selectedDestinationUID.map { uid in
-            !outputDevices.contains { $0.uid == uid }
-        } ?? false
+        let sourceGone =
+            selectedSourceUID.map { uid in
+                !inputDevices.contains { $0.uid == uid }
+            } ?? false
+        let destinationGone =
+            selectedDestinationUID.map { uid in
+                !outputDevices.contains { $0.uid == uid }
+            } ?? false
 
         if isRunning, sourceGone || destinationGone {
             stop()
@@ -485,7 +495,9 @@ final class RouterModel {
     // MARK: Routing
 
     var routes: [Route] {
-        guard let source = selectedSource, let destination = selectedDestination else { return [] }
+        guard let source = selectedSource, let destination = selectedDestination else {
+            return []
+        }
         let destinationChannels = min(2, destination.outputChannels)
         guard destinationChannels > 0, source.inputChannels > 0 else { return [] }
 
@@ -527,15 +539,17 @@ final class RouterModel {
         let processIDs = tappableProcessIDs
         if !processIDs.isEmpty {
             if let tap = try? ProcessTap(
-                processIDs: processIDs, muteBehavior: tapMuteBehavior) {
+                processIDs: processIDs, muteBehavior: tapMuteBehavior)
+            {
                 taps.append(tap)
                 let destinationChannels = min(2, selectedDestination?.outputChannels ?? 0)
                 let tapChannels = Int(tap.format?.mChannelsPerFrame ?? 2)
                 for channel in 0..<min(destinationChannels, tapChannels) {
-                    routeList.append(Route(
-                        source: ChannelRef(deviceUID: tap.uid, channel: channel),
-                        destination: ChannelRef(
-                            deviceUID: destination, channel: channel)))
+                    routeList.append(
+                        Route(
+                            source: ChannelRef(deviceUID: tap.uid, channel: channel),
+                            destination: ChannelRef(
+                                deviceUID: destination, channel: channel)))
                 }
             } else {
                 lastError = "could not capture the selected applications"
@@ -552,7 +566,8 @@ final class RouterModel {
 
         let engine = engine
         let effects = Array(enabledEffects)
-        let isolation = enabledEffects.contains(.voiceIsolation)
+        let isolation =
+            enabledEffects.contains(.voiceIsolation)
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
         let handle = TapHandle(taps: taps)
