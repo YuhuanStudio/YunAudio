@@ -55,6 +55,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var duckDecibels: Float?
     /// What each source is for, keyed by device UID or bundle identifier.
     var sourceRoles: [String: String]?
+    /// Hold a key to talk rather than clicking to mute.
+    var isPushToTalkEnabled: Bool?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -85,7 +87,8 @@ struct Preferences: Codable, Equatable, Sendable {
         isAutoLevelling: false,
         isDucking: false,
         duckDecibels: -14,
-        sourceRoles: [:])
+        sourceRoles: [:],
+        isPushToTalkEnabled: false)
 }
 
 @MainActor

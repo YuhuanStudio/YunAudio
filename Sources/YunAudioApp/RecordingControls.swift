@@ -42,10 +42,33 @@ struct RecordingControls: View {
                 .help(loc(model.isRecording ? "Stop recording (⌘R)" : "Record (⌘R)"))
 
                 if model.isRecording {
+                    // Pause rather than stop is what somebody wants when the
+                    // doorbell goes: the file stays open and what comes out is
+                    // one clean splice instead of two files to join later.
+                    Button {
+                        model.toggleRecordingPause()
+                    } label: {
+                        Image(
+                            systemName: model.isRecordingPaused ? "play.fill" : "pause.fill"
+                        )
+                        .font(.system(size: 10))
+                        .frame(width: 14)
+                    }
+                    .buttonStyle(YunButtonStyle(.secondary, small: true))
+                    .help(loc(model.isRecordingPaused ? "Resume" : "Pause"))
+
                     Text(Self.elapsed(model.recordingSeconds))
                         .font(Yun.Text.mono)
-                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .foregroundStyle(
+                            model.isRecordingPaused
+                                ? Yun.Palette.textTertiary : Yun.Palette.textPrimary
+                        )
                         .monospacedDigit()
+                    if model.isRecordingPaused {
+                        Text(loc("Paused"))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                    }
                 } else {
                     YunSegmented(
                         selection: $model.recordingFormat,

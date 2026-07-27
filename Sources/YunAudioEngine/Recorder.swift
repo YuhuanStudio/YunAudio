@@ -20,13 +20,33 @@ public final class Recorder: @unchecked Sendable {
     public enum Format: String, CaseIterable, Sendable {
         /// Lossless, and the only choice that keeps a bit-exact path bit-exact.
         case wav
+        /// Lossless and about half the size of WAV. The right default for
+        /// anybody keeping the recording rather than sending it somewhere.
+        case flac
         /// A quarter the size, at the cost of being a lossy copy of something
         /// this project spends most of its effort keeping intact.
         case aac
 
-        public var fileExtension: String { self == .wav ? "wav" : "m4a" }
+        public var fileExtension: String {
+            switch self {
+            case .wav: "wav"
+            case .flac: "flac"
+            case .aac: "m4a"
+            }
+        }
 
-        public var title: String { self == .wav ? "WAV" : "AAC" }
+        public var title: String {
+            switch self {
+            case .wav: "WAV"
+            case .flac: "FLAC"
+            case .aac: "AAC"
+            }
+        }
+
+        /// True when nothing about the signal is thrown away, which is the only
+        /// thing that matters for a project whose whole claim is that the path
+        /// is bit-exact.
+        public var isLossless: Bool { self != .aac }
     }
 
     public let url: URL
@@ -77,6 +97,13 @@ public final class Recorder: @unchecked Sendable {
             settings[AVLinearPCMBitDepthKey] = 32
             settings[AVLinearPCMIsFloatKey] = true
             settings[AVLinearPCMIsNonInterleaved] = false
+        case .flac:
+            settings[AVFormatIDKey] = kAudioFormatFLAC
+            // FLAC is an integer format, so this is the one path where the
+            // float capture has to be quantised. Twenty-four bits puts the
+            // quantisation floor at −144 dBFS, which is below the noise floor
+            // of any microphone that has ever existed.
+            settings[AVLinearPCMBitDepthKey] = 24
         case .aac:
             settings[AVFormatIDKey] = kAudioFormatMPEG4AAC
             settings[AVEncoderBitRateKey] = 256_000

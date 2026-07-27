@@ -2599,3 +2599,90 @@ struct VoiceCharacterTests {
         #expect(chain.latencyFrames >= 0)
     }
 }
+
+// MARK: - Recording formats
+
+/// A format that cannot be written is a segment in the picker that produces an
+/// error at the worst possible moment — after somebody has recorded something.
+@Suite("Recording formats")
+struct RecorderFormatTests {
+
+    @Test("every offered format opens a real file")
+    func formatsWrite() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-format-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        for format in Recorder.Format.allCases {
+            let recorder = try Recorder(
+                directory: directory, format: format, channels: 2, sampleRate: 48000,
+                timestamp: Date(timeIntervalSince1970: 0))
+            #expect(recorder.url.pathExtension == format.fileExtension)
+
+            // A second of a tone, so there is something for the encoder to
+            // encode — an empty file proves nothing about a lossy format.
+            var samples = [Float](repeating: 0, count: 48000 * 2)
+            for frame in 0..<48000 {
+                let value = 0.25 * Float(sin(2 * Double.pi * 440 * Double(frame) / 48000))
+                samples[frame * 2] = value
+                samples[frame * 2 + 1] = value
+            }
+            samples.withUnsafeBufferPointer {
+                recorder.write($0.baseAddress!, count: $0.count)
+            }
+            recorder.stop()
+
+            #expect(
+                recorder.lastError == nil, "\(format.rawValue): \(recorder.lastError ?? "")")
+            let size =
+                (try? FileManager.default.attributesOfItem(atPath: recorder.url.path))?[.size]
+                as? Int ?? 0
+            #expect(size > 1000, "\(format.rawValue) wrote \(size) bytes")
+            // Roughly a second of stereo, whatever the container did with it.
+            #expect(abs(recorder.duration - 1.0) < 0.05, "\(format.rawValue)")
+        }
+    }
+
+    /// The lossless claim has to mean something, because the whole project is
+    /// built on the path being bit-exact and a lossy container throws that away
+    /// at the last step.
+    @Test("only the lossy format says it is lossy")
+    func losslessIsHonest() {
+        #expect(Recorder.Format.wav.isLossless)
+        #expect(Recorder.Format.flac.isLossless)
+        #expect(!Recorder.Format.aac.isLossless)
+    }
+
+    /// And a lossless format has to actually be smaller than uncompressed, or
+    /// there is no reason to offer it.
+    @Test("FLAC is smaller than WAV for the same audio")
+    func flacIsSmaller() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-size-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        var sizes: [Recorder.Format: Int] = [:]
+        for format in [Recorder.Format.wav, .flac] {
+            let recorder = try Recorder(
+                directory: directory, format: format, channels: 1, sampleRate: 48000,
+                timestamp: Date(timeIntervalSince1970: 0))
+            var samples = [Float](repeating: 0, count: 48000)
+            for frame in 0..<48000 {
+                samples[frame] =
+                    0.3 * Float(sin(2 * Double.pi * 220 * Double(frame) / 48000))
+            }
+            samples.withUnsafeBufferPointer {
+                recorder.write($0.baseAddress!, count: $0.count)
+            }
+            recorder.stop()
+            sizes[format] =
+                (try? FileManager.default.attributesOfItem(atPath: recorder.url.path))?[.size]
+                as? Int ?? 0
+        }
+        #expect(sizes[.flac]! < sizes[.wav]!)
+    }
+}

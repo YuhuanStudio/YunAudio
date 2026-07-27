@@ -305,3 +305,9 @@
 "Alien" = "外星人";
 "Voice type" = "變聲種類";
 "Time" = "延遲時間";
+"Pause" = "暫停";
+"Resume" = "繼續";
+"Paused" = "已暫停";
+"Hold to talk" = "按住說話";
+"Open" = "開啟中";
+"The microphone stays muted until the key is down. Switching it off puts the mute back where it was." = "麥克風保持靜音，只有按住那個鍵時才開。關掉這個功能會把靜音狀態還原。";

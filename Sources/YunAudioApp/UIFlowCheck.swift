@@ -32,6 +32,22 @@ enum UIFlowCheck {
 
     static func run(model: RouterModel) async {
         print("\nlaunch state")
+        // The single-instance guard is bypassed for this mode, so two copies
+        // can be running at once — and when they are, they fight over the same
+        // microphone and the same aggregate. The result is dozens of unrelated
+        // failures with nothing to connect them: recording writes nothing, the
+        // canceller cannot claim the device, routes stop resolving. It took a
+        // while to work that out the first time, so it is stated here instead.
+        let others = NSWorkspace.shared.runningApplications.filter {
+            $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+                && $0.executableURL?.lastPathComponent == "YunAudioApp"
+        }
+        check("no other copy is holding the devices", others.isEmpty)
+        if !others.isEmpty {
+            note(
+                "\(others.count) other copy(ies) running — everything below is "
+                    + "competing with them for the hardware")
+        }
         check("devices were enumerated", !model.inputDevices.isEmpty)
         check("an input is preselected", model.selectedSourceUID != nil)
         if !model.isDriverInstalled {
@@ -73,6 +89,7 @@ enum UIFlowCheck {
         check("every global shortcut found a free combination", model.hotkeyFailures.isEmpty)
         for (action, shortcut) in model.activeShortcuts {
             note("\(action.title): \(shortcut.displayName)")
+            check("\(action.rawValue) can be written down", !shortcut.displayName.isEmpty)
         }
         check(
             "the in-window shortcuts are listed too",
@@ -580,6 +597,30 @@ enum UIFlowCheck {
         check("switching it off keeps the level it settled on", model.inputDecibels == settled)
         check("routing continues without it", model.isRunning && !model.isBusy)
 
+        print("\npush to talk")
+        // The property that matters is that arming it is safe: silence has to
+        // be the resting state, or somebody broadcasts a room they were sure
+        // was muted.
+        let muteBefore = model.isInputMuted
+        model.isPushToTalkEnabled = true
+        check("arming it mutes immediately", model.isInputMuted)
+        check("and it starts closed", !model.isPushToTalkHeld)
+        check(
+            "it got a shortcut",
+            model.activeShortcuts[.pushToTalk] != nil
+                || model.hotkeyFailures.contains { $0.contains("talk") })
+        if let shortcut = model.activeShortcuts[.pushToTalk] {
+            note("bound to \(shortcut.displayName)")
+            // A badge with nothing in it is what an unnamed key code looks
+            // like, and F13 upwards produce no character through the layout —
+            // so this said nothing at all until they were named.
+            check("the shortcut can be written down", !shortcut.displayName.isEmpty)
+        }
+        model.isPushToTalkEnabled = false
+        // Disarming has to restore what the mute was, not leave somebody muted
+        // by a feature they just switched off.
+        check("disarming restores the previous mute", model.isInputMuted == muteBefore)
+
         print("\ndirect monitoring")
         if let monitor = model.monitorOptions.first {
             let routesBefore = model.activeRoutes.count
@@ -659,8 +700,35 @@ enum UIFlowCheck {
         check("a file was named", file != nil)
         await pause(2.0)
         check("the elapsed time is advancing", model.recordingSeconds > 0.5)
+        // Pausing has to stop the clock as well as the writing, or the elapsed
+        // time claims audio that is not in the file.
+        //
+        // Not measured from the instant of the pause: whatever is already in
+        // the ring keeps being written, and it should — those frames were
+        // captured before anybody pressed pause, and throwing them away would
+        // clip the end of every sentence somebody paused after. So the backlog
+        // is allowed to flush first, and what is asserted is that it then
+        // stops, which is the actual claim.
+        model.toggleRecordingPause()
+        check("it paused", model.isRecordingPaused)
+        await pause(0.6)
+        let atPause = model.recordingSeconds
+        await pause(1.0)
+        check(
+            "the elapsed time stops while paused",
+            abs(model.recordingSeconds - atPause) < 0.02)
+        note(
+            String(
+                format: "%.2fs after the backlog flushed, %.2fs a second later",
+                atPause, model.recordingSeconds))
+        model.toggleRecordingPause()
+        check("it resumed", !model.isRecordingPaused)
+        await pause(0.8)
+        check("and the elapsed time moves again", model.recordingSeconds > atPause + 0.3)
+
         model.toggleRecording()
         check("the recording stopped", !model.isRecording)
+        check("stopping clears the pause", !model.isRecordingPaused)
         // The duration has to survive the stop. Reading it after releasing the
         // recorder returned zero, so the elapsed time snapped to 00:00 at
         // exactly the moment anyone would look at it.

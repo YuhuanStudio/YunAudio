@@ -140,6 +140,13 @@ struct RTGraph {
     var recordRing: OpaquePointer?
     /// Channels the recorder expects per frame.
     var recordChannels: Int32
+    /// Non-zero while recording is paused.
+    ///
+    /// Paused at the source rather than in the writer: nothing is put into the
+    /// ring at all, so the file becomes a seamless splice of the parts that
+    /// were not paused. A writer that dropped frames instead would leave the
+    /// ring holding audio from before the pause and play it back after.
+    var recordPaused: Int32
     /// Scratch for de-striding the destination bus before it goes into the ring.
     /// Allocated with the graph, because the IO thread cannot allocate and the
     /// destination is usually wider than the recording — BlackHole presents
@@ -410,6 +417,7 @@ struct RTGraph {
                 isolationIsChain: 0,
                 recordRing: nil,
                 recordChannels: 0,
+                recordPaused: 0,
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
                 mainOutputBuffer: 0,
@@ -912,7 +920,9 @@ func yunAudioIOProc(
 
     // Feed the recorder from the destination bus: what is written to disk
     // should be what the far end receives, not what arrived at the input.
-    if let ring = graph.pointee.recordRing, mainIndex < output.count {
+    if let ring = graph.pointee.recordRing, graph.pointee.recordPaused == 0,
+        mainIndex < output.count
+    {
         let channels = Int(graph.pointee.recordChannels)
         if let data = output[mainIndex].mData, channels > 0 {
             let stride = Int(output[mainIndex].mNumberChannels)

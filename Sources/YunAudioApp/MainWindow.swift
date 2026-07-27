@@ -283,6 +283,9 @@ struct MainWindow: View {
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
                             label: loc("Output level"))
 
+                        YunDivider()
+                        pushToTalk
+
                         if !model.monitorOptions.isEmpty {
                             YunDivider()
                             monitor
@@ -390,6 +393,44 @@ struct MainWindow: View {
                     .monospacedDigit()
                     .frame(width: 58, alignment: .trailing)
             }
+        }
+    }
+
+    /// Held to talk rather than clicked to mute.
+    ///
+    /// Sits with the input because that is what it takes over: while it is
+    /// armed the microphone is muted unless the key is down, and the mute
+    /// button above reflects that rather than fighting it.
+    @ViewBuilder
+    private var pushToTalk: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Toggle(isOn: $model.isPushToTalkEnabled) { EmptyView() }
+                .toggleStyle(YunToggleStyle())
+                .labelsHidden()
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: Yun.Space.sm) {
+                    Text(loc("Hold to talk"))
+                        .font(Yun.Text.label)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                    if let shortcut = model.activeShortcuts[.pushToTalk] {
+                        YunBadge(shortcut.displayName)
+                    }
+                    if model.isPushToTalkEnabled && model.isPushToTalkHeld {
+                        Text(loc("Open"))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.success)
+                    }
+                }
+                Text(
+                    loc(
+                        "The microphone stays muted until the key is down. Switching it off puts the mute back where it was."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
         }
     }
 

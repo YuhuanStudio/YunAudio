@@ -451,8 +451,26 @@ final class RouterModel {
             ?? FileManager.default.temporaryDirectory
     }
 
+    /// Paused, with the file still open.
+    ///
+    /// Kept in the model as well as the engine because a paused recording is a
+    /// state the interface has to render, and asking the engine sixty times a
+    /// second for something that changes on a click is work for nothing.
+    private(set) var isRecordingPaused = false
+
+    /// Pausing rather than stopping, which is what somebody wants when the
+    /// doorbell goes: the file stays open and what comes out is a clean splice
+    /// rather than two files to join afterwards.
+    func toggleRecordingPause() {
+        guard isRecording else { return }
+        isRecordingPaused.toggle()
+        engine.setRecordingPaused(isRecordingPaused)
+    }
+
     func toggleRecording() {
         if isRecording {
+            isRecordingPaused = false
+            engine.setRecordingPaused(false)
             // Read the duration first: stopping releases the recorder, and
             // asking a released recorder how long it ran returns zero, so the
             // elapsed time snapped back to 00:00 exactly when someone would
@@ -470,6 +488,7 @@ final class RouterModel {
             recordingURL = try engine.startRecording(
                 to: recordingDirectory, format: recordingFormat)
             isRecording = true
+            isRecordingPaused = false
             recordingSeconds = 0
             lastError = nil
         } catch {
@@ -1142,19 +1161,63 @@ final class RouterModel {
         }
     }
 
+    // MARK: Push to talk
+
+    /// Held to talk, released to go quiet.
+    ///
+    /// Off by default, and deliberately not the same switch as the mute button.
+    /// Turning it on takes over the microphone's mute: while it is armed the
+    /// microphone is muted unless the key is down, and the button reflects that
+    /// rather than fighting it. The alternative — two independent notions of
+    /// muted — is how somebody ends up broadcasting a room they were sure was
+    /// silent.
+    var isPushToTalkEnabled = false {
+        didSet {
+            guard oldValue != isPushToTalkEnabled else { return }
+            // Arming it mutes immediately: the whole point is that silence is
+            // the resting state. Disarming restores whatever the mute was
+            // before, rather than leaving somebody muted by a feature they just
+            // switched off.
+            if isPushToTalkEnabled {
+                muteBeforePushToTalk = isInputMuted
+                isPushToTalkHeld = false
+                isInputMuted = true
+            } else {
+                isInputMuted = muteBeforePushToTalk
+            }
+            persist()
+        }
+    }
+
+    private(set) var isPushToTalkHeld = false
+    @ObservationIgnored private var muteBeforePushToTalk = false
+
+    private func setPushToTalk(held: Bool) {
+        guard isPushToTalkEnabled else { return }
+        guard isPushToTalkHeld != held else { return }
+        isPushToTalkHeld = held
+        isInputMuted = !held
+    }
+
     // MARK: Hotkeys
 
     private func installHotkeys() {
         for action in HotkeyManager.Action.allCases {
-            let handler: @Sendable () -> Void
+            let handler: @Sendable (Bool) -> Void
             switch action {
             case .toggleRouting:
-                handler = { [weak self] in
+                handler = { [weak self] isPressed in
+                    guard isPressed else { return }
                     MainActor.assumeIsolated { self?.toggle() }
                 }
             case .toggleMute:
-                handler = { [weak self] in
+                handler = { [weak self] isPressed in
+                    guard isPressed else { return }
                     MainActor.assumeIsolated { self?.toggleMute() }
+                }
+            case .pushToTalk:
+                handler = { [weak self] isPressed in
+                    MainActor.assumeIsolated { self?.setPushToTalk(held: isPressed) }
                 }
             }
             // Work down the candidates until one is free. Another application
@@ -1245,6 +1308,7 @@ final class RouterModel {
         isDucking = saved.isDucking ?? false
         sourceRoles = (saved.sourceRoles ?? [:]).compactMapValues(
             LevelCalibration.Role.init(rawValue:))
+        isPushToTalkEnabled = saved.isPushToTalkEnabled ?? false
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1305,7 +1369,8 @@ final class RouterModel {
                 isAutoLevelling: isAutoLevelling,
                 isDucking: isDucking,
                 duckDecibels: duckDecibels,
-                sourceRoles: sourceRoles.mapValues(\.rawValue)))
+                sourceRoles: sourceRoles.mapValues(\.rawValue),
+                isPushToTalkEnabled: isPushToTalkEnabled))
     }
 
     // MARK: Devices

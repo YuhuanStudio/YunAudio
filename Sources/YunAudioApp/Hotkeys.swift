@@ -15,13 +15,24 @@ final class HotkeyManager {
     enum Action: String, CaseIterable, Codable, Sendable {
         case toggleRouting
         case toggleMute
+        /// Held to talk, released to go quiet.
+        ///
+        /// Unlike the others this needs the key going up as well as down, which
+        /// is why the handler below listens for both. A push-to-talk built on
+        /// press events alone is a toggle, and a toggle used as push-to-talk is
+        /// how somebody ends up broadcasting a room they thought was muted.
+        case pushToTalk
 
         var title: String {
             switch self {
             case .toggleRouting: loc("Start / stop routing")
             case .toggleMute: loc("Mute / unmute")
+            case .pushToTalk: loc("Hold to talk")
             }
         }
+
+        /// True when the action cares about the key being released.
+        var isHeld: Bool { self == .pushToTalk }
 
         /// Defaults chosen to avoid anything the system or common apps claim.
         /// Control-Option is largely unused territory.
@@ -58,6 +69,19 @@ final class HotkeyManager {
                         keyCode: UInt32(kVK_ANSI_U), modifiers: [.control, .option]),
                     Shortcut(
                         keyCode: UInt32(kVK_F14), modifiers: [.control, .option]),
+                ]
+            case .pushToTalk:
+                // Every gaming convention uses a single unmodified key for
+                // this, because a modifier combination cannot be held
+                // comfortably while doing anything else. F15 and the numeric
+                // keypad are the ones nothing else claims.
+                [
+                    Shortcut(keyCode: UInt32(kVK_F15), modifiers: []),
+                    Shortcut(keyCode: UInt32(kVK_ANSI_Keypad0), modifiers: []),
+                    Shortcut(
+                        keyCode: UInt32(kVK_ANSI_T), modifiers: [.control, .option]),
+                    Shortcut(
+                        keyCode: UInt32(kVK_F16), modifiers: [.control, .option]),
                 ]
             }
         }
@@ -112,6 +136,18 @@ final class HotkeyManager {
             kVK_F1: "F1", kVK_F2: "F2", kVK_F3: "F3", kVK_F4: "F4",
             kVK_F5: "F5", kVK_F6: "F6", kVK_F7: "F7", kVK_F8: "F8",
             kVK_F9: "F9", kVK_F10: "F10", kVK_F11: "F11", kVK_F12: "F12",
+            // The ones a push-to-talk actually lands on. F13 upwards and the
+            // numeric keypad produce no character through the layout, so
+            // without these the badge came out empty — the shortcut worked and
+            // the interface could not say what it was.
+            kVK_F13: "F13", kVK_F14: "F14", kVK_F15: "F15", kVK_F16: "F16",
+            kVK_F17: "F17", kVK_F18: "F18", kVK_F19: "F19", kVK_F20: "F20",
+            kVK_ANSI_Keypad0: "Keypad 0", kVK_ANSI_Keypad1: "Keypad 1",
+            kVK_ANSI_Keypad2: "Keypad 2", kVK_ANSI_Keypad3: "Keypad 3",
+            kVK_ANSI_Keypad4: "Keypad 4", kVK_ANSI_Keypad5: "Keypad 5",
+            kVK_ANSI_Keypad6: "Keypad 6", kVK_ANSI_Keypad7: "Keypad 7",
+            kVK_ANSI_Keypad8: "Keypad 8", kVK_ANSI_Keypad9: "Keypad 9",
+            kVK_ANSI_KeypadEnter: "Keypad ⏎",
         ]
 
         static func keyName(for keyCode: UInt32) -> String? {
@@ -151,7 +187,7 @@ final class HotkeyManager {
     }
 
     private var registrations: [Action: EventHotKeyRef] = [:]
-    private var handlers: [Action: @Sendable () -> Void] = [:]
+    private var handlers: [Action: @Sendable (_ isPressed: Bool) -> Void] = [:]
     private var eventHandler: EventHandlerRef?
     private static let signature: OSType = 0x7975_6E61  // 'yuna'
 
@@ -161,7 +197,8 @@ final class HotkeyManager {
     /// Handlers are `@Sendable` because a Carbon callback delivers them from
     /// the event thread and they are then hopped to the main actor. Without the
     /// annotation the hop is a data race the compiler cannot see through.
-    nonisolated(unsafe) private static var dispatch: [UInt32: @Sendable () -> Void] = [:]
+    nonisolated(unsafe) private static var dispatch:
+        [UInt32: @Sendable (_ isPressed: Bool) -> Void] = [:]
 
     init() { installHandler() }
 
@@ -180,8 +217,18 @@ final class HotkeyManager {
     }
 
     private func installHandler() {
-        var spec = EventTypeSpec(
-            eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+        // Both edges. Everything except push-to-talk ignores the release, but
+        // registering only for presses makes a held shortcut impossible to
+        // build later without reworking this — and a push-to-talk that cannot
+        // see the key come up is a toggle wearing the wrong label.
+        var specs = [
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyPressed)),
+            EventTypeSpec(
+                eventClass: OSType(kEventClassKeyboard),
+                eventKind: UInt32(kEventHotKeyReleased)),
+        ]
         InstallEventHandler(
             GetApplicationEventTarget(),
             { _, event, _ -> OSStatus in
@@ -191,12 +238,13 @@ final class HotkeyManager {
                     EventParamType(typeEventHotKeyID), nil,
                     MemoryLayout<EventHotKeyID>.size, nil, &identifier)
                 guard status == noErr else { return status }
+                let isPress = GetEventKind(event) == UInt32(kEventHotKeyPressed)
                 if let action = HotkeyManager.dispatch[identifier.id] {
-                    DispatchQueue.main.async { action() }
+                    DispatchQueue.main.async { action(isPress) }
                 }
                 return noErr
             },
-            1, &spec, nil, &eventHandler)
+            2, &specs, nil, &eventHandler)
     }
 
     /// Registers a shortcut. Returns false when another application already
@@ -204,7 +252,8 @@ final class HotkeyManager {
     /// shortcut that silently does nothing is worse than no shortcut.
     @discardableResult
     func register(
-        _ action: Action, shortcut: Shortcut, handler: @escaping @Sendable () -> Void
+        _ action: Action, shortcut: Shortcut,
+        handler: @escaping @Sendable (_ isPressed: Bool) -> Void
     ) -> Bool {
         unregister(action)
 

@@ -305,3 +305,9 @@
 "Alien" = "Alien";
 "Voice type" = "Voice type";
 "Time" = "Time";
+"Pause" = "Pause";
+"Resume" = "Resume";
+"Paused" = "Paused";
+"Hold to talk" = "Hold to talk";
+"Open" = "Open";
+"The microphone stays muted until the key is down. Switching it off puts the mute back where it was." = "The microphone stays muted until the key is down. Switching it off puts the mute back where it was.";

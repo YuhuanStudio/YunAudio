@@ -773,6 +773,20 @@ public final class RoutingEngine: @unchecked Sendable {
         return Int(yun_rt_ring_read(ring, destination, UInt32(capacity)))
     }
 
+    /// Pauses or resumes without closing the file.
+    ///
+    /// The recorder itself does not know: frames simply stop being put into its
+    /// ring. That is what makes the result a clean splice rather than a gap —
+    /// and it means the elapsed time stops too, because the duration is counted
+    /// from what was written.
+    public func setRecordingPaused(_ paused: Bool) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.recordPaused = paused ? 1 : 0
+    }
+
+    public var isRecordingPaused: Bool { graph?.pointee.recordPaused != 0 }
+
     public func stopRecording() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -841,6 +855,7 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.selftest = previous.pointee.selftest
         next.pointee.recordRing = previous.pointee.recordRing
         next.pointee.recordChannels = previous.pointee.recordChannels
+        next.pointee.recordPaused = previous.pointee.recordPaused
         next.pointee.cancelledRing = previous.pointee.cancelledRing
         next.pointee.inputGain = previous.pointee.inputGain
         next.pointee.inputMuted = previous.pointee.inputMuted
