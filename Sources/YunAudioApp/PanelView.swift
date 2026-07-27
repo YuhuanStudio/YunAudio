@@ -346,21 +346,22 @@ struct PanelView: View {
                 model.capturedAppBundleIDs.insert(bundle)
             }
         } label: {
-            HStack(spacing: Yun.Space.sm) {
-                Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(
-                        isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
-                Text(process.name)
-                    .font(Yun.Text.body)
-                    .foregroundStyle(Yun.Palette.textPrimary)
-                    .lineLimit(1)
-                if process.isPlaying {
-                    YunBadge("playing")
+            YunHoverRow {
+                HStack(spacing: Yun.Space.sm) {
+                    Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(
+                            isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
+                    Text(process.name)
+                        .font(Yun.Text.body)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .lineLimit(1)
+                    if process.isPlaying {
+                        YunBadge("playing")
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
             }
-            .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()

@@ -17,6 +17,23 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         onTerminate?()
     }
+
+    /// Runs the flow check once the run loop is alive.
+    ///
+    /// It cannot run from `App.init()`: starting a route hops to a queue and
+    /// back through `Task { @MainActor }`, and with no run loop yet that
+    /// continuation never executes, so the first wait spins until the process is
+    /// killed. That is exactly what happened the first time this was written.
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] != nil,
+            let model = flowCheckModel
+        else { return }
+        Task { @MainActor in
+            await UIFlowCheck.run(model: model)
+        }
+    }
+
+    var flowCheckModel: RouterModel?
 }
 
 @main
@@ -40,10 +57,6 @@ struct YunAudioApp: App {
         // accessibility permission, so the panel is rendered offscreen instead —
         // in both appearances, which is the only way to catch a colour that
         // works in one theme and vanishes in the other.
-        if ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] != nil {
-            MainActor.assumeIsolated { UIFlowCheck.run() }
-            exit(0)
-        }
         if let directory = ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] {
             MainActor.assumeIsolated {
                 PanelRenderer.write(to: directory, model: RouterModel())
@@ -60,6 +73,7 @@ struct YunAudioApp: App {
     private func installStatusItem() {
         guard termination.statusItem == nil else { return }
         termination.onTerminate = { model.shutDown() }
+        termination.flowCheckModel = model
         termination.statusItem = StatusItemController(model: model) {
             NSApp.activate(ignoringOtherApps: true)
             for window in NSApp.windows where window.title == "YunAudio" {

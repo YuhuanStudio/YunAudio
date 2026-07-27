@@ -21,53 +21,74 @@ public struct YunButtonStyle: ButtonStyle {
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        let radius = isSmall ? Yun.Radius.buttonSmall : Yun.Radius.button
-        let pressed = configuration.isPressed
+        Surface(kind: kind, isSmall: isSmall, configuration: configuration)
+    }
 
-        configuration.label
-            .font(.system(size: isSmall ? 12 : 13, weight: .medium))
-            .foregroundStyle(foreground)
-            .lineLimit(1)
-            .padding(.horizontal, isSmall ? 12 : 18)
-            .padding(.vertical, isSmall ? 6 : 9)
-            .background(fill(pressed: pressed), in: .rect(cornerRadius: radius))
-            .overlay {
-                if let border = borderColor {
-                    RoundedRectangle(cornerRadius: radius)
-                        .strokeBorder(border, lineWidth: 1)
+    /// A nested view because a `ButtonStyle` has no state of its own, and hover
+    /// needs some. Every rule in the source stylesheet has a matching `:hover`;
+    /// without it the controls here read as static images of buttons.
+    private struct Surface: View {
+        let kind: Kind
+        let isSmall: Bool
+        let configuration: Configuration
+        @State private var isHovering = false
+
+        var body: some View {
+            let radius = isSmall ? Yun.Radius.buttonSmall : Yun.Radius.button
+            let pressed = configuration.isPressed
+
+            configuration.label
+                .font(.system(size: isSmall ? 12 : 13, weight: .medium))
+                .foregroundStyle(foreground)
+                .lineLimit(1)
+                .padding(.horizontal, isSmall ? 12 : 18)
+                .padding(.vertical, isSmall ? 6 : 9)
+                .background(
+                    fill(pressed: pressed, hovering: isHovering),
+                    in: .rect(cornerRadius: radius)
+                )
+                .overlay {
+                    if let border = borderColor(hovering: isHovering) {
+                        RoundedRectangle(cornerRadius: radius)
+                            .strokeBorder(border, lineWidth: 1)
+                    }
                 }
+                .contentShape(.rect(cornerRadius: radius))
+                .onHover { isHovering = $0 }
+                .animation(.easeOut(duration: 0.15), value: pressed)
+                .animation(.easeOut(duration: 0.15), value: isHovering)
+        }
+
+        private var foreground: Color {
+            switch kind {
+            case .primary: Yun.Palette.textPrimary
+            // Secondary and ghost darken towards primary on hover, which is
+            // what the stylesheet does.
+            case .secondary:
+                isHovering ? Yun.Palette.textPrimary : Yun.Palette.textSecondary
+            case .ghost: isHovering ? Yun.Palette.textPrimary : Yun.Palette.textTertiary
+            case .danger: Yun.Palette.danger
             }
-            .contentShape(.rect(cornerRadius: radius))
-            .animation(.easeOut(duration: 0.15), value: pressed)
-    }
-
-    private var foreground: Color {
-        switch kind {
-        case .primary: Yun.Palette.textPrimary
-        case .secondary: Yun.Palette.textSecondary
-        case .ghost: Yun.Palette.textTertiary
-        case .danger: Yun.Palette.danger
         }
-    }
 
-    private var borderColor: Color? {
-        switch kind {
-        case .primary: Yun.Palette.textPrimary
-        case .secondary: Yun.Palette.borderStrong
-        case .ghost: nil
-        case .danger: Yun.Palette.danger.opacity(0.5)
+        private func borderColor(hovering: Bool) -> Color? {
+            switch kind {
+            case .primary: Yun.Palette.textPrimary
+            case .secondary:
+                hovering ? Yun.Palette.textTertiary : Yun.Palette.borderStrong
+            case .ghost: nil
+            case .danger: Yun.Palette.danger.opacity(0.5)
+            }
         }
-    }
 
-    /// The stylesheet's tints: 4% for primary, 2% for secondary, transparent
-    /// until hover for ghost. Pressed doubles the tint, which is what the
-    /// `:hover` rules do.
-    private func fill(pressed: Bool) -> Color {
-        switch kind {
-        case .primary: Yun.Palette.textPrimary.opacity(pressed ? 0.08 : 0.04)
-        case .secondary: Yun.Palette.textPrimary.opacity(pressed ? 0.04 : 0.02)
-        case .ghost: Yun.Palette.textPrimary.opacity(pressed ? 0.04 : 0)
-        case .danger: Yun.Palette.danger.opacity(pressed ? 0.10 : 0.04)
+        private func fill(pressed: Bool, hovering: Bool) -> Color {
+            let step: Double = pressed ? 2 : (hovering ? 1 : 0)
+            return switch kind {
+            case .primary: Yun.Palette.textPrimary.opacity(0.04 + 0.02 * step)
+            case .secondary: Yun.Palette.textPrimary.opacity(0.02 + 0.02 * step)
+            case .ghost: Yun.Palette.textPrimary.opacity(0.04 * step)
+            case .danger: Yun.Palette.danger.opacity(0.04 + 0.03 * step)
+            }
         }
     }
 }
@@ -233,6 +254,10 @@ public struct YunSelect<Value: Hashable>: View {
             .padding(4)
             .frame(minWidth: 240)
             .background(Yun.Palette.card)
+            .overlay {
+                RoundedRectangle(cornerRadius: Yun.Radius.control)
+                    .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+            }
             // A popover is its own hosting window, so a suppression applied at
             // the panel's root does not reach in here.
             .focusEffectDisabled()

@@ -28,18 +28,26 @@ enum UIFlowCheck {
         notes.append(text)
     }
 
-    static func run() {
-        let model = RouterModel()
-
+    static func run(model: RouterModel) async {
         print("\nlaunch state")
         check("devices were enumerated", !model.inputDevices.isEmpty)
         check("an input is preselected", model.selectedSourceUID != nil)
         if !model.isDriverInstalled {
-            note("the virtual device is not installed, so routing flows are skipped")
-            note("the panel should be showing the install card")
-            check("the install button is offered", model.canInstallDriver)
-            summarise()
-            return
+            note("the virtual device is not installed — the panel shows the install card")
+            check("an install button is offered", model.canInstallDriver)
+            // Fall back to any loopback so the routing flows are still
+            // exercised. Skipping them because one device is absent would leave
+            // the part most likely to be broken untested.
+            if let fallback = model.outputDevices.first(where: {
+                $0.transport.isVirtual && $0.inputChannels > 0
+            }) {
+                note("routing against \(fallback.name) instead")
+                model.selectedDestinationUID = fallback.uid
+            } else {
+                note("no loopback device at all — routing flows skipped")
+                summarise()
+                return
+            }
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
 
@@ -55,14 +63,14 @@ enum UIFlowCheck {
 
         print("\nstarting")
         model.start()
-        waitUntil("the route came up", { model.isRunning }, timeout: 3)
+        await waitUntil("the route came up", { model.isRunning }, timeout: 5)
         check("no error was reported", model.lastError == nil)
         check("routes were built", !model.activeRoutes.isEmpty)
         check(
             "a fader exists for every route", model.routeGains.count == model.activeRoutes.count
         )
 
-        waitUntil("levels started arriving", { !model.routeLevels.isEmpty }, timeout: 2)
+        await waitUntil("levels started arriving", { !model.routeLevels.isEmpty }, timeout: 3)
         check("path quality is being reported", model.pathQuality != nil)
 
         print("\nmuting the first route")
@@ -82,34 +90,38 @@ enum UIFlowCheck {
         let before = model.activeRoutes.count
         let cyclesBefore = model.cycleCountForDiagnostics
         model.channelMode = model.channelMode == .mono ? .stereo : .mono
-        Thread.sleep(forTimeInterval: 0.4)
+        await pause(0.4)
         check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBefore)
         check("the route set changed", model.activeRoutes.count != before || before > 0)
         check("still running", model.isRunning)
 
         print("\napplying a preset while running")
         model.apply(.recording)
-        Thread.sleep(forTimeInterval: 1.0)
+        await pause(1.0)
         check("still running after a preset", model.isRunning)
         check("no error after a preset", model.lastError == nil)
         model.apply(.voiceChat)
-        Thread.sleep(forTimeInterval: 1.0)
+        await pause(1.0)
 
         print("\nstopping")
         model.stop()
-        waitUntil("the route came down", { !model.isRunning }, timeout: 3)
+        await waitUntil("the route came down", { !model.isRunning }, timeout: 5)
         check("levels were cleared", model.routeLevels.isEmpty)
         check("routes were cleared", model.activeRoutes.isEmpty)
 
         summarise()
     }
 
+    private static func pause(_ seconds: TimeInterval) async {
+        try? await Task.sleep(for: .seconds(seconds))
+    }
+
     private static func waitUntil(
         _ description: String, _ condition: () -> Bool, timeout: TimeInterval
-    ) {
+    ) async {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline, !condition() {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            await pause(0.05)
         }
         check(description, condition())
     }

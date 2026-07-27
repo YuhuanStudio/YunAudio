@@ -178,18 +178,20 @@ struct MainWindow: View {
                 model.capturedAppBundleIDs.insert(bundle)
             }
         } label: {
-            HStack(spacing: Yun.Space.sm) {
-                Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 11))
-                    .foregroundStyle(isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
-                Text(process.name)
-                    .font(Yun.Text.body)
-                    .foregroundStyle(Yun.Palette.textPrimary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                if process.isPlaying { YunBadge("playing") }
+            YunHoverRow {
+                HStack(spacing: Yun.Space.sm) {
+                    Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 11))
+                        .foregroundStyle(
+                            isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
+                    Text(process.name)
+                        .font(Yun.Text.body)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if process.isPlaying { YunBadge("playing") }
+                }
             }
-            .contentShape(.rect)
         }
         .buttonStyle(.plain)
         .focusEffectDisabled()

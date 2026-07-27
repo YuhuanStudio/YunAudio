@@ -27,6 +27,34 @@ public struct YunCard<Content: View>: View {
     }
 }
 
+/// Wraps a row so it lifts under the pointer.
+///
+/// Everything clickable in the source system has a hover fill; a list that does
+/// not respond reads as static text rather than as something to click.
+public struct YunHoverRow<Content: View>: View {
+    private let content: Content
+    private let radius: CGFloat
+    @State private var isHovering = false
+
+    public init(radius: CGFloat = 6, @ViewBuilder content: () -> Content) {
+        self.radius = radius
+        self.content = content()
+    }
+
+    public var body: some View {
+        content
+            .padding(.horizontal, 6)
+            .padding(.vertical, 4)
+            .background(
+                isHovering ? Yun.Palette.accentSubtle : .clear,
+                in: .rect(cornerRadius: radius)
+            )
+            .contentShape(.rect(cornerRadius: radius))
+            .onHover { isHovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: isHovering)
+    }
+}
+
 /// A hairline divider at the system's quietest border weight.
 public struct YunDivider: View {
     public init() {}
@@ -191,13 +219,19 @@ public struct YunLevelMeter: View {
         self.segments = segments
     }
 
-    /// Maps amplitude to a 0…1 position on a -60 dBFS scale. Linear amplitude
-    /// would leave everything below half scale crammed into the last tenth of
-    /// the bar, which is where speech actually lives.
+    /// Maps amplitude to a 0…1 position.
+    ///
+    /// Linear on amplitude would cram everything speech does into the last tenth
+    /// of the bar; linear on decibels overcorrects, putting a comfortable -11
+    /// dBFS at four fifths of full scale so a healthy signal looks like it is
+    /// about to clip. The curve below is closer to a broadcast meter: the top
+    /// 20 dB take half the bar, the 40 below it take the rest.
     private func normalized(_ amplitude: Float) -> Double {
         guard amplitude > 0 else { return 0 }
-        let db = 20 * log10(Double(amplitude))
-        return max(0, min(1, (db + 60) / 60))
+        let db = max(-60, min(0, 20 * log10(Double(amplitude))))
+        return db >= -20
+            ? 0.5 + 0.5 * ((db + 20) / 20)
+            : 0.5 * ((db + 60) / 40)
     }
 
     public var body: some View {
