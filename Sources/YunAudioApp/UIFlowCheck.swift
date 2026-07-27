@@ -51,6 +51,11 @@ enum UIFlowCheck {
             }
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
+        check(
+            "the source is not the destination",
+            model.selectedSourceUID != model.selectedDestinationUID)
+        note(
+            "\(model.selectedSource?.name ?? "—") → \(model.selectedDestination?.name ?? "—")")
 
         print("\nappearance")
         // The look was half Apple's material and half the source design system:

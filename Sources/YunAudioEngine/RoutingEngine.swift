@@ -82,6 +82,17 @@ public struct PathQuality: Sendable, Hashable {
     public var bufferLatencyMilliseconds: Double {
         sampleRate > 0 ? Double(bufferFrames) / sampleRate * 1000 : 0
     }
+
+    /// The one word for what this path is doing to the signal.
+    ///
+    /// Three views were each deriving it from the same two flags with their own
+    /// ternary, and they had already drifted once — the same string went
+    /// through `loc()` in one place and not in the other two, so the readout
+    /// was translated in the window and English in the panel.
+    public var integrityKey: String {
+        if isBitExact { return "bit-exact" }
+        return hasProcessing ? "processed" : "resampled"
+    }
 }
 
 /// Drives one private aggregate device through a single IOProc.

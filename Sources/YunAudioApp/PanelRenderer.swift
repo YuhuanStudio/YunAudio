@@ -111,7 +111,7 @@ enum PanelRenderer {
         guard let png = pngData(from: renderer),
             let source = CGImageSourceCreateWithData(png as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
-            let sampled = pixel(at: CGPoint(x: 2, y: 2), of: image)
+            let sampled = PixelProbe.sample(image, at: CGPoint(x: 2, y: 2))
         else {
             FileHandle.standardError.write(Data("the capture pipeline failed\n".utf8))
             return
@@ -128,26 +128,6 @@ enum PanelRenderer {
                         "⚠︎ the capture pipeline is altering colour: #3B82F6 came back as #%02X%02X%02X. Every capture below is unreliable.\n",
                     sampled.r, sampled.g, sampled.b
                 ).utf8))
-    }
-
-    private static func pixel(
-        at point: CGPoint, of image: CGImage
-    ) -> (r: UInt8, g: UInt8, b: UInt8)? {
-        var bytes = [UInt8](repeating: 0, count: 4)
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-            let context = bytes.withUnsafeMutableBytes({ raw in
-                CGContext(
-                    data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
-                    bytesPerRow: 4, space: space,
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            })
-        else { return nil }
-        context.draw(
-            image,
-            in: CGRect(
-                x: -point.x, y: -(CGFloat(image.height) - point.y - 1),
-                width: CGFloat(image.width), height: CGFloat(image.height)))
-        return (bytes[0], bytes[1], bytes[2])
     }
 
     /// Rasterises into a context this code owns, in sRGB, at eight bits.

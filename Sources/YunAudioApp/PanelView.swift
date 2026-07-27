@@ -150,18 +150,18 @@ struct PanelView: View {
                 picker(
                     loc("Input"), selection: $model.selectedSourceUID,
                     devices: model.inputDevices, channelLabel: { "\($0.inputChannels)ch" })
-                levelRow(
+                LevelRow(
                     decibels: $model.inputDecibels, muted: $model.isInputMuted,
-                    label: loc("Input level"))
+                    label: loc("Input level"), isCompact: true)
 
                 YunDivider()
 
                 picker(
                     loc("Output"), selection: $model.selectedDestinationUID,
                     devices: model.outputDevices, channelLabel: { "\($0.outputChannels)ch" })
-                levelRow(
+                LevelRow(
                     decibels: $model.outputDecibels, muted: $model.isOutputMuted,
-                    label: loc("Output level"))
+                    label: loc("Output level"), isCompact: true)
 
                 if let source = model.selectedSource, source.inputChannels > 1 {
                     YunDivider()
@@ -188,43 +188,6 @@ struct PanelView: View {
                 options: devices.map {
                     .init(value: $0.uid as String?, title: $0.name, detail: channelLabel($0))
                 })
-        }
-    }
-
-    /// The same trim and master the window carries, so the menu bar is not a
-    /// second-class view of the same application.
-    private func levelRow(
-        decibels: Binding<Float>, muted: Binding<Bool>, label: String
-    ) -> some View {
-        HStack(spacing: Yun.Space.sm) {
-            Button {
-                muted.wrappedValue.toggle()
-            } label: {
-                Image(
-                    systemName: muted.wrappedValue
-                        ? "speaker.slash.fill" : "speaker.wave.2.fill"
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(
-                    muted.wrappedValue ? Yun.Palette.danger : Yun.Palette.textSecondary
-                )
-                .frame(width: Self.labelColumn, height: 18, alignment: .leading)
-            }
-            .buttonStyle(.plain)
-            .focusEffectDisabled()
-            .accessibilityLabel(Text(label))
-
-            YunFader(decibels: decibels)
-                .opacity(muted.wrappedValue ? 0.4 : 1)
-
-            Text(
-                decibels.wrappedValue <= RouterModel.minimumDecibels
-                    ? "−∞" : String(format: "%+.1f", decibels.wrappedValue)
-            )
-            .font(Yun.Text.mono)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .monospacedDigit()
-            .frame(width: 40, alignment: .trailing)
         }
     }
 
@@ -274,10 +237,7 @@ struct PanelView: View {
                 if let quality = model.pathQuality {
                     YunDetailRow(
                         loc("Path"),
-                        value: loc(
-                            quality.isBitExact
-                                ? "bit-exact"
-                                : (quality.hasProcessing ? "processed" : "resampled")),
+                        value: loc(quality.integrityKey),
                         tone: quality.isBitExact ? .success : .warning)
                     YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                     YunDetailRow(
@@ -405,50 +365,7 @@ struct PanelView: View {
             subtitle: model.cancelsEcho ? loc("on") : loc("off"),
             isExpanded: $showsEchoCancellation
         ) {
-            VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Toggle(
-                    loc("Remove the speakers from the microphone"),
-                    isOn: $model.cancelsEcho
-                )
-                .toggleStyle(YunToggleStyle())
-
-                Text(
-                    loc(
-                        "For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way."
-                    )
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                if model.cancelsEcho {
-                    HStack {
-                        Text(loc("Cancel against"))
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.textTertiary)
-                            .frame(width: Self.labelColumn, alignment: .leading)
-                        YunSelect(
-                            selection: $model.echoSpeakerUID,
-                            options: model.echoSpeakerOptions.map {
-                                .init(value: $0.uid as String?, title: $0.name)
-                            }
-                        )
-                    }
-                    if let status = model.echoStatus {
-                        Text(
-                            status.hasReference
-                                ? loc("The far-end reference is present.")
-                                : loc("No far-end reference: only steady noise is removed.")
-                        )
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(
-                            status.hasReference
-                                ? Yun.Palette.success : Yun.Palette.warning
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
+            EchoCancellationControls(model: model, labelColumn: Self.labelColumn)
         }
     }
 

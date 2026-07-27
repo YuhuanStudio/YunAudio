@@ -121,27 +121,15 @@ enum WindowCapture {
         guard let source = CGImageSourceCreateWithData(png as CFData, nil),
             let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
         else { return false }
-        var bytes = [UInt8](repeating: 0, count: 4)
-        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-            let context = bytes.withUnsafeMutableBytes({ raw in
-                CGContext(
-                    data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
-                    bytesPerRow: 4, space: space,
-                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            })
+        // A point a little way down the left edge: past the title bar, which is
+        // translucent and would answer for neither appearance, and inside the
+        // window's own background rather than any card.
+        guard
+            let sampled = PixelProbe.sample(
+                image, at: CGPoint(x: 6, y: Double(image.height) - 120))
         else { return false }
-        // A point a little way down the left edge: past the title bar, inside
-        // the window's own background rather than any card.
-        let x = 6.0
-        let y = Double(image.height) - 120
-        context.draw(
-            image,
-            in: CGRect(
-                x: -x, y: -(Double(image.height) - y - 1),
-                width: Double(image.width), height: Double(image.height)))
-        return isLight ? bytes[0] > 160 : bytes[0] < 96
+        return isLight ? sampled.r > 160 : sampled.r < 96
     }
-
     private static func mainWindow() -> NSWindow? {
         NSApp.windows.first { $0.title == "YunAudio" && $0.contentView != nil }
     }

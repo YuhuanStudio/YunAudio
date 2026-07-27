@@ -163,48 +163,6 @@ struct MainWindow: View {
         .accessibilityLabel(Text(label))
     }
 
-    /// A mute button, a fader and the value, for one end of the signal.
-    ///
-    /// The per-route strips balance sources against each other; this is the
-    /// plain "how loud is the microphone" that the window did not have.
-    private func levelRow(
-        decibels: Binding<Float>, muted: Binding<Bool>, label: String
-    ) -> some View {
-        HStack(spacing: Yun.Space.sm) {
-            Button {
-                muted.wrappedValue.toggle()
-            } label: {
-                Image(
-                    systemName: muted.wrappedValue
-                        ? "speaker.slash.fill" : "speaker.wave.2.fill"
-                )
-                .font(.system(size: 10))
-                .foregroundStyle(
-                    muted.wrappedValue ? Yun.Palette.danger : Yun.Palette.textSecondary
-                )
-                .frame(width: 22, height: 22)
-                .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
-            }
-            .buttonStyle(.plain)
-            .focusEffectDisabled()
-            .accessibilityLabel(Text(label))
-            .accessibilityValue(Text(muted.wrappedValue ? loc("Muted") : loc("Unmuted")))
-
-            YunFader(decibels: decibels)
-                .accessibilityLabel(Text(label))
-                .opacity(muted.wrappedValue ? 0.4 : 1)
-
-            Text(
-                decibels.wrappedValue <= RouterModel.minimumDecibels
-                    ? "−∞" : String(format: "%+.1f dB", decibels.wrappedValue)
-            )
-            .font(Yun.Text.mono)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .monospacedDigit()
-            .frame(width: 58, alignment: .trailing)
-        }
-    }
-
     // MARK: Sources
 
     private var sources: some View {
@@ -226,7 +184,7 @@ struct MainWindow: View {
                                         detail: "\($0.inputChannels)ch")
                                 })
                         }
-                        levelRow(
+                        LevelRow(
                             decibels: $model.inputDecibels, muted: $model.isInputMuted,
                             label: loc("Input level"))
 
@@ -241,7 +199,7 @@ struct MainWindow: View {
                                         detail: "\($0.outputChannels)ch")
                                 })
                         }
-                        levelRow(
+                        LevelRow(
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
                             label: loc("Output level"))
 
@@ -406,52 +364,7 @@ struct MainWindow: View {
 
                 sectionHeading(loc("Echo cancellation"))
                 YunCard {
-                    VStack(alignment: .leading, spacing: Yun.Space.md) {
-                        Toggle(
-                            loc("Remove the speakers from the microphone"),
-                            isOn: $model.cancelsEcho
-                        )
-                        .toggleStyle(YunToggleStyle())
-
-                        Text(
-                            loc(
-                                "For speakers rather than headphones. Apple's canceller takes the microphone, so the path loses its clock lock and gains a buffer of latency each way."
-                            )
-                        )
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                        if model.cancelsEcho {
-                            YunDivider()
-                            Text(loc("Cancel against"))
-                                .font(Yun.Text.caption)
-                                .foregroundStyle(Yun.Palette.textTertiary)
-                            YunSelect(
-                                selection: $model.echoSpeakerUID,
-                                options: model.echoSpeakerOptions.map {
-                                    .init(
-                                        value: $0.uid as String?, title: $0.name,
-                                        detail: "\($0.outputChannels)ch")
-                                })
-                            if let status = model.echoStatus {
-                                YunDetailRow(
-                                    loc("Reference"),
-                                    value: status.hasReference
-                                        ? loc("present") : loc("absent"),
-                                    tone: status.hasReference ? .success : .warning)
-                                YunDetailRow(
-                                    loc("Buffered"),
-                                    value: String(
-                                        format: loc("%d frames"), Int(status.buffered)))
-                                if status.dropped > 0 {
-                                    YunDetailRow(
-                                        loc("Dropped"), value: "\(status.dropped)",
-                                        tone: .danger)
-                                }
-                            }
-                        }
-                    }
+                    EchoCancellationControls(model: model, labelColumn: nil)
                 }
 
                 sectionHeading(loc("Signal path"))
@@ -460,10 +373,7 @@ struct MainWindow: View {
                         if let quality = model.pathQuality {
                             YunDetailRow(
                                 loc("Integrity"),
-                                value: loc(
-                                    quality.isBitExact
-                                        ? "bit-exact"
-                                        : (quality.hasProcessing ? "processed" : "resampled")),
+                                value: loc(quality.integrityKey),
                                 tone: quality.isBitExact ? .success : .warning)
                             YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                             YunDetailRow(
@@ -583,10 +493,7 @@ struct MainWindow: View {
                         quality.bufferLatencyMilliseconds))
                 statusDivider
                 statusField(
-                    loc(
-                        quality.isBitExact
-                            ? "bit-exact"
-                            : (quality.hasProcessing ? "processed" : "resampled")),
+                    loc(quality.integrityKey),
                     tone: quality.isBitExact ? Yun.Palette.success : Yun.Palette.warning)
                 if model.isClockLocked {
                     statusDivider

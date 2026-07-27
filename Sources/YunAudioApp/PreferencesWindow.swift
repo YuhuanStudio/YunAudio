@@ -234,10 +234,7 @@ struct PreferencesWindow: View {
                     if let quality = model.pathQuality {
                         YunDetailRow(
                             loc("Integrity"),
-                            value: loc(
-                                quality.isBitExact
-                                    ? "bit-exact"
-                                    : (quality.hasProcessing ? "processed" : "resampled")),
+                            value: loc(quality.integrityKey),
                             tone: quality.isBitExact ? .success : .warning)
                         YunDetailRow(loc("Sample rate"), value: "\(Int(quality.sampleRate)) Hz")
                         YunDetailRow(

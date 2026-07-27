@@ -766,13 +766,31 @@ final class RouterModel {
 
     private func selectDefaults() {
         if selectedSourceUID == nil {
-            // Prefer the system input, but never the virtual endpoint we are
-            // about to write into — that would be a feedback loop.
+            // Prefer the system input, but never a loopback — and least of all
+            // our own device.
+            //
+            // The comment saying so was here from the start and the code never
+            // did it. It matters more than it looks: the point of this app is
+            // that the conferencing application uses YunAudio, so somebody will
+            // set YunAudio as the system input, and then the app picked its own
+            // destination as its source and refused to start with "the input
+            // and the output cannot be the same device" — on a first run, with
+            // nothing to suggest what to change.
             let systemInput = try? AudioDevices.defaultInput()
+            let realInput = systemInput.flatMap { device in
+                device.transport.isVirtual ? nil : device
+            }
             selectedSourceUID =
-                systemInput.map(\.uid)
+                realInput.map(\.uid)
                 ?? inputDevices.first { $0.transport == .usb }?.uid
+                ?? inputDevices.first { !$0.transport.isVirtual }?.uid
                 ?? inputDevices.first?.uid
+        }
+        // Whatever the source ended up as, it must not also be the destination.
+        if selectedSourceUID != nil, selectedSourceUID == selectedDestinationUID {
+            selectedSourceUID =
+                inputDevices.first { !$0.transport.isVirtual }?.uid
+                ?? inputDevices.first { $0.uid != selectedDestinationUID }?.uid
         }
         if selectedDestinationUID == nil {
             // Our own device first, then any other loopback endpoint. Never a
