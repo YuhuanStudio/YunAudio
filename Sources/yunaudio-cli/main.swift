@@ -339,6 +339,60 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+// Proves a route change no longer interrupts audio.
+//
+// Cycles are counted across a topology change. A restart shows a gap of about
+// a hundred milliseconds' worth of missing cycles; a swap shows none.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "swap" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard let source = all.first(where: { $0.hasInput && $0.transport == .usb }),
+        let destination = all.first(where: { $0.hasOutput && $0.transport.isVirtual })
+    else {
+        print("need a USB input and a virtual output")
+        exit(1)
+    }
+    print("\(source.name) → \(destination.name)\n")
+
+    let engine = RoutingEngine()
+    let one = [
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: 0))
+    ]
+    let two =
+        one + [
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: 0),
+                destination: ChannelRef(deviceUID: destination.uid, channel: 1))
+        ]
+    try engine.start(
+        sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid, routes: one)
+    Thread.sleep(forTimeInterval: 0.5)
+
+    func cyclesAcross(_ change: () -> Void) -> UInt64 {
+        let before = engine.cycleCount
+        let mark = Date()
+        change()
+        Thread.sleep(forTimeInterval: 0.5)
+        let elapsed = Date().timeIntervalSince(mark)
+        let observed = engine.cycleCount - before
+        let expected = UInt64(
+            elapsed * (engine.pathQuality.map { $0.sampleRate } ?? 48000)
+                / Double(engine.pathQuality.map { $0.bufferFrames } ?? 128))
+        print(
+            String(
+                format: "  %llu cycles observed, %llu expected — %.0f%% delivered",
+                observed, expected, Double(observed) / Double(max(expected, 1)) * 100))
+        return observed
+    }
+
+    print("swapping the route set in place:")
+    _ = cyclesAcross { _ = engine.updateRoutes(two) }
+    print("  routes now: \(engine.currentRoutes.count)")
+    engine.stop()
+    exit(0)
+}
+
 // How long the blocking parts take, because start() runs on the main thread.
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
     let all = (try? AudioDevices.all()) ?? []

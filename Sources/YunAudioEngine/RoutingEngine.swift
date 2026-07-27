@@ -94,7 +94,17 @@ public final class RoutingEngine: @unchecked Sendable {
 
     private var ioProcID: AudioDeviceIOProcID?
     private var graph: UnsafeMutablePointer<RTGraph>?
+    /// What the IOProc actually reads. Holding the graph behind this is what
+    /// makes a route change a swap rather than a restart.
+    private var graphCell: OpaquePointer?
     private var activeRoutes: [Route] = []
+
+    /// The routes currently carrying audio, including any built from taps.
+    public var currentRoutes: [Route] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return activeRoutes
+    }
     /// Maps a device channel onto the (buffer, channel) pair the IOProc sees.
     private var inputMap: [ChannelRef: (buffer: Int32, channel: Int32)] = [:]
     private var outputMap: [ChannelRef: (buffer: Int32, channel: Int32)] = [:]
@@ -366,9 +376,12 @@ public final class RoutingEngine: @unchecked Sendable {
             graph.pointee.selftest = block
         }
 
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))
+        graphCell = cell
+
         var procID: AudioDeviceIOProcID?
         let createStatus = AudioDeviceCreateIOProcID(
-            aggregate.id, yunAudioIOProc, UnsafeMutableRawPointer(graph), &procID)
+            aggregate.id, yunAudioIOProc, UnsafeMutableRawPointer(cell), &procID)
         guard createStatus == noErr, let procID else {
             throw RoutingError.ioProcFailed(createStatus)
         }
@@ -436,6 +449,8 @@ public final class RoutingEngine: @unchecked Sendable {
         // the graph any more.
         if let graph { RTGraph.deallocate(graph) }
         graph = nil
+        if let graphCell { yun_rt_cell_free(graphCell) }
+        graphCell = nil
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
         selftestBlock = nil
 
@@ -485,6 +500,59 @@ public final class RoutingEngine: @unchecked Sendable {
             routes: configuration.routes,
             bufferFrames: configuration.bufferFrames)
         onClockLockFailure?()
+    }
+
+    // MARK: Live topology
+
+    /// Replaces the whole set of routes without interrupting audio.
+    ///
+    /// The alternative — restarting the device — costs about 108 ms of silence
+    /// every time a route is added or removed. Here a new graph is built on this
+    /// thread, swapped in atomically, and the old one is freed only once the
+    /// realtime thread has been seen to complete two cycles past the swap: one
+    /// cycle may already have been in flight holding the old pointer.
+    @discardableResult
+    public func updateRoutes(_ routes: [Route]) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard isRunning, let cell = graphCell, let previous = graph else { return false }
+
+        let rtRoutes = routes.compactMap { route -> RTRoute? in
+            guard let source = inputMap[route.source],
+                let destination = outputMap[route.destination]
+            else { return nil }
+            return RTRoute(
+                sourceBuffer: source.buffer,
+                sourceChannel: source.channel,
+                destinationBuffer: destination.buffer,
+                destinationChannel: destination.channel,
+                gain: route.gain,
+                muted: route.isMuted,
+                usesIsolatedSource: previous.pointee.routes[0].usesIsolatedSource != 0
+                    && route.source == activeRoutes.first?.source)
+        }
+        guard rtRoutes.count == routes.count else { return false }
+
+        let next = RTGraph.allocate(
+            routes: rtRoutes,
+            bufferFrames: Int(aggregate?.device?.currentBufferFrameSize ?? 128),
+            sampleRate: aggregate?.device?.currentSampleRate ?? 48000)
+        // Carry the processing and self-test blocks across: they belong to the
+        // engine's lifetime, not to any one graph.
+        next.pointee.voiceIsolation = previous.pointee.voiceIsolation
+        next.pointee.isolationIsChain = previous.pointee.isolationIsChain
+        next.pointee.selftest = previous.pointee.selftest
+
+        _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
+        graph = next
+        activeRoutes = routes
+
+        // A false return means the device is not producing cycles, so nothing
+        // can be holding the old graph and it is safe to free anyway.
+        _ = yun_rt_cell_wait_for_swap(cell, 200)
+        RTGraph.deallocate(previous)
+        return true
     }
 
     // MARK: Live control
@@ -626,7 +694,7 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Number of IO cycles completed. A stalled counter means the device is not
     /// actually pulling audio.
     public var cycleCount: UInt64 {
-        graph.map { $0.pointee.cycleCounter.pointee } ?? 0
+        graphCell.map { yun_rt_cell_cycles($0) } ?? 0
     }
 
     /// The clock master's most recent timestamp, read through the cycle counter

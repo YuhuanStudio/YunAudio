@@ -174,7 +174,13 @@ func yunAudioIOProc(
     _ clientData: UnsafeMutableRawPointer?
 ) -> OSStatus {
     guard let clientData else { return noErr }
-    let graph = clientData.assumingMemoryBound(to: RTGraph.self)
+    // The graph is reached through a cell rather than directly, so the control
+    // thread can swap in a new one between cycles instead of stopping the
+    // device to change a route.
+    let cell = OpaquePointer(clientData)
+    guard let raw = yun_rt_cell_load(cell) else { return noErr }
+    let graph = raw.assumingMemoryBound(to: RTGraph.self)
+    defer { yun_rt_cell_retire(cell) }
 
     // Anything allocated between here and the matching call at the end is a
     // violation of the realtime contract and gets counted.

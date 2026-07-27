@@ -7,6 +7,7 @@
 #include <AudioToolbox/AudioWorkInterval.h>
 #include <os/object.h>
 #include <pthread.h>
+#include <unistd.h>
 #include <os/workgroup.h>
 #include <stdlib.h>
 #include <string.h>
@@ -166,6 +167,55 @@ bool yun_rt_queue_pop(YunRTQueue *queue, YunRTCommand *outCommand) {
     *outCommand = queue->slots[tail & queue->mask];
     atomic_store_explicit(&queue->tail, tail + 1, memory_order_release);
     return true;
+}
+
+#pragma mark - Realtime pointer publication
+
+struct YunRTCell {
+    _Atomic(void *) pointer;
+    /// Incremented by the realtime thread once per completed cycle.
+    _Atomic uint64_t cycles;
+};
+
+YunRTCell *yun_rt_cell_create(void *initial) {
+    YunRTCell *cell = calloc(1, sizeof(YunRTCell));
+    if (cell == NULL) return NULL;
+    atomic_store_explicit(&cell->pointer, initial, memory_order_relaxed);
+    atomic_store_explicit(&cell->cycles, 0, memory_order_relaxed);
+    return cell;
+}
+
+void yun_rt_cell_free(YunRTCell *cell) { free(cell); }
+
+void *yun_rt_cell_load(YunRTCell *cell) {
+    return atomic_load_explicit(&cell->pointer, memory_order_acquire);
+}
+
+void *yun_rt_cell_publish(YunRTCell *cell, void *next) {
+    // Release: everything written into the new graph must be visible to the
+    // realtime thread that observes the pointer.
+    return atomic_exchange_explicit(&cell->pointer, next, memory_order_acq_rel);
+}
+
+void yun_rt_cell_retire(YunRTCell *cell) {
+    atomic_fetch_add_explicit(&cell->cycles, 1, memory_order_release);
+}
+
+uint64_t yun_rt_cell_cycles(YunRTCell *cell) {
+    return atomic_load_explicit(&cell->cycles, memory_order_acquire);
+}
+
+bool yun_rt_cell_wait_for_swap(YunRTCell *cell, uint32_t timeoutMilliseconds) {
+    uint64_t start = atomic_load_explicit(&cell->cycles, memory_order_acquire);
+    // Poll rather than block on a condition variable: the realtime thread must
+    // never touch a lock, so it cannot signal one. A cycle is well under a
+    // millisecond, so this returns almost immediately when audio is running.
+    for (uint32_t elapsed = 0; elapsed < timeoutMilliseconds; ++elapsed) {
+        uint64_t now = atomic_load_explicit(&cell->cycles, memory_order_acquire);
+        if (now - start >= 2) return true;
+        usleep(1000);
+    }
+    return false;
 }
 
 #pragma mark - Allocation tripwire

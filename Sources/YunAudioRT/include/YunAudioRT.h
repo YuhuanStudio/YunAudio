@@ -110,6 +110,51 @@ bool yun_rt_queue_push(YunRTQueue *_Nonnull queue, YunRTCommand command);
 /// Consumer side. Returns false when empty.
 bool yun_rt_queue_pop(YunRTQueue *_Nonnull queue, YunRTCommand *_Nonnull outCommand);
 
+#pragma mark - Realtime pointer publication (RCU)
+
+/// A pointer the realtime thread reads and a control thread replaces.
+///
+/// Swapping a whole graph rather than mutating one in place is what lets a
+/// route be added or removed without stopping the device. The realtime thread
+/// picks up the new pointer at the top of a cycle; the control thread waits
+/// until it has seen the cycle counter advance past the swap before freeing
+/// what it replaced, which is the read-copy-update discipline.
+///
+/// Lives in C so the memory ordering is stated rather than inferred.
+typedef struct YunRTCell YunRTCell;
+
+YunRTCell *_Nullable yun_rt_cell_create(void *_Nullable initial);
+void yun_rt_cell_free(YunRTCell *_Nullable cell);
+
+/// Realtime side. Acquire, so whatever the publisher wrote before the swap is
+/// visible to the reader that observes it.
+void *_Nullable yun_rt_cell_load(YunRTCell *_Nonnull cell);
+
+/// Control side. Returns the pointer that was there, which the caller must not
+/// free until `yun_rt_cell_wait_for_swap` says the realtime thread has moved on.
+void *_Nullable yun_rt_cell_publish(YunRTCell *_Nonnull cell, void *_Nullable next);
+
+/// Records that a cycle has completed. Called by the realtime thread after it
+/// has finished with whatever `yun_rt_cell_load` handed it.
+void yun_rt_cell_retire(YunRTCell *_Nonnull cell);
+
+/// Blocks until the realtime thread has completed two cycles since the publish,
+/// or until `timeoutMilliseconds` elapses. Two rather than one because a cycle
+/// already in flight when the swap happened may still hold the old pointer.
+///
+/// Returns true when the wait succeeded and the old pointer is safe to free.
+/// A false return means the device is not running — the caller can free
+/// immediately, since nothing is reading.
+bool yun_rt_cell_wait_for_swap(YunRTCell *_Nonnull cell, uint32_t timeoutMilliseconds);
+
+/// Cycles completed since the cell was created.
+///
+/// Lives here rather than in the published structure precisely because it has
+/// to survive a swap: a counter that resets whenever the graph is replaced
+/// cannot answer "is audio still flowing across this change", which is the one
+/// question worth asking of it.
+uint64_t yun_rt_cell_cycles(YunRTCell *_Nonnull cell);
+
 #pragma mark - Allocation tripwire (debug builds)
 
 /// Installs a hook on the allocator that records any allocation made while the

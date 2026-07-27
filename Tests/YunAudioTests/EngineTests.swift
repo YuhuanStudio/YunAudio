@@ -197,3 +197,62 @@ struct MeterBallisticsTests {
         #expect(RTGraph.decay(bufferFrames: 128, sampleRate: 0) == 0.85)
     }
 }
+
+// MARK: - Realtime pointer publication
+
+@Suite("RCU cell")
+struct RealtimeCellTests {
+    @Test("publish returns the pointer it replaced")
+    func publishReturnsOld() throws {
+        let first = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 8)
+        let second = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 8)
+        defer {
+            first.deallocate()
+            second.deallocate()
+        }
+
+        let cell = try #require(yun_rt_cell_create(first))
+        defer { yun_rt_cell_free(cell) }
+
+        #expect(yun_rt_cell_load(cell) == first)
+        #expect(yun_rt_cell_publish(cell, second) == first)
+        #expect(yun_rt_cell_load(cell) == second)
+    }
+
+    /// The wait exists so the control thread does not free a graph a cycle
+    /// already in flight is still reading. With no cycles being retired it has
+    /// to time out rather than block forever.
+    @Test("waiting times out when nothing is running")
+    func waitTimesOutWhenIdle() throws {
+        let cell = try #require(yun_rt_cell_create(nil))
+        defer { yun_rt_cell_free(cell) }
+        #expect(!yun_rt_cell_wait_for_swap(cell, 5))
+    }
+
+    @Test("waiting succeeds once two cycles have been retired")
+    func waitSucceedsAfterTwoCycles() throws {
+        let cell = try #require(yun_rt_cell_create(nil))
+        defer { yun_rt_cell_free(cell) }
+
+        // Stand in for the IO thread.
+        let retiring = Thread {
+            for _ in 0..<8 {
+                yun_rt_cell_retire(cell)
+                usleep(2000)
+            }
+        }
+        retiring.start()
+        #expect(yun_rt_cell_wait_for_swap(cell, 500))
+    }
+
+    /// One cycle is not enough: the swap may land midway through a cycle that
+    /// already loaded the old pointer, so that cycle has to finish and one more
+    /// has to start before the old graph is unreachable.
+    @Test("one retired cycle is not enough to release the old pointer")
+    func oneCycleIsNotEnough() throws {
+        let cell = try #require(yun_rt_cell_create(nil))
+        defer { yun_rt_cell_free(cell) }
+        yun_rt_cell_retire(cell)
+        #expect(!yun_rt_cell_wait_for_swap(cell, 5))
+    }
+}
