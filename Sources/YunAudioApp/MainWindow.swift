@@ -92,6 +92,32 @@ struct MainWindow: View {
         .frame(minWidth: 980, minHeight: 600)
         .yunWindowBackground()
         .focusEffectDisabled()
+        .background(shortcuts)
+        .background(RemembersFrame(name: "YunAudioMainWindow").frame(width: 0, height: 0))
+    }
+
+    /// Keyboard shortcuts for the things done most often.
+    ///
+    /// An accessory application has no menu bar to hang them on, so they are
+    /// attached to zero-sized buttons instead. `.hidden()` would remove them
+    /// from the responder chain along with the view, which takes the shortcut
+    /// with it — the size has to go to zero while the button stays real.
+    private var shortcuts: some View {
+        ZStack {
+            Button(loc("Record")) { model.toggleRecording() }
+                .keyboardShortcut("r", modifiers: [.command])
+                .disabled(!model.isRunning && !model.isRecording)
+            Button(loc("Mute")) { model.toggleMute() }
+                .keyboardShortcut("m", modifiers: [.command])
+            ForEach(Array(RoutePreset.builtIn.enumerated()), id: \.offset) { index, preset in
+                Button(preset.name) { model.apply(preset) }
+                    .keyboardShortcut(
+                        KeyEquivalent(Character("\(index + 1)")), modifiers: [.command])
+            }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .accessibilityHidden(true)
     }
 
     // MARK: Header
@@ -113,12 +139,12 @@ struct MainWindow: View {
                 .fill(Yun.Palette.borderHairline)
                 .frame(width: 1, height: 18)
 
-            ForEach(RoutePreset.builtIn) { preset in
+            ForEach(Array(RoutePreset.builtIn.enumerated()), id: \.offset) { index, preset in
                 Button(loc(preset.name)) { model.apply(preset) }
                     .buttonStyle(
                         YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true)
                     )
-                    .help(loc(preset.note))
+                    .help("\(loc(preset.note))  (⌘\(index + 1))")
             }
 
             Spacer()
@@ -141,6 +167,7 @@ struct MainWindow: View {
             .buttonStyle(YunButtonStyle(.primary))
             .disabled(model.isBusy)
             .keyboardShortcut(.return, modifiers: [.command])
+            .help(loc(model.isRunning ? "Stop routing (⌘↩)" : "Start routing (⌘↩)"))
         }
         .padding(.horizontal, Yun.Space.xl)
         .padding(.top, trafficLightInset)

@@ -192,3 +192,7 @@
 "Solo" = "獨奏";
 "CLIP" = "削波";
 "The signal reached full scale. Click to reset." = "訊號曾達到滿刻度。點擊以重設。";
+"Start routing (⌘↩)" = "開始路由（⌘↩）";
+"Stop routing (⌘↩)" = "停止路由（⌘↩）";
+"Record (⌘R)" = "開始錄音（⌘R）";
+"Stop recording (⌘R)" = "停止錄音（⌘R）";

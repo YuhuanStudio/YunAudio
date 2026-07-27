@@ -192,3 +192,7 @@
 "Solo" = "Solo";
 "CLIP" = "CLIP";
 "The signal reached full scale. Click to reset." = "The signal reached full scale. Click to reset.";
+"Start routing (⌘↩)" = "Start routing (⌘↩)";
+"Stop routing (⌘↩)" = "Stop routing (⌘↩)";
+"Record (⌘R)" = "Record (⌘R)";
+"Stop recording (⌘R)" = "Stop recording (⌘R)";

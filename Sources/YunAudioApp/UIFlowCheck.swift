@@ -57,6 +57,15 @@ enum UIFlowCheck {
         note(
             "\(model.selectedSource?.name ?? "—") → \(model.selectedDestination?.name ?? "—")")
 
+        print("\nwindow and shortcuts")
+        // The frame has to be saved under a name or the window reopens in the
+        // middle of the screen at its default size on every launch.
+        let window = NSApp.windows.first { $0.title == "YunAudio" }
+        check("the main window exists", window != nil)
+        check(
+            "its frame is remembered between launches",
+            window?.frameAutosaveName == "YunAudioMainWindow")
+
         print("\nappearance")
         // The look was half Apple's material and half the source design system:
         // the menu bar panel floated on glass while the window was flat cards,

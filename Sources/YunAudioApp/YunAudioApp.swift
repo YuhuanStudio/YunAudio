@@ -113,6 +113,7 @@ struct YunAudioApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 620)
         .windowResizability(.contentMinSize)
+
         .onChange(of: hasLaunched, initial: true) { _, _ in installStatusItem() }
 
         Settings {

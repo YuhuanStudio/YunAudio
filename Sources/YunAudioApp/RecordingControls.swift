@@ -39,6 +39,7 @@ struct RecordingControls: View {
                         model.isRecording ? .primary : .secondary, small: true)
                 )
                 .disabled(!model.isRunning && !model.isRecording)
+                .help(loc(model.isRecording ? "Stop recording (⌘R)" : "Record (⌘R)"))
 
                 if model.isRecording {
                     Text(Self.elapsed(model.recordingSeconds))
