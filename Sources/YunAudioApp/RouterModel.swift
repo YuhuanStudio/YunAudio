@@ -679,7 +679,7 @@ final class RouterModel {
     }
 
     private func persist() {
-        guard !isRestoring else { return }
+        guard !isRestoring, !isApplyingPreset else { return }
         PreferencesStore.save(
             Preferences(
                 sourceDeviceUID: selectedSourceUID,
@@ -974,8 +974,39 @@ final class RouterModel {
     /// silent. Anything that changes the devices, the taps or the processing
     /// chain still has to rebuild the aggregate, and that costs about 108 ms of
     /// audio — so the two cases are kept apart rather than treated alike.
+    /// Set while a preset is being applied, so half a dozen property writes
+    /// produce one restart instead of one each.
+    ///
+    /// Applying a preset moved the isolation flag, the channel mode and the
+    /// sample rate, and each of those restarted the route on its own — three
+    /// teardowns and three rebuilds for one click, with the audio dropping at
+    /// every one.
+    private var isApplyingPreset = false
+
+    /// Runs `changes` as one edit: nothing restarts until they are all in.
+    func batched(_ changes: () -> Void) {
+        guard !isApplyingPreset else {
+            changes()
+            return
+        }
+        isApplyingPreset = true
+        changes()
+        isApplyingPreset = false
+        persist()
+        restartIfRunning()
+    }
+
+    /// Rebuilds triggered since launch. Only for the flow check, which asserts
+    /// that one preset costs one rebuild — the alternative is a race, not
+    /// merely waste: back-to-back restarts hit `stop`'s busy guard and are
+    /// dropped, so whether the final settings reach the engine depends on how
+    /// fast the engine queue happens to be.
+    private(set) var restartCount = 0
+
     private func restartIfRunning() {
+        guard !isApplyingPreset else { return }
         guard isRunning else { return }
+        restartCount += 1
         // stop() is asynchronous and holds `isBusy` until the engine queue has
         // finished, so calling start() straight after it hits the busy guard and
         // the route never comes back. Chain them instead.

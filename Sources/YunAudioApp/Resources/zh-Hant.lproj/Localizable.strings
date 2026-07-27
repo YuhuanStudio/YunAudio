@@ -181,3 +181,5 @@
 "The input and the output cannot be the same device." = "輸入與輸出不能是同一個裝置。";
 "The selected applications could not be captured." = "無法擷取所選的應用程式。";
 "Those two devices share no usable channels." = "這兩個裝置之間沒有可用的聲道。";
+"Speakers" = "外放通話";
+"Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way." = "從麥克風中移除喇叭的聲音。代價是失去時鐘鎖定，並在來回各增加一個緩衝區的延遲。";

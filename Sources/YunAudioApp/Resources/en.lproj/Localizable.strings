@@ -181,3 +181,5 @@
 "The input and the output cannot be the same device." = "The input and the output cannot be the same device.";
 "The selected applications could not be captured." = "The selected applications could not be captured.";
 "Those two devices share no usable channels." = "Those two devices share no usable channels.";
+"Speakers" = "Speakers";
+"Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way." = "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way.";

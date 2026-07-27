@@ -214,12 +214,52 @@ enum UIFlowCheck {
         }
 
         print("\napplying a preset while running")
+        // One restart per preset, not one per property. Every field a preset
+        // sets restarts the route on its own, so this used to tear the audio
+        // down and rebuild it three times for a single click.
+        let cyclesBeforePreset = model.cycleCountForDiagnostics
         model.apply(.recording)
-        await pause(1.0)
+        await pause(1.5)
         check("still running after a preset", model.isRunning)
         check("no error after a preset", model.lastError == nil)
+        check("audio came back", model.cycleCountForDiagnostics > cyclesBeforePreset)
+        check("the preset reads as active", model.matches(.recording))
+
+        // Every preset has to be distinguishable from every other, or two of
+        // them light up at once because the field they differ in is not
+        // compared.
+        for preset in RoutePreset.builtIn {
+            model.apply(preset)
+            let matching = RoutePreset.builtIn.filter { model.matches($0) }
+            check("\(preset.name) matches only itself", matching.count == 1)
+        }
         model.apply(.voiceChat)
+        await waitUntil("it settled", { !model.isBusy }, timeout: 8)
+        check("routing survived every preset", model.isRunning)
         await pause(1.0)
+
+        // The batching itself, measured directly rather than through a preset.
+        // No two presets happen to differ in more than one rebuilding field, so
+        // going through one would pass whether the batching worked or not.
+        let unbatchedBefore = model.restartCount
+        model.preferredSampleRate = 44100
+        model.channelMode = model.channelMode == .mono ? .stereo : .mono
+        model.cancelsEcho = false
+        let unbatched = model.restartCount - unbatchedBefore
+        await waitUntil("the loose edits settled", { !model.isBusy }, timeout: 10)
+
+        let batchedBefore = model.restartCount
+        model.batched {
+            model.preferredSampleRate = 48000
+            model.channelMode = model.channelMode == .mono ? .stereo : .mono
+            model.cancelsEcho = false
+        }
+        let batched = model.restartCount - batchedBefore
+        note("\(unbatched) rebuilds loose, \(batched) batched")
+        check("a batch of edits costs one rebuild", batched == 1)
+        check("and that is fewer than doing them loose", batched < unbatched)
+        await waitUntil("the batch settled", { !model.isBusy }, timeout: 10)
+        check("routing survived both", model.isRunning)
 
         print("\npatching")
         let sourcePorts = model.canvasSources

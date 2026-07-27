@@ -17,6 +17,12 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     var voiceIsolationEnabled: Bool
     var voiceIsolationMix: Float
     var channelMode: String
+    /// Whether the microphone goes through the echo canceller. Only the
+    /// speakerphone preset wants this: it costs the clock lock and a buffer of
+    /// latency each way, which is a bad trade on headphones.
+    var cancelsEcho: Bool
+    /// Container to record in. WAV keeps a lossless path lossless on disk.
+    var recordingFormat: String
     var note: String
 
     static let voiceChat = RoutePreset(
@@ -26,8 +32,29 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         voiceIsolationEnabled: false,
         voiceIsolationMix: 100,
         channelMode: SourceChannelMode.mono.rawValue,
+        cancelsEcho: false,
+        recordingFormat: Recorder.Format.wav.rawValue,
         note:
             "48 kHz and a small buffer. Anything higher is resampled back down at the far end.")
+
+    /// The case the echo canceller exists for.
+    ///
+    /// On speakers the far end comes back into the microphone and everyone
+    /// hears themselves a beat late. On headphones none of this applies and the
+    /// cost — no clock lock, no bit-exactness, a buffer each way — buys
+    /// nothing, which is why it is a preset rather than a default.
+    static let speakerphone = RoutePreset(
+        name: loc("Speakers"),
+        sampleRate: 48000,
+        bufferFrames: 256,
+        voiceIsolationEnabled: false,
+        voiceIsolationMix: 100,
+        channelMode: SourceChannelMode.mono.rawValue,
+        cancelsEcho: true,
+        recordingFormat: Recorder.Format.wav.rawValue,
+        note:
+            "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way."
+    )
 
     static let noisyRoom = RoutePreset(
         name: loc("Noisy room"),
@@ -36,6 +63,8 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         voiceIsolationEnabled: true,
         voiceIsolationMix: 100,
         channelMode: SourceChannelMode.mono.rawValue,
+        cancelsEcho: false,
+        recordingFormat: Recorder.Format.wav.rawValue,
         note: "Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact.")
 
     static let recording = RoutePreset(
@@ -45,28 +74,46 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         voiceIsolationEnabled: false,
         voiceIsolationMix: 100,
         channelMode: SourceChannelMode.mono.rawValue,
+        cancelsEcho: false,
+        recordingFormat: Recorder.Format.wav.rawValue,
         note: "96 kHz, untouched signal. Latency matters less than keeping the capture intact.")
 
-    static let builtIn: [RoutePreset] = [.voiceChat, .noisyRoom, .recording]
+    static let builtIn: [RoutePreset] = [
+        .voiceChat, .speakerphone, .noisyRoom, .recording,
+    ]
 }
 
 extension RouterModel {
     /// Applies a preset. Device selection is deliberately left alone — a preset
     /// describes how to route, not what to route.
     func apply(_ preset: RoutePreset) {
-        voiceIsolationEnabled = preset.voiceIsolationEnabled
-        voiceIsolationMix = preset.voiceIsolationMix
-        if let mode = SourceChannelMode(rawValue: preset.channelMode) {
-            channelMode = mode
+        // One edit, not five. Every one of these properties restarts the route
+        // on its own, so applying a preset used to tear the audio down and
+        // build it back three times for a single click.
+        batched {
+            voiceIsolationEnabled = preset.voiceIsolationEnabled
+            voiceIsolationMix = preset.voiceIsolationMix
+            if let mode = SourceChannelMode(rawValue: preset.channelMode) {
+                channelMode = mode
+            }
+            preferredSampleRate = preset.sampleRate
+            cancelsEcho = preset.cancelsEcho
+            if let format = Recorder.Format(rawValue: preset.recordingFormat) {
+                recordingFormat = format
+            }
+            activePresetName = preset.name
         }
-        preferredSampleRate = preset.sampleRate
-        activePresetName = preset.name
     }
 
     /// True when the current settings still match the named preset.
+    ///
+    /// Every field the preset sets has to be compared, or two presets that
+    /// differ only in a field nobody checks both light up at once.
     func matches(_ preset: RoutePreset) -> Bool {
         voiceIsolationEnabled == preset.voiceIsolationEnabled
             && channelMode.rawValue == preset.channelMode
             && preferredSampleRate == preset.sampleRate
+            && cancelsEcho == preset.cancelsEcho
+            && recordingFormat.rawValue == preset.recordingFormat
     }
 }
