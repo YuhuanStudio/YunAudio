@@ -151,6 +151,9 @@ public final class RoutingEngine: @unchecked Sendable {
     /// ring pointer the IO thread holds.
     private var echoBridge: EchoCancellationBridge?
 
+    /// The destination as a device, for reading controls back off it.
+    private var destinationDevice: AudioDevice?
+
     /// True when the microphone is reaching the routes through the canceller
     /// rather than through this aggregate.
     public var cancelsEcho: Bool {
@@ -321,6 +324,7 @@ public final class RoutingEngine: @unchecked Sendable {
             clockMasterUID: cancelsEcho ? destinationDeviceUID : sourceDeviceUID,
             taps: taps)
         self.aggregate = aggregate
+        destinationDevice = destination
 
         try? aggregate.setBufferFrameSize(bufferFrames)
 
@@ -561,6 +565,7 @@ public final class RoutingEngine: @unchecked Sendable {
 
         aggregate?.destroy()
         aggregate = nil
+        destinationDevice = nil
 
         // Safe now: the IOProc has been destroyed, so nothing can be reading
         // the graph any more.
@@ -925,7 +930,13 @@ public final class RoutingEngine: @unchecked Sendable {
     public var pathQuality: PathQuality? {
         guard let aggregate, let device = aggregate.device else { return nil }
         let drifted = aggregate.driftCorrectedUIDs
-        let processing = isolationUnit != nil || effectChain != nil
+        // The destination's own level control counts as processing. Ours has
+        // one now — the volume keys reach it, and so does anyone else — and a
+        // path that called itself bit-exact while the device attenuated it on
+        // the way out would be claiming something false.
+        let attenuated =
+            destinationDevice?.alters(scope: kAudioObjectPropertyScopeInput) ?? false
+        let processing = isolationUnit != nil || effectChain != nil || attenuated
         return PathQuality(
             // Nothing is being drift-corrected, nothing is processing the
             // signal, and where the first was only true because the driver

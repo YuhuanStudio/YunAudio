@@ -54,9 +54,18 @@ enum {
     kObjectID_Device = 3,
     kObjectID_Stream_Input = 4,
     kObjectID_Stream_Output = 5,
-    kObjectID_Volume_Output_Master = 6,
-    kObjectID_Mute_Output_Master = 7,
+    kObjectID_Volume_Input_Master = 6,
+    kObjectID_Mute_Input_Master = 7,
 };
+
+/// Range of the input level control, in decibels.
+///
+/// The control lives on the input scope because that is the side anything else
+/// reads: an application capturing this device, System Settings' input slider,
+/// the volume keys while it is the default input. Nothing that writes into the
+/// device needs a control, since whatever wrote it already had a fader.
+#define kVolume_MinimumDecibels (-64.0f)
+#define kVolume_MaximumDecibels (0.0f)
 
 #pragma mark - Custom properties
 
@@ -112,8 +121,12 @@ typedef struct {
     Float64 pendingSampleRate;
 
     // Output control state
-    Float32 outputVolume;
-    bool outputMuted;
+    /// Scalar 0...1, as the control reports it.
+    Float32 inputVolume;
+    /// Linear gain derived from `inputVolume`, kept alongside it so the IO
+    /// thread never has to call powf or take the lock to find it.
+    Float32 inputGain;
+    bool inputMuted;
 
     // Zero timestamp bookkeeping
     /// Host ticks per frame actually used to emit timestamps. Starts at the

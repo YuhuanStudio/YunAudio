@@ -11,6 +11,7 @@
 #include "YunAudioDriver.h"
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -20,7 +21,8 @@ YunDriverState gDriver = {
     .stateMutex = PTHREAD_MUTEX_INITIALIZER,
     .sampleRate = kDevice_DefaultSampleRate,
     .pendingSampleRate = 0.0,
-    .outputVolume = 1.0f,
+    .inputVolume = 1.0f,
+    .inputGain = 1.0f,
     .hostTicksPerFrame = 0.0,
 };
 
@@ -335,13 +337,46 @@ static OSStatus Yun_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef in
 
 #pragma mark - Property support
 
+static bool IsControl(AudioObjectID objectID) {
+    return objectID == kObjectID_Volume_Input_Master
+        || objectID == kObjectID_Mute_Input_Master;
+}
+
 static bool ObjectExists(AudioObjectID objectID) {
     return objectID == kObjectID_PlugIn || objectID == kObjectID_Device
-        || objectID == kObjectID_Stream_Input || objectID == kObjectID_Stream_Output;
+        || objectID == kObjectID_Stream_Input || objectID == kObjectID_Stream_Output
+        || IsControl(objectID);
 }
 
 static bool StreamIsInput(AudioObjectID objectID) {
     return objectID == kObjectID_Stream_Input;
+}
+
+/// Scalar 0...1 to decibels, with a taper rather than a straight line.
+///
+/// A linear scalar spends most of its travel in the top few decibels, so the
+/// slider feels dead over its lower half. Squaring the scalar is the usual
+/// remedy and is what the system's own controls do.
+static Float32 ScalarToDecibels(Float32 scalar) {
+    if (scalar <= 0.0f) return kVolume_MinimumDecibels;
+    if (scalar >= 1.0f) return kVolume_MaximumDecibels;
+    return kVolume_MinimumDecibels
+        + (kVolume_MaximumDecibels - kVolume_MinimumDecibels) * scalar * scalar;
+}
+
+static Float32 DecibelsToScalar(Float32 decibels) {
+    if (decibels <= kVolume_MinimumDecibels) return 0.0f;
+    if (decibels >= kVolume_MaximumDecibels) return 1.0f;
+    Float32 fraction = (decibels - kVolume_MinimumDecibels)
+        / (kVolume_MaximumDecibels - kVolume_MinimumDecibels);
+    return sqrtf(fraction);
+}
+
+/// The linear gain the IO thread applies, from the stored scalar.
+static Float32 ScalarToGain(Float32 scalar) {
+    if (scalar <= 0.0f) return 0.0f;
+    if (scalar >= 1.0f) return 1.0f;
+    return powf(10.0f, ScalarToDecibels(scalar) / 20.0f);
 }
 
 static Boolean Yun_HasProperty(AudioServerPlugInDriverRef inDriver,
@@ -383,6 +418,13 @@ static OSStatus Yun_IsPropertySettable(AudioServerPlugInDriverRef inDriver,
     case kYunCustomProperty_ClockAnchor:
         *outIsSettable = (inObjectID == kObjectID_Device);
         break;
+    case kAudioLevelControlPropertyScalarValue:
+    case kAudioLevelControlPropertyDecibelValue:
+        *outIsSettable = (inObjectID == kObjectID_Volume_Input_Master);
+        break;
+    case kAudioBooleanControlPropertyValue:
+        *outIsSettable = (inObjectID == kObjectID_Mute_Input_Master);
+        break;
     default:
         *outIsSettable = false;
         break;
@@ -423,7 +465,10 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
             *outDataSize = sizeof(AudioObjectID);
         } else if (inObjectID == kObjectID_Device) {
             switch (inAddress->mScope) {
+            // The input side owns its stream plus the level and mute controls.
             case kAudioObjectPropertyScopeInput:
+                *outDataSize = 3 * sizeof(AudioObjectID);
+                break;
             case kAudioObjectPropertyScopeOutput:
                 *outDataSize = sizeof(AudioObjectID);
                 break;
@@ -497,13 +542,41 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
             *outDataSize = sizeof(AudioObjectID);
             break;
         default:
-            *outDataSize = 2 * sizeof(AudioObjectID);
+            *outDataSize = 4 * sizeof(AudioObjectID);
             break;
         }
         return 0;
     case kAudioObjectPropertyControlList:
         if (inObjectID != kObjectID_Device) break;
-        *outDataSize = 0;
+        *outDataSize = 2 * sizeof(AudioObjectID);
+        return 0;
+
+    // Controls.
+    case kAudioControlPropertyScope:
+        if (!IsControl(inObjectID)) break;
+        *outDataSize = sizeof(AudioObjectPropertyScope);
+        return 0;
+    case kAudioControlPropertyElement:
+        if (!IsControl(inObjectID)) break;
+        *outDataSize = sizeof(AudioObjectPropertyElement);
+        return 0;
+    case kAudioLevelControlPropertyScalarValue:
+    case kAudioLevelControlPropertyDecibelValue:
+        if (inObjectID != kObjectID_Volume_Input_Master) break;
+        *outDataSize = sizeof(Float32);
+        return 0;
+    case kAudioLevelControlPropertyDecibelRange:
+        if (inObjectID != kObjectID_Volume_Input_Master) break;
+        *outDataSize = sizeof(AudioValueRange);
+        return 0;
+    case kAudioLevelControlPropertyConvertScalarToDecibels:
+    case kAudioLevelControlPropertyConvertDecibelsToScalar:
+        if (inObjectID != kObjectID_Volume_Input_Master) break;
+        *outDataSize = sizeof(Float32);
+        return 0;
+    case kAudioBooleanControlPropertyValue:
+        if (inObjectID != kObjectID_Mute_Input_Master) break;
+        *outDataSize = sizeof(UInt32);
         return 0;
     case kAudioObjectPropertyCustomPropertyInfoList:
         if (inObjectID != kObjectID_Device) break;
@@ -569,10 +642,13 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
     switch (inAddress->mSelector) {
     case kAudioObjectPropertyBaseClass:
         YUN_GUARD(inDataSize >= sizeof(AudioClassID), kAudioHardwareBadPropertySizeError, done);
-        if (inObjectID == kObjectID_PlugIn) {
-            *(AudioClassID *)outData = kAudioObjectClassID;
-        } else if (inObjectID == kObjectID_Device) {
-            *(AudioClassID *)outData = kAudioObjectClassID;
+        if (inObjectID == kObjectID_Volume_Input_Master) {
+            // The HAL walks the class hierarchy to decide what a control is;
+            // a volume whose base class is not the level control is not found
+            // by anything looking for a level control.
+            *(AudioClassID *)outData = kAudioLevelControlClassID;
+        } else if (inObjectID == kObjectID_Mute_Input_Master) {
+            *(AudioClassID *)outData = kAudioBooleanControlClassID;
         } else {
             *(AudioClassID *)outData = kAudioObjectClassID;
         }
@@ -585,6 +661,10 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
             *(AudioClassID *)outData = kAudioPlugInClassID;
         } else if (inObjectID == kObjectID_Device) {
             *(AudioClassID *)outData = kAudioDeviceClassID;
+        } else if (inObjectID == kObjectID_Volume_Input_Master) {
+            *(AudioClassID *)outData = kAudioVolumeControlClassID;
+        } else if (inObjectID == kObjectID_Mute_Input_Master) {
+            *(AudioClassID *)outData = kAudioMuteControlClassID;
         } else {
             *(AudioClassID *)outData = kAudioStreamClassID;
         }
@@ -641,11 +721,15 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         } else if (inObjectID == kObjectID_Device) {
             if (inAddress->mScope == kAudioObjectPropertyScopeInput) {
                 if (capacity > written) ids[written++] = kObjectID_Stream_Input;
+                if (capacity > written) ids[written++] = kObjectID_Volume_Input_Master;
+                if (capacity > written) ids[written++] = kObjectID_Mute_Input_Master;
             } else if (inAddress->mScope == kAudioObjectPropertyScopeOutput) {
                 if (capacity > written) ids[written++] = kObjectID_Stream_Output;
             } else {
                 if (capacity > written) ids[written++] = kObjectID_Stream_Input;
                 if (capacity > written) ids[written++] = kObjectID_Stream_Output;
+                if (capacity > written) ids[written++] = kObjectID_Volume_Input_Master;
+                if (capacity > written) ids[written++] = kObjectID_Mute_Input_Master;
             }
         }
         *outDataSize = written * sizeof(AudioObjectID);
@@ -653,8 +737,77 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
     }
 
     case kAudioPlugInPropertyBoxList:
-    case kAudioObjectPropertyControlList:
         *outDataSize = 0;
+        break;
+
+    case kAudioObjectPropertyControlList: {
+        YUN_GUARD(inDataSize >= 2 * sizeof(AudioObjectID),
+                  kAudioHardwareBadPropertySizeError, done);
+        AudioObjectID *controls = (AudioObjectID *)outData;
+        controls[0] = kObjectID_Volume_Input_Master;
+        controls[1] = kObjectID_Mute_Input_Master;
+        *outDataSize = 2 * sizeof(AudioObjectID);
+        break;
+    }
+
+    case kAudioControlPropertyScope:
+        YUN_GUARD(inDataSize >= sizeof(AudioObjectPropertyScope),
+                  kAudioHardwareBadPropertySizeError, done);
+        *(AudioObjectPropertyScope *)outData = kAudioObjectPropertyScopeInput;
+        *outDataSize = sizeof(AudioObjectPropertyScope);
+        break;
+
+    case kAudioControlPropertyElement:
+        YUN_GUARD(inDataSize >= sizeof(AudioObjectPropertyElement),
+                  kAudioHardwareBadPropertySizeError, done);
+        *(AudioObjectPropertyElement *)outData = kAudioObjectPropertyElementMain;
+        *outDataSize = sizeof(AudioObjectPropertyElement);
+        break;
+
+    case kAudioLevelControlPropertyScalarValue:
+        YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        pthread_mutex_lock(&gDriver.stateMutex);
+        *(Float32 *)outData = gDriver.inputVolume;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        *outDataSize = sizeof(Float32);
+        break;
+
+    case kAudioLevelControlPropertyDecibelValue:
+        YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        pthread_mutex_lock(&gDriver.stateMutex);
+        *(Float32 *)outData = ScalarToDecibels(gDriver.inputVolume);
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        *outDataSize = sizeof(Float32);
+        break;
+
+    case kAudioLevelControlPropertyDecibelRange: {
+        YUN_GUARD(inDataSize >= sizeof(AudioValueRange),
+                  kAudioHardwareBadPropertySizeError, done);
+        AudioValueRange *range = (AudioValueRange *)outData;
+        range->mMinimum = kVolume_MinimumDecibels;
+        range->mMaximum = kVolume_MaximumDecibels;
+        *outDataSize = sizeof(AudioValueRange);
+        break;
+    }
+
+    case kAudioLevelControlPropertyConvertScalarToDecibels:
+        YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        *(Float32 *)outData = ScalarToDecibels(*(Float32 *)outData);
+        *outDataSize = sizeof(Float32);
+        break;
+
+    case kAudioLevelControlPropertyConvertDecibelsToScalar:
+        YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        *(Float32 *)outData = DecibelsToScalar(*(Float32 *)outData);
+        *outDataSize = sizeof(Float32);
+        break;
+
+    case kAudioBooleanControlPropertyValue:
+        YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
+        pthread_mutex_lock(&gDriver.stateMutex);
+        *(UInt32 *)outData = gDriver.inputMuted ? 1 : 0;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        *outDataSize = sizeof(UInt32);
         break;
 
     case kAudioObjectPropertyCustomPropertyInfoList: {
@@ -953,6 +1106,65 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
     if (!ObjectExists(inObjectID)) return kAudioHardwareBadObjectError;
 
     switch (inAddress->mSelector) {
+    case kAudioLevelControlPropertyScalarValue:
+    case kAudioLevelControlPropertyDecibelValue: {
+        if (inObjectID != kObjectID_Volume_Input_Master) {
+            return kAudioHardwareUnknownPropertyError;
+        }
+        if (inDataSize != sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
+        Float32 scalar =
+            (inAddress->mSelector == kAudioLevelControlPropertyScalarValue)
+                ? *(const Float32 *)inData
+                : DecibelsToScalar(*(const Float32 *)inData);
+        if (scalar < 0.0f) scalar = 0.0f;
+        if (scalar > 1.0f) scalar = 1.0f;
+
+        pthread_mutex_lock(&gDriver.stateMutex);
+        bool changed = (scalar != gDriver.inputVolume);
+        gDriver.inputVolume = scalar;
+        // Recomputed here rather than on the IO thread, which must not call
+        // powf or take this lock.
+        gDriver.inputGain = ScalarToGain(scalar);
+        AudioServerPlugInHostRef host = gDriver.host;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+
+        // Both representations move together, so both have to be announced or
+        // whichever one the observer watches goes stale.
+        if (changed && host != NULL) {
+            AudioObjectPropertyAddress changes[2] = {
+                { kAudioLevelControlPropertyScalarValue,
+                  kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+                { kAudioLevelControlPropertyDecibelValue,
+                  kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
+            };
+            host->PropertiesChanged(host, kObjectID_Volume_Input_Master, 2, changes);
+        }
+        return 0;
+    }
+
+    case kAudioBooleanControlPropertyValue: {
+        if (inObjectID != kObjectID_Mute_Input_Master) {
+            return kAudioHardwareUnknownPropertyError;
+        }
+        if (inDataSize != sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
+        bool muted = (*(const UInt32 *)inData != 0);
+
+        pthread_mutex_lock(&gDriver.stateMutex);
+        bool changed = (muted != gDriver.inputMuted);
+        gDriver.inputMuted = muted;
+        AudioServerPlugInHostRef host = gDriver.host;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+
+        if (changed && host != NULL) {
+            AudioObjectPropertyAddress change = {
+                kAudioBooleanControlPropertyValue,
+                kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
+            };
+            host->PropertiesChanged(host, kObjectID_Mute_Input_Master, 1, &change);
+        }
+        return 0;
+    }
+
     case kAudioDevicePropertyNominalSampleRate: {
         if (inObjectID != kObjectID_Device) return kAudioHardwareUnknownPropertyError;
         if (inDataSize != sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
@@ -1174,12 +1386,31 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     Float32 *buffer = (Float32 *)ioMainBuffer;
 
     if (inOperationID == kAudioServerPlugInIOOperationReadInput) {
+        // Read without the lock: both are single scalars written by the control
+        // thread, and taking a mutex here would be the one thing this whole
+        // project exists to avoid. A cycle either side of a slider move is the
+        // worst case, and a slider move is not a sample-accurate event.
+        Float32 gain = gDriver.inputMuted ? 0.0f : gDriver.inputGain;
+
         UInt64 startFrame = (UInt64)inIOCycleInfo->mInputTime.mSampleTime;
-        for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
-            UInt64 slot = (startFrame + frame) & kRingBufferMask;
-            for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
-                buffer[frame * kDevice_ChannelCount + channel] =
-                    ring[slot * kDevice_ChannelCount + channel];
+        if (gain == 1.0f) {
+            // Unity is the ordinary case and has to stay exactly untouched:
+            // multiplying by 1.0f is arithmetic, and this device's claim is
+            // that it does none.
+            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
+                UInt64 slot = (startFrame + frame) & kRingBufferMask;
+                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
+                    buffer[frame * kDevice_ChannelCount + channel] =
+                        ring[slot * kDevice_ChannelCount + channel];
+                }
+            }
+        } else {
+            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
+                UInt64 slot = (startFrame + frame) & kRingBufferMask;
+                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
+                    buffer[frame * kDevice_ChannelCount + channel] =
+                        ring[slot * kDevice_ChannelCount + channel] * gain;
+                }
             }
         }
         return 0;

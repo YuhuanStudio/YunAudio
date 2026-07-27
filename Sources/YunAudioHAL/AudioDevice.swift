@@ -64,6 +64,10 @@ extension AudioProperty {
     public static var isRunningSomewhere: AudioProperty<UInt32> {
         .init(kAudioDevicePropertyDeviceIsRunningSomewhere)
     }
+    public static var volumeScalar: AudioProperty<Float32> {
+        .init(kAudioDevicePropertyVolumeScalar)
+    }
+    public static var mute: AudioProperty<UInt32> { .init(kAudioDevicePropertyMute) }
 }
 
 // MARK: - Transport
@@ -205,6 +209,28 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         let safety =
             id.optionalValue(of: AudioProperty<UInt32>.safetyOffset.scoped(to: scope)) ?? 0
         return Int(latency) + Int(safety)
+    }
+
+    /// The device's own level control on a scope, when it publishes one.
+    ///
+    /// Read rather than assumed, because it is somebody else's to move: the
+    /// volume keys, System Settings, or any application. A path that claims to
+    /// be bit-exact while a control on the device is attenuating it would be
+    /// claiming something false.
+    public func volumeScalar(scope: AudioObjectPropertyScope) -> Float? {
+        id.optionalValue(of: AudioProperty<Float32>.volumeScalar.scoped(to: scope))
+    }
+
+    public func isMuted(scope: AudioObjectPropertyScope) -> Bool {
+        (id.optionalValue(of: AudioProperty<UInt32>.mute.scoped(to: scope)) ?? 0) != 0
+    }
+
+    /// True when a control on this device is altering the signal on its way
+    /// out — anything but unity gain and unmuted.
+    public func alters(scope: AudioObjectPropertyScope) -> Bool {
+        if isMuted(scope: scope) { return true }
+        guard let volume = volumeScalar(scope: scope) else { return false }
+        return volume < 0.999
     }
 
     public func setNominalSampleRate(_ rate: Double) throws {

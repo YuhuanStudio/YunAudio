@@ -896,6 +896,61 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
 // system process rather than opening a client of its own, so there is nothing
 // to tap. An AVAudioEngine playing into the default output does register, which
 // is what makes it usable as a fixture.
+// Reads and moves the virtual device's own level control.
+//
+// The driver publishes a volume and a mute on its input scope, which is the
+// side anything else reads: an application capturing it, System Settings, the
+// volume keys while it is the default input. Without them macOS shows the
+// device with no slider at all, which looks broken.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "volume" {
+    guard let device = try? AudioDevices.device(uid: ClockAnchorPublisher.driverDeviceUID)
+    else {
+        print("the YunAudio device is not installed")
+        exit(1)
+    }
+    let input = kAudioObjectPropertyScopeInput
+
+    if CommandLine.arguments.count > 2 {
+        let argument = CommandLine.arguments[2]
+        if argument == "mute" || argument == "unmute" {
+            let muted: UInt32 = argument == "mute" ? 1 : 0
+            do {
+                try device.id.setValue(
+                    muted, for: AudioProperty<UInt32>.mute.scoped(to: input))
+            } catch {
+                print("could not set mute: \(error)")
+                exit(1)
+            }
+        } else if let scalar = Float(argument) {
+            do {
+                try device.id.setValue(
+                    scalar, for: AudioProperty<Float32>.volumeScalar.scoped(to: input))
+            } catch {
+                print("could not set the volume: \(error)")
+                exit(1)
+            }
+        } else {
+            print("usage: volume [0...1 | mute | unmute]")
+            exit(1)
+        }
+        // Re-read rather than trusting the write: the HAL can refuse.
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+
+    let fresh = (try? AudioDevices.device(uid: device.uid)) ?? device
+    guard let scalar = fresh.volumeScalar(scope: input) else {
+        print("the device publishes no input volume control")
+        exit(1)
+    }
+    print(String(format: "volume  %.3f", scalar))
+    print("mute    \(fresh.isMuted(scope: input) ? "on" : "off")")
+    let verdict =
+        fresh.alters(scope: input)
+        ? "yes — the path is no longer bit-exact" : "no"
+    print("alters  \(verdict)")
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tone" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 10 : 10
     let frequency =

@@ -105,6 +105,7 @@ swift run -c release yunaudio-cli tap Discord         # route an app's audio
 swift run -c release yunaudio-cli tone 12 &           # a tappable noise source
 swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
 swift run -c release yunaudio-cli aec-route           # route through the canceller
+swift run -c release yunaudio-cli volume 0.5         # move the device's own level
 ```
 
 `aec-route` is the integration check. With the canceller in the path the
@@ -185,6 +186,10 @@ reasonable substitute.
   but the realtime contract is broken while it is on.
 - A driver fault takes `coreaudiod` down with all system audio attached. Keep the
   uninstall command above to hand.
+- The virtual device's input level control is implemented but has only been
+  verified to compile and to be published correctly by inspection; moving it
+  through System Settings has not been tried on-device, because installing a
+  driver restarts `coreaudiod`.
 - Echo cancellation costs the clock lock and bit-exactness, and adds a buffer of
   latency in each direction. That is not a defect to be fixed later: the
   canceller has to own the microphone and the speaker together, so the microphone
