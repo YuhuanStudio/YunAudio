@@ -23,9 +23,35 @@ struct MainWindow: View {
             content()
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         } else {
-            ScrollView { content() }
+            // The clip edge used to land wherever it landed, which at the
+            // window's minimum height meant a line of text sliced in half a few
+            // points above the footer. That reads as broken rather than as
+            // scrolled, and macOS hides its scrollers until you touch them, so
+            // there was nothing else saying the column continued. Trailing space
+            // plus a short fade says it.
+            ScrollView {
+                content()
+                    .padding(.bottom, Yun.Space.xl)
+            }
+            .mask(
+                LinearGradient(
+                    stops: [
+                        .init(color: .black, location: 0),
+                        .init(color: .black, location: 0.94),
+                        .init(color: .black.opacity(0), location: 1),
+                    ],
+                    startPoint: .top, endPoint: .bottom))
         }
     }
+
+    /// Room for the traffic lights, which float over the content now that the
+    /// system title bar is hidden.
+    ///
+    /// Vertical rather than horizontal: indenting the header past them left the
+    /// wordmark hanging seventy points to the right of every column heading
+    /// beneath it, and that shared left edge is doing more work than the few
+    /// points of height it costs to keep.
+    private var trafficLightInset: CGFloat { isRendering ? Yun.Space.lg : 40 }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -93,7 +119,7 @@ struct MainWindow: View {
                 tone: model.isRunning ? .success : .neutral)
         }
         .padding(.horizontal, Yun.Space.xl)
-        .padding(.top, Yun.Space.lg)
+        .padding(.top, trafficLightInset)
         .padding(.bottom, Yun.Space.md)
     }
 

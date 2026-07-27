@@ -114,6 +114,55 @@ public final class AggregateDevice {
         id = deviceID
     }
 
+    /// An aggregate whose only members are process taps.
+    ///
+    /// A tap is not readable on its own — it has to be a member of some
+    /// aggregate before an IOProc can see it — but it does not need a physical
+    /// device for company. That matters when the point is to read an
+    /// application's output *without* touching any hardware: adding a speaker
+    /// here to satisfy an invariant would put two owners on that speaker, which
+    /// is precisely the fight this project exists to avoid.
+    ///
+    /// The clock comes from the tapped process's own timeline, so there is no
+    /// main sub-device to name.
+    ///
+    /// - Throws: `AggregateError.noSubDevices` when no taps are given, or
+    ///   `.creationFailed` when CoreAudio refuses.
+    public convenience init(name: String, tapsOnly taps: [ProcessTap]) throws {
+        guard !taps.isEmpty else { throw AggregateError.noSubDevices }
+        try self.init(name: name, taps: taps, subDevices: [], clockMasterUID: nil)
+    }
+
+    private init(
+        name: String, taps: [ProcessTap], subDevices: [SubDevice], clockMasterUID: String?
+    ) throws {
+        let generatedUID = "com.yuhuanstudio.yunaudio.aggregate.\(UUID().uuidString)"
+        uid = generatedUID
+        self.subDevices = subDevices
+        self.clockMasterUID = clockMasterUID ?? ""
+        self.taps = taps
+
+        var description: [String: Any] = [
+            kAudioAggregateDeviceNameKey: name,
+            kAudioAggregateDeviceUIDKey: generatedUID,
+            kAudioAggregateDeviceSubDeviceListKey: [[String: Any]](),
+            kAudioAggregateDeviceIsPrivateKey: 1,
+            kAudioAggregateDeviceIsStackedKey: 0,
+            kAudioAggregateDeviceTapAutoStartKey: 1,
+        ]
+        description[kAudioAggregateDeviceTapListKey] = taps.map { tap in
+            [kAudioSubTapUIDKey: tap.uid, kAudioSubTapDriftCompensationKey: 0]
+        }
+
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateAggregateDevice(
+            description as CFDictionary, &deviceID)
+        guard status == noErr, deviceID != kAudioObjectUnknown else {
+            throw AggregateError.creationFailed(status)
+        }
+        id = deviceID
+    }
+
     deinit { destroy() }
 
     public func destroy() {

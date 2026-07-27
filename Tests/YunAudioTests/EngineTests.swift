@@ -311,3 +311,56 @@ struct EffectParameterTests {
         #expect(ordered == [.voiceIsolation, .equaliser, .compressor, .limiter])
     }
 }
+
+@Suite("Sample ring")
+struct SampleRingTests {
+
+    /// The far-end capture reports "the tap never started" and "the application
+    /// is silent" differently, and the only thing that can tell them apart is
+    /// the write cursor: a ring drained as fast as it fills looks empty either
+    /// way.
+    @Test("a fresh ring has produced nothing")
+    func freshRingIsEmpty() throws {
+        let ring = try #require(yun_rt_ring_create(1024))
+        defer { yun_rt_ring_free(ring) }
+        #expect(yun_rt_ring_written(ring) == 0)
+        #expect(yun_rt_ring_available(ring) == 0)
+    }
+
+    @Test("draining a ring leaves the produced count standing")
+    func drainedRingRemembersProduction() throws {
+        let ring = try #require(yun_rt_ring_create(1024))
+        defer { yun_rt_ring_free(ring) }
+
+        var written = [Float](repeating: 0.5, count: 300)
+        _ = written.withUnsafeBufferPointer {
+            yun_rt_ring_write(ring, $0.baseAddress!, 300)
+        }
+        #expect(yun_rt_ring_available(ring) == 300)
+
+        var read = [Float](repeating: 0, count: 300)
+        let taken = read.withUnsafeMutableBufferPointer {
+            yun_rt_ring_read(ring, $0.baseAddress!, 300)
+        }
+        #expect(taken == 300)
+        #expect(read.allSatisfy { $0 == 0.5 })
+        // Empty, but not untouched — which is the distinction that matters.
+        #expect(yun_rt_ring_available(ring) == 0)
+        #expect(yun_rt_ring_written(ring) == 300)
+    }
+
+    @Test("a full ring drops rather than blocking")
+    func fullRingDrops() throws {
+        // Rounded up to 1024 slots, one of which the ring keeps to tell full
+        // from empty.
+        let ring = try #require(yun_rt_ring_create(600))
+        defer { yun_rt_ring_free(ring) }
+
+        var samples = [Float](repeating: 1, count: 2000)
+        let taken = samples.withUnsafeBufferPointer {
+            yun_rt_ring_write(ring, $0.baseAddress!, 2000)
+        }
+        #expect(taken == 1023)
+        #expect(yun_rt_ring_dropped(ring) == 977)
+    }
+}

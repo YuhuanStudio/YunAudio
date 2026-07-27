@@ -101,6 +101,23 @@ swift run -c release yunaudio-cli tap Discord         # route an app's audio
 Run the audio tests against a release build. Debug builds report hundreds of
 allocations per IO cycle that come from Swift's own checking machinery.
 
+The interface is verified three ways, because each is blind to what the others
+catch:
+
+```bash
+./App/build-app.sh
+YUNAUDIO_FLOWCHECK=1  ./build/YunAudio.app/Contents/MacOS/YunAudioApp   # behaviour
+YUNAUDIO_RENDER=out   ./build/YunAudio.app/Contents/MacOS/YunAudioApp   # colour
+YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp # the real window
+```
+
+The flow check drives the model through every path a person can take and
+asserts what came back. The renderer rasterises the view tree offscreen in both
+appearances, which is the only way to catch a colour that works in one theme and
+vanishes in the other. The screenshot photographs the actual window at its
+minimum size, including the title bar and the traffic lights — everything the
+window itself contributes, which an offscreen render structurally cannot show.
+
 ## Razer hardware control
 
 The transport for Razer's vendor HID interface is implemented and verified

@@ -181,6 +181,15 @@ uint32_t yun_rt_ring_read(
 /// Samples the producer had to drop. Non-zero means the recording has gaps.
 uint64_t yun_rt_ring_dropped(YunRTRing *_Nonnull ring);
 
+/// Samples the producer has written since the ring was made, wrapping at 2^32.
+/// Tells "nothing was ever produced" apart from "it was produced and consumed",
+/// which the fill level alone cannot.
+uint32_t yun_rt_ring_written(YunRTRing *_Nonnull ring);
+
+/// Samples waiting to be read. The slack between two realtime threads: steady
+/// is healthy, climbing means the consumer is slower than the producer.
+uint32_t yun_rt_ring_available(YunRTRing *_Nonnull ring);
+
 #pragma mark - Allocation tripwire (debug builds)
 
 /// Installs a hook on the allocator that records any allocation made while the

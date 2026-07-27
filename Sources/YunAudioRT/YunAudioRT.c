@@ -283,6 +283,16 @@ uint64_t yun_rt_ring_dropped(YunRTRing *ring) {
     return atomic_load_explicit(&ring->dropped, memory_order_relaxed);
 }
 
+uint32_t yun_rt_ring_written(YunRTRing *ring) {
+    return atomic_load_explicit(&ring->writeIndex, memory_order_relaxed);
+}
+
+uint32_t yun_rt_ring_available(YunRTRing *ring) {
+    uint32_t write = atomic_load_explicit(&ring->writeIndex, memory_order_acquire);
+    uint32_t read = atomic_load_explicit(&ring->readIndex, memory_order_relaxed);
+    return write - read;
+}
+
 #pragma mark - Allocation tripwire
 
 /// The allocator calls this on every operation when it is non-NULL. It is a

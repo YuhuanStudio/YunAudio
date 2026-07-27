@@ -25,8 +25,23 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     /// continuation never executes, so the first wait spins until the process is
     /// killed. That is exactly what happened the first time this was written.
     func applicationDidFinishLaunching(_ notification: Notification) {
-        guard ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] != nil,
-            let model = flowCheckModel
+        let environment = ProcessInfo.processInfo.environment
+
+        // Photographing the real window has to happen here for the same reason:
+        // there is no window until the scene has been through the run loop.
+        if let directory = environment["YUNAUDIO_SCREENSHOT"] {
+            NSApp.activate(ignoringOtherApps: true)
+            for window in NSApp.windows where window.title == "YunAudio" {
+                window.makeKeyAndOrderFront(nil)
+            }
+            Task { @MainActor in
+                WindowCapture.write(to: directory)
+                NSApp.terminate(nil)
+            }
+            return
+        }
+
+        guard environment["YUNAUDIO_FLOWCHECK"] != nil, let model = flowCheckModel
         else { return }
         Task { @MainActor in
             await UIFlowCheck.run(model: model)
@@ -44,8 +59,10 @@ struct YunAudioApp: App {
     init() {
         // Before anything else: a second copy would put a second icon in the
         // menu bar and quietly fight the first over the same devices.
-        if ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] == nil,
-            ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] == nil,
+        let environment = ProcessInfo.processInfo.environment
+        if environment["YUNAUDIO_RENDER"] == nil,
+            environment["YUNAUDIO_FLOWCHECK"] == nil,
+            environment["YUNAUDIO_SCREENSHOT"] == nil,
             !MainActor.assumeIsolated({ SingleInstance.claim() })
         {
             exit(0)
@@ -89,6 +106,11 @@ struct YunAudioApp: App {
         Window("YunAudio", id: "main") {
             MainWindow(model: model)
         }
+        // The window drew "YunAudio" in its title bar and the header drew it
+        // again eight points below, with a rule between them. Hiding the system
+        // title bar leaves the traffic lights floating over the header, which is
+        // what the header is inset for.
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 620)
         .windowResizability(.contentMinSize)
         .onChange(of: hasLaunched, initial: true) { _, _ in installStatusItem() }
