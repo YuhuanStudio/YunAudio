@@ -795,7 +795,12 @@ final class RouterModel {
         }
     }
 
-    func start() {
+    func start() { start(selftest: false) }
+
+    /// - Parameter selftest: Installs the loopback integrity check alongside
+    ///   the routes. It overwrites one destination channel with a known
+    ///   sequence, so it is never on for ordinary routing.
+    func start(selftest: Bool) {
         guard !isBusy else { return }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
             lastError = "pick an input and an output first"
@@ -868,7 +873,8 @@ final class RouterModel {
                     effects: effects,
                     preferredSampleRate: rate,
                     voiceIsolation: isolation,
-                    echoCancellation: echo)
+                    echoCancellation: echo,
+                    selftest: selftest)
             } catch {
                 failure = String(describing: error)
             }
@@ -1038,6 +1044,72 @@ final class RouterModel {
     /// True in an unoptimised build, where the count is Swift's own checking
     /// machinery rather than anything about the code that ships.
     var isDebugBuild: Bool { RoutingEngine.isDebugBuild }
+
+    // MARK: Integrity check
+
+    private(set) var isCheckingIntegrity = false
+    /// Fraction of the capture buffer filled, for the progress bar.
+    private(set) var integrityProgress: Double = 0
+    /// What the last comparison found, or nil if none has run.
+    private(set) var integrityResult: SelftestResult?
+    private(set) var integrityError: String?
+
+    /// Only a loopback destination can answer the question: the check writes a
+    /// known sequence to the output and reads it back off the same device's
+    /// input, so a destination with no input has nothing to read back.
+    var canCheckIntegrity: Bool {
+        guard let destination = selectedDestination else { return false }
+        return destination.inputChannels > 0 && !isCheckingIntegrity
+    }
+
+    /// Sends a known pseudorandom sequence through the whole path and compares
+    /// every sample that comes back.
+    ///
+    /// This is the project's central claim, and until now it could only be made
+    /// from a terminal. Somebody who installs the app had no way to find out
+    /// whether their own path is bit-exact — which is the one thing nothing
+    /// else in this category will tell them.
+    func checkIntegrity() {
+        guard canCheckIntegrity, !isBusy else { return }
+        integrityResult = nil
+        integrityError = nil
+        integrityProgress = 0
+        isCheckingIntegrity = true
+
+        // The check needs its own start: the sequence generator and the capture
+        // buffer are installed when the graph is built, so they cannot be added
+        // to a route that is already running.
+        let wasRunning = isRunning
+        let begin: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.start(selftest: true)
+            Task { @MainActor in await self.pollIntegrity(restoreRunning: wasRunning) }
+        }
+        if wasRunning { stop(then: begin) } else { begin() }
+    }
+
+    private func pollIntegrity(restoreRunning: Bool) async {
+        // Long enough to fill the capture buffer at 48 kHz, with headroom for
+        // the route to come up first.
+        for _ in 0..<160 {
+            try? await Task.sleep(for: .milliseconds(100))
+            integrityProgress = engine.selftestProgress
+            if integrityProgress >= 1 { break }
+        }
+        integrityResult = engine.evaluateSelftest()
+        if integrityResult == nil {
+            integrityError = loc("The check could not be set up on this path.")
+        }
+        isCheckingIntegrity = false
+
+        // Put the route back the way it was found rather than leaving the
+        // check's own graph running: it overwrites a destination channel with
+        // the test sequence, which is not something to leave in a call.
+        stop(then: { [weak self] in
+            guard let self, restoreRunning else { return }
+            self.start()
+        })
+    }
 
     /// Which of the two looks the whole application wears.
     ///

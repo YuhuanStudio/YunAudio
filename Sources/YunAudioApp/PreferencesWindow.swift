@@ -268,6 +268,93 @@ struct PreferencesWindow: View {
                 }
             }
 
+            heading(loc("Integrity check"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    Text(
+                        loc(
+                            "Sends a known sequence through the whole path and compares every sample that comes back. The only way to know whether your own path is lossless, rather than being told it is."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: Yun.Space.sm) {
+                        Button(
+                            model.isCheckingIntegrity
+                                ? loc("Checking…") : loc("Run the check")
+                        ) {
+                            model.checkIntegrity()
+                        }
+                        .buttonStyle(YunButtonStyle(.primary, small: true))
+                        .disabled(!model.canCheckIntegrity)
+
+                        if model.isCheckingIntegrity {
+                            YunProgressBar(fraction: model.integrityProgress)
+                        }
+                    }
+
+                    if let result = model.integrityResult {
+                        YunDivider()
+                        YunDetailRow(
+                            loc("Result"),
+                            value: loc(
+                                result.isBitExact
+                                    ? "bit-exact"
+                                    : (result.didAlign
+                                        ? "resampled" : "the signal did not come back")),
+                            tone: result.isBitExact
+                                ? .success : (result.didAlign ? .warning : .danger))
+                        YunDetailRow(
+                            loc("Samples compared"),
+                            value: "\(result.exactMatches) / \(result.comparedFrames)")
+                        YunDetailRow(
+                            loc("Loopback delay"),
+                            value: String(
+                                format: loc("%d frames"), result.delayFrames))
+                        if !result.isBitExact && result.didAlign {
+                            // Mean before max: on a resampled path the maximum
+                            // is a single worst sample and says little, while
+                            // the mean is the size of the conversion.
+                            YunDetailRow(
+                                loc("Mean error"),
+                                value: String(format: "%.6f", result.meanAbsoluteError))
+                            YunDetailRow(
+                                loc("Largest error"),
+                                value: String(format: "%.6f", result.maxAbsoluteError))
+                        }
+                        if !result.didAlign {
+                            Text(
+                                loc(
+                                    "Nothing recognisable came back. The output may not loop back to its own input, or something else is writing to the same channel."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    } else if let error = model.integrityError {
+                        Text(error)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if model.selectedDestination?.inputChannels == 0 {
+                        // A destination with no input cannot be read back, so
+                        // there is nothing to compare against. Saying which
+                        // devices can beats greying out a button in silence.
+                        Text(
+                            loc(
+                                "This output has no input to read back from. Pick a loopback device — the YunAudio device, or another virtual endpoint."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             heading(loc("Realtime safety"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {

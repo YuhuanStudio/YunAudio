@@ -9,7 +9,7 @@ import Foundation
 /// could not be represented exactly would fail for reasons that have nothing to
 /// do with the audio path.
 @inline(__always)
-func selftestSample(_ frame: UInt64) -> Float {
+package func selftestSample(_ frame: UInt64) -> Float {
     var x = frame &* 0x9E37_79B9_7F4A_7C15
     x ^= x >> 30
     x = x &* 0xBF58_476D_1CE4_E5B9
@@ -24,25 +24,25 @@ func selftestSample(_ frame: UInt64) -> Float {
 ///
 /// Lives beside the graph and is only consulted when `enabled` is set, so the
 /// normal audio path pays nothing for its existence.
-struct RTSelftest {
-    var enabled: Int32
+package struct RTSelftest {
+    package var enabled: Int32
     /// Where the generated sequence is written, and where it is read back.
-    var outBuffer: Int32
-    var outChannel: Int32
-    var inBuffer: Int32
-    var inChannel: Int32
+    package var outBuffer: Int32
+    package var outChannel: Int32
+    package var inBuffer: Int32
+    package var inChannel: Int32
 
     /// Frames of the sequence emitted so far.
-    var generatedFrames: UnsafeMutablePointer<UInt64>
+    package var generatedFrames: UnsafeMutablePointer<UInt64>
     /// Captured samples from the return path.
-    var capture: UnsafeMutablePointer<Float>
-    var captureCapacity: Int32
-    var captureCount: UnsafeMutablePointer<Int32>
+    package var capture: UnsafeMutablePointer<Float>
+    package var captureCapacity: Int32
+    package var captureCount: UnsafeMutablePointer<Int32>
     /// Value of `generatedFrames` when the first sample was captured, which
     /// anchors the captured run to the generated sequence.
-    var captureStartFrame: UnsafeMutablePointer<UInt64>
+    package var captureStartFrame: UnsafeMutablePointer<UInt64>
 
-    static func allocate(
+    package static func allocate(
         outBuffer: Int32, outChannel: Int32,
         inBuffer: Int32, inChannel: Int32,
         captureFrames: Int
@@ -70,7 +70,7 @@ struct RTSelftest {
         return selftest
     }
 
-    static func deallocate(_ selftest: UnsafeMutablePointer<RTSelftest>) {
+    package static func deallocate(_ selftest: UnsafeMutablePointer<RTSelftest>) {
         selftest.pointee.generatedFrames.deinitialize(count: 1)
         selftest.pointee.generatedFrames.deallocate()
         selftest.pointee.capture.deinitialize(count: Int(selftest.pointee.captureCapacity))
@@ -93,6 +93,26 @@ public struct SelftestResult: Sendable {
     /// Largest absolute difference across the compared run. Zero is the only
     /// acceptable answer for a path that claims to be lossless.
     public let maxAbsoluteError: Float
+    /// Mean absolute difference. This is what separates a resampled path, which
+    /// tracks the sequence closely without ever matching it exactly, from a
+    /// loopback that carried nothing at all.
+    public let meanAbsoluteError: Float
+
+    /// Error at the recovered offset over the error at a typical wrong one.
+    ///
+    /// Zero means the alignment is exact; one means the winning offset is no
+    /// better than chance and nothing came back.
+    public let alignmentSeparation: Float
+
+    /// True when the recovered offset stands clearly above the wrong ones.
+    ///
+    /// Judged by ratio rather than by an absolute error, because the probe is
+    /// white noise and resampling low-passes white noise: a path that carries
+    /// the signal perfectly can still differ at every single sample. Measured
+    /// on a resampled path here: 0.171 mean error against 0.66 for two
+    /// unrelated runs — close enough that any fixed cutoff between them would
+    /// be a guess about somebody's resampler.
+    public var didAlign: Bool { comparedFrames > 0 && alignmentSeparation < 0.6 }
 
     public var isBitExact: Bool { comparedFrames > 0 && exactMatches == comparedFrames }
 
@@ -104,10 +124,23 @@ public struct SelftestResult: Sendable {
             return
                 "bit-exact: \(exactMatches)/\(comparedFrames) samples identical, delay \(delayFrames) frames"
         }
+        guard didAlign else {
+            // Distinguishing this from "resampled" matters: one is a working
+            // path that happens to convert, the other is a path carrying
+            // something else entirely, and reporting 0% for both said nothing.
+            return String(
+                format:
+                    "the signal did not come back — the best offset scores %.2f of a "
+                    + "typical wrong one, over %d samples",
+                alignmentSeparation, comparedFrames)
+        }
         let percentage = Double(exactMatches) / Double(comparedFrames) * 100
         return String(
-            format: "NOT bit-exact: %d/%d identical (%.2f%%), max error %.9f, delay %d frames",
-            exactMatches, comparedFrames, percentage, maxAbsoluteError, delayFrames)
+            format:
+                "resampled: %d/%d identical (%.2f%%), mean error %.4f, max %.4f, "
+                + "delay %d frames, separation %.3f",
+            exactMatches, comparedFrames, percentage, meanAbsoluteError, maxAbsoluteError,
+            delayFrames, alignmentSeparation)
     }
 }
 
@@ -119,7 +152,7 @@ extension RTSelftest {
     /// offset and keeping the one that matches best. An offset found this way
     /// is only convincing because an exact match against a 24-bit pseudorandom
     /// sequence cannot happen by chance.
-    static func evaluate(
+    package static func evaluate(
         _ selftest: UnsafeMutablePointer<RTSelftest>,
         maximumDelayFrames: Int = 16384
     ) -> SelftestResult {
@@ -128,7 +161,8 @@ extension RTSelftest {
         let capture = selftest.pointee.capture
         guard count > 64 else {
             return SelftestResult(
-                delayFrames: 0, comparedFrames: 0, exactMatches: 0, maxAbsoluteError: 0)
+                delayFrames: 0, comparedFrames: 0, exactMatches: 0, maxAbsoluteError: 0,
+                meanAbsoluteError: 0, alignmentSeparation: 1)
         }
 
         // Skip the head of the capture: the first cycles can contain the ring
@@ -136,29 +170,61 @@ extension RTSelftest {
         let probeOffset = min(count / 4, 4096)
         let probeLength = min(256, count - probeOffset)
 
+        // Scored by how far the returned run sits from the generated one, not
+        // by how many samples match it exactly.
+        //
+        // Exact matching finds the alignment on a clock-locked path and finds
+        // nothing at all on a resampled one — every sample differs, every
+        // offset scores zero, and the search returns delay 0 with no matches,
+        // which is indistinguishable from a loopback that carried silence. A
+        // resampled path still tracks the sequence closely, so minimising the
+        // difference recovers the alignment either way.
         var bestDelay = 0
-        var bestScore = -1
+        var bestError = Double.infinity
+        var errors: [Double] = []
+        errors.reserveCapacity(maximumDelayFrames + 1)
         for delay in 0...maximumDelayFrames {
             guard startFrame &+ UInt64(probeOffset) >= UInt64(delay) else { break }
-            var score = 0
+            var error = 0.0
+            var exact = 0
             for index in 0..<probeLength {
                 let generatedFrame =
                     startFrame &+ UInt64(probeOffset + index) &- UInt64(delay)
-                if capture[probeOffset + index] == selftestSample(generatedFrame) {
-                    score += 1
-                }
+                let expected = selftestSample(generatedFrame)
+                let actual = capture[probeOffset + index]
+                error += Double(abs(actual - expected))
+                if actual == expected { exact += 1 }
             }
-            if score > bestScore {
-                bestScore = score
+            errors.append(error)
+            if error < bestError {
+                bestError = error
                 bestDelay = delay
-                if score == probeLength { break }
+            }
+            // A whole probe run matching a 24-bit pseudorandom sequence exactly
+            // cannot happen by chance, so nothing later can beat it.
+            if exact == probeLength {
+                errors = [error]
+                break
             }
         }
+
+        // How much better the winning offset is than a typical wrong one.
+        //
+        // An absolute threshold cannot answer this. The probe is white noise,
+        // and resampling low-passes white noise, so a resampled path that is
+        // carrying the signal perfectly well still differs at every sample —
+        // measured here at 0.171 against 0.66 for two unrelated runs. Any fixed
+        // cutoff between those two numbers is a guess about the resampler.
+        // The ratio is not: at the true offset the error is far below the
+        // spread of the wrong ones, whatever the path did to the signal.
+        let median = errors.sorted()[errors.count / 2]
+        let separation = median > 0 ? bestError / median : 0
 
         // Grade the whole capture at the recovered delay.
         var compared = 0
         var matches = 0
         var maxError: Float = 0
+        var totalError = 0.0
         for index in 0..<count {
             let absolute = startFrame &+ UInt64(index)
             guard absolute >= UInt64(bestDelay) else { continue }
@@ -169,6 +235,7 @@ extension RTSelftest {
                 matches += 1
             } else {
                 let error = abs(actual - expected)
+                totalError += Double(error)
                 if error > maxError { maxError = error }
             }
         }
@@ -177,6 +244,8 @@ extension RTSelftest {
             delayFrames: bestDelay,
             comparedFrames: compared,
             exactMatches: matches,
-            maxAbsoluteError: maxError)
+            maxAbsoluteError: maxError,
+            meanAbsoluteError: compared > 0 ? Float(totalError / Double(compared)) : 0,
+            alignmentSeparation: Float(separation))
     }
 }

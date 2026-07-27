@@ -350,3 +350,29 @@ public struct YunDetailRow: View {
         }
     }
 }
+
+/// A determinate progress bar.
+///
+/// Built from two rounded rectangles rather than from `ProgressView`, for the
+/// reason every control in this file is: the system style carries the accent
+/// colour, and the accent here is near-black on light and near-white on dark.
+public struct YunProgressBar: View {
+    private let fraction: Double
+
+    public init(fraction: Double) {
+        self.fraction = min(1, max(0, fraction))
+    }
+
+    public var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Yun.Palette.elevated)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: geometry.size.width * fraction)
+            }
+        }
+        .frame(height: 4)
+        .accessibilityValue(Text("\(Int(fraction * 100))%"))
+    }
+}

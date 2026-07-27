@@ -33,6 +33,12 @@ care about.
 The `0.999986` is your microphone's crystal, measured: 14 parts per million slow,
 which is 50 ms of drift per hour if nobody corrects it.
 
+**And you can run that check yourself.** It is in Preferences → Diagnostics, not
+only in the CLI: press a button and the app sends the sequence through your own
+path and grades what comes back. On a path that is not clock-locked it reports
+what is actually true — resampled, with the recovered loopback delay and the
+size of the conversion — rather than pass or fail.
+
 **It tells you the truth about the path.** Bit-exact, resampled, or processed;
 measured round-trip latency; whether the clock lock is actually holding. When you
 enable voice isolation it says so and stops claiming bit-exactness, because

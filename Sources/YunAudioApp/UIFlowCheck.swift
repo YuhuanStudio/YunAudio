@@ -270,6 +270,33 @@ enum UIFlowCheck {
                     .allSatisfy { offered.contains($0.destination.channel) })
         }
 
+        print("\nintegrity check")
+        // The project's central claim, and until now it could only be made from
+        // a terminal: somebody who installs the app had no way to find out
+        // whether their own path is bit-exact.
+        if !model.canCheckIntegrity {
+            note("the destination has no input to read back from — skipped")
+        } else {
+            model.checkIntegrity()
+            check("the check started", model.isCheckingIntegrity)
+            await waitUntil(
+                "it finished", { !model.isCheckingIntegrity && !model.isBusy },
+                timeout: 40)
+            check("a result came back", model.integrityResult != nil)
+            if let result = model.integrityResult {
+                note(result.summary)
+                check("samples were actually compared", result.comparedFrames > 0)
+                // BlackHole is not clock-locked to the microphone, so its path
+                // is legitimately resampled and will never be exact. What is
+                // asserted is that the measurement aligned and reported — not
+                // that this particular path is lossless.
+                check("the returned run aligned with what was sent", result.didAlign)
+                check("a loopback delay was recovered", result.delayFrames > 0)
+            }
+            check("the route came back afterwards", model.isRunning)
+            check("no error was left behind", model.lastError == nil)
+        }
+
         print("\nstopping")
         model.stop()
         await waitUntil("the route came down", { !model.isRunning }, timeout: 5)

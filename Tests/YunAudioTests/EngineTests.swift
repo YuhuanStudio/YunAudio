@@ -364,3 +364,79 @@ struct SampleRingTests {
         #expect(yun_rt_ring_dropped(ring) == 977)
     }
 }
+
+@Suite("Loopback grading")
+struct LoopbackGradingTests {
+
+    /// Builds a capture as if the path had returned `transform` applied to the
+    /// generated sequence, offset by `delay` frames.
+    private func grade(
+        delay: Int, frames: Int = 8192,
+        transform: (Float, Int) -> Float
+    ) -> SelftestResult {
+        let selftest = RTSelftest.allocate(
+            outBuffer: 0, outChannel: 0, inBuffer: 0, inChannel: 0, captureFrames: frames)
+        defer { RTSelftest.deallocate(selftest) }
+
+        // The capture begins well past the start so the search has room to look
+        // backwards, exactly as it does on a real device.
+        let startFrame = UInt64(delay + 4096)
+        selftest.pointee.captureStartFrame.pointee = startFrame
+        selftest.pointee.captureCount.pointee = Int32(frames)
+        for index in 0..<frames {
+            let source = selftestSample(startFrame &+ UInt64(index) &- UInt64(delay))
+            selftest.pointee.capture[index] = transform(source, index)
+        }
+        return RTSelftest.evaluate(selftest)
+    }
+
+    @Test("an untouched return is graded bit-exact and its delay recovered")
+    func exactReturn() {
+        let result = grade(delay: 872) { sample, _ in sample }
+        #expect(result.isBitExact)
+        #expect(result.didAlign)
+        #expect(result.delayFrames == 872)
+        #expect(result.maxAbsoluteError == 0)
+        #expect(result.alignmentSeparation == 0)
+    }
+
+    /// The case that was being reported as a total failure.
+    ///
+    /// A resampler low-passes the probe, so every sample differs even though
+    /// the path is carrying the signal. Scoring by exact equality found no
+    /// offset at all and returned delay 0 with no matches — which reads as "the
+    /// loopback carried nothing", and is a very different thing to tell someone.
+    @Test("a smoothed return still aligns, and is not called bit-exact")
+    func resampledReturn() {
+        var previous: Float = 0
+        let result = grade(delay: 555) { sample, _ in
+            // A one-pole smoother stands in for the resampler.
+            previous = previous * 0.5 + sample * 0.5
+            return previous
+        }
+        #expect(result.didAlign)
+        #expect(!result.isBitExact)
+        #expect(result.delayFrames == 555)
+        #expect(result.alignmentSeparation < 0.6)
+        #expect(result.meanAbsoluteError > 0)
+    }
+
+    @Test("an unrelated return is not claimed to align")
+    func unrelatedReturn() {
+        // A different sequence entirely: what a path that never carried the
+        // signal returns.
+        let result = grade(delay: 300) { _, index in
+            selftestSample(UInt64(index) &* 7 &+ 999_331)
+        }
+        #expect(!result.didAlign)
+        #expect(!result.isBitExact)
+        #expect(result.alignmentSeparation > 0.6)
+    }
+
+    @Test("silence is not mistaken for a returned signal")
+    func silentReturn() {
+        let result = grade(delay: 100) { _, _ in 0 }
+        #expect(!result.didAlign)
+        #expect(!result.isBitExact)
+    }
+}
