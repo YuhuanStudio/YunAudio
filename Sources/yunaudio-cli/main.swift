@@ -106,6 +106,20 @@ func describe(_ device: AudioDevice, isDefaultInput: Bool, isDefaultOutput: Bool
     if device.supportsFloatInput {
         print("  ** hardware presents a float input format **")
     }
+
+    // What the channels carry, where the device's topology is known. CoreAudio
+    // will not say, and on the Seiren V3 Pro the three inputs are three
+    // different versions of the same capsule.
+    if let named = DeviceChannelNames.channels(
+        modelUID: device.modelUID, name: device.name,
+        scope: kAudioObjectPropertyScopeInput)
+    {
+        print("  input channels")
+        for (index, channel) in named.enumerated() {
+            let marker = channel.isDefault ? " ←" : ""
+            print("    ch \(index + 1)  \(channel.name)\(marker)")
+        }
+    }
 }
 
 // MARK: - Route mode
@@ -1096,7 +1110,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "light" {
     }
     let arguments = Array(CommandLine.arguments.dropFirst(2))
     guard let verb = arguments.first else {
-        print("usage: light [off | on | solid | led | spectrum]")
+        print("usage: light [off | on | solid | led | walk | spectrum]")
         exit(1)
     }
 
@@ -1143,6 +1157,30 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "light" {
             }
             colours[index] = (r, g, b)
             report(try device.send(RazerLightingCommand.frame(colours)))
+        case "walk":
+            // The one thing the capture could not settle: which physical LED is
+            // index 0, and which way round the ring the indices run. It cannot
+            // be read off the device — somebody has to look at it — so this
+            // lights one at a time, slowly, and says which it is lighting.
+            let hold = arguments.count > 1 ? Double(arguments[1]) ?? 1.2 : 1.2
+            _ = try device.send(RazerLightingCommand.streamMode())
+            _ = try device.send(RazerLightingCommand.brightness(255))
+            for index in 0..<RazerLightingCommand.ledCount {
+                var colours = Array(
+                    repeating: (r: UInt8(0), g: UInt8(0), b: UInt8(0)),
+                    count: RazerLightingCommand.ledCount)
+                colours[index] = (255, 255, 255)
+                _ = try device.send(RazerLightingCommand.frame(colours))
+                print("index \(index)")
+                fflush(stdout)
+                Thread.sleep(forTimeInterval: hold)
+            }
+            // Left as it was found rather than dark.
+            let all = Array(
+                repeating: (r: UInt8(255), g: UInt8(255), b: UInt8(255)),
+                count: RazerLightingCommand.ledCount)
+            _ = try device.send(RazerLightingCommand.frame(all))
+            print("done — every index lit in turn")
         case "spectrum":
             let seconds = arguments.count > 1 ? Double(arguments[1]) ?? 6 : 6
             _ = try device.send(RazerLightingCommand.streamMode())
@@ -1163,7 +1201,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "light" {
             try device.stream(frames: frames, frameInterval: 1 / fps)
             print("done")
         default:
-            print("usage: light [off | on | solid | led | spectrum]")
+            print("usage: light [off | on | solid | led | walk | spectrum]")
             exit(1)
         }
     } catch {

@@ -27,7 +27,7 @@ Razer 把功能拆成**三條完全獨立的控制路徑**，彼此不共用協�
 | Synapse 功能 | 在哪裡執行 | macOS 怎麼做 |
 |---|---|---|
 | 燈環顏色／效果 | ✅ 裝置韌體 | HID feature report `0x07`（見 REFERENCE.md §6） |
-| 麥克風增益 | ✅ 裝置 | UAC2 Feature Unit **7**，或 CoreAudio volume |
+| 麥克風增益 | ✅ 裝置 | UAC2 Feature Unit **7**。⚠️ **實測更正**：macOS 的 UAC2 驅動**沒有**為 V3 Pro 公開 CoreAudio volume（V2 X 有）。要碰到這個增益只剩 EP0 class request 一條路。 |
 | 麥克風靜音 | ✅ 裝置 | UAC2 Feature Unit **7** master mute |
 | 耳機輸出音量 | ✅ 裝置 | UAC2 Feature Unit **3** |
 | 零延遲監聽（開關／音量） | ✅ 裝置 | UAC2 Feature Unit **10** → Mixer Unit **11** |

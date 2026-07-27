@@ -92,6 +92,25 @@ final class RouterModel {
         didSet { if oldValue != voiceIsolationMix { persist(); restartIfRunning() } }
     }
 
+    /// IO cycle size, in frames.
+    ///
+    /// Persisted and carried by every preset since the day they were written,
+    /// and never once passed to the engine — so the recording preset's 256
+    /// frames did nothing at all and every route ran at the default 128. The
+    /// status bar reported the real value, which is how it stayed hidden: it
+    /// was right about the wrong number being used.
+    var bufferFrames: UInt32 = 128 {
+        didSet {
+            guard oldValue != bufferFrames else { return }
+            persist()
+            restartIfRunning()
+        }
+    }
+
+    /// What the buffer picker offers. Below 64 the IO thread has no room for a
+    /// processing stage; above 512 the latency stops being worth the safety.
+    static let bufferSizes: [UInt32] = [64, 128, 256, 512]
+
     /// Sample rate a preset asked for. Applied when both devices support it.
     var preferredSampleRate: Double = 48000 {
         didSet { if oldValue != preferredSampleRate { persist(); restartIfRunning() } }
@@ -916,6 +935,8 @@ final class RouterModel {
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
+        bufferFrames =
+            Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
         monoChannel = saved.monoChannel
         channelMode = SourceChannelMode(rawValue: saved.channelMode) ?? .mono
 
@@ -938,7 +959,7 @@ final class RouterModel {
                 destinationDeviceUID: selectedDestinationUID,
                 channelMode: channelMode.rawValue,
                 monoChannel: monoChannel,
-                bufferFrames: 128,
+                bufferFrames: bufferFrames,
                 autoStart: autoStart,
                 voiceIsolationEnabled: voiceIsolationEnabled,
                 voiceIsolationMix: voiceIsolationMix,
@@ -1145,6 +1166,7 @@ final class RouterModel {
             enabledEffects.contains(.voiceIsolation)
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
+        let buffer = bufferFrames
         let handle = TapHandle(taps: taps)
         // The far end is whatever the user chose to mix in. If they picked
         // nothing, every application currently making noise is used instead:
@@ -1167,6 +1189,7 @@ final class RouterModel {
                     taps: handle.taps,
                     effects: effects,
                     preferredSampleRate: rate,
+                    bufferFrames: buffer,
                     voiceIsolation: isolation,
                     echoCancellation: echo,
                     selftest: selftest)

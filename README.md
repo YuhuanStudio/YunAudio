@@ -53,8 +53,13 @@ of added latency, under a quarter of the IO deadline in CPU.
 the hardware before its converter, so raising it costs no headroom; a digital
 trim afterwards can only amplify what the converter already decided, noise
 included. Both are here and the hardware one is first, which is the order that
-matters and the one nothing else on macOS puts in front of you. The Seiren
-publishes 0 to +36 dB; the built-in microphone publishes −12 to +12.
+matters and the one nothing else on macOS puts in front of you.
+
+It appears only where the device publishes a settable gain, and that turned out
+to be worth checking rather than assuming: the Seiren **V2 X** publishes one
+through CoreAudio and the **V3 Pro does not**, even though its own firmware
+carries 0 to +36 dB on feature unit 7. macOS's UAC2 driver does not expose it,
+so on that device the trim is what there is.
 
 **It knows what your microphone's channels actually are.** CoreAudio reports
 that a Seiren V3 Pro has three inputs and nothing about what is on them. They

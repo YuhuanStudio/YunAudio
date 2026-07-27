@@ -97,6 +97,7 @@ extension RouterModel {
                 channelMode = mode
             }
             preferredSampleRate = preset.sampleRate
+            bufferFrames = preset.bufferFrames
             cancelsEcho = preset.cancelsEcho
             if let format = Recorder.Format(rawValue: preset.recordingFormat) {
                 recordingFormat = format
@@ -113,6 +114,7 @@ extension RouterModel {
         voiceIsolationEnabled == preset.voiceIsolationEnabled
             && channelMode.rawValue == preset.channelMode
             && preferredSampleRate == preset.sampleRate
+            && bufferFrames == preset.bufferFrames
             && cancelsEcho == preset.cancelsEcho
             && recordingFormat.rawValue == preset.recordingFormat
     }
