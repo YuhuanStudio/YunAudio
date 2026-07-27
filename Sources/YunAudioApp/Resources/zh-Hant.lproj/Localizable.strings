@@ -96,3 +96,8 @@
 "silent" = "無訊號";
 "Mute" = "靜音";
 "Unmute" = "取消靜音";
+"Amount" = "強度";
+"High-pass" = "高通";
+"Threshold" = "閾值";
+"Headroom" = "餘裕";
+"Pre-gain" = "前級增益";

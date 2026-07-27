@@ -383,6 +383,57 @@ public struct YunFader: View {
     }
 }
 
+/// A bare 0…1 slider.
+///
+/// Separate from `YunFader`, which is specifically a gain control in decibels
+/// with silence at the bottom. A parameter carries its own range and curve, so
+/// what it needs from a control is a position, not an opinion about loudness.
+public struct YunSlider: View {
+    @Binding private var fraction: Double
+    @State private var isHovering = false
+
+    public init(fraction: Binding<Double>) {
+        _fraction = fraction
+    }
+
+    public var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack(alignment: .leading) {
+                Capsule().fill(Yun.Palette.elevated).frame(height: 3)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: max(0, min(width, width * fraction)), height: 3)
+                Circle()
+                    .fill(Yun.Palette.card)
+                    .overlay {
+                        Circle().strokeBorder(
+                            isHovering ? Yun.Palette.textTertiary : Yun.Palette.borderStrong,
+                            lineWidth: 1)
+                    }
+                    .frame(width: 10, height: 10)
+                    .offset(x: max(0, min(width - 10, width * fraction - 5)))
+            }
+            .frame(height: 12)
+            .contentShape(.rect)
+            .onHover { isHovering = $0 }
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { fraction = max(0, min(1, $0.location.x / width)) })
+        }
+        .frame(height: 12)
+        .accessibilityElement()
+        .accessibilityValue(Text("\(Int(fraction * 100))%"))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: fraction = min(1, fraction + 0.05)
+            case .decrement: fraction = max(0, fraction - 0.05)
+            @unknown default: break
+            }
+        }
+    }
+}
+
 /// Converts a fader position to the linear multiplier the engine wants.
 /// The bottom of the range is silence rather than a very small number, so a
 /// fader pulled all the way down is actually off.

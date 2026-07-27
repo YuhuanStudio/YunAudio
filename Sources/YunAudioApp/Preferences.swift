@@ -21,6 +21,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var capturedAppBundleIDs: [String]
     /// Raw values of the enabled processing stages.
     var enabledEffects: [String]
+    /// Knob positions, keyed by "<stage>.<parameter>".
+    var effectValues: [String: Float]
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -33,7 +35,8 @@ struct Preferences: Codable, Equatable, Sendable {
         voiceIsolationMix: 100,
         preferredSampleRate: 48000,
         capturedAppBundleIDs: [],
-        enabledEffects: [])
+        enabledEffects: [],
+        effectValues: [:])
 }
 
 @MainActor

@@ -262,6 +262,22 @@ final class RouterModel {
         didSet { if oldValue != enabledEffects { persist(); restartIfRunning() } }
     }
 
+    /// Knob positions, keyed by "<stage>.<parameter>". Persisted so a chain
+    /// comes back tuned the way it was left rather than at its defaults.
+    private(set) var effectValues: [String: Float] = [:]
+
+    func value(of parameter: EffectParameter, in kind: EffectKind) -> Float {
+        effectValues["\(kind.rawValue).\(parameter.id)"] ?? parameter.defaultValue
+    }
+
+    func setValue(_ value: Float, of parameter: EffectParameter, in kind: EffectKind) {
+        effectValues["\(kind.rawValue).\(parameter.id)"] = value
+        // Audio Unit parameter writes are realtime-safe, so this takes effect
+        // immediately without rebuilding anything.
+        engine.setEffectParameter(parameter.id, of: kind, to: value)
+        persist()
+    }
+
     func setEffect(_ kind: EffectKind, enabled: Bool) {
         if enabled { enabledEffects.insert(kind) } else { enabledEffects.remove(kind) }
         // The old single toggle stays in step so saved settings and the menu bar
@@ -405,6 +421,7 @@ final class RouterModel {
         autoStart = saved.autoStart
         capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
         enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
+        effectValues = saved.effectValues
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         preferredSampleRate = saved.preferredSampleRate
@@ -436,7 +453,8 @@ final class RouterModel {
                 voiceIsolationMix: voiceIsolationMix,
                 preferredSampleRate: preferredSampleRate,
                 capturedAppBundleIDs: Array(capturedAppBundleIDs),
-                enabledEffects: enabledEffects.map(\.rawValue)))
+                enabledEffects: enabledEffects.map(\.rawValue),
+                effectValues: effectValues))
     }
 
     // MARK: Devices

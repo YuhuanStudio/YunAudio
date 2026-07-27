@@ -256,3 +256,58 @@ struct RealtimeCellTests {
         #expect(!yun_rt_cell_wait_for_swap(cell, 5))
     }
 }
+
+// MARK: - Effect parameters
+
+@Suite("Effect parameters")
+struct EffectParameterTests {
+    /// A frequency control has to be logarithmic. On a linear slider the useful
+    /// range for a voice high-pass — 20 to 200 Hz — would occupy the first
+    /// third of the travel and the rest would be unusable.
+    @Test("a logarithmic parameter puts its midpoint at the geometric mean")
+    func logarithmicCurve() throws {
+        let frequency = try #require(
+            EffectKind.equaliser.parameters.first { $0.id == "frequency" })
+        let middle = frequency.value(atFraction: 0.5)
+        let geometric = (Double(frequency.minimum) * Double(frequency.maximum)).squareRoot()
+        #expect(abs(Double(middle) - geometric) < 1)
+    }
+
+    @Test("position and value are inverses of each other")
+    func roundTrip() {
+        for kind in EffectKind.allCases {
+            for parameter in kind.parameters {
+                for fraction in [0.0, 0.25, 0.5, 0.75, 1.0] {
+                    let value = parameter.value(atFraction: fraction)
+                    #expect(abs(parameter.fraction(for: value) - fraction) < 0.001)
+                }
+            }
+        }
+    }
+
+    @Test("every default sits inside its own range")
+    func defaultsAreValid() {
+        for kind in EffectKind.allCases {
+            for parameter in kind.parameters {
+                #expect(parameter.defaultValue >= parameter.minimum)
+                #expect(parameter.defaultValue <= parameter.maximum)
+            }
+        }
+    }
+
+    @Test("a position outside the slider is clamped rather than extrapolated")
+    func clamping() throws {
+        let threshold = try #require(
+            EffectKind.compressor.parameters.first { $0.id == "threshold" })
+        #expect(threshold.value(atFraction: -1) == threshold.minimum)
+        #expect(threshold.value(atFraction: 2) == threshold.maximum)
+    }
+
+    /// Stages are rendered in signal order regardless of the order they were
+    /// switched on: a limiter ahead of a compressor is a configuration mistake.
+    @Test("stages carry a signal order independent of when they were enabled")
+    func chainOrder() {
+        let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
+        #expect(ordered == [.voiceIsolation, .equaliser, .compressor, .limiter])
+    }
+}

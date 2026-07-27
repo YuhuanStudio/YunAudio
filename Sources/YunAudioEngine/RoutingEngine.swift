@@ -513,6 +513,13 @@ public final class RoutingEngine: @unchecked Sendable {
         onClockLockFailure?()
     }
 
+    /// Applies a processing parameter to the running chain.
+    public func setEffectParameter(_ parameter: String, of kind: EffectKind, to value: Float) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        effectChain?.set(parameter, of: kind, to: value)
+    }
+
     // MARK: Recording
 
     private var recorder: Recorder?

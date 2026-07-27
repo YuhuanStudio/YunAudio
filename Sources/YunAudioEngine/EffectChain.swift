@@ -2,6 +2,53 @@ import AudioToolbox
 import AVFoundation
 import Foundation
 
+/// A knob on a stage.
+///
+/// Carries its own range and unit so the interface can draw it without knowing
+/// anything about the Audio Unit behind it — adding a stage should not mean
+/// adding a matching case to a switch in a view.
+public struct EffectParameter: Identifiable, Hashable, Sendable {
+    public let id: String
+    public let title: String
+    public let minimum: Float
+    public let maximum: Float
+    public let unit: String
+    public let defaultValue: Float
+    /// Log-scaled parameters (frequency) need a curve; the rest are linear.
+    public let isLogarithmic: Bool
+
+    /// Position on a 0…1 slider for a value.
+    public func fraction(for value: Float) -> Double {
+        guard maximum > minimum else { return 0 }
+        if isLogarithmic, minimum > 0 {
+            let low = log(Double(minimum))
+            let high = log(Double(maximum))
+            return (log(Double(max(minimum, value))) - low) / (high - low)
+        }
+        return Double((value - minimum) / (maximum - minimum))
+    }
+
+    /// The value at a position, the inverse of `fraction(for:)`.
+    public func value(atFraction fraction: Double) -> Float {
+        let clamped = max(0, min(1, fraction))
+        if isLogarithmic, minimum > 0 {
+            let low = log(Double(minimum))
+            let high = log(Double(maximum))
+            return Float(exp(low + clamped * (high - low)))
+        }
+        return minimum + Float(clamped) * (maximum - minimum)
+    }
+
+    public func formatted(_ value: Float) -> String {
+        if unit == "Hz", value >= 1000 {
+            return String(format: "%.1f kHz", value / 1000)
+        }
+        return unit == "Hz" || abs(value) >= 100
+            ? String(format: "%.0f %@", value, unit)
+            : String(format: "%.1f %@", value, unit)
+    }
+}
+
 /// One stage of the processing chain.
 public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     case voiceIsolation
@@ -26,6 +73,39 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .equaliser: "Ten bands of parametric EQ."
         case .compressor: "Evens out level. Useful before a limiter, not instead of one."
         case .limiter: "Stops the signal exceeding full scale. Cheap insurance."
+        }
+    }
+
+    /// The knobs this stage offers, with the ranges the underlying unit accepts.
+    public var parameters: [EffectParameter] {
+        switch self {
+        case .voiceIsolation:
+            [
+                EffectParameter(
+                    id: "mix", title: "Amount", minimum: 0, maximum: 100,
+                    unit: "%", defaultValue: 100, isLogarithmic: false)
+            ]
+        case .equaliser:
+            [
+                EffectParameter(
+                    id: "frequency", title: "High-pass", minimum: 20, maximum: 500,
+                    unit: "Hz", defaultValue: 80, isLogarithmic: true)
+            ]
+        case .compressor:
+            [
+                EffectParameter(
+                    id: "threshold", title: "Threshold", minimum: -40, maximum: 0,
+                    unit: "dB", defaultValue: -20, isLogarithmic: false),
+                EffectParameter(
+                    id: "headroom", title: "Headroom", minimum: 0.1, maximum: 20,
+                    unit: "dB", defaultValue: 5, isLogarithmic: false),
+            ]
+        case .limiter:
+            [
+                EffectParameter(
+                    id: "gain", title: "Pre-gain", minimum: -20, maximum: 20,
+                    unit: "dB", defaultValue: 0, isLogarithmic: false)
+            ]
         }
     }
 
@@ -247,6 +327,34 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, kLimiterParam_DecayTime, kAudioUnitScope_Global, 0, 0.05, 0)
             }
+        }
+    }
+
+    /// Applies a knob to the live unit. Audio Unit parameter changes are
+    /// realtime-safe by design, so this needs no queue of its own.
+    func set(_ parameter: String, of kind: EffectKind, to value: Float) {
+        guard let index = stages.firstIndex(of: kind), index < units.count else { return }
+        let unit = units[index]
+        switch (kind, parameter) {
+        case (.voiceIsolation, "mix"):
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.equaliser, "frequency"):
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kAUNBandEQParam_Frequency),
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.compressor, "threshold"):
+            AudioUnitSetParameter(
+                unit, kDynamicsProcessorParam_Threshold, kAudioUnitScope_Global, 0, value, 0)
+        case (.compressor, "headroom"):
+            AudioUnitSetParameter(
+                unit, kDynamicsProcessorParam_HeadRoom, kAudioUnitScope_Global, 0, value, 0)
+        case (.limiter, "gain"):
+            AudioUnitSetParameter(
+                unit, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, value, 0)
+        default:
+            break
         }
     }
 

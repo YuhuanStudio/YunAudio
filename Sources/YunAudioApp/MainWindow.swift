@@ -360,6 +360,38 @@ struct MainWindow: View {
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // The knobs appear only for a stage that is on: a slider for
+            // something bypassed invites the reasonable assumption that moving
+            // it will do something.
+            if model.enabledEffects.contains(kind) {
+                ForEach(kind.parameters) { parameter in
+                    parameterRow(parameter, in: kind)
+                }
+                .padding(.top, 2)
+            }
+        }
+    }
+
+    private func parameterRow(_ parameter: EffectParameter, in kind: EffectKind) -> some View {
+        let value = model.value(of: parameter, in: kind)
+        return VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(loc(parameter.title))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                Spacer()
+                Text(parameter.formatted(value))
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+            }
+            YunSlider(
+                fraction: Binding(
+                    get: { parameter.fraction(for: model.value(of: parameter, in: kind)) },
+                    set: {
+                        model.setValue(parameter.value(atFraction: $0), of: parameter, in: kind)
+                    }
+                ))
         }
     }
 

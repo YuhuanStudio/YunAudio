@@ -96,3 +96,8 @@
 "silent" = "silent";
 "Mute" = "Mute";
 "Unmute" = "Unmute";
+"Amount" = "Amount";
+"High-pass" = "High-pass";
+"Threshold" = "Threshold";
+"Headroom" = "Headroom";
+"Pre-gain" = "Pre-gain";
