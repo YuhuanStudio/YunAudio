@@ -56,6 +56,16 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         }
 
         let menu = NSMenu()
+        // Mute first, because it is the one thing anybody opens this menu in a
+        // hurry to do.
+        muteItem = menu.addItem(
+            withTitle: loc("Mute"), action: #selector(toggleMute), keyEquivalent: "")
+        muteItem?.target = self
+        menu.addItem(
+            withTitle: loc("Start / stop routing"), action: #selector(toggleRouting),
+            keyEquivalent: ""
+        ).target = self
+        menu.addItem(.separator())
         menu.addItem(
             withTitle: loc("Open YunAudio"), action: #selector(openWindow), keyEquivalent: ""
         ).target = self
@@ -77,19 +87,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private var rightClickMenu: NSMenu?
+    private var muteItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
 
     private func refreshImage() {
         item.button?.image = Self.statusImage(
-            level: model.isRunning ? model.peakLevel : nil)
+            level: model.isRunning ? model.peakLevel : nil, isMuted: model.isMuted)
+        muteItem?.title = model.isMuted ? loc("Unmute") : loc("Mute")
     }
+
+    @objc private func toggleMute() { model.toggleMute() }
+
+    @objc private func toggleRouting() { model.toggle() }
 
     /// The mark, with a dot beneath it while routing.
     ///
     /// Drawn rather than composed in SwiftUI because a status item takes an
     /// `NSImage`, and rendering a view to one every half second to show a five
     /// pixel dot would be a great deal of machinery for very little.
-    private static func statusImage(level: Float?) -> NSImage? {
+    private static func statusImage(level: Float?, isMuted: Bool = false) -> NSImage? {
         guard let mark = YunAppIcon.image else { return nil }
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size)
@@ -97,7 +113,22 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         mark.draw(
             in: NSRect(x: 0, y: 3, width: 15, height: 15),
             from: .zero, operation: .sourceOver, fraction: 1)
-        if let level {
+        if isMuted {
+            // Muted outranks the level, and it is drawn whether or not routing
+            // is running: talking into a muted microphone is the single most
+            // expensive mistake this application can let somebody make, and the
+            // menu bar is the only part of it they are looking at.
+            NSColor.systemRed.setFill()
+            NSBezierPath(ovalIn: NSRect(x: 5.5, y: 0, width: 4, height: 4)).fill()
+            // A bar across it, so it reads as muted rather than as some other
+            // kind of red — the shape has to survive being four pixels wide.
+            NSColor.systemRed.setStroke()
+            let slash = NSBezierPath()
+            slash.move(to: NSPoint(x: 3.5, y: 0))
+            slash.line(to: NSPoint(x: 11.5, y: 5))
+            slash.lineWidth = 1.5
+            slash.stroke()
+        } else if let level {
             // Scaled so speech, which sits low on a linear scale, still moves it.
             let intensity = CGFloat(min(1, pow(min(1, level * 4), 0.5)))
             NSColor.systemGreen.withAlphaComponent(0.35 + 0.65 * intensity).setFill()

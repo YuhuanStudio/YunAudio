@@ -77,6 +77,14 @@ enum UIFlowCheck {
             "the in-window shortcuts are listed too",
             model.hotkeyDescriptions.contains { !$0.isGlobal })
 
+        // The menu bar glyph is the only part of this application most people
+        // look at, and it showed nothing at all while muted — which is exactly
+        // the state worth knowing about at a glance.
+        model.toggleMute()
+        check("the glyph reflects a muted microphone", model.isMuted)
+        model.toggleMute()
+        check("and reflects it being unmuted again", !model.isMuted)
+
         print("\nappearance")
         // The look was half Apple's material and half the source design system:
         // the menu bar panel floated on glass while the window was flat cards,
