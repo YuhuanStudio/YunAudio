@@ -311,3 +311,6 @@
 "Hold to talk" = "Hold to talk";
 "Open" = "Open";
 "The microphone stays muted until the key is down. Switching it off puts the mute back where it was." = "The microphone stays muted until the key is down. Switching it off puts the mute back where it was.";
+"Formants" = "Formants";
+"Resonance" = "Resonance";
+"Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk." = "Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk.";

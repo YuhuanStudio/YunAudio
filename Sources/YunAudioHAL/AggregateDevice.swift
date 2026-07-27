@@ -201,11 +201,17 @@ public final class AggregateDevice {
     ///
     /// Best effort: a device that has been unplugged in the meantime is skipped
     /// rather than treated as a failure, because there is nothing to restore.
-    public static func restoreSampleRates(_ rates: [String: Double]) {
+    /// - Returns: The UIDs of devices that did not arrive back at their
+    ///   original rate. Empty is the normal case; anything in it is hardware
+    ///   left somewhere the user did not put it.
+    @discardableResult
+    public static func restoreSampleRates(_ rates: [String: Double]) -> [String] {
+        var stubborn: [String] = []
         for (uid, rate) in rates {
             guard let device = try? AudioDevices.device(uid: uid) else { continue }
-            try? device.setNominalSampleRate(rate)
+            if (try? device.setNominalSampleRate(rate)) != true { stubborn.append(uid) }
         }
+        return stubborn
     }
 
     /// Highest sample rate every device in the list can present.

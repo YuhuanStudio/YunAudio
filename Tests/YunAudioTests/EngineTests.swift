@@ -322,8 +322,8 @@ struct EffectParameterTests {
         let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
         #expect(
             ordered == [
-                .voiceIsolation, .equaliser, .gate, .pitch, .character, .compressor,
-                .echo, .reverb, .limiter,
+                .voiceIsolation, .equaliser, .gate, .pitch, .formant, .character,
+                .compressor, .echo, .reverb, .limiter,
             ])
         // Every stage has a distinct position, or the sort is not deterministic
         // and the same set of switches can build two different chains.
@@ -2684,5 +2684,306 @@ struct RecorderFormatTests {
                 as? Int ?? 0
         }
         #expect(sizes[.flac]! < sizes[.wav]!)
+    }
+}
+
+// MARK: - Formant shifting
+
+/// The half of a voice changer that decides whether it sounds like a different
+/// person or like a chipmunk.
+///
+/// Two claims have to hold and they pull against each other: the resonances
+/// move, and the pitch does not. A test that only checked the first would pass
+/// for a plain pitch shifter, which is the thing this exists not to be.
+@Suite("Formant shifting")
+struct FormantShifterTests {
+
+    /// A synthetic vowel: a harmonic series shaped by three resonances.
+    ///
+    /// Three rather than one, because one is not a vowel and — more to the
+    /// point — is not something a cepstral envelope can represent. The envelope
+    /// follows structure on the scale of the spacing between formants, about a
+    /// kilohertz; a lone 150 Hz-wide resonance is far narrower than that and
+    /// gets smoothed away, so a fixture built from one measures the smoothing
+    /// rather than the shifting. The first version of this test did exactly
+    /// that and reported the effect doing nothing.
+    private func vowel(
+        fundamental: Double, formants: [Double] = [700, 1220, 2600],
+        seconds: Double, sampleRate: Double = 48000
+    ) -> [Float] {
+        let count = Int(sampleRate * seconds)
+        var samples = [Float](repeating: 0, count: count)
+        var harmonic = 1
+        while Double(harmonic) * fundamental < sampleRate / 2 - 1000 {
+            let frequency = fundamental * Double(harmonic)
+            var weight = 0.02
+            for (index, formant) in formants.enumerated() {
+                let bandwidth = 110.0 + Double(index) * 60
+                let distance = (frequency - formant) / bandwidth
+                // Later formants are quieter, as they are in a real voice.
+                weight += (1 / (1 + distance * distance)) / Double(index + 1)
+            }
+            for index in 0..<count {
+                samples[index] +=
+                    Float(weight * sin(2 * Double.pi * frequency * Double(index) / sampleRate))
+            }
+            harmonic += 1
+        }
+        let peak = samples.map(abs).max() ?? 1
+        return samples.map { $0 / peak * 0.5 }
+    }
+
+    /// Runs the shifter and returns the part past the start-up.
+    private func shift(_ input: [Float], ratio: Float) throws -> [Float] {
+        let shifter = try #require(FormantShifter())
+        shifter.ratio = ratio
+        var samples = input
+        samples.withUnsafeMutableBufferPointer {
+            shifter.process($0.baseAddress!, count: $0.count)
+        }
+        return Array(samples.dropFirst(FormantShifter.windowSize * 4))
+    }
+
+    /// Where the energy sits, in hertz. Robust in a way a single peak bin is
+    /// not: moving a whole spectral envelope moves the centroid whether or not
+    /// it moves which harmonic happens to be loudest.
+    private func centroid(_ samples: [Float], sampleRate: Double = 48000) throws -> Double {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: sampleRate))
+        samples.withUnsafeBufferPointer { analyser.add($0.baseAddress!, count: $0.count) }
+        var weighted = 0.0
+        var total = 0.0
+        for band in 0..<SpectrumAnalyser.bandCount {
+            // Back to amplitude from the display's decibel mapping, so the
+            // centroid is of the signal rather than of the picture.
+            let decibels = Double(analyser.decibels(ofBand: band))
+            guard decibels > -70 else { continue }
+            let amplitude = pow(10, decibels / 20)
+            weighted += analyser.centreFrequency(ofBand: band) * amplitude
+            total += amplitude
+        }
+        return total > 0 ? weighted / total : 0
+    }
+
+    /// Through the transform, not around it.
+    ///
+    /// The bypass at exactly 1.0 skips the FFT entirely, so a test written at
+    /// that ratio proves the bypass works and nothing else — which is how two
+    /// scaling errors survived: the reconstruction was 2× loud and the envelope
+    /// was doubled in the log domain, so every correction was applied at twice
+    /// the decibels asked for.
+    @Test("a barely-shifted signal comes back at the level it went in")
+    func levelIsPreserved() throws {
+        let input = vowel(fundamental: 120, seconds: 0.6)
+        let output = try shift(input, ratio: 1.02)
+        let reference = Array(input.dropFirst(FormantShifter.windowSize * 4))
+
+        let outPeak = output.map(abs).max() ?? 0
+        let inPeak = reference.map(abs).max() ?? 0
+        #expect(abs(outPeak - inPeak) < 0.05, "level changed: \(inPeak) → \(outPeak)")
+
+        // And it is still the same signal, not a reconstruction that merely
+        // happens to be as loud.
+        let outCentroid = try centroid(output)
+        let inCentroid = try centroid(reference)
+        #expect(
+            abs(outCentroid - inCentroid) / inCentroid < 0.06,
+            "spectrum moved at ratio 1.02: \(inCentroid) → \(outCentroid)")
+    }
+
+    @Test("the resonances move up with the ratio")
+    func formantsMoveUp() throws {
+        let input = vowel(fundamental: 120, seconds: 1.0)
+        let plain = try centroid(try shift(input, ratio: 1.0))
+        let raised = try centroid(try shift(input, ratio: 1.5))
+        #expect(raised > plain * 1.1, "\(plain) Hz → \(raised) Hz")
+    }
+
+    @Test("and down again")
+    func formantsMoveDown() throws {
+        let input = vowel(fundamental: 120, seconds: 1.0)
+        let plain = try centroid(try shift(input, ratio: 1.0))
+        let lowered = try centroid(try shift(input, ratio: 0.7))
+        #expect(lowered < plain * 0.95, "\(plain) Hz → \(lowered) Hz")
+    }
+
+    /// The assertion that separates this from a pitch shifter, and the one a
+    /// naive implementation fails: the harmonics stay exactly where they were.
+    @Test("the pitch does not move with the formants")
+    func pitchStaysPut() throws {
+        let input = vowel(fundamental: 150, seconds: 1.0)
+        let shifted = try shift(input, ratio: 1.5)
+        let reference = Array(input.dropFirst(FormantShifter.windowSize * 4))
+
+        #expect(abs(Self.pitch(of: reference) - 150) < 5)
+        #expect(
+            abs(Self.pitch(of: shifted) - Self.pitch(of: reference)) < 5,
+            "pitch moved: \(Self.pitch(of: reference)) → \(Self.pitch(of: shifted))")
+    }
+
+    /// Autocorrelation, taking the *shortest* period that correlates nearly as
+    /// well as the best one.
+    ///
+    /// Taking the maximum outright is the classic octave error: twice the true
+    /// period correlates almost as strongly, and a plain maximum picks it about
+    /// half the time. The first version of this reported a 150 Hz fixture as
+    /// 75 Hz and blamed the shifter.
+    private static func pitch(of samples: [Float], sampleRate: Double = 48000) -> Double {
+        let window = Array(samples.prefix(8192))
+        var scores: [Int: Float] = [:]
+        var best: Float = 0
+        for lag in 120...800 {
+            var score: Float = 0
+            var energy: Float = 0
+            for index in 0..<(window.count - lag) {
+                score += window[index] * window[index + lag]
+                energy += window[index + lag] * window[index + lag]
+            }
+            let normalised = energy > 0 ? score / energy.squareRoot() : 0
+            scores[lag] = normalised
+            best = max(best, normalised)
+        }
+        let shortest = (120...800).first { (scores[$0] ?? 0) > best * 0.9 } ?? 120
+        return sampleRate / Double(shortest)
+    }
+
+    /// Silence in, silence out. A shifter that produced anything from nothing
+    /// would add a noise floor to every quiet moment — and warping an envelope
+    /// estimated from a numerical floor is exactly how that happens.
+    @Test("silence stays silent")
+    func silence() throws {
+        let output = try shift([Float](repeating: 0, count: 48000), ratio: 1.5)
+        #expect(output.allSatisfy { abs($0) < 1e-5 })
+    }
+
+    /// Nor may it invent much above the signal.
+    ///
+    /// Warping reads the envelope from a lower bin, so at the top of the
+    /// spectrum it reads real content and applies it to whatever is up there —
+    /// which, where the source has little, is a boost applied to almost
+    /// nothing. Measured against the unshifted signal rather than an absolute
+    /// floor, because the source has its own high end and an absolute threshold
+    /// would be a test of the fixture.
+    @Test("it does not manufacture energy above the signal")
+    func noInventedHighEnd() throws {
+        let input = vowel(fundamental: 120, formants: [500, 900], seconds: 0.6)
+        let plain = try #require(SpectrumAnalyser(sampleRate: 48000))
+        let shifted = try #require(SpectrumAnalyser(sampleRate: 48000))
+        try shift(input, ratio: 1.0).withUnsafeBufferPointer {
+            plain.add($0.baseAddress!, count: $0.count)
+        }
+        try shift(input, ratio: 1.6).withUnsafeBufferPointer {
+            shifted.add($0.baseAddress!, count: $0.count)
+        }
+        // The clamp allows twelve decibels of boost anywhere; the top of the
+        // spectrum must not exceed that, which is what would happen if the
+        // guard on empty bins were not there.
+        for band in (SpectrumAnalyser.bandCount - 4)..<SpectrumAnalyser.bandCount {
+            let added = shifted.decibels(ofBand: band) - plain.decibels(ofBand: band)
+            #expect(added < 12.5, "band \(band) gained \(added) dB")
+        }
+    }
+
+    @Test("it reports its latency")
+    func latency() throws {
+        let shifter = try #require(FormantShifter())
+        #expect(shifter.latencyFrames == FormantShifter.windowSize)
+    }
+
+    /// Resetting has to clear the overlap state, or the first frames of the
+    /// next take carry the tail of the last one.
+    @Test("reset clears the overlap history")
+    func reset() throws {
+        let shifter = try #require(FormantShifter())
+        shifter.ratio = 1.3
+        var loud = vowel(fundamental: 120, seconds: 0.2)
+        loud.withUnsafeMutableBufferPointer {
+            shifter.process($0.baseAddress!, count: $0.count)
+        }
+        shifter.reset()
+
+        var quiet = [Float](repeating: 0, count: FormantShifter.windowSize * 4)
+        quiet.withUnsafeMutableBufferPointer {
+            shifter.process($0.baseAddress!, count: $0.count)
+        }
+        #expect(quiet.allSatisfy { abs($0) < 1e-5 })
+    }
+}
+
+// MARK: - A chain with a stage that is not an audio unit
+
+/// The formant shifter is the only stage written here rather than hosted, and
+/// it sits in the middle of the run. That splits the pull chain in two, and the
+/// split is exactly the kind of thing that works in isolation and quietly
+/// misconfigures everything downstream.
+@Suite("Native chain stage")
+struct NativeStageTests {
+
+    @Test("a chain of only the native stage works")
+    func aloneBuilds() throws {
+        let chain = try #require(
+            EffectChain(kinds: [.formant], sampleRate: 48000, maximumFrames: 512))
+        #expect(chain.stages == [.formant])
+        // A whole window, which is the honest cost of doing this at all.
+        #expect(chain.latencyFrames == FormantShifter.windowSize)
+    }
+
+    /// Signal has to reach the far end of a split chain.
+    @Test("a split chain passes signal end to end")
+    func splitPassesSignal() throws {
+        let chain = try #require(
+            EffectChain(
+                kinds: [.equaliser, .formant, .limiter], sampleRate: 48000,
+                maximumFrames: 1024))
+        #expect(chain.stages == [.equaliser, .formant, .limiter])
+
+        // Enough hops for the shifter's window to fill.
+        var produced = false
+        for block in 0..<40 {
+            for index in 0..<1024 {
+                let frame = block * 1024 + index
+                chain.inputBuffer[index] =
+                    0.4 * Float(sin(2 * Double.pi * 440 * Double(frame) / 48000))
+            }
+            guard chain.render(frames: 1024, sampleTime: Float64(block * 1024)) else {
+                Issue.record("render failed on block \(block)")
+                return
+            }
+            if block > 4 {
+                let peak = (0..<1024).map { abs(chain.outputBuffer[$0]) }.max() ?? 0
+                if peak > 0.05 { produced = true }
+            }
+        }
+        #expect(produced, "no signal came out of the split chain")
+    }
+
+    /// The parameter mapping is what the split breaks: `stages` and `units` are
+    /// no longer index-paired, so pairing them hands every stage after the
+    /// native one the wrong unit. A compressor configured as a limiter renders
+    /// perfectly happily and sounds wrong.
+    @Test("stages after the native one still reach their own unit")
+    func parametersStillLandOnTheRightUnit() throws {
+        let chain = try #require(
+            EffectChain(
+                kinds: [.formant, .character, .limiter], sampleRate: 48000,
+                maximumFrames: 512))
+        chain.set("flavour", of: .character, to: 3)
+        #expect(chain.characterState?.flavour == .bitcrush)
+        // And the native stage's own knob is not confused for a unit's.
+        #expect(chain.recognises("shift", of: .formant))
+    }
+
+    /// Every stage still resolves to something that can be built, native or
+    /// not.
+    @Test("the whole set including the native stage builds in order")
+    func everythingTogether() throws {
+        let chain = try #require(
+            EffectChain(
+                kinds: EffectKind.allCases.reversed(), sampleRate: 48000,
+                maximumFrames: 512))
+        #expect(chain.stages.count == EffectKind.allCases.count)
+        for (first, second) in zip(chain.stages, chain.stages.dropFirst()) {
+            #expect(first.chainOrder < second.chainOrder)
+        }
+        #expect(chain.latencyFrames >= FormantShifter.windowSize)
     }
 }

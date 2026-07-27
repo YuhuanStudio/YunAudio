@@ -311,3 +311,6 @@
 "Hold to talk" = "按住說話";
 "Open" = "開啟中";
 "The microphone stays muted until the key is down. Switching it off puts the mute back where it was." = "麥克風保持靜音，只有按住那個鍵時才開。關掉這個功能會把靜音狀態還原。";
+"Formants" = "共振峰";
+"Resonance" = "共振位移";
+"Moves the resonances of the voice without moving its pitch. This is what turns a shift into a different person rather than a chipmunk." = "移動聲音的共振峰而不動音高。這才是讓變聲聽起來像另一個人、而不是花栗鼠的關鍵。";

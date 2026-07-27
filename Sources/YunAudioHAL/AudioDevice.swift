@@ -282,8 +282,39 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
             for: AudioProperty<Float32>.volumeScalar.scoped(to: scope))
     }
 
-    public func setNominalSampleRate(_ rate: Double) throws {
+    /// Sets the nominal sample rate and waits for the device to actually be at
+    /// it.
+    ///
+    /// A sample rate change is asynchronous: `AudioObjectSetPropertyData`
+    /// returns as soon as the HAL has accepted the request, and the hardware
+    /// gets there some milliseconds later. Anything that reads the rate back
+    /// immediately sees the old value, and — far worse — anything that sets a
+    /// rate and then exits can leave the device somewhere it never intended.
+    /// That is not a test artifact: it is how the application could quit and
+    /// leave somebody's interface at 8 kHz.
+    ///
+    /// - Parameter timeout: How long to wait for the device to arrive.
+    /// - Throws: `AudioError` if the HAL rejects the request outright.
+    /// - Returns: True when the device was observed at the new rate. False
+    ///   means it was accepted and had not arrived within the timeout, which is
+    ///   worth reporting rather than assuming.
+    @discardableResult
+    public func setNominalSampleRate(
+        _ rate: Double, timeout: TimeInterval = 1.0
+    ) throws
+        -> Bool
+    {
         try id.setValue(rate, for: .nominalSampleRate)
+        // Poll rather than register a listener: this is a control-thread
+        // operation that happens a handful of times per route, and a listener
+        // would have to be installed, waited on and torn down for something
+        // that is usually true on the first read.
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if let current = currentSampleRate, abs(current - rate) < 0.5 { return true }
+            usleep(2000)
+        } while Date() < deadline
+        return false
     }
 
     public func setBufferFrameSize(_ frames: UInt32) throws {

@@ -96,6 +96,13 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     /// Ring modulation, decimation and soft clipping — the machinery behind
     /// every robot, radio and monster voice there has ever been.
     case character
+    /// Moves the resonances of the voice without moving its pitch.
+    ///
+    /// The half of a voice change that decides whether it sounds like a
+    /// different person or like a chipmunk, and the only stage here that is not
+    /// a hosted Audio Unit — nothing on the system does it, so it is written
+    /// out in `FormantShifter`.
+    case formant
     /// A room around the voice. The thing a karaoke box sells.
     case reverb
     /// Repeats. The other half of that same box.
@@ -112,6 +119,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .compressor: "Compressor"
         case .pitch: "Pitch"
         case .character: "Character"
+        case .formant: "Formants"
         case .reverb: "Reverb"
         case .echo: "Echo"
         case .limiter: "Limiter"
@@ -132,6 +140,9 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .character:
             "Robot, radio, monster. Pitch alone only makes somebody sound small; "
                 + "this is what makes them sound like something else."
+        case .formant:
+            "Moves the resonances of the voice without moving its pitch. This is "
+                + "what turns a shift into a different person rather than a chipmunk."
         case .reverb:
             "Puts the voice in a room. Small amounts flatter it; large amounts hide it."
         case .echo: "Repeats. Musical in small doses, unusable on a call in large ones."
@@ -213,6 +224,15 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                     id: "cents", title: "Shift", minimum: -1200, maximum: 1200,
                     unit: "cents", defaultValue: 0, isLogarithmic: false)
             ]
+        case .formant:
+            [
+                EffectParameter(
+                    // Percent rather than a bare ratio, because a control that
+                    // reads 1.2 tells nobody anything and one that reads +20%
+                    // tells them which way it goes.
+                    id: "shift", title: "Resonance", minimum: -40, maximum: 60,
+                    unit: "%", defaultValue: 0, isLogarithmic: false)
+            ]
         case .character:
             [
                 EffectParameter(
@@ -263,9 +283,17 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     var componentType: OSType {
         switch self {
         case .pitch: kAudioUnitType_FormatConverter
+        case .formant: 0
         default: kAudioUnitType_Effect
         }
     }
+
+    /// True when this stage is written here rather than hosted.
+    ///
+    /// Only one, and it is the one nothing on the system provides. Every other
+    /// stage is Apple's own unit, which is the right trade every time it is
+    /// available: their limiter is better than one written in an afternoon.
+    var isNative: Bool { self == .formant }
 
     var subType: OSType {
         switch self {
@@ -274,6 +302,8 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .equaliser: kAudioUnitSubType_NBandEQ
         case .compressor: kAudioUnitSubType_DynamicsProcessor
         case .pitch: kAudioUnitSubType_NewTimePitch
+        // Not a hosted unit at all; the subtype is never consulted for it.
+        case .formant: 0
         case .character: kAudioUnitSubType_Distortion
         case .reverb: kAudioUnitSubType_Reverb2
         case .echo: kAudioUnitSubType_Delay
@@ -296,17 +326,22 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         // After the gate: shifting first would move the noise floor along with
         // the voice and give the gate a moving target.
         case .pitch: 3
-        // After the shift, so the character is applied to the voice at the
-        // pitch it is going to be heard at rather than the one it arrived at.
-        case .character: 4
-        case .compressor: 5
+        // Directly after the pitch shift and before anything else: the two are
+        // one effect as far as a listener is concerned, and putting a
+        // compressor between them would make the character depend on how loud
+        // somebody happened to be.
+        case .formant: 4
+        // After both, so the character is applied to the voice as it is going
+        // to be heard rather than as it arrived.
+        case .character: 5
+        case .compressor: 6
         // The room goes on after the level has been evened out, or the reverb
         // tail gets compressed along with the voice and breathes.
-        case .echo: 6
-        case .reverb: 7
+        case .echo: 7
+        case .reverb: 8
         // Always last. Anything after a limiter can put the signal back over
         // full scale, which is the one thing it was there to prevent.
-        case .limiter: 8
+        case .limiter: 9
         }
     }
 }
@@ -323,7 +358,23 @@ final class EffectChain {
     let maximumFrames: Int
 
     private(set) var stages: [EffectKind] = []
+    /// The stages that became units, in the same order as `units`.
+    ///
+    /// Not `stages`: the native stage produces no unit, so pairing `stages`
+    /// with `units` by index silently hands every stage after it the wrong
+    /// unit — the compressor would be configured as a limiter and nothing
+    /// would say so.
+    private var hostedStages: [EffectKind] = []
     private var units: [AudioComponentInstance] = []
+    /// The one stage written here rather than hosted, and where it sits in the
+    /// run of units.
+    private var native: FormantShifter?
+    private var nativeIndex: Int?
+    /// What the first half of the chain produced, which the native stage
+    /// rewrites in place and the second half then pulls from.
+    private var nativeBuffer: UnsafeMutablePointer<Float>?
+    private var nativeList: UnsafeMutableAudioBufferListPointer?
+    private var nativeTimestamp = AudioTimeStamp()
     private let bufferList: UnsafeMutableAudioBufferListPointer
     private var timestamp = AudioTimeStamp()
 
@@ -354,7 +405,17 @@ final class EffectChain {
             mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
         let formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
 
+        // Hosted stages become units; the native one does not, and its
+        // position among them is remembered so the chain can be split around
+        // it. Everything before it pulls from the staging buffer as before;
+        // everything after pulls from what the native stage produced.
         for kind in stages {
+            if kind.isNative {
+                nativeIndex = units.count
+                native = FormantShifter()
+                continue
+            }
+            hostedStages.append(kind)
             var description = AudioComponentDescription(
                 componentType: kind.componentType,
                 componentSubType: kind.subType,
@@ -379,11 +440,26 @@ final class EffectChain {
             units.append(unit)
         }
 
-        guard !units.isEmpty else {
+        // A chain of nothing but the native stage is legitimate: somebody who
+        // wants only a formant shift should get one.
+        guard !units.isEmpty || native != nil else {
             inputBuffer.deallocate()
             outputBuffer.deallocate()
             free(bufferList.unsafeMutablePointer)
             return nil
+        }
+
+        if native != nil {
+            let buffer = UnsafeMutablePointer<Float>.allocate(capacity: maximumFrames)
+            buffer.initialize(repeating: 0, count: maximumFrames)
+            nativeBuffer = buffer
+            let list = AudioBufferList.allocate(maximumBuffers: 1)
+            list[0] = AudioBuffer(
+                mNumberChannels: 1,
+                mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
+                mData: UnsafeMutableRawPointer(buffer))
+            nativeList = list
+            nativeTimestamp.mFlags = .sampleTimeValid
         }
 
         // The head pulls from our staging buffer; every later stage pulls from
@@ -401,11 +477,26 @@ final class EffectChain {
                 return noErr
             },
             inputProcRefCon: UnsafeMutableRawPointer(inputBuffer))
-        AudioUnitSetProperty(
-            units[0], kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-            &headCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        if !units.isEmpty {
+            AudioUnitSetProperty(
+                units[0], kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+                &headCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        }
 
-        for index in 1..<units.count {
+        for index in 1..<max(units.count, 1) where index < units.count {
+            // The unit immediately after the native stage is fed from the
+            // native stage's buffer rather than connected to the unit before
+            // it — that connection is where the split goes.
+            if index == nativeIndex, let buffer = nativeBuffer {
+                var callback = AURenderCallbackStruct(
+                    inputProc: headCallback.inputProc,
+                    inputProcRefCon: UnsafeMutableRawPointer(buffer))
+                AudioUnitSetProperty(
+                    units[index], kAudioUnitProperty_SetRenderCallback,
+                    kAudioUnitScope_Input, 0,
+                    &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                continue
+            }
             var connection = AudioUnitConnection(
                 sourceAudioUnit: units[index - 1],
                 sourceOutputNumber: 0,
@@ -425,7 +516,8 @@ final class EffectChain {
             return nil
         }
 
-        latencyFrames = units.reduce(into: 0) { total, unit in
+        latencyFrames = (native?.latencyFrames ?? 0)
+        latencyFrames += units.reduce(into: 0) { total, unit in
             var latency: Float64 = 0
             var size = UInt32(MemoryLayout<Float64>.size)
             AudioUnitGetProperty(
@@ -442,6 +534,8 @@ final class EffectChain {
         teardown()
         inputBuffer.deallocate()
         outputBuffer.deallocate()
+        nativeBuffer?.deallocate()
+        if let nativeList { free(nativeList.unsafeMutablePointer) }
         free(bufferList.unsafeMutablePointer)
     }
 
@@ -456,7 +550,7 @@ final class EffectChain {
     /// Starting points chosen for a voice signal rather than the units' own
     /// defaults, which are tuned for music.
     private func applyDefaults(sampleRate: Double) {
-        for (index, kind) in stages.enumerated() where index < units.count {
+        for (index, kind) in hostedStages.enumerated() where index < units.count {
             let unit = units[index]
             switch kind {
             case .voiceIsolation:
@@ -536,6 +630,12 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, AudioUnitParameterID(kNewTimePitchParam_Rate),
                     kAudioUnitScope_Global, 0, 1, 0)
+            case .formant:
+                // Never reached: the native stage produces no unit and is not
+                // in `hostedStages`. Stated rather than left to `default`, so
+                // that adding another native stage fails to compile here
+                // instead of silently configuring the wrong unit.
+                break
             case .character:
                 applyFlavour(.robot, amount: 60, to: unit)
             case .reverb:
@@ -699,6 +799,7 @@ final class EffectChain {
         Pair(kind: .pitch, parameter: "cents"),
         Pair(kind: .character, parameter: "flavour"),
         Pair(kind: .character, parameter: "amount"),
+        Pair(kind: .formant, parameter: "shift"),
         Pair(kind: .reverb, parameter: "mix"),
         Pair(kind: .reverb, parameter: "decay"),
         Pair(kind: .echo, parameter: "mix"),
@@ -710,7 +811,15 @@ final class EffectChain {
     /// Applies a knob to the live unit. Audio Unit parameter changes are
     /// realtime-safe by design, so this needs no queue of its own.
     func set(_ parameter: String, of kind: EffectKind, to value: Float) {
-        guard let index = stages.firstIndex(of: kind), index < units.count else { return }
+        if kind == .formant {
+            // A percentage either way, which is what the control says. −20%
+            // reads the envelope from higher up and moves the resonances down.
+            if parameter == "shift" { native?.ratio = 1 + value / 100 }
+            return
+        }
+        guard let index = hostedStages.firstIndex(of: kind), index < units.count else {
+            return
+        }
         let unit = units[index]
         switch (kind, parameter) {
         case (.character, "flavour"):
@@ -792,6 +901,33 @@ final class EffectChain {
     /// `outputBuffer`. Called on the IO thread.
     @inline(__always)
     func render(frames: Int, sampleTime: Float64) -> Bool {
+        // The native stage splits the run in two. Everything before it renders
+        // into its own buffer, it rewrites that in place, and everything after
+        // pulls from the result.
+        if let native, let nativeBuffer, let nativeList {
+            let split = nativeIndex ?? 0
+            if split > 0 {
+                nativeTimestamp.mSampleTime = sampleTime
+                nativeList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
+                var flags = AudioUnitRenderActionFlags()
+                guard
+                    AudioUnitRender(
+                        units[split - 1], &flags, &nativeTimestamp, 0, UInt32(frames),
+                        nativeList.unsafeMutablePointer) == noErr
+                else { return false }
+            } else {
+                nativeBuffer.update(from: inputBuffer, count: frames)
+            }
+
+            native.process(nativeBuffer, count: frames)
+
+            guard split < units.count else {
+                // Nothing after it, so what it produced is the output.
+                outputBuffer.update(from: nativeBuffer, count: frames)
+                return true
+            }
+        }
+
         guard let tail = units.last else { return false }
         timestamp.mSampleTime = sampleTime
         bufferList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
