@@ -350,8 +350,11 @@ struct MainWindow: View {
 
             Spacer()
 
-            Button(model.isRunning ? "Stop" : "Start") { model.toggle() }
-                .buttonStyle(YunButtonStyle(.primary))
+            Button(model.isBusy ? "…" : (model.isRunning ? "Stop" : "Start")) {
+                model.toggle()
+            }
+            .buttonStyle(YunButtonStyle(.primary))
+            .disabled(model.isBusy)
         }
         .padding(.horizontal, Yun.Space.lg)
         .padding(.vertical, Yun.Space.md)

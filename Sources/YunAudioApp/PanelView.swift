@@ -436,8 +436,11 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack(spacing: Yun.Space.sm) {
-            Button(model.isRunning ? "Stop" : "Start") { model.toggle() }
-                .buttonStyle(YunButtonStyle(.primary))
+            Button(model.isBusy ? "…" : (model.isRunning ? "Stop" : "Start")) {
+                model.toggle()
+            }
+            .buttonStyle(YunButtonStyle(.primary))
+            .disabled(model.isBusy)
 
             Button("Open YunAudio") { openWindow(id: "main") }
                 .buttonStyle(YunButtonStyle(.secondary, small: true))

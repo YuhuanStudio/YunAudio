@@ -290,6 +290,16 @@ final class RouterModel {
 
     private let engine = RoutingEngine()
     private let hotkeys = HotkeyManager()
+    /// Engine start and stop go here rather than running inline.
+    ///
+    /// Measured: bringing a route up takes about 108 ms and tearing it down
+    /// about 17 ms, nearly all of it inside blocking CoreAudio calls. Run on the
+    /// main actor that is a visible stall every time someone hits the button.
+    private let engineQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.engine", qos: .userInitiated)
+    /// Set while a start or stop is in flight so the button cannot be pressed
+    /// twice into a half-built route.
+    private(set) var isBusy = false
     private var levelTimer: Timer?
     private var deviceWatcher: DeviceChangeWatcher?
 
@@ -499,6 +509,7 @@ final class RouterModel {
     }
 
     func start() {
+        guard !isBusy else { return }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
             lastError = "pick an input and an output first"
             return
@@ -536,33 +547,65 @@ final class RouterModel {
             return
         }
 
-        do {
-            clockLockFailed = false
+        clockLockFailed = false
+        isBusy = true
+
+        let engine = engine
+        let effects = Array(enabledEffects)
+        let isolation = enabledEffects.contains(.voiceIsolation)
+            ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
+        let rate = preferredSampleRate
+        let handle = TapHandle(taps: taps)
+        // Copied so the queue closure and the main actor are not reading and
+        // writing the same array. Route is a value type, so this is a real copy.
+        let routes = routeList
+
+        engineQueue.async {
             engine.allowClockLockRetry()
-            try engine.start(
-                sourceDeviceUID: source,
-                destinationDeviceUID: destination,
-                routes: routeList,
-                taps: taps,
-                effects: Array(enabledEffects),
-                preferredSampleRate: preferredSampleRate,
-                voiceIsolation: enabledEffects.contains(.voiceIsolation)
-                    ? VoiceIsolationSettings(mixPercent: voiceIsolationMix)
-                    : nil)
-            isRunning = true
-            lastError = nil
-            activeRoutes = routeList
-            routeGains = routeList.map(\.gain)
-            routeMutes = routeList.map(\.isMuted)
-            startPolling()
-        } catch {
-            isRunning = false
-            lastError = String(describing: error)
+            var failure: String?
+            do {
+                try engine.start(
+                    sourceDeviceUID: source,
+                    destinationDeviceUID: destination,
+                    routes: routes,
+                    taps: handle.taps,
+                    effects: effects,
+                    preferredSampleRate: rate,
+                    voiceIsolation: isolation)
+            } catch {
+                failure = String(describing: error)
+            }
+            Task { @MainActor [failure] in
+                self.isBusy = false
+                if let failure {
+                    self.isRunning = false
+                    self.lastError = failure
+                    return
+                }
+                self.isRunning = true
+                self.lastError = nil
+                self.activeRoutes = routes
+                self.routeGains = routes.map(\.gain)
+                self.routeMutes = routes.map(\.isMuted)
+                self.startPolling()
+            }
         }
     }
 
     func stop() {
-        engine.stop()
+        guard !isBusy else { return }
+        isBusy = true
+        let engine = engine
+        engineQueue.async {
+            engine.stop()
+            Task { @MainActor in
+                self.isBusy = false
+                self.finishStop()
+            }
+        }
+    }
+
+    private func finishStop() {
         isRunning = false
         stopPolling()
         levels = []
@@ -574,6 +617,12 @@ final class RouterModel {
     }
 
     func toggle() { isRunning ? stop() : start() }
+
+    /// Carries the taps across the queue hop. `ProcessTap` is a class the audio
+    /// system owns, and the queue closure has to be `Sendable`.
+    private struct TapHandle: @unchecked Sendable {
+        let taps: [ProcessTap]
+    }
 
     private func restartIfRunning() {
         guard isRunning else { return }
