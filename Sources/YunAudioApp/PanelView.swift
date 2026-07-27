@@ -58,6 +58,10 @@ struct PanelView: View {
             .frame(width: 340)
         }
         .background(.clear)
+        // Covers the whole subtree. The system focus effect is a blue ring, and
+        // blue is the one colour this design system never uses; the controls
+        // that can take focus draw their own ring in --border-strong instead.
+        .focusEffectDisabled()
     }
 
     // MARK: Header

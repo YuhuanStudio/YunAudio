@@ -233,6 +233,9 @@ public struct YunSelect<Value: Hashable>: View {
             .padding(4)
             .frame(minWidth: 240)
             .background(Yun.Palette.card)
+            // A popover is its own hosting window, so a suppression applied at
+            // the panel's root does not reach in here.
+            .focusEffectDisabled()
         }
     }
 

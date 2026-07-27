@@ -65,6 +65,7 @@ struct PreferencesWindow: View {
         }
         .frame(minWidth: 620, minHeight: 440)
         .background(Yun.Palette.background)
+        .focusEffectDisabled()
     }
 
     private var sidebar: some View {

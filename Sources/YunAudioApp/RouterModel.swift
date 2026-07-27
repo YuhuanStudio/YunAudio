@@ -725,6 +725,11 @@ final class RouterModel {
     /// the number is only meaningful if someone looks at it.
     var allocationViolations: UInt64 { RoutingEngine.allocationViolations }
 
+    /// IO cycles completed. Only used by the flow check, which needs to know
+    /// whether audio survived a change rather than merely whether the model
+    /// still says it is running.
+    var cycleCountForDiagnostics: UInt64 { engine.cycleCount }
+
     /// Loudest route, for the menu bar icon and the signal path graphic.
     var peakLevel: Float { levels.max() ?? 0 }
 }

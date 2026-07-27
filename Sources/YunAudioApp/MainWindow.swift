@@ -50,6 +50,7 @@ struct MainWindow: View {
         }
         .frame(minWidth: 980, minHeight: 600)
         .background(Yun.Palette.windowBackground)
+        .focusEffectDisabled()
     }
 
     // MARK: Header

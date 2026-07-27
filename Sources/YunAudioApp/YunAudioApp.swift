@@ -10,6 +10,9 @@ import YunDesign
 @MainActor
 final class TerminationObserver: NSObject, NSApplicationDelegate {
     var onTerminate: (@MainActor () -> Void)?
+    /// Owned here because the status item has to outlive the scene body that
+    /// created it, and a SwiftUI scene is not a place to keep a reference.
+    var statusItem: StatusItemController?
 
     func applicationWillTerminate(_ notification: Notification) {
         onTerminate?()
@@ -22,6 +25,14 @@ struct YunAudioApp: App {
     @NSApplicationDelegateAdaptor(TerminationObserver.self) private var termination
 
     init() {
+        // Before anything else: a second copy would put a second icon in the
+        // menu bar and quietly fight the first over the same devices.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] == nil,
+            ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] == nil,
+            !MainActor.assumeIsolated({ SingleInstance.claim() })
+        {
+            exit(0)
+        }
         // The .lproj folders ship with this module, not with the main bundle.
         YunStrings.bundle = Bundle.module
 
@@ -29,11 +40,32 @@ struct YunAudioApp: App {
         // accessibility permission, so the panel is rendered offscreen instead —
         // in both appearances, which is the only way to catch a colour that
         // works in one theme and vanishes in the other.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK"] != nil {
+            MainActor.assumeIsolated { UIFlowCheck.run() }
+            exit(0)
+        }
         if let directory = ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] {
             MainActor.assumeIsolated {
                 PanelRenderer.write(to: directory, model: RouterModel())
             }
             exit(0)
+        }
+    }
+
+    @State private var hasLaunched = false
+
+    /// Creates the menu bar presence once, on whichever scene is evaluated
+    /// first. SwiftUI offers no launch hook for an app with no primary window.
+    @MainActor
+    private func installStatusItem() {
+        guard termination.statusItem == nil else { return }
+        termination.onTerminate = { model.shutDown() }
+        termination.statusItem = StatusItemController(model: model) {
+            NSApp.activate(ignoringOtherApps: true)
+            for window in NSApp.windows where window.title == "YunAudio" {
+                window.makeKeyAndOrderFront(nil)
+                return
+            }
         }
     }
 
@@ -45,20 +77,13 @@ struct YunAudioApp: App {
         }
         .defaultSize(width: 1000, height: 620)
         .windowResizability(.contentMinSize)
+        .onChange(of: hasLaunched, initial: true) { _, _ in installStatusItem() }
 
         Settings {
             PreferencesWindow(model: model)
+                .onAppear { installStatusItem() }
         }
 
-        MenuBarExtra {
-            PanelView(model: model)
-                .onAppear { termination.onTerminate = { model.shutDown() } }
-        } label: {
-            MenuBarIcon(level: model.isRunning ? model.peakLevel : nil)
-        }
-        // A real window rather than a menu: the panel holds pickers, meters and
-        // a live readout, none of which belong in a list of menu items.
-        .menuBarExtraStyle(.window)
     }
 }
 
