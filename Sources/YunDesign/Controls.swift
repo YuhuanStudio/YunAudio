@@ -536,3 +536,54 @@ private struct OptionClickReset: ViewModifier {
         }
     }
 }
+
+/// Picks a hue by dragging along the spectrum itself.
+///
+/// A full colour well would offer greys and pastels a twelve-LED ring behind a
+/// diffuser cannot show. What anybody wants from it is "make it green", and a
+/// strip of the actual colours answers that without a dialog.
+public struct HueStrip: View {
+    @Binding private var hue: Double
+
+    public init(hue: Binding<Double>) {
+        _hue = hue
+    }
+
+    public var body: some View {
+        GeometryReader { geometry in
+            let width = geometry.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: stride(from: 0.0, through: 1.0, by: 1.0 / 12)
+                                .map { Color(hue: $0, saturation: 1, brightness: 1) },
+                            startPoint: .leading, endPoint: .trailing))
+                Circle()
+                    .fill(Color(hue: hue, saturation: 1, brightness: 1))
+                    .overlay { Circle().strokeBorder(.white, lineWidth: 2) }
+                    .shadow(color: .black.opacity(0.25), radius: 2)
+                    .frame(width: 14, height: 14)
+                    .offset(x: max(0, min(width - 14, width * hue - 7)))
+            }
+            .frame(height: 14)
+            .contentShape(.rect)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        hue = max(0, min(1, value.location.x / width))
+                    })
+        }
+        .frame(height: 14)
+        .accessibilityElement()
+        .accessibilityLabel(Text(loc("Colour")))
+        .accessibilityValue(Text("\(Int(hue * 360))°"))
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: hue = min(1, hue + 1.0 / 24)
+            case .decrement: hue = max(0, hue - 1.0 / 24)
+            @unknown default: break
+            }
+        }
+    }
+}

@@ -331,14 +331,78 @@ enum UIFlowCheck {
         model.inputDecibels = 0
         model.outputDecibels = 0
 
+        print("\nloudness and spectrum")
+        // The unit tests prove the arithmetic against the standard. What they
+        // cannot prove is that the ring is wired to the output bus at all — a
+        // meter reading a ring nothing writes to reports a clean −inf, which is
+        // indistinguishable from a quiet room until somebody speaks into it.
+        model.isAnalysisVisible = true
+        model.resetLoudness()
+        await pause(1.5)
+        check("the analyser is receiving audio", model.analysis.duration > 0.5)
+        note(
+            String(
+                format: "%.2fs measured, short-term %.1f LUFS, peak %.1f dBFS",
+                model.analysis.duration, model.analysis.shortTerm, model.analysis.peak))
+        check(
+            "the spectrum has one band per position",
+            model.analysis.bands.count == SpectrumAnalyser.bandCount)
+        check(
+            "every band is inside the display range",
+            model.analysis.bands.allSatisfy { $0 >= 0 && $0 <= 1 })
+
+        // Measured time has to track wall-clock time. If it lags, the ring is
+        // dropping — which would silently bias the integrated figure towards
+        // whatever the interface happened to catch.
+        let measuredBefore = model.analysis.duration
+        await pause(2.0)
+        let advanced = model.analysis.duration - measuredBefore
+        note(String(format: "%.2fs measured over 2.0s of wall clock", advanced))
+        check("the analyser is not dropping audio", advanced > 1.8)
+
+        // The master is applied before the fold, so turning it down has to move
+        // the reading. This is what catches the tap being taken from the wrong
+        // side of the gain stage.
+        if model.analysis.shortTerm.isFinite {
+            let beforeCut = model.analysis.shortTerm
+            model.outputDecibels = -20
+            await pause(3.5)
+            note(
+                String(
+                    format: "short-term %.1f → %.1f LUFS after a 20 dB cut",
+                    beforeCut, model.analysis.shortTerm))
+            check(
+                "the master reaches the loudness meter",
+                model.analysis.shortTerm < beforeCut - 10)
+            model.outputDecibels = 0
+        } else {
+            note("the room is silent — the master's effect on loudness not exercised")
+        }
+
+        model.resetLoudness()
+        check("reset clears the reading", model.analysis.duration == 0)
+
         print("\nswitching channel mode while running")
         let before = model.activeRoutes.count
-        let cyclesBefore = model.cycleCountForDiagnostics
         model.channelMode = model.channelMode == .mono ? .stereo : .mono
-        await pause(0.4)
-        check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBefore)
-        check("the route set changed", model.activeRoutes.count != before || before > 0)
+        // A channel-mode change is a rebuild, not a live edit: the engine stops,
+        // frees the RCU cell and makes a new one. So the cycle counter starts
+        // again from zero, and comparing it against the value from before the
+        // change proves nothing — it was passing only when 0.4 s had not been
+        // long enough for the teardown to happen at all, and failing whenever
+        // the machine was quick. Worse, carrying on while `isBusy` was still
+        // set meant everything after it was talking to an engine mid-restart,
+        // which is what made the recording refuse to start.
+        await waitUntil("the rebuild settled", { !model.isBusy }, timeout: 8)
         check("still running", model.isRunning)
+        check("the route set changed", model.activeRoutes.count != before || before > 0)
+        // Audio flowing is then a claim about the new graph, which is the only
+        // one worth making: the counter has to be advancing now.
+        let cyclesAfterRebuild = model.cycleCountForDiagnostics
+        await pause(0.4)
+        check(
+            "audio is flowing through the rebuilt graph",
+            model.cycleCountForDiagnostics > cyclesAfterRebuild)
 
         print("\nrecording")
         check("recording is offered while routing", model.isRunning)

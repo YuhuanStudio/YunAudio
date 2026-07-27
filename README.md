@@ -44,6 +44,26 @@ measured round-trip latency; whether the clock lock is actually holding. When yo
 enable voice isolation it says so and stops claiming bit-exactness, because
 processing the signal is the opposite of leaving it alone.
 
+**Loudness to the broadcast standard.** A peak meter answers "will this clip".
+It does not answer the question anybody streaming or recording actually has,
+which is "am I as loud as everyone else" — Discord normalises to about −18 LUFS,
+YouTube to −14, broadcast to −23. YunAudio measures loudness to ITU-R BS.1770-4,
+the same standard those platforms use: K-weighting, 400 ms blocks at 75% overlap,
+and the two-pass gate that stops pauses counting. It reads momentary, short-term
+and integrated, and then says the useful part in a sentence — how far you are
+from the platform you picked, and which way to move.
+
+The arithmetic is checked against the standard rather than against itself: a
+1 kHz sine reads its own RMS level in LUFS, doubling the amplitude adds exactly
+6.02, the reading is the same at 48 and 96 kHz, and silence between passages does
+not drag it down. Nothing else in this category on macOS measures loudness at all.
+
+**A spectrum you can read frequencies off.** Twenty-four log-spaced bands with a
+frequency axis, so the display says *what* rather than merely how much: hum at
+60 Hz, a desk knock under 100, sibilance piled up at 7 kHz. Calibrated, not
+merely ordered — a tone of known amplitude comes back at its own level in
+decibels, which is the assertion that caught a real transform bug here.
+
 **Voice isolation from Apple's own model.** `AUSoundIsolation` is the model
 behind FaceTime's Voice Isolation, on-device and free, and no other router in
 this category exposes it as a general microphone processor. Measured here: 56 ms

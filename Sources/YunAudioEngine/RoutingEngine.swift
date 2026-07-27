@@ -199,7 +199,8 @@ public final class RoutingEngine: @unchecked Sendable {
             produced: bridge.producedFrames,
             buffered: bridge.bufferedFrames,
             dropped: bridge.droppedFrames,
-            hasReference: bridge.hasFarEndReference && !bridge.farEndReferenceFailed)
+            hasReference: bridge.hasFarEndReference && !bridge.farEndReferenceFailed,
+            truncatedBlocks: bridge.truncatedBlocks)
     }
 
     public init() {}
@@ -708,6 +709,22 @@ public final class RoutingEngine: @unchecked Sendable {
         return recorder.url
     }
 
+    /// Takes whatever the IO thread has folded to mono since the last call.
+    ///
+    /// Returns the number of samples written into `destination`. A short read
+    /// is the normal case; an empty one means no cycle has run since the last
+    /// drain, which the caller should treat as "nothing new" rather than
+    /// "silence" — feeding zeroes to a loudness meter would drag the integrated
+    /// reading down for time the signal was never absent.
+    public func drainAnalysis(
+        into destination: UnsafeMutablePointer<Float>, capacity: Int
+    ) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let ring = graph?.pointee.analysisRing, capacity > 0 else { return 0 }
+        return Int(yun_rt_ring_read(ring, destination, UInt32(capacity)))
+    }
+
     public func stopRecording() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -780,6 +797,19 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.inputMuted = previous.pointee.inputMuted
         next.pointee.outputGain = previous.pointee.outputGain
         next.pointee.outputMuted = previous.pointee.outputMuted
+
+        // The analysis ring is handed over rather than replaced. Its consumer
+        // lives outside the graph and holds a running integrated loudness; a
+        // fresh ring would silently drop whatever was in flight, so moving one
+        // cable would put a gap in a measurement that is supposed to be
+        // continuous. The freshly allocated one is released here, and the old
+        // graph is detached from the carried one so its deallocation does not
+        // take the ring with it.
+        if let carried = previous.pointee.analysisRing {
+            if let unused = next.pointee.analysisRing { yun_rt_ring_free(unused) }
+            next.pointee.analysisRing = carried
+            previous.pointee.analysisRing = nil
+        }
 
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         graph = next

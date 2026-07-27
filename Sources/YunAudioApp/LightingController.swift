@@ -164,7 +164,6 @@ final class LightingController {
     /// The render loop. Runs off the main actor and touches only the two
     /// scalars above.
     nonisolated private func render(device: RazerDevice, generation mine: Int) {
-        let count = RazerLightingCommand.ledCount
         var step = 0
         // The ring's own smoothing. The meters fall at 20 dB a second, which is
         // right for reading a number and too fast for something in peripheral

@@ -1,0 +1,230 @@
+import SwiftUI
+import YunAudioEngine
+import YunDesign
+
+/// The spectrum, drawn as bars across the audible range.
+///
+/// One `Canvas` rather than twenty-four `Shape`s: at twenty frames a second a
+/// stack of views would be twenty-four layout passes per frame for something
+/// that is one path.
+struct SpectrumView: View {
+    var bands: [Float]
+    var isRunning: Bool
+
+    var body: some View {
+        VStack(spacing: 2) {
+            chart
+            scale
+        }
+    }
+
+    private var chart: some View {
+        Canvas(opaque: false) { context, size in
+            guard !bands.isEmpty else { return }
+
+            // Two faint rules across the empty part of the chart. Without them
+            // the space above a quiet signal reads as nothing at all; with them
+            // it reads as headroom, and the height of a bar becomes a quantity
+            // rather than an impression. The display spans −72 dB to 0, so
+            // these land at a third and two thirds.
+            for decibels in [-48.0, -24.0] {
+                let y = size.height * (1 - (decibels + 72) / 72)
+                var rule = Path()
+                rule.move(to: CGPoint(x: 0, y: y))
+                rule.addLine(to: CGPoint(x: size.width, y: y))
+                context.stroke(
+                    rule, with: .color(Yun.Palette.borderHairline), lineWidth: 1)
+            }
+
+            let gap: CGFloat = 2
+            let width = (size.width - gap * CGFloat(bands.count - 1)) / CGFloat(bands.count)
+            guard width > 0 else { return }
+
+            for (index, value) in bands.enumerated() {
+                let x = CGFloat(index) * (width + gap)
+                // A floor of one point so the shape of the analyser is legible
+                // when nothing is playing, rather than the panel appearing empty
+                // and broken.
+                let height = max(1, CGFloat(value) * size.height)
+                let rect = CGRect(
+                    x: x, y: size.height - height, width: width, height: height)
+                context.fill(
+                    Path(roundedRect: rect, cornerRadius: min(2, width / 2)),
+                    with: .color(colour(for: index, level: value)))
+            }
+        }
+        .frame(height: 72)
+        .opacity(isRunning ? 1 : 0.35)
+        .animation(.linear(duration: 0.05), value: bands)
+    }
+
+    /// A frequency axis.
+    ///
+    /// Without one the display says "there is energy over there", which is not
+    /// something anybody can act on. With one it says the hum is at 60 Hz and
+    /// the sibilance is at 7 kHz, and those are fixable. Three decade marks
+    /// rather than a label per band: twenty-four labels at this width would be
+    /// unreadable, and the eye interpolates between decades perfectly well.
+    private var scale: some View {
+        GeometryReader { proxy in
+            ForEach(Self.marks, id: \.hertz) { mark in
+                Text(mark.title)
+                    .font(.system(size: 9, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Yun.Palette.textMuted)
+                    .position(x: position(of: mark.hertz, in: proxy.size.width), y: 6)
+            }
+        }
+        .frame(height: 12)
+    }
+
+    private static let marks: [(hertz: Double, title: String)] = [
+        (100, "100"), (1000, "1k"), (10000, "10k"),
+    ]
+
+    /// Bands are laid out on a log scale, so a label's position is the log of
+    /// its frequency within the same range — not a fraction of the band count.
+    private func position(of hertz: Double, in width: CGFloat) -> CGFloat {
+        let low = SpectrumAnalyser.lowestFrequency
+        let high = SpectrumAnalyser.highestFrequency
+        let fraction = log(hertz / low) / log(high / low)
+        return width * CGFloat(fraction)
+    }
+
+    /// Colour carries frequency, not level: the point of the display is to say
+    /// *where* the energy is, and a bar that changes hue as it grows would make
+    /// two bars of different heights unreadable against each other.
+    private func colour(for index: Int, level: Float) -> Color {
+        let position = Double(index) / Double(max(1, bands.count - 1))
+        let base = Color(
+            hue: 0.58 - position * 0.16, saturation: 0.55, brightness: 0.95)
+        return base.opacity(0.35 + Double(level) * 0.65)
+    }
+}
+
+/// Loudness to the broadcast standard, and how far it is from the platform the
+/// user is aiming at.
+struct LoudnessReadout: View {
+    @Bindable var model: RouterModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            HStack(alignment: .firstTextBaseline, spacing: Yun.Space.lg) {
+                figure(
+                    loc("Short-term"), model.analysis.shortTerm, unit: loc("LUFS"),
+                    isPrimary: true)
+                // Held back until the gate has enough material to mean
+                // anything. Showing −54.6 with "not meaningful yet" written
+                // directly underneath asks the reader to believe two things at
+                // once, and the number is the one they will believe.
+                figure(
+                    loc("Integrated"),
+                    model.loudnessOffset == nil ? -.infinity : model.analysis.integrated,
+                    unit: loc("LUFS"))
+                figure(loc("Peak"), model.analysis.peak, unit: loc("dBFS"))
+                Spacer(minLength: 0)
+            }
+
+            YunDivider()
+
+            HStack(spacing: Yun.Space.sm) {
+                Text(loc("Target"))
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                YunSelect(
+                    selection: $model.loudnessTarget,
+                    options: LoudnessTarget.allCases.map {
+                        .init(
+                            value: $0, title: $0.title,
+                            detail: String(format: loc("%d LUFS"), Int($0.lufs)))
+                    })
+                Spacer(minLength: 0)
+                Button(loc("Reset")) { model.resetLoudness() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+
+            verdict
+        }
+    }
+
+    /// What the number means, in a sentence.
+    ///
+    /// A bare "−19.4 LUFS" is only useful to somebody who already knows what
+    /// Discord does with it. The whole reason to show loudness rather than just
+    /// peaks is to answer "am I too quiet", so it answers that.
+    @ViewBuilder
+    private var verdict: some View {
+        if let offset = model.loudnessOffset {
+            let rounded = (offset * 10).rounded() / 10
+            HStack(spacing: Yun.Space.sm) {
+                Circle()
+                    .fill(verdictColour(abs(rounded)))
+                    .frame(width: 6, height: 6)
+                Text(verdictText(rounded))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+        } else {
+            Text(
+                loc(
+                    "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One unit either way is inaudible and not worth chasing; past three, a
+    /// platform's normalisation will move the whole thing audibly.
+    private func verdictColour(_ magnitude: Double) -> Color {
+        if magnitude <= 1 { return Yun.Palette.success }
+        if magnitude <= 3 { return Yun.Palette.warning }
+        return Yun.Palette.danger
+    }
+
+    private func verdictText(_ offset: Double) -> String {
+        if abs(offset) <= 1 {
+            return String(
+                format: loc("On target for %@."), model.loudnessTarget.title)
+        }
+        let amount = String(format: "%.1f", abs(offset))
+        return offset > 0
+            ? String(
+                format: loc("%@ LU louder than %@ expects — it will be turned down."),
+                amount, model.loudnessTarget.title)
+            : String(
+                format: loc("%@ LU quieter than %@ expects — raise the master or gain."),
+                amount, model.loudnessTarget.title)
+    }
+
+    private func figure(
+        _ title: String, _ value: Double, unit: String, isPrimary: Bool = false
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value.isFinite ? String(format: "%.1f", value) : "—")
+                    .font(
+                        .system(
+                            size: isPrimary ? 22 : 15,
+                            weight: isPrimary ? .semibold : .medium,
+                            design: .monospaced)
+                    )
+                    .foregroundStyle(
+                        value.isFinite ? Yun.Palette.textPrimary : Yun.Palette.textMuted
+                    )
+                    // A number that changes width as it crosses −10 makes the
+                    // whole row jitter twenty times a second.
+                    .monospacedDigit()
+                Text(unit)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textMuted)
+            }
+        }
+    }
+}

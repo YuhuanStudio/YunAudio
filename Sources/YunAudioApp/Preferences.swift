@@ -1,5 +1,6 @@
 import Foundation
 import ServiceManagement
+import YunAudioEngine
 import YunDesign
 
 /// Everything the app remembers between launches.
@@ -36,10 +37,14 @@ struct Preferences: Codable, Equatable, Sendable {
     /// reason.
     /// What the microphone's light ring shows.
     var lightingMode: String?
+    var lightingHue: Double?
+    var lightingBrightness: Double?
     var inputDecibels: Float?
     var isInputMuted: Bool?
     var outputDecibels: Float?
     var isOutputMuted: Bool?
+    /// Which platform the loudness readout is compared against.
+    var loudnessTarget: String?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -58,10 +63,13 @@ struct Preferences: Codable, Equatable, Sendable {
         echoSpeakerUID: nil,
         style: YunStyle.flat.rawValue,
         lightingMode: LightingMode.off.rawValue,
+        lightingHue: 0.55,
+        lightingBrightness: 1,
         inputDecibels: 0,
         isInputMuted: false,
         outputDecibels: 0,
-        isOutputMuted: false)
+        isOutputMuted: false,
+        loudnessTarget: LoudnessTarget.discord.rawValue)
 }
 
 @MainActor

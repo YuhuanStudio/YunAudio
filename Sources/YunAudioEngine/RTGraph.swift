@@ -141,6 +141,21 @@ struct RTGraph {
     /// Frames drained this cycle. Zero while the canceller is still filling.
     var cancelledFrames: Int32
 
+    /// Ring carrying a mono fold of the output bus to the analysers.
+    ///
+    /// Separate from `recordRing` even though both come off the same bus,
+    /// because they answer to different consumers: the recorder must not lose a
+    /// sample and stops when nothing is recording, while the analysers want a
+    /// continuous stream and would rather drop than stall. Sharing one ring
+    /// would mean the loudness meter reading nothing until somebody pressed
+    /// record.
+    var analysisRing: OpaquePointer?
+    /// Where the mono fold is built before it goes into the ring. The IO thread
+    /// cannot allocate, and the output bus is interleaved and usually wider
+    /// than two channels.
+    var analysisScratch: UnsafeMutablePointer<Float>
+    var analysisCapacity: Int32
+
     /// Parameter changes waiting to be applied. Drained at the top of each
     /// cycle so a fader move lands without rebuilding anything.
     var commands: OpaquePointer?
@@ -224,6 +239,11 @@ struct RTGraph {
             capacity: cancelledCapacity)
         cancelledStorage.initialize(repeating: 0, count: cancelledCapacity)
 
+        let analysisCapacity = max(bufferFrames, 4096)
+        let analysisScratch = UnsafeMutablePointer<Float>.allocate(
+            capacity: analysisCapacity)
+        analysisScratch.initialize(repeating: 0, count: analysisCapacity)
+
         let clockSampleStorage =
             sharedClock?.sampleTime
             ?? {
@@ -264,6 +284,13 @@ struct RTGraph {
                 cancelledBuffer: cancelledStorage,
                 cancelledCapacity: Int32(cancelledCapacity),
                 cancelledFrames: 0,
+                // Two seconds at 48 kHz. Long enough that a UI poll at any
+                // practical rate finds a whole 400 ms loudness block waiting,
+                // short enough that a stalled consumer discards stale audio
+                // rather than showing a reading from a second ago.
+                analysisRing: yun_rt_ring_create(131_072),
+                analysisScratch: analysisScratch,
+                analysisCapacity: Int32(analysisCapacity),
                 commands: yun_rt_queue_create(256),
                 selftest: nil))
         return graph
@@ -291,6 +318,10 @@ struct RTGraph {
             graph.pointee.clockHostTime.deinitialize(count: 1)
             graph.pointee.clockHostTime.deallocate()
         }
+        graph.pointee.analysisScratch.deinitialize(
+            count: Int(graph.pointee.analysisCapacity))
+        graph.pointee.analysisScratch.deallocate()
+        if let ring = graph.pointee.analysisRing { yun_rt_ring_free(ring) }
         if let commands = graph.pointee.commands { yun_rt_queue_free(commands) }
         graph.deinitialize(count: 1)
         graph.deallocate()
@@ -550,6 +581,42 @@ func yunAudioIOProc(
             let pointer = data.assumingMemoryBound(to: Float.self)
             for sample in 0..<samples {
                 pointer[sample] *= master
+            }
+        }
+    }
+
+    // Fold the output bus to mono for the analysers. After the master, because
+    // a loudness reading that ignored the master would tell the far end's story
+    // wrong, and before the self-test, which overwrites a channel with a test
+    // sequence nobody wants measured.
+    //
+    // Averaged rather than summed: two copies of one signal are the same
+    // loudness, not twice it, and summing would read three units high on
+    // anything panned centre.
+    if let ring = graph.pointee.analysisRing, output.count > 0,
+        let data = output[0].mData
+    {
+        let stride = Int(output[0].mNumberChannels)
+        if stride > 0 {
+            let frames = min(
+                Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride),
+                Int(graph.pointee.analysisCapacity))
+            let source = data.assumingMemoryBound(to: Float.self)
+            let scratch = graph.pointee.analysisScratch
+            // Two channels is the common case and the one worth folding; a
+            // sixteen-channel virtual device carries silence on most of them,
+            // and averaging those in would read fourteen units low.
+            let folded = min(stride, 2)
+            let scale = 1 / Float(folded)
+            for frame in 0..<frames {
+                var sum: Float = 0
+                for channel in 0..<folded {
+                    sum += source[frame * stride + channel]
+                }
+                scratch[frame] = sum * scale
+            }
+            if frames > 0 {
+                _ = yun_rt_ring_write(ring, scratch, UInt32(frames))
             }
         }
     }

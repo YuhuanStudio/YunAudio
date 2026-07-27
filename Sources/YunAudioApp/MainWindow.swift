@@ -98,6 +98,11 @@ struct MainWindow: View {
         .focusEffectDisabled()
         .background(shortcuts)
         .background(RemembersFrame(name: "YunAudioMainWindow").frame(width: 0, height: 0))
+        // The analysers keep running either way — the ring has to be drained or
+        // it overflows — but publishing a reading twenty times a second to a
+        // window nobody has open is work for nothing.
+        .onAppear { model.isAnalysisVisible = true }
+        .onDisappear { model.isAnalysisVisible = false }
     }
 
     /// The last step, which happens in another application.
@@ -342,6 +347,16 @@ struct MainWindow: View {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
                 RoutingCanvas(model: model)
 
+                sectionHeading(loc("Analysis"))
+                YunCard {
+                    VStack(alignment: .leading, spacing: Yun.Space.md) {
+                        SpectrumView(
+                            bands: model.analysis.bands, isRunning: model.isRunning)
+                        YunDivider()
+                        LoudnessReadout(model: model)
+                    }
+                }
+
                 sectionHeading(loc("Mixer"))
 
                 if model.activeRoutes.isEmpty {
@@ -409,6 +424,37 @@ struct MainWindow: View {
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
+                            if model.lightingMode != .off {
+                                YunDivider()
+                                // A hue strip rather than a colour well: the
+                                // ring is one saturated colour at a time, and a
+                                // full picker would offer greys it cannot show.
+                                if model.lightingMode != .spectrum {
+                                    HStack(spacing: Yun.Space.sm) {
+                                        Text(loc("Colour"))
+                                            .font(Yun.Text.caption)
+                                            .foregroundStyle(Yun.Palette.textTertiary)
+                                            .frame(width: 62, alignment: .leading)
+                                        HueStrip(hue: $model.lightingHue)
+                                    }
+                                }
+                                HStack(spacing: Yun.Space.sm) {
+                                    Text(loc("Brightness"))
+                                        .font(Yun.Text.caption)
+                                        .foregroundStyle(Yun.Palette.textTertiary)
+                                        .frame(width: 62, alignment: .leading)
+                                    YunSlider(
+                                        fraction: Binding(
+                                            get: { model.lightingBrightness },
+                                            set: { model.lightingBrightness = $0 }))
+                                    Text("\(Int(model.lightingBrightness * 100))%")
+                                        .font(Yun.Text.mono)
+                                        .foregroundStyle(Yun.Palette.textTertiary)
+                                        .monospacedDigit()
+                                        .frame(width: 40, alignment: .trailing)
+                                }
+                            }
+
                             if let error = model.lighting.lastError {
                                 Text(error)
                                     .font(Yun.Text.caption)

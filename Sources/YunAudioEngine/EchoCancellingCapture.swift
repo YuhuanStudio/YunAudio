@@ -41,6 +41,17 @@ public final class EchoCancellingCapture {
     private let captureBuffer: UnsafeMutablePointer<Float>
     private let bufferList: UnsafeMutableAudioBufferListPointer
 
+    /// Blocks the device asked for that did not fit and were truncated.
+    ///
+    /// Manually allocated rather than a stored property because the callback
+    /// reaches it from a realtime thread through an unowned reference, and a
+    /// non-zero value has to be reportable rather than merely not crashing.
+    private let truncatedBlocks: UnsafeMutablePointer<UInt64>
+
+    /// Non-zero means the device handed over more frames per pull than this
+    /// object was sized for, and some audio was dropped.
+    public var truncatedBlockCount: UInt64 { truncatedBlocks.pointee }
+
     /// Boxed so the C render callbacks can reach them through a raw pointer
     /// without any Swift object being retained on the realtime thread.
     private final class Callbacks {
@@ -61,10 +72,18 @@ public final class EchoCancellingCapture {
     ///   - speakerUID: The speaker whose output should be cancelled out of it.
     ///     Pass nil to leave the unit on the system defaults, which the HAL will
     ///     pair for it.
-    ///   - maximumFrames: Largest block the unit will be asked to render. Sets
-    ///     the size of the buffers allocated here, so it must not be exceeded.
+    ///   - maximumFrames: Lower bound on the block size to allocate for. The
+    ///     actual size comes from the device this unit ends up bound to, which
+    ///     is the only thing that decides how much it will hand over per pull.
+    ///
+    ///     Passing the router's own buffer size here was the mistake that made
+    ///     this class corrupt the heap: the canceller's aggregate is a different
+    ///     device with a buffer size of its own, and it was observed asking for
+    ///     1394 frames against the 512 the caller had derived from the router.
+    ///     `AudioUnitRender` then wrote 3528 bytes past the end of the capture
+    ///     buffer on every cycle. The clamp in the callback below means an
+    ///     underestimate can now only cost audio, never memory.
     public init?(microphoneUID: String, speakerUID: String?, maximumFrames: Int = 512) {
-        self.maximumFrames = maximumFrames
 
         // Bind the two devices into one duplex object when both are named.
         var builtAggregate: AggregateDevice?
@@ -110,12 +129,34 @@ public final class EchoCancellingCapture {
         else { return nil }
         unit = created
 
-        captureBuffer = .allocate(capacity: maximumFrames)
-        captureBuffer.initialize(repeating: 0, count: maximumFrames)
+        // Sized from the device that will actually drive this unit, not from
+        // whatever the caller guessed. A device's buffer frame size can be
+        // changed underneath us as well, so the allocation carries generous
+        // headroom on top of it rather than matching it exactly.
+        let deviceFrames =
+            boundDeviceID.flatMap { id -> Int? in
+                var size = UInt32(MemoryLayout<UInt32>.size)
+                var value: UInt32 = 0
+                var address = AudioObjectPropertyAddress(
+                    mSelector: kAudioDevicePropertyBufferFrameSize,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain)
+                guard
+                    AudioObjectGetPropertyData(id, &address, 0, nil, &size, &value) == noErr
+                else { return nil }
+                return Int(value)
+            } ?? 0
+        let capacity = max(maximumFrames, deviceFrames * 4, 8192)
+        self.maximumFrames = capacity
+
+        captureBuffer = .allocate(capacity: capacity)
+        captureBuffer.initialize(repeating: 0, count: capacity)
+        truncatedBlocks = .allocate(capacity: 1)
+        truncatedBlocks.initialize(to: 0)
         bufferList = AudioBufferList.allocate(maximumBuffers: 1)
         bufferList[0] = AudioBuffer(
             mNumberChannels: 1,
-            mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
+            mDataByteSize: UInt32(capacity * MemoryLayout<Float>.size),
             mData: UnsafeMutableRawPointer(captureBuffer))
 
         var enable: UInt32 = 1
@@ -172,13 +213,26 @@ public final class EchoCancellingCapture {
                 // Pull the cancelled microphone out of element 1.
                 let owner = box.owner
                 guard let owner else { return noErr }
+                // Never render more than the buffer holds.
+                //
+                // `frameCount` comes from the device, and the buffer was sized
+                // from what that device said it would ask for — but a device is
+                // free to change its buffer size while running, and nothing
+                // here would hear about it before the next pull. Without this
+                // clamp that reconfiguration is a heap overflow rather than a
+                // glitch, and the process dies somewhere unrelated minutes
+                // later. Truncating loses a fraction of a block of audio and
+                // says so.
+                let wanted = Int(frameCount)
+                let frames = min(wanted, owner.maximumFrames)
+                if frames < wanted { owner.truncatedBlocks.pointee &+= 1 }
                 owner.bufferList[0].mDataByteSize =
-                    UInt32(Int(frameCount) * MemoryLayout<Float>.size)
+                    UInt32(frames * MemoryLayout<Float>.size)
                 let status = AudioUnitRender(
-                    owner.unit, flags, timestamp, bus, frameCount,
+                    owner.unit, flags, timestamp, bus, UInt32(frames),
                     owner.bufferList.unsafeMutablePointer)
                 guard status == noErr else { return status }
-                handler(owner.captureBuffer, Int(frameCount), timestamp.pointee)
+                handler(owner.captureBuffer, frames, timestamp.pointee)
                 return noErr
             },
             inputProcRefCon: context)
@@ -226,6 +280,8 @@ public final class EchoCancellingCapture {
         AudioUnitUninitialize(unit)
         AudioComponentInstanceDispose(unit)
         captureBuffer.deallocate()
+        truncatedBlocks.deinitialize(count: 1)
+        truncatedBlocks.deallocate()
         free(bufferList.unsafeMutablePointer)
     }
 

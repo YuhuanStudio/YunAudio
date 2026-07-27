@@ -265,12 +265,30 @@ public final class RazerDevice {
     /// changes nothing. This is as far as protocol discovery can responsibly go
     /// without a capture of the vendor's own tool — the write side would be
     /// guessing at command bytes on hardware that stores configuration.
+    /// - Parameters:
+    ///   - id: The feature report to read.
+    ///   - size: Payload bytes the report declares, not counting the report id.
+    /// - Returns: The report id followed by the payload, so the buffer has the
+    ///   same layout as the one that would be written.
+    /// - Throws: `RazerError.couldNotOpen` when another owner holds the device,
+    ///   or `RazerError.transferFailed` when the device refuses the read.
     public func readFeatureReport(id: UInt8, size: Int) throws -> [UInt8] {
         guard IOHIDDeviceOpen(device, IOOptionBits(kIOHIDOptionsTypeNone)) == kIOReturnSuccess
         else { throw RazerError.couldNotOpen }
         defer { IOHIDDeviceClose(device, IOOptionBits(kIOHIDOptionsTypeNone)) }
 
-        var buffer = [UInt8](repeating: 0, count: size)
+        // One byte more than the payload, because this device uses numbered
+        // reports: IOKit writes the report id into byte zero and the payload
+        // after it. Allocating exactly the payload size wrote one byte past the
+        // end of the array on every single call.
+        //
+        // That is the worst shape a bug can have. It never faults where it
+        // happens — it puts one byte into the allocator's own bookkeeping, and
+        // the process dies later in whatever allocated next. The three crashes
+        // that led here were in CoreText laying out a label, CoreGraphics
+        // drawing a layer, and a Swift retain inside the device list, none of
+        // which had anything to do with a microphone.
+        var buffer = [UInt8](repeating: 0, count: size + 1)
         var length = buffer.count
         let result = IOHIDDeviceGetReport(
             device, kIOHIDReportTypeFeature, CFIndex(id), &buffer, &length)

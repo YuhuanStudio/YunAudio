@@ -4,6 +4,7 @@ import Foundation
 import Observation
 import YunAudioEngine
 import YunAudioHAL
+import YunAudioRazer
 import YunDesign
 
 /// How the source's channels map onto a stereo destination.
@@ -215,6 +216,30 @@ final class RouterModel {
         set {
             guard lighting.mode != newValue else { return }
             lighting.mode = newValue
+            persist()
+        }
+    }
+
+    /// The ring's colour, as a hue from 0 to 1.
+    ///
+    /// A hue rather than three channels: the ring is one colour at a time and
+    /// what anybody wants from it is "make it green", not a colour space. Full
+    /// saturation is the only setting that reads properly on twelve LEDs
+    /// through a diffuser.
+    var lightingHue: Double = 0.55 {
+        didSet {
+            guard oldValue != lightingHue else { return }
+            lighting.colour = RazerRing.hue(lightingHue)
+            persist()
+        }
+    }
+
+    var lightingBrightness: Double {
+        get { Double(lighting.brightness) / 255 }
+        set {
+            let level = UInt8(max(0, min(255, newValue * 255)))
+            guard lighting.brightness != level else { return }
+            lighting.brightness = level
             persist()
         }
     }
@@ -948,10 +973,15 @@ final class RouterModel {
         echoSpeakerUID = saved.echoSpeakerUID
         lighting.mode =
             saved.lightingMode.flatMap(LightingMode.init(rawValue:)) ?? .off
+        lightingHue = saved.lightingHue ?? 0.55
+        lighting.colour = RazerRing.hue(lightingHue)
+        lightingBrightness = saved.lightingBrightness ?? 1
         inputDecibels = saved.inputDecibels ?? 0
         isInputMuted = saved.isInputMuted ?? false
         outputDecibels = saved.outputDecibels ?? 0
         isOutputMuted = saved.isOutputMuted ?? false
+        loudnessTarget =
+            saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
         style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
         YunTheme.shared.style = style
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
@@ -993,10 +1023,13 @@ final class RouterModel {
                 echoSpeakerUID: echoSpeakerUID,
                 style: style.rawValue,
                 lightingMode: lighting.mode.rawValue,
+                lightingHue: lightingHue,
+                lightingBrightness: lightingBrightness,
                 inputDecibels: inputDecibels,
                 isInputMuted: isInputMuted,
                 outputDecibels: outputDecibels,
-                isOutputMuted: isOutputMuted))
+                isOutputMuted: isOutputMuted,
+                loudnessTarget: loudnessTarget.rawValue))
     }
 
     // MARK: Devices
@@ -1237,6 +1270,10 @@ final class RouterModel {
                 self.activeRoutes = routes
                 self.routeGains = routes.map(\.gain)
                 self.routeMutes = routes.map(\.isMuted)
+                // The analysers are built per run, because the K-weighting
+                // coefficients and the FFT bin mapping both depend on the rate
+                // the aggregate settled on.
+                self.startAnalysis(sampleRate: self.engine.pathQuality?.sampleRate ?? 48000)
                 self.startPolling()
             }
         }
@@ -1275,6 +1312,7 @@ final class RouterModel {
             isRecording = false
         }
         stopPolling()
+        stopAnalysis()
         levels = []
         peakHolds = []
         clipped = []
@@ -1296,6 +1334,7 @@ final class RouterModel {
     func shutDown() {
         hotkeys.tearDown()
         stopPolling()
+        stopAnalysis()
         engine.stop()
         isRunning = false
     }
@@ -1391,9 +1430,65 @@ final class RouterModel {
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio
         refreshRecordingState()
+        // Drained every poll whether or not the analysis panel is open. The ring
+        // is finite, so a consumer that only ran while a view was visible would
+        // hand the loudness meter a stream with holes in it and report an
+        // integrated figure for audio it never saw.
+        analyser?.drain(from: engine)
+        if isAnalysisVisible { analysis = analyser?.reading() ?? .silent }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
         lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
+    }
+
+    // MARK: Analysis
+
+    /// Loudness and spectrum, computed off the routed signal.
+    private(set) var analysis: SignalAnalyser.Reading = .silent
+    @ObservationIgnored private var analyser: SignalAnalyser?
+
+    /// Set by the panel that draws the spectrum, so a closed panel costs nothing
+    /// beyond the drain the meters need anyway.
+    var isAnalysisVisible = false {
+        didSet {
+            guard isAnalysisVisible, !oldValue else { return }
+            analysis = analyser?.reading() ?? .silent
+        }
+    }
+
+    /// The platform the loudness readout is compared against.
+    var loudnessTarget: LoudnessTarget = .discord {
+        didSet {
+            guard oldValue != loudnessTarget else { return }
+            persist()
+        }
+    }
+
+    /// How far the session sits from the chosen target, or nil while there is
+    /// not yet enough material for the integrated figure to mean anything.
+    ///
+    /// Ten seconds is the threshold because the relative gate needs a mean to
+    /// work against: before that the number swings by several units and would
+    /// be read as a measurement.
+    var loudnessOffset: Double? {
+        guard analysis.duration >= 10, analysis.integrated.isFinite else { return nil }
+        return analysis.integrated - loudnessTarget.lufs
+    }
+
+    /// Starts the integrated measurement over.
+    func resetLoudness() {
+        analyser?.reset()
+        analysis = .silent
+    }
+
+    private func startAnalysis(sampleRate: Double) {
+        analyser = SignalAnalyser(sampleRate: sampleRate)
+        analysis = .silent
+    }
+
+    private func stopAnalysis() {
+        analyser = nil
+        analysis = .silent
     }
 
     /// Sample rates both selected devices can present.

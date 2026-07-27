@@ -189,6 +189,8 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     public var producedFrames: UInt32 { yun_rt_ring_written(cancelledRing) }
     public var bufferedFrames: UInt32 { yun_rt_ring_available(cancelledRing) }
     public var farEndProducedFrames: UInt32 { farEnd?.producedFrames ?? 0 }
+    /// Blocks cut short because the device asked for more than fits.
+    public var truncatedBlocks: UInt64 { capture.truncatedBlockCount }
 
     /// Turns the cancellation off while leaving the same path in place, which
     /// is what makes its effect measurable rather than merely asserted.
@@ -221,4 +223,8 @@ public struct EchoCancellationStatus: Sendable, Hashable {
     /// canceller is running blind: still useful against steady noise, but it
     /// cannot remove a voice it has never heard.
     public let hasReference: Bool
+    /// Blocks the device offered that were larger than the capture buffer and
+    /// had to be cut short. Should be zero; anything else means the device
+    /// changed its buffer size underneath the unit.
+    public let truncatedBlocks: UInt64
 }

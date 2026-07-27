@@ -481,3 +481,393 @@ struct ProcessingChainTests {
         #expect(EffectKind.gate.rawValue == "gate")
     }
 }
+
+// MARK: - Loudness
+
+/// The whole value of a loudness meter is that its number means the same thing
+/// as everybody else's. A meter that is internally consistent but two units off
+/// the standard is worse than no meter, because it will be trusted.
+///
+/// These check it against the properties BS.1770 fixes: the calibration of a
+/// 1 kHz sine, the decibel law, and the two gates.
+@Suite("Loudness")
+struct LoudnessTests {
+
+    /// Feeds `seconds` of a sine at a given peak amplitude.
+    private func sine(
+        into meter: inout LoudnessMeter, amplitude: Float, seconds: Double,
+        frequency: Double = 1000, sampleRate: Double = 48000
+    ) {
+        let count = Int(sampleRate * seconds)
+        var samples = [Float](repeating: 0, count: count)
+        for index in 0..<count {
+            samples[index] =
+                amplitude * Float(sin(2 * Double.pi * frequency * Double(index) / sampleRate))
+        }
+        samples.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: count) }
+    }
+
+    /// The standard is calibrated so a 1 kHz sine reads its own RMS level. A
+    /// sine peaking at 0.1 has an RMS of 0.1/√2, which is −23.0 dBFS — and the
+    /// answer has to be −23.0 LUFS, not merely something stable.
+    @Test("a 1 kHz sine reads its own RMS level in LUFS")
+    func calibration() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        // 0.1 peak → −23.01 dBFS RMS.
+        sine(into: &meter, amplitude: 0.1, seconds: 5)
+        #expect(abs(meter.integrated - (-23.01)) < 0.35)
+    }
+
+    /// Doubling amplitude is 6.02 dB, and LUFS is a decibel scale, so the
+    /// reading has to move by exactly that. This is what catches a mean-square
+    /// that has become a mean-absolute somewhere.
+    @Test("doubling the amplitude adds 6 units")
+    func decibelLaw() {
+        var quiet = LoudnessMeter(sampleRate: 48000)
+        sine(into: &quiet, amplitude: 0.1, seconds: 5)
+        var loud = LoudnessMeter(sampleRate: 48000)
+        sine(into: &loud, amplitude: 0.2, seconds: 5)
+        #expect(abs((loud.integrated - quiet.integrated) - 6.02) < 0.1)
+    }
+
+    /// The K-weighting is not flat, and it must not be: that is the whole
+    /// difference between this and an RMS meter. Subsonic rumble — a desk knock
+    /// or a passing lorry — carries real energy that nobody hears, and the
+    /// high-pass is there to stop it counting.
+    ///
+    /// The corner is 38 Hz at Q 0.5, so the numbers below are what that filter
+    /// measurably does, not round figures: 6.1 dB at 40 Hz and 13.8 dB at 20 Hz.
+    /// A 60 Hz mains hum is barely touched, which is correct and worth knowing —
+    /// the standard's high-pass is not a hum filter.
+    @Test("the weighting filter attenuates subsonic energy")
+    func weightingIsNotFlat() {
+        var mid = LoudnessMeter(sampleRate: 48000)
+        sine(into: &mid, amplitude: 0.5, seconds: 4, frequency: 1000)
+
+        var atCorner = LoudnessMeter(sampleRate: 48000)
+        sine(into: &atCorner, amplitude: 0.5, seconds: 4, frequency: 40)
+        #expect(atCorner.integrated < mid.integrated - 5)
+
+        var subsonic = LoudnessMeter(sampleRate: 48000)
+        sine(into: &subsonic, amplitude: 0.5, seconds: 4, frequency: 20)
+        #expect(subsonic.integrated < mid.integrated - 13)
+    }
+
+    /// And it lifts the top, which is the shelf standing in for the head.
+    @Test("the weighting filter lifts high frequencies")
+    func shelfLifts() {
+        var mid = LoudnessMeter(sampleRate: 48000)
+        sine(into: &mid, amplitude: 0.5, seconds: 4, frequency: 1000)
+        var high = LoudnessMeter(sampleRate: 48000)
+        sine(into: &high, amplitude: 0.5, seconds: 4, frequency: 8000)
+        #expect(high.integrated > mid.integrated + 2)
+    }
+
+    /// The coefficients are specified at 48 kHz. Using them unchanged at 96 kHz
+    /// would put the shelf an octave out; re-deriving them means the same signal
+    /// reads the same at either rate.
+    @Test("the reading does not depend on the sample rate")
+    func rateIndependent() {
+        var at48 = LoudnessMeter(sampleRate: 48000)
+        sine(into: &at48, amplitude: 0.1, seconds: 4, sampleRate: 48000)
+        var at96 = LoudnessMeter(sampleRate: 96000)
+        sine(into: &at96, amplitude: 0.1, seconds: 4, sampleRate: 96000)
+        #expect(abs(at48.integrated - at96.integrated) < 0.2)
+    }
+
+    /// The absolute gate is what stops pauses counting. Speech with silence
+    /// between the sentences has to read the same as the speech alone — without
+    /// the gate, a recording with long pauses reads far quieter than it sounds,
+    /// which is exactly the mistake the standard exists to prevent.
+    @Test("silence between passages does not drag the reading down")
+    func absoluteGate() {
+        var continuous = LoudnessMeter(sampleRate: 48000)
+        sine(into: &continuous, amplitude: 0.1, seconds: 6)
+
+        var gapped = LoudnessMeter(sampleRate: 48000)
+        for _ in 0..<3 {
+            sine(into: &gapped, amplitude: 0.1, seconds: 2)
+            let silence = [Float](repeating: 0, count: 48000 * 2)
+            silence.withUnsafeBufferPointer { gapped.add($0.baseAddress!, count: $0.count) }
+        }
+        #expect(abs(gapped.integrated - continuous.integrated) < 1.0)
+    }
+
+    /// The relative gate discards anything more than 10 LU below the mean, so a
+    /// quiet passage under loud material must not pull the figure down by the
+    /// share of time it occupies.
+    @Test("a passage far below the mean is gated out")
+    func relativeGate() {
+        var loudOnly = LoudnessMeter(sampleRate: 48000)
+        sine(into: &loudOnly, amplitude: 0.5, seconds: 6)
+
+        var mixed = LoudnessMeter(sampleRate: 48000)
+        sine(into: &mixed, amplitude: 0.5, seconds: 6)
+        // 40 dB down: well past the 10 LU relative threshold.
+        sine(into: &mixed, amplitude: 0.005, seconds: 6)
+        #expect(abs(mixed.integrated - loudOnly.integrated) < 0.6)
+    }
+
+    /// Nothing in, nothing out — and specifically not a very large negative
+    /// number that would render as a plausible reading.
+    @Test("silence reads as no measurement rather than a number")
+    func silenceIsNotAReading() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        let silence = [Float](repeating: 0, count: 48000 * 2)
+        silence.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: $0.count) }
+        #expect(meter.integrated == -.infinity)
+        #expect(meter.peak == -.infinity)
+    }
+
+    /// A steady tone has no loudness range. If this reports a spread, the
+    /// percentile arithmetic is picking up block-boundary noise.
+    @Test("a steady signal has no loudness range")
+    func steadyRange() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        sine(into: &meter, amplitude: 0.1, seconds: 8)
+        #expect(meter.range < 1.0)
+    }
+
+    /// And material that swings has to show it, or the number says nothing.
+    @Test("material that swings reports a range")
+    func swingingRange() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        for _ in 0..<4 {
+            sine(into: &meter, amplitude: 0.5, seconds: 1)
+            sine(into: &meter, amplitude: 0.05, seconds: 1)
+        }
+        #expect(meter.range > 15)
+    }
+
+    /// Peak is a separate question from loudness and has to keep answering it:
+    /// a single sample at full scale in otherwise quiet material is a clip, and
+    /// no amount of gating may hide it.
+    @Test("peak catches a lone sample the loudness reading averages away")
+    func peakIsIndependent() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        sine(into: &meter, amplitude: 0.01, seconds: 2)
+        var spike: [Float] = [1.0]
+        spike.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: 1) }
+        #expect(abs(meter.peak) < 0.01)
+        #expect(meter.integrated < -40)
+    }
+
+    /// Reset has to clear the filter state too. A meter that kept its biquad
+    /// history would carry a transient across the boundary and misread the
+    /// first block of the next take.
+    @Test("reset returns the meter to its initial state")
+    func resetClears() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        sine(into: &meter, amplitude: 0.5, seconds: 3)
+        meter.reset()
+        #expect(meter.integrated == -.infinity)
+        #expect(meter.peak == -.infinity)
+        #expect(meter.momentary == -.infinity)
+
+        var fresh = LoudnessMeter(sampleRate: 48000)
+        sine(into: &fresh, amplitude: 0.1, seconds: 3)
+        sine(into: &meter, amplitude: 0.1, seconds: 3)
+        #expect(abs(meter.integrated - fresh.integrated) < 0.01)
+    }
+
+    /// Short-term follows the last three seconds, so it has to move when the
+    /// signal changes while integrated is still remembering everything.
+    @Test("short-term tracks recent material and integrated does not")
+    func shortTermIsRecent() {
+        var meter = LoudnessMeter(sampleRate: 48000)
+        sine(into: &meter, amplitude: 0.5, seconds: 6)
+        let integratedAfterLoud = meter.integrated
+        sine(into: &meter, amplitude: 0.05, seconds: 4)
+        #expect(meter.shortTerm < integratedAfterLoud - 15)
+        // The relative gate throws the quiet part away, so the integrated
+        // figure barely moves.
+        #expect(abs(meter.integrated - integratedAfterLoud) < 0.6)
+    }
+
+    /// Every target has to name itself and sit somewhere a person could reach.
+    @Test("every platform target is labelled and plausible")
+    func targets() {
+        for target in LoudnessTarget.allCases {
+            #expect(!target.title.isEmpty)
+            #expect(target.lufs < 0)
+            #expect(target.lufs > -30)
+        }
+    }
+}
+
+// MARK: - Spectrum
+
+/// A spectrum display is only worth having if a bar's position corresponds to
+/// the frequency it claims. These put known tones in and check the energy lands
+/// where the labels say it will.
+@Suite("Spectrum")
+struct SpectrumTests {
+
+    private func feed(
+        _ analyser: SpectrumAnalyser, frequency: Double, amplitude: Float = 0.5,
+        seconds: Double = 0.5, sampleRate: Double = 48000
+    ) {
+        let count = Int(sampleRate * seconds)
+        var samples = [Float](repeating: 0, count: count)
+        for index in 0..<count {
+            samples[index] =
+                amplitude * Float(sin(2 * Double.pi * frequency * Double(index) / sampleRate))
+        }
+        samples.withUnsafeBufferPointer { analyser.add($0.baseAddress!, count: count) }
+    }
+
+    /// The band whose range contains the tone has to be the loudest one. This is
+    /// the whole contract of the display; an off-by-one in the bin mapping would
+    /// still produce a plausible-looking picture.
+    @Test("a tone lands in the band that covers its frequency")
+    func tonePosition() throws {
+        for frequency in [100.0, 440.0, 1000.0, 4000.0] {
+            let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+            feed(analyser, frequency: frequency)
+
+            let loudest = try #require(
+                analyser.bands.enumerated().max(by: { $0.element < $1.element })?.offset)
+            let centre = analyser.centreFrequency(ofBand: loudest)
+            // Within half a band either way, which at 24 log-spaced bands is a
+            // factor of 1.13.
+            #expect(centre > frequency / 1.15)
+            #expect(centre < frequency * 1.15)
+        }
+    }
+
+    /// And the rest of the display has to be quiet, or every band would light up
+    /// together and the picture would carry no information at all.
+    @Test("a single tone does not light the whole display")
+    func toneIsLocalised() throws {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(analyser, frequency: 1000)
+
+        let loudest = try #require(
+            analyser.bands.enumerated().max(by: { $0.element < $1.element })?.offset)
+        // Two bands either side are the window's own skirts; beyond that
+        // anything substantial means leakage the window should have suppressed.
+        let distant = analyser.bands.enumerated()
+            .filter { abs($0.offset - loudest) > 2 }
+            .map(\.element)
+        #expect(distant.allSatisfy { $0 < analyser.bands[loudest] * 0.5 })
+    }
+
+    /// Louder in, higher bar. Obvious, and exactly the thing a sign error in the
+    /// decibel mapping would invert.
+    @Test("a louder tone reads higher")
+    func levelOrdering() throws {
+        let quiet = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(quiet, frequency: 1000, amplitude: 0.05)
+        let loud = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(loud, frequency: 1000, amplitude: 0.5)
+        #expect(loud.bands.max()! > quiet.bands.max()!)
+    }
+
+    /// Bands are normalised for display, so nothing may leave the range the
+    /// drawing code assumes — a value above one would draw a bar out of its box.
+    @Test("every band stays within the display range")
+    func normalised() throws {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        // Full scale, which is the case most likely to overflow.
+        feed(analyser, frequency: 1000, amplitude: 1.0)
+        #expect(analyser.bands.allSatisfy { $0 >= 0 && $0 <= 1 })
+    }
+
+    /// Silence has to settle to nothing rather than to a noise floor invented by
+    /// the window function.
+    @Test("silence settles to an empty display")
+    func silence() throws {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        let quiet = [Float](repeating: 0, count: 48000)
+        quiet.withUnsafeBufferPointer { analyser.add($0.baseAddress!, count: $0.count) }
+        #expect(analyser.bands.allSatisfy { $0 < 0.01 })
+    }
+
+    /// The bin mapping is derived from the sample rate, so a tone has to land in
+    /// the same band at either rate.
+    @Test("band positions do not depend on the sample rate")
+    func rateIndependent() throws {
+        let at48 = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(at48, frequency: 1000, sampleRate: 48000)
+        let at96 = try #require(SpectrumAnalyser(sampleRate: 96000))
+        feed(at96, frequency: 1000, sampleRate: 96000)
+
+        let first = at48.bands.enumerated().max(by: { $0.element < $1.element })?.offset
+        let second = at96.bands.enumerated().max(by: { $0.element < $1.element })?.offset
+        #expect(first == second)
+    }
+
+    /// The reading has to be calibrated, not merely ordered: a tone of known
+    /// amplitude must come back at its own level in decibels.
+    ///
+    /// This is the assertion that catches a wrong transform. The first version
+    /// of this analyser ran a complex-to-complex FFT over buffers packed for a
+    /// real one, reading and writing twice past the end of both on every frame.
+    /// Every test above still passed — the peak landed in the right band and
+    /// rose with level — because none of them ever asked what the number *was*.
+    @Test("a tone of known amplitude reads its own level")
+    func calibration() throws {
+        // Half scale is −6.02 dBFS.
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(analyser, frequency: 1000, amplitude: 0.5, seconds: 1.0)
+        let loudest = try #require(
+            analyser.bands.enumerated().max(by: { $0.element < $1.element })?.offset)
+        // 1 kHz falls between bins, so up to 1.4 dB of scalloping loss with a
+        // Hann window is expected and is not an error.
+        #expect(abs(analyser.decibels(ofBand: loudest) - -6.02) < 1.6)
+
+        // And a decade down has to move it by twenty.
+        let quieter = try #require(SpectrumAnalyser(sampleRate: 48000))
+        feed(quieter, frequency: 1000, amplitude: 0.05, seconds: 1.0)
+        #expect(abs(quieter.decibels(ofBand: loudest) - -26.02) < 1.6)
+    }
+
+    /// Bands ascend in frequency, which is what lets the drawing code map index
+    /// to horizontal position without consulting anything.
+    @Test("band centres ascend")
+    func ascending() throws {
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        for index in 1..<SpectrumAnalyser.bandCount {
+            #expect(
+                analyser.centreFrequency(ofBand: index)
+                    > analyser.centreFrequency(ofBand: index - 1))
+        }
+    }
+
+    /// Feeding one continuous signal in small pieces has to give the same
+    /// answer as feeding it whole, or the reading would depend on the buffer
+    /// size the device happened to pick.
+    ///
+    /// One signal generated once and then sliced, rather than a fresh tone per
+    /// chunk: restarting the phase at every boundary would make this a test of
+    /// how the analyser handles fifty discontinuities, which is a different
+    /// question and an easier one to pass.
+    @Test("the result does not depend on how the samples are chunked")
+    func chunking() throws {
+        let count = 24000
+        var samples = [Float](repeating: 0, count: count)
+        for index in 0..<count {
+            samples[index] = 0.5 * Float(sin(2 * Double.pi * 1000 * Double(index) / 48000))
+        }
+
+        let whole = try #require(SpectrumAnalyser(sampleRate: 48000))
+        samples.withUnsafeBufferPointer { whole.add($0.baseAddress!, count: count) }
+
+        let pieces = try #require(SpectrumAnalyser(sampleRate: 48000))
+        var offset = 0
+        // Deliberately not a divisor of the window size, so the chunk boundaries
+        // fall inside windows rather than lining up with them.
+        let chunk = 373
+        while offset < count {
+            let take = min(chunk, count - offset)
+            samples.withUnsafeBufferPointer {
+                pieces.add($0.baseAddress! + offset, count: take)
+            }
+            offset += take
+        }
+
+        for index in 0..<SpectrumAnalyser.bandCount {
+            #expect(abs(whole.bands[index] - pieces.bands[index]) < 0.02)
+        }
+    }
+}

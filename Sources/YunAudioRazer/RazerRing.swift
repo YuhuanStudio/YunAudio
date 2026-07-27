@@ -68,7 +68,7 @@ public enum RazerRing {
         }
     }
 
-    static func hue(_ hue: Double) -> Colour {
+    public static func hue(_ hue: Double) -> Colour {
         let sector = hue * 6
         let offset = sector - sector.rounded(.down)
         let rising = UInt8(offset * 255)
