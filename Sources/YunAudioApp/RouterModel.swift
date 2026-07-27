@@ -618,6 +618,19 @@ final class RouterModel {
 
     func toggle() { isRunning ? stop() : start() }
 
+    /// Tears everything down synchronously.
+    ///
+    /// Called while the application is quitting, so it cannot hop to a queue and
+    /// hope to be finished — the process may be gone before the closure runs.
+    /// The 17 ms this blocks for is the price of not leaving someone's hardware
+    /// reconfigured.
+    func shutDown() {
+        hotkeys.tearDown()
+        stopPolling()
+        engine.stop()
+        isRunning = false
+    }
+
     /// Carries the taps across the queue hop. `ProcessTap` is a class the audio
     /// system owns, and the queue closure has to be `Sendable`.
     private struct TapHandle: @unchecked Sendable {

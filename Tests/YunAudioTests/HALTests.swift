@@ -164,3 +164,41 @@ struct RazerReportTests {
         #expect(report.decodedStatus == nil)
     }
 }
+
+// MARK: - Sample rate restoration
+
+@Suite("Sample rate restoration")
+struct SampleRateRestorationTests {
+    /// Routing has to align sample rates, and that change persists on the
+    /// hardware after the process exits. Handing back what was there before is
+    /// the only thing that makes the change undoable.
+    @Test("aligning reports what each device was set to beforehand")
+    func reportsPreviousRates() throws {
+        let devices = try AudioDevices.all().filter {
+            $0.availableSampleRates.contains(48000) && $0.availableSampleRates.count > 1
+        }
+        try #require(!devices.isEmpty, "needs a device offering more than one rate")
+
+        let device = devices[0]
+        let original = try #require(device.currentSampleRate)
+        let other = try #require(device.availableSampleRates.first { $0 != original })
+
+        let previous = try AggregateDevice.alignSampleRate(other, across: [device])
+        defer { AggregateDevice.restoreSampleRates(previous) }
+
+        #expect(previous[device.uid] == original)
+
+        AggregateDevice.restoreSampleRates(previous)
+        // Re-read rather than trusting the write: the HAL can refuse.
+        let restored = try AudioDevice(id: device.id).currentSampleRate
+        #expect(restored == original)
+    }
+
+    @Test("a device that is already at the target is not recorded")
+    func noChangeNoRecord() throws {
+        let device = try #require(try AudioDevices.all().first)
+        let current = try #require(device.currentSampleRate)
+        let previous = try AggregateDevice.alignSampleRate(current, across: [device])
+        #expect(previous.isEmpty)
+    }
+}

@@ -117,6 +117,8 @@ public final class RoutingEngine: @unchecked Sendable {
     /// True when drift correction was switched off on the strength of the
     /// driver's clock locking, so the path is only clean while the lock holds.
     private var requiresClockLock = false
+    /// Sample rates as they were before routing touched them.
+    private var originalSampleRates: [String: Double] = [:]
     /// Enough of the last start() to bring the route back up unaided.
     private var lastConfiguration: (
         source: String, destination: String, routes: [Route], bufferFrames: UInt32)?
@@ -185,7 +187,13 @@ public final class RoutingEngine: @unchecked Sendable {
         } else {
             throw RoutingError.noCommonSampleRate
         }
-        try AggregateDevice.alignSampleRate(rate, across: members)
+        // Remembered so the devices go back the way they were found. Merged
+        // rather than replaced: a restart must not forget what the first start
+        // changed.
+        let changed = try AggregateDevice.alignSampleRate(rate, across: members)
+        for (uid, previous) in changed where originalSampleRates[uid] == nil {
+            originalSampleRates[uid] = previous
+        }
 
         // If the destination is our own driver and it implements clock anchors,
         // it will track the microphone's measured rate itself, so asking the
@@ -428,6 +436,13 @@ public final class RoutingEngine: @unchecked Sendable {
         inputMap.removeAll()
         outputMap.removeAll()
         activeRoutes.removeAll()
+
+        // Restore last: the aggregate has to be gone first, or the HAL will
+        // simply set the rate back to whatever the aggregate wanted.
+        if !originalSampleRates.isEmpty {
+            AggregateDevice.restoreSampleRates(originalSampleRates)
+            originalSampleRates.removeAll()
+        }
     }
 
     /// Brings the route back up with drift correction enabled after the clock

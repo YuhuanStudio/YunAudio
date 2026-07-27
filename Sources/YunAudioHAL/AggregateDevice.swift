@@ -122,14 +122,36 @@ public final class AggregateDevice {
 
     public var device: AudioDevice? { try? AudioDevice(id: id) }
 
-    /// Aligns every member to one rate before the aggregate starts.
+    /// Aligns every member to one rate before the aggregate starts, returning
+    /// what each device was set to beforehand.
     ///
     /// Mixing rates inside an aggregate forces the HAL to convert on more paths
-    /// than necessary, so the caller picks the highest rate all members share
-    /// and applies it here.
-    public static func alignSampleRate(_ rate: Double, across devices: [AudioDevice]) throws {
-        for device in devices where device.currentSampleRate != rate {
+    /// than necessary, so the caller picks a rate all members share and applies
+    /// it here. The change persists on the hardware after this process exits, so
+    /// the previous values come back with the return value and the caller is
+    /// expected to restore them — leaving someone's microphone at a rate they
+    /// did not choose is a side effect, not a feature.
+    @discardableResult
+    public static func alignSampleRate(
+        _ rate: Double, across devices: [AudioDevice]
+    ) throws -> [String: Double] {
+        var previous: [String: Double] = [:]
+        for device in devices {
+            guard let current = device.currentSampleRate, current != rate else { continue }
+            previous[device.uid] = current
             try device.setNominalSampleRate(rate)
+        }
+        return previous
+    }
+
+    /// Puts sample rates back the way `alignSampleRate` found them.
+    ///
+    /// Best effort: a device that has been unplugged in the meantime is skipped
+    /// rather than treated as a failure, because there is nothing to restore.
+    public static func restoreSampleRates(_ rates: [String: Double]) {
+        for (uid, rate) in rates {
+            guard let device = try? AudioDevices.device(uid: uid) else { continue }
+            try? device.setNominalSampleRate(rate)
         }
     }
 

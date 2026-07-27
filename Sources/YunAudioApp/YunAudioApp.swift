@@ -1,9 +1,25 @@
 import SwiftUI
 import YunDesign
 
+/// Watches for the application quitting.
+///
+/// Routing changes the sample rate of real hardware, and that change outlives
+/// the process. `deinit` is not enough — a SwiftUI app that is quit from the
+/// menu tears down without necessarily releasing the model first, which is
+/// exactly how someone's microphone ends up left at 96 kHz.
+@MainActor
+final class TerminationObserver: NSObject, NSApplicationDelegate {
+    var onTerminate: (@MainActor () -> Void)?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        onTerminate?()
+    }
+}
+
 @main
 struct YunAudioApp: App {
     @State private var model = RouterModel()
+    @NSApplicationDelegateAdaptor(TerminationObserver.self) private var termination
 
     init() {
         // Design verification path. A menu bar popover cannot be opened without
@@ -33,6 +49,7 @@ struct YunAudioApp: App {
 
         MenuBarExtra {
             PanelView(model: model)
+                .onAppear { termination.onTerminate = { model.shutDown() } }
         } label: {
             MenuBarIcon(level: model.isRunning ? model.peakLevel : nil)
         }

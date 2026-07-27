@@ -51,6 +51,8 @@ public final class EchoCancellingCapture {
     }
     private let callbacks = Callbacks()
     private var isRunning = false
+    /// Rates to put back when this capture goes away.
+    private var restorableRates: [String: Double] = [:]
 
     /// - Parameters:
     ///   - microphoneUID: The microphone to capture.
@@ -74,7 +76,7 @@ public final class EchoCancellingCapture {
             let shared = Set(microphone.availableSampleRates)
                 .intersection(speaker.availableSampleRates)
             rate = shared.contains(48000) ? 48000 : (shared.max() ?? 48000)
-            try? AggregateDevice.alignSampleRate(rate, across: members)
+            restorableRates = (try? AggregateDevice.alignSampleRate(rate, across: members)) ?? [:]
 
             builtAggregate = try? AggregateDevice(
                 name: "YunAudio Echo Cancellation",
@@ -214,6 +216,7 @@ public final class EchoCancellingCapture {
 
     deinit {
         stop()
+        AggregateDevice.restoreSampleRates(restorableRates)
         AudioUnitUninitialize(unit)
         AudioComponentInstanceDispose(unit)
         captureBuffer.deallocate()
