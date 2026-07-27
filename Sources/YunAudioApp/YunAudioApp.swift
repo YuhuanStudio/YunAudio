@@ -76,7 +76,7 @@ struct MenuBarIcon: View {
 
     var body: some View {
         HStack(spacing: 3) {
-            if let mark = NSImage(named: "Icon") ?? Bundle.module.image(forResource: "Icon") {
+            if let mark = YunAppIcon.image {
                 Image(nsImage: mark)
                     .resizable()
                     .interpolation(.high)

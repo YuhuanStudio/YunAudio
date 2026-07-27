@@ -30,32 +30,40 @@ struct MainWindow: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
 
-            HStack(alignment: .top, spacing: 0) {
+            // Columns separated by space rather than rules: the cards already
+            // carry the boundaries, and a 1px line through the middle of a card
+            // layout is what made this read as a wireframe.
+            HStack(alignment: .top, spacing: Yun.Space.lg) {
                 sources
-                    .frame(width: 260)
-                Rectangle().fill(Yun.Palette.borderHairline).frame(width: 1)
+                    .frame(width: 268)
                 mixer
                     .frame(maxWidth: .infinity)
-                Rectangle().fill(Yun.Palette.borderHairline).frame(width: 1)
                 inspector
-                    .frame(width: 280)
+                    .frame(width: 292)
             }
-            .frame(maxHeight: .infinity)
+            .padding(.horizontal, Yun.Space.xl)
+            .padding(.bottom, Yun.Space.lg)
+            .frame(maxHeight: .infinity, alignment: .top)
 
-            Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
             footer
         }
-        .frame(minWidth: 940, minHeight: 560)
-        .background(Yun.Palette.background)
+        .frame(minWidth: 980, minHeight: 600)
+        .background(Yun.Palette.windowBackground)
     }
 
     // MARK: Header
 
     private var header: some View {
         HStack(spacing: Yun.Space.md) {
-            Text(L("YunAudio"))
+            if let mark = YunAppIcon.image {
+                Image(nsImage: mark)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 22, height: 22)
+            }
+            Text(loc("YunAudio"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Yun.Palette.textPrimary)
 
@@ -64,7 +72,7 @@ struct MainWindow: View {
                 .frame(width: 1, height: 18)
 
             ForEach(RoutePreset.builtIn) { preset in
-                Button(L(preset.name)) { model.apply(preset) }
+                Button(loc(preset.name)) { model.apply(preset) }
                     .buttonStyle(
                         YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true)
                     )
@@ -74,11 +82,12 @@ struct MainWindow: View {
             Spacer()
 
             YunStatusPill(
-                model.isRunning ? "Routing" : "Idle",
+                loc(model.isRunning ? "Routing" : "Idle"),
                 tone: model.isRunning ? .success : .neutral)
         }
-        .padding(.horizontal, Yun.Space.lg)
-        .padding(.vertical, Yun.Space.md)
+        .padding(.horizontal, Yun.Space.xl)
+        .padding(.top, Yun.Space.lg)
+        .padding(.bottom, Yun.Space.md)
     }
 
     // MARK: Sources
@@ -86,7 +95,7 @@ struct MainWindow: View {
     private var sources: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                sectionHeading(L("Input"))
+                sectionHeading(loc("Input"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {
                         YunSelect(
@@ -101,7 +110,7 @@ struct MainWindow: View {
                             YunDivider()
                             YunSegmented(
                                 selection: $model.channelMode,
-                                options: SourceChannelMode.allCases.map { ($0, L($0.title)) })
+                                options: SourceChannelMode.allCases.map { ($0, loc($0.title)) })
                             if model.channelMode == .mono {
                                 YunSegmented(
                                     selection: $model.monoChannel,
@@ -110,7 +119,7 @@ struct MainWindow: View {
                                     })
                                 Text(
                                     String(
-                                        format: L(
+                                        format: loc(
                                             "This device reports %d input channels; not all of them necessarily carry audio."
                                         ), source.inputChannels)
                                 )
@@ -123,18 +132,20 @@ struct MainWindow: View {
                 }
 
                 HStack {
-                    sectionHeading(L("Application audio"))
+                    sectionHeading(loc("Application audio"))
                     Spacer()
-                    Button(L("Refresh")) { model.refreshApps() }
+                    Button(loc("Refresh")) { model.refreshApps() }
                         .buttonStyle(YunButtonStyle(.ghost, small: true))
                 }
 
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {
                         if model.availableApps.isEmpty {
-                            Text(L("Nothing is producing audio right now."))
-                                .font(Yun.Text.caption)
-                                .foregroundStyle(Yun.Palette.textTertiary)
+                            YunEmptyState(
+                                symbol: "speaker.slash",
+                                message: loc("Nothing is producing audio right now.")
+                            )
+                            .frame(maxWidth: .infinity)
                         } else {
                             ForEach(model.availableApps.prefix(10)) { process in
                                 appRow(process)
@@ -142,17 +153,16 @@ struct MainWindow: View {
                         }
                         if !model.capturedAppBundleIDs.isEmpty {
                             YunDivider()
-                            Text(L("While routed"))
+                            Text(loc("While routed"))
                                 .font(Yun.Text.caption)
                                 .foregroundStyle(Yun.Palette.textTertiary)
                             YunSegmented(
                                 selection: $model.tapMuteBehavior,
-                                options: TapMuteBehavior.allCases.map { ($0, L($0.title)) })
+                                options: TapMuteBehavior.allCases.map { ($0, loc($0.title)) })
                         }
                     }
                 }
             }
-            .padding(Yun.Space.lg)
         }
     }
 
@@ -190,7 +200,7 @@ struct MainWindow: View {
     private var mixer: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                sectionHeading(L("Mixer"))
+                sectionHeading(loc("Mixer"))
 
                 if model.activeRoutes.isEmpty {
                     YunCard {
@@ -210,7 +220,6 @@ struct MainWindow: View {
                     }
                 }
             }
-            .padding(Yun.Space.lg)
         }
     }
 
@@ -265,7 +274,7 @@ struct MainWindow: View {
     private var inspector: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                sectionHeading(L("Processing"))
+                sectionHeading(loc("Processing"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {
                         ForEach(EffectKind.allCases) { kind in
@@ -283,42 +292,44 @@ struct MainWindow: View {
                     }
                 }
 
-                sectionHeading(L("Signal path"))
+                sectionHeading(loc("Signal path"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {
                         if let quality = model.pathQuality {
                             YunDetailRow(
-                                L("Integrity"),
+                                loc("Integrity"),
                                 value: quality.isBitExact
                                     ? "bit-exact"
                                     : (quality.hasProcessing ? "processed" : "resampled"),
                                 tone: quality.isBitExact ? .success : .warning)
-                            YunDetailRow(L("Rate"), value: "\(Int(quality.sampleRate)) Hz")
+                            YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                             YunDetailRow(
-                                L("Buffer"),
+                                loc("Buffer"),
                                 value: String(
                                     format: "%d · %.2f ms",
                                     quality.bufferFrames, quality.bufferLatencyMilliseconds))
                             if model.isClockLocked {
                                 YunDetailRow(
-                                    L("Clock"),
+                                    loc("Clock"),
                                     value: String(
                                         format: "locked %.6f", model.measuredRateRatio),
                                     tone: .success)
                                 YunDetailRow(
-                                    L("Crystal"),
+                                    loc("Crystal"),
                                     value: String(
                                         format: "%+.1f ppm",
                                         (model.measuredRateRatio - 1) * 1_000_000))
                             }
                         } else {
-                            Text(L("Start routing to measure the path."))
-                                .font(Yun.Text.caption)
-                                .foregroundStyle(Yun.Palette.textTertiary)
+                            YunEmptyState(
+                                symbol: "waveform.path.ecg",
+                                message: loc("Start routing to measure the path.")
+                            )
+                            .frame(maxWidth: .infinity)
                         }
                         if model.addedLatencyMilliseconds > 0 {
                             YunDetailRow(
-                                L("Added by DSP"),
+                                loc("Added by DSP"),
                                 value: String(
                                     format: "%.0f ms", model.addedLatencyMilliseconds),
                                 tone: .warning)
@@ -326,20 +337,19 @@ struct MainWindow: View {
                     }
                 }
             }
-            .padding(Yun.Space.lg)
         }
     }
 
     private func effectRow(_ kind: EffectKind) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Toggle(
-                L(kind.title),
+                loc(kind.title),
                 isOn: Binding(
                     get: { model.enabledEffects.contains(kind) },
                     set: { model.setEffect(kind, enabled: $0) })
             )
             .toggleStyle(YunToggleStyle())
-            Text(L(kind.detail))
+            Text(loc(kind.detail))
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -350,7 +360,7 @@ struct MainWindow: View {
 
     private var footer: some View {
         HStack(spacing: Yun.Space.md) {
-            Text(L("Output"))
+            Text(loc("Output"))
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
             YunSelect(
@@ -372,14 +382,18 @@ struct MainWindow: View {
 
             Spacer()
 
-            Button(model.isBusy ? "…" : L(model.isRunning ? "Stop" : "Start")) {
+            Button(model.isBusy ? "…" : loc(model.isRunning ? "Stop" : "Start")) {
                 model.toggle()
             }
             .buttonStyle(YunButtonStyle(.primary))
             .disabled(model.isBusy)
         }
-        .padding(.horizontal, Yun.Space.lg)
+        .padding(.horizontal, Yun.Space.xl)
         .padding(.vertical, Yun.Space.md)
+        .background(Yun.Palette.card)
+        .overlay(alignment: .top) {
+            Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
+        }
     }
 
     private func sectionHeading(_ text: String) -> some View {

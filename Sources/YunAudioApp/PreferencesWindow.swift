@@ -116,7 +116,7 @@ struct PreferencesWindow: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(L("General"))
+            heading(loc("General"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
                     Toggle(
@@ -127,7 +127,7 @@ struct PreferencesWindow: View {
                     )
                     .toggleStyle(YunToggleStyle())
                     YunDivider()
-                    Toggle(L("Start routing at launch"), isOn: $model.autoStart)
+                    Toggle(loc("Start routing at launch"), isOn: $model.autoStart)
                         .toggleStyle(YunToggleStyle())
                     if let error = model.loginItemError {
                         Text(error)
@@ -138,7 +138,7 @@ struct PreferencesWindow: View {
                 }
             }
 
-            heading(L("Sample rate"))
+            heading(loc("Sample rate"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
                     YunSegmented(
@@ -161,7 +161,7 @@ struct PreferencesWindow: View {
 
     private var shortcutsSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(L("Shortcuts"))
+            heading(loc("Shortcuts"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
                     ForEach(Array(model.hotkeyDescriptions.enumerated()), id: \.offset) {
@@ -209,24 +209,24 @@ struct PreferencesWindow: View {
 
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(L("Signal path"))
+            heading(loc("Signal path"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
                     if let quality = model.pathQuality {
                         YunDetailRow(
-                            L("Integrity"),
+                            loc("Integrity"),
                             value: quality.isBitExact
                                 ? "bit-exact"
                                 : (quality.hasProcessing ? "processed" : "resampled"),
                             tone: quality.isBitExact ? .success : .warning)
-                        YunDetailRow(L("Sample rate"), value: "\(Int(quality.sampleRate)) Hz")
+                        YunDetailRow(loc("Sample rate"), value: "\(Int(quality.sampleRate)) Hz")
                         YunDetailRow(
-                            L("Buffer"),
+                            loc("Buffer"),
                             value: String(
                                 format: "%d frames · %.2f ms",
                                 quality.bufferFrames, quality.bufferLatencyMilliseconds))
                         YunDetailRow(
-                            L("Clock"),
+                            loc("Clock"),
                             value: model.isClockLocked
                                 ? String(format: "locked · %.6f", model.measuredRateRatio)
                                 : "not locked",
@@ -239,18 +239,18 @@ struct PreferencesWindow: View {
                                     (model.measuredRateRatio - 1) * 1_000_000))
                         }
                     } else {
-                        Text(L("Start routing to see live measurements."))
+                        Text(loc("Start routing to see live measurements."))
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.textTertiary)
                     }
                 }
             }
 
-            heading(L("Realtime safety"))
+            heading(loc("Realtime safety"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
                     YunDetailRow(
-                        L("IO thread allocations"),
+                        loc("IO thread allocations"),
                         value: "\(model.allocationViolations)",
                         tone: model.allocationViolations == 0 ? .success : .warning)
                     Text(
@@ -268,15 +268,15 @@ struct PreferencesWindow: View {
 
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(L("YunAudio"))
+            heading(loc("YunAudio"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                    YunDetailRow(L("Version"), value: "0.1.0")
+                    YunDetailRow(loc("Version"), value: "0.1.0")
                     YunDetailRow(
-                        L("Virtual device"),
+                        loc("Virtual device"),
                         value: model.isDriverInstalled ? "installed" : "not installed",
                         tone: model.isDriverInstalled ? .success : .warning)
-                    YunDetailRow(L("Licence"), value: "MIT")
+                    YunDetailRow(loc("Licence"), value: "MIT")
                 }
             }
             Text(

@@ -16,8 +16,8 @@ public enum SourceChannelMode: String, CaseIterable, Identifiable, Sendable {
 
     var title: String {
         switch self {
-        case .mono: L("Mono")
-        case .stereo: L("Stereo")
+        case .mono: loc("Mono")
+        case .stereo: loc("Stereo")
         }
     }
 }

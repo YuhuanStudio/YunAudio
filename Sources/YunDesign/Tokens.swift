@@ -29,6 +29,15 @@ public enum Yun {
         public static let card = adaptive(
             light: Color(hex: 0xFFFFFF), dark: Color(hex: 0x141417))
 
+        /// The surface a window's content sits on.
+        ///
+        /// One step away from the card fill so cards read as raised rather than
+        /// as regions marked out by rules. The source system gets this from
+        /// `--bg-base` against white cards; a window needs the same separation
+        /// or it flattens into a wireframe.
+        public static let windowBackground = adaptive(
+            light: Color(hex: 0xF7F7F8), dark: Color(hex: 0x0B0B0D))
+
         /// Hairline separators — the quietest border in the system.
         public static let borderHairline = adaptive(
             light: Color(hex: 0xF4F4F5), dark: Color(hex: 0x27272A))

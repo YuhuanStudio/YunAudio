@@ -20,7 +20,7 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     var note: String
 
     static let voiceChat = RoutePreset(
-        name: L("Voice chat"),
+        name: loc("Voice chat"),
         sampleRate: 48000,
         bufferFrames: 128,
         voiceIsolationEnabled: false,
@@ -30,7 +30,7 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
             "48 kHz and a small buffer. Anything higher is resampled back down at the far end.")
 
     static let noisyRoom = RoutePreset(
-        name: L("Noisy room"),
+        name: loc("Noisy room"),
         sampleRate: 48000,
         bufferFrames: 256,
         voiceIsolationEnabled: true,
@@ -39,7 +39,7 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         note: "Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact.")
 
     static let recording = RoutePreset(
-        name: L("Recording"),
+        name: loc("Recording"),
         sampleRate: 96000,
         bufferFrames: 256,
         voiceIsolationEnabled: false,

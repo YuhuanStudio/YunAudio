@@ -59,6 +59,7 @@ public enum YunStrings {
 
 /// Shorthand for a localised literal.
 ///
-/// Named for brevity because it appears on almost every view line; anything
-/// longer would be more visible than the string it wraps.
-public func L(_ key: String) -> String { YunStrings.lookUp(key) }
+/// Short because it appears on almost every view line and anything longer
+/// would be more visible than the string it wraps. Not `L`, which reads better
+/// still but is not lower camel case and so fails the project's own lint.
+public func loc(_ key: String) -> String { YunStrings.lookUp(key) }

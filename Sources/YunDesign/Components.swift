@@ -21,6 +21,9 @@ public struct YunCard<Content: View>: View {
                 RoundedRectangle(cornerRadius: Yun.Radius.card)
                     .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
             }
+            // shadow-xs from the source system. Small enough to read as a lift
+            // rather than a drop, which is what keeps the surface calm.
+            .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
     }
 }
 
@@ -31,6 +34,35 @@ public struct YunDivider: View {
         Rectangle()
             .fill(Yun.Palette.borderHairline)
             .frame(height: 1)
+    }
+}
+
+/// An empty state.
+///
+/// A card holding one line of grey text reads as a bug. Centring a glyph above
+/// the sentence makes the emptiness look deliberate, which is what it is.
+public struct YunEmptyState: View {
+    private let symbol: String
+    private let message: String
+
+    public init(symbol: String, message: String) {
+        self.symbol = symbol
+        self.message = message
+    }
+
+    public var body: some View {
+        VStack(spacing: Yun.Space.md) {
+            Image(systemName: symbol)
+                .font(.system(size: 26, weight: .light))
+                .foregroundStyle(Yun.Palette.textMuted)
+            Text(message)
+                .font(Yun.Text.body)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: 260)
+        .padding(.vertical, Yun.Space.xl)
     }
 }
 
