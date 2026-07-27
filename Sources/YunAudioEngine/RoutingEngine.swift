@@ -160,6 +160,8 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   - destinationDeviceUID: The virtual output the routed signal lands in.
     ///   - routes: Channel-level connections between the two.
     ///   - taps: Application captures to fold in as extra source channels.
+    ///   - additionalDestinationUIDs: Further outputs to bind, so a tapped
+    ///     application can be sent somewhere other than the main destination.
     ///   - effects: Processing stages to insert ahead of the routes. More than
     ///     one supersedes `voiceIsolation`, which is the single-stage form.
     ///   - preferredSampleRate: Used when both devices support it, rather than
