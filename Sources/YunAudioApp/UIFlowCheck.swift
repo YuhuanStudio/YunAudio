@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import Foundation
 import YunAudioEngine
 import YunAudioHAL
@@ -110,6 +111,32 @@ enum UIFlowCheck {
         check("it can be armed", model.watchesIOAllocations)
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
+
+        print("\nhardware gain")
+        // The microphone's own gain sits before the converter, so raising it
+        // costs no headroom, while the trim afterwards can only amplify what
+        // the converter already decided. They are different controls and the
+        // interface had only the second one.
+        if let gain = model.hardwareGain, gain.isSettable {
+            note(
+                "range "
+                    + (gain.decibelRange.map {
+                        String(format: "%.0f…%.0f dB", $0.lowerBound, $0.upperBound)
+                    }
+                        ?? "scalar only"))
+            let original = model.hardwareGainScalar
+            model.hardwareGainScalar = 0.4
+            await pause(0.3)
+            check(
+                "the device took the new gain",
+                abs(
+                    (model.selectedSource?.hardwareGain(
+                        scope: kAudioObjectPropertyScopeInput)?.scalar ?? -1) - 0.4) < 0.05)
+            check("the readout is not empty", !model.hardwareGainLabel.isEmpty)
+            model.hardwareGainScalar = original
+        } else {
+            note("this input publishes no settable gain of its own")
+        }
 
         print("\nchannel naming")
         // CoreAudio says a device has three input channels and nothing about

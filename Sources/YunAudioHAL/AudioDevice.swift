@@ -68,6 +68,12 @@ extension AudioProperty {
         .init(kAudioDevicePropertyVolumeScalar)
     }
     public static var mute: AudioProperty<UInt32> { .init(kAudioDevicePropertyMute) }
+    public static var volumeDecibels: AudioProperty<Float32> {
+        .init(kAudioDevicePropertyVolumeDecibels)
+    }
+    public static var volumeDecibelRange: AudioProperty<AudioValueRange> {
+        .init(kAudioDevicePropertyVolumeRangeDecibels)
+    }
 }
 
 // MARK: - Transport
@@ -235,6 +241,45 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         if isMuted(scope: scope) { return true }
         guard let volume = volumeScalar(scope: scope) else { return false }
         return volume < 0.999
+    }
+
+    /// The device's own gain, before its converter.
+    ///
+    /// Worth separating from anything the router does: this happens in the
+    /// hardware ahead of the analogue-to-digital step, so turning it up costs
+    /// nothing in headroom. A digital trim after the fact can only ever amplify
+    /// what the converter already decided, noise included. The right order is
+    /// this first, then the trim.
+    ///
+    /// The Seiren V3 Pro publishes 0 to +36 dB here; the built-in microphone
+    /// publishes a scalar with no decibel mapping at all, which is why both are
+    /// returned and either can be absent.
+    public struct HardwareGain: Sendable, Hashable {
+        public let scalar: Float
+        /// Nil when the device publishes no decibel mapping for its scalar.
+        public let decibels: Float?
+        public let decibelRange: ClosedRange<Float>?
+        public let isSettable: Bool
+    }
+
+    public func hardwareGain(scope: AudioObjectPropertyScope) -> HardwareGain? {
+        let volume = AudioProperty<Float32>.volumeScalar.scoped(to: scope)
+        guard let scalar = id.optionalValue(of: volume) else { return nil }
+        let decibels = id.optionalValue(
+            of: AudioProperty<Float32>.volumeDecibels.scoped(to: scope))
+        let range = id.optionalValue(
+            of: AudioProperty<AudioValueRange>.volumeDecibelRange.scoped(to: scope))
+        return HardwareGain(
+            scalar: scalar,
+            decibels: decibels,
+            decibelRange: range.map { Float($0.mMinimum)...Float($0.mMaximum) },
+            isSettable: id.isSettable(volume))
+    }
+
+    public func setHardwareGain(scalar: Float, scope: AudioObjectPropertyScope) throws {
+        try id.setValue(
+            Float32(max(0, min(1, scalar))),
+            for: AudioProperty<Float32>.volumeScalar.scoped(to: scope))
     }
 
     public func setNominalSampleRate(_ rate: Double) throws {

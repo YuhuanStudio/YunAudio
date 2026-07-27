@@ -234,6 +234,31 @@ struct MainWindow: View {
                                         detail: "\($0.inputChannels)ch")
                                 })
                         }
+                        // Hardware gain first, because it is first in the
+                        // signal: it happens before the converter, so it is the
+                        // one that costs nothing.
+                        if let gain = model.hardwareGain, gain.isSettable {
+                            HStack(spacing: Yun.Space.sm) {
+                                Image(systemName: "dial.medium")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Yun.Palette.textMuted)
+                                    .frame(width: 22, height: 22)
+                                YunSlider(
+                                    fraction: Binding(
+                                        get: { Double(model.hardwareGainScalar) },
+                                        set: { model.hardwareGainScalar = Float($0) }))
+                                Text(model.hardwareGainLabel)
+                                    .font(Yun.Text.mono)
+                                    .foregroundStyle(Yun.Palette.textTertiary)
+                                    .monospacedDigit()
+                                    .frame(width: 58, alignment: .trailing)
+                            }
+                            .help(
+                                loc(
+                                    "The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom."
+                                ))
+                        }
+
                         LevelRow(
                             decibels: $model.inputDecibels, muted: $model.isInputMuted,
                             label: loc("Input level"))

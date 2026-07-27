@@ -180,6 +180,46 @@ final class RouterModel {
         decibels <= minimumDecibels ? 0 : pow(10, decibels / 20)
     }
 
+    // MARK: Hardware gain
+
+    /// The microphone's own gain, if it publishes one.
+    ///
+    /// Kept separate from the trim on purpose. This happens in the hardware
+    /// before the converter, so turning it up costs no headroom; the trim
+    /// happens afterwards and can only amplify what the converter already
+    /// decided, noise and all. The right order is this first.
+    var hardwareGain: AudioDevice.HardwareGain? {
+        selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
+    }
+
+    /// Read through a stored copy so the slider does not fight the device: a
+    /// bare read every frame would snap the thumb back while it is being
+    /// dragged, because the device rounds what it was given.
+    var hardwareGainScalar: Float {
+        get { pendingHardwareGain ?? hardwareGain?.scalar ?? 0 }
+        set {
+            pendingHardwareGain = newValue
+            guard let source = selectedSource else { return }
+            try? source.setHardwareGain(
+                scalar: newValue, scope: kAudioObjectPropertyScopeInput)
+        }
+    }
+    private var pendingHardwareGain: Float?
+
+    /// What the hardware gain reads as, in the device's own units where it has
+    /// them.
+    var hardwareGainLabel: String {
+        guard let gain = hardwareGain else { return "" }
+        // Re-derived from the range rather than re-read, so it tracks the
+        // slider rather than lagging a device round trip behind it.
+        if let range = gain.decibelRange {
+            let span = range.upperBound - range.lowerBound
+            let value = range.lowerBound + hardwareGainScalar * span
+            return String(format: "%+.1f dB", value)
+        }
+        return String(format: "%.0f%%", hardwareGainScalar * 100)
+    }
+
     // MARK: Echo cancellation
 
     /// Whether the microphone is captured through the echo canceller.

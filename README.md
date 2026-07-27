@@ -49,6 +49,13 @@ behind FaceTime's Voice Isolation, on-device and free, and no other router in
 this category exposes it as a general microphone processor. Measured here: 56 ms
 of added latency, under a quarter of the IO deadline in CPU.
 
+**Two gain stages, in the right order.** The microphone's own gain happens in
+the hardware before its converter, so raising it costs no headroom; a digital
+trim afterwards can only amplify what the converter already decided, noise
+included. Both are here and the hardware one is first, which is the order that
+matters and the one nothing else on macOS puts in front of you. The Seiren
+publishes 0 to +36 dB; the built-in microphone publishes −12 to +12.
+
 **It knows what your microphone's channels actually are.** CoreAudio reports
 that a Seiren V3 Pro has three inputs and nothing about what is on them. They
 are the processed capsule, the dry capsule, and the capsule past the

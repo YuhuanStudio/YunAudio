@@ -224,3 +224,4 @@
 "Depth" = "壓制深度";
 "Release" = "釋放時間";
 "Corner" = "轉折頻率";
+"The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom." = "麥克風自己的增益，位於類比轉換之前。請先調它再調下方的 trim——它不佔用任何動態餘裕。";
