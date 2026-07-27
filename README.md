@@ -53,6 +53,9 @@ of added latency, under a quarter of the IO deadline in CPU.
 `AudioHardwareCreateProcessTap`, optionally silencing its normal output. Loopback
 and its peers need their own plug-in for this; here it is a documented API.
 
+**It costs almost nothing to run.** 0.40% of one core for a stereo route at 128
+frames, 4.7 MB resident, measured over a six-minute run rather than estimated.
+
 **The realtime path allocates nothing.** Verified rather than asserted: a hook on
 the allocator counts anything allocated on the IO thread. Zero over thousands of
 cycles in an optimised build. (Measure release builds — a debug build's own
@@ -119,6 +122,7 @@ over six minutes against the real driver:
 cycle rate                    375.0/s, worst deviation 0.1
 memory growth                 +4.0 kB/min
 allocations on the IO thread  0
+processor                     0.40% of one core
 path at the end               bit-exact
 clock                         locked, 0.999983 – 0.999985 throughout
 ```
@@ -126,7 +130,8 @@ clock                         locked, 0.999983 – 0.999985 throughout
 375.0 is 48000/128 exactly. The 4 kB a minute is allocator noise rather than
 growth — the footprint ends lower than its own midpoint — and the whole process
 sits at 4.7 MB. It fails the run if memory climbs past a megabyte an hour, if
-the cycle rate wanders more than 5%, or if the realtime contract breaks once.
+the cycle rate wanders more than 5%, if the processor cost grows by an order of
+magnitude, or if the realtime contract breaks once.
 
 `aec-route` is the integration check. With the canceller in the path the
 microphone belongs to `AUVoiceProcessingIO` rather than to the router's

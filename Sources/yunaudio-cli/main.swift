@@ -931,6 +931,43 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
         exit(1)
     }
 
+    /// Processor time this task has consumed, in seconds.
+    ///
+    /// Taken from the task rather than from `top`, so it is the router's own
+    /// cost and not the sampler's. Live threads and dead ones both count —
+    /// `task_info` reports only threads that have exited, so the running IO
+    /// thread has to be added separately or the answer is always zero.
+    func processorSeconds() -> Double {
+        var total = 0.0
+        var basic = task_basic_info_64()
+        var basicCount = mach_msg_type_number_t(
+            MemoryLayout<task_basic_info_64>.size / MemoryLayout<natural_t>.size)
+        _ = withUnsafeMutablePointer(to: &basic) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(basicCount)) {
+                task_info(mach_task_self_, task_flavor_t(TASK_BASIC_INFO_64), $0, &basicCount)
+            }
+        }
+        total += Double(basic.user_time.seconds) + Double(basic.user_time.microseconds) / 1e6
+        total +=
+            Double(basic.system_time.seconds) + Double(basic.system_time.microseconds) / 1e6
+
+        var threads = task_thread_times_info()
+        var threadCount = mach_msg_type_number_t(
+            MemoryLayout<task_thread_times_info>.size / MemoryLayout<natural_t>.size)
+        _ = withUnsafeMutablePointer(to: &threads) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(threadCount)) {
+                task_info(
+                    mach_task_self_, task_flavor_t(TASK_THREAD_TIMES_INFO), $0, &threadCount)
+            }
+        }
+        total +=
+            Double(threads.user_time.seconds) + Double(threads.user_time.microseconds) / 1e6
+        total +=
+            Double(threads.system_time.seconds)
+            + Double(threads.system_time.microseconds) / 1e6
+        return total
+    }
+
     /// Resident size in bytes, from the task itself rather than from `ps`.
     func residentBytes() -> UInt64 {
         var info = task_vm_info_data_t()
@@ -949,9 +986,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
     Thread.sleep(forTimeInterval: 10)
     let baselineBytes = residentBytes()
     let baselineCycles = engine.cycleCount
+    let baselineProcessor = processorSeconds()
     let started = Date()
 
-    print("      elapsed   cycles/s   footprint      Δ    clock")
+    print("      elapsed   cycles/s   footprint      Δ     CPU   clock")
     var samples: [(seconds: Double, cycles: Double, bytes: UInt64)] = []
     var lastCycles = baselineCycles
     var lastAt = started
@@ -963,12 +1001,15 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
         let rate = Double(cycles - lastCycles) / now.timeIntervalSince(lastAt)
         let bytes = residentBytes()
         let delta = Int64(bytes) - Int64(baselineBytes)
+        let cpu =
+            (processorSeconds() - baselineProcessor)
+            / now.timeIntervalSince(started) * 100
         samples.append((now.timeIntervalSince(started), rate, bytes))
         print(
             String(
-                format: "  %10.0fs %10.1f %10.2f MB %+7.2f MB   %@",
+                format: "  %10.0fs %10.1f %10.2f MB %+7.2f MB %6.2f%%   %@",
                 now.timeIntervalSince(started), rate,
-                Double(bytes) / 1_048_576, Double(delta) / 1_048_576,
+                Double(bytes) / 1_048_576, Double(delta) / 1_048_576, cpu,
                 engine.isClockLocked
                     ? String(format: "locked %.6f", engine.measuredRateRatio) : "free"))
         lastCycles = cycles
@@ -977,11 +1018,15 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
 
     let violations = RoutingEngine.allocationViolations - violationsBefore
     let quality = engine.pathQuality
+    let processorCost =
+        (processorSeconds() - baselineProcessor)
+        / Date().timeIntervalSince(started) * 100
     engine.stop()
 
     print("")
     print("allocations on the IO thread  \(violations)")
     print("path at the end               \(quality?.integrityKey ?? "—")")
+    print(String(format: "processor                     %.2f%% of one core", processorCost))
 
     guard samples.count >= 3 else {
         print("not enough samples to judge")
@@ -1018,6 +1063,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
     }
     if violations > 0 {
         print("\nthe realtime contract broke during the run")
+        failed = true
+    }
+    // Measured at 0.40% of a core for a stereo route at 128 frames. Five
+    // percent is an order of magnitude of headroom and still catches anything
+    // that starts doing real work per sample.
+    if processorCost > 5 {
+        print("\nthe processor cost has grown by an order of magnitude")
         failed = true
     }
     if failed { exit(1) }
