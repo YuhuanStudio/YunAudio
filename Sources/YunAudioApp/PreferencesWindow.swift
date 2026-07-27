@@ -148,7 +148,9 @@ struct PreferencesWindow: View {
                             ($0, "\(Int($0 / 1000)) kHz")
                         })
                     Text(
-                        "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down."
+                        loc(
+                            "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down."
+                        )
                     )
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
@@ -191,7 +193,9 @@ struct PreferencesWindow: View {
 
             if model.hotkeyFailures.isEmpty {
                 Text(
-                    "Registered with the window server, so they work without Input Monitoring permission."
+                    loc(
+                        "Registered with the window server, so they work without Input Monitoring permission."
+                    )
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
@@ -216,9 +220,10 @@ struct PreferencesWindow: View {
                     if let quality = model.pathQuality {
                         YunDetailRow(
                             loc("Integrity"),
-                            value: quality.isBitExact
-                                ? "bit-exact"
-                                : (quality.hasProcessing ? "processed" : "resampled"),
+                            value: loc(
+                                quality.isBitExact
+                                    ? "bit-exact"
+                                    : (quality.hasProcessing ? "processed" : "resampled")),
                             tone: quality.isBitExact ? .success : .warning)
                         YunDetailRow(loc("Sample rate"), value: "\(Int(quality.sampleRate)) Hz")
                         YunDetailRow(
@@ -229,12 +234,13 @@ struct PreferencesWindow: View {
                         YunDetailRow(
                             loc("Clock"),
                             value: model.isClockLocked
-                                ? String(format: "locked · %.6f", model.measuredRateRatio)
-                                : "not locked",
+                                ? String(
+                                    format: loc("locked · %.6f"), model.measuredRateRatio)
+                                : loc("not locked"),
                             tone: model.isClockLocked ? .success : .neutral)
                         if model.isClockLocked {
                             YunDetailRow(
-                                "Crystal error",
+                                loc("Crystal error"),
                                 value: String(
                                     format: "%.1f ppm",
                                     (model.measuredRateRatio - 1) * 1_000_000))
@@ -255,7 +261,9 @@ struct PreferencesWindow: View {
                         value: "\(model.allocationViolations)",
                         tone: model.allocationViolations == 0 ? .success : .warning)
                     Text(
-                        "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app."
+                        loc(
+                            "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app."
+                        )
                     )
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
@@ -275,13 +283,16 @@ struct PreferencesWindow: View {
                     YunDetailRow(loc("Version"), value: "0.1.0")
                     YunDetailRow(
                         loc("Virtual device"),
-                        value: model.isDriverInstalled ? "installed" : "not installed",
+                        value: loc(
+                            model.isDriverInstalled ? "installed" : "not installed"),
                         tone: model.isDriverInstalled ? .success : .warning)
                     YunDetailRow(loc("Licence"), value: "MIT")
                 }
             }
             Text(
-                "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0."
+                loc(
+                    "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0."
+                )
             )
             .font(Yun.Text.caption)
             .foregroundStyle(Yun.Palette.textTertiary)

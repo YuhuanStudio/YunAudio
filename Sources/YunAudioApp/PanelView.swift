@@ -203,7 +203,10 @@ struct PanelView: View {
                 // The Seiren V3 Pro presents three input channels with only the
                 // first carrying the capsule, so this is not an exotic case.
                 Text(
-                    "This device reports \(source.inputChannels) input channels; not all of them necessarily carry audio."
+                    String(
+                        format: loc(
+                            "This device reports %d input channels; not all of them necessarily carry audio."
+                        ), source.inputChannels)
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
@@ -239,7 +242,9 @@ struct PanelView: View {
                 }
                 if model.clockLockFailed {
                     Text(
-                        "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact."
+                        loc(
+                            "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact."
+                        )
                     )
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.warning)
@@ -434,7 +439,9 @@ struct PanelView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Text(
-                        "Removes background noise using the model behind FaceTime's Voice Isolation."
+                        loc(
+                            "Removes background noise using the model behind FaceTime's Voice Isolation."
+                        )
                     )
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)

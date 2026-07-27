@@ -106,19 +106,10 @@
 "Cancel" = "Cancel";
 "Ch" = "Ch";
 "Pick an input and an output to start patching." = "Pick an input and an output to start patching.";
-"playing" = "playing";
 "and %d more" = "and %d more";
 "Show %d background processes" = "Show %d background processes";
 "Hide background processes" = "Hide background processes";
-"No routes are carrying audio." = "No routes are carrying audio.";
-"Start routing to see the mix." = "Start routing to see the mix.";
-"bit-exact" = "bit-exact";
-"processed" = "processed";
-"resampled" = "resampled";
-"Processing means the path is no longer bit-exact. That is the trade, not a fault." = "Processing means the path is no longer bit-exact. That is the trade, not a fault.";
 "%@ is being used instead. Routing works; the path is resampled rather than bit-exact." = "%@ is being used instead. Routing works; the path is resampled rather than bit-exact.";
-"Installing…" = "Installing…";
-"Install" = "Install";
 "Click to start a cable from this channel." = "Click to start a cable from this channel.";
 "Click to pull every cable reaching this channel." = "Click to pull every cable reaching this channel.";
 "Click to land the pending cable here." = "Click to land the pending cable here.";
@@ -133,7 +124,6 @@
 "Dropped" = "Dropped";
 "Show %d more channels" = "Show %d more channels";
 "Fewer channels" = "Fewer channels";
-"Recording" = "Recording";
 "Record" = "Record";
 "Stop recording" = "Stop recording";
 "Start routing before recording." = "Start routing before recording.";
@@ -144,3 +134,5 @@
 "off" = "off";
 "recording" = "recording";
 "idle" = "idle";
+"locked · %.6f" = "locked · %.6f";
+"Crystal error" = "Crystal error";

@@ -51,6 +51,9 @@ enum UIFlowCheck {
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
 
+        print("\nlocalisation")
+        checkLocalisation()
+
         print("\napplication list")
         model.refreshApps()
         check("applications were found", !model.availableApps.isEmpty)
@@ -247,6 +250,56 @@ enum UIFlowCheck {
         check("routes were cleared", model.activeRoutes.isEmpty)
 
         summarise()
+    }
+
+    /// Compares the two string tables against each other.
+    ///
+    /// Seven long strings in the interface were never passed through `loc()`,
+    /// and every one of them already had a Chinese translation sitting in the
+    /// table unused — the table said the work was done and the interface showed
+    /// English anyway. Nothing catches that but comparing the two sides, so it
+    /// is compared on every run.
+    private static func checkLocalisation() {
+        guard let bundle = Bundle(path: Bundle.module.bundlePath) else {
+            note("could not open the resource bundle")
+            return
+        }
+        let tables = ["en", "zh-Hant"].map { language -> (String, [String: String]) in
+            // SwiftPM lowercases .lproj folder names and Bundle's matching is
+            // case-sensitive, which is why this looks the folder up by hand.
+            let contents = try? FileManager.default.contentsOfDirectory(
+                atPath: bundle.bundlePath)
+            let folder = contents?.first {
+                $0.lowercased() == "\(language.lowercased()).lproj"
+            }
+            let path = folder.map { "\(bundle.bundlePath)/\($0)/Localizable.strings" }
+            let table = path.flatMap { NSDictionary(contentsOfFile: $0) as? [String: String] }
+            return (language, table ?? [:])
+        }
+
+        for (language, table) in tables {
+            check("the \(language) table loaded", !table.isEmpty)
+        }
+        guard tables.count == 2, !tables[0].1.isEmpty, !tables[1].1.isEmpty else { return }
+
+        let english = Set(tables[0].1.keys)
+        let chinese = Set(tables[1].1.keys)
+        check("both tables carry the same keys", english == chinese)
+        if english != chinese {
+            note("only in en: \(Array(english.subtracting(chinese).prefix(5)))")
+            note("only in zh: \(Array(chinese.subtracting(english).prefix(5)))")
+        }
+        // An entry translated to itself is either a word that is the same in
+        // both languages or a line someone forgot. Latin text in the Chinese
+        // column is the second kind.
+        let untranslated = tables[1].1.filter { key, value in
+            key == value && value.count > 24
+        }
+        check("no long line is left in English", untranslated.isEmpty)
+        for key in untranslated.keys.sorted().prefix(3) {
+            note("untranslated: \(key.prefix(50))…")
+        }
+        note("\(english.count) keys in each table")
     }
 
     private static func pause(_ seconds: TimeInterval) async {
