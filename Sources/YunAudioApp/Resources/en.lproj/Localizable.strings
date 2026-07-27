@@ -176,3 +176,8 @@
 "the signal did not come back" = "the signal did not come back";
 "Mean error" = "Mean error";
 "Nothing recognisable came back. The output may not loop back to its own input, or something else is writing to the same channel." = "Nothing recognisable came back. The output may not loop back to its own input, or something else is writing to the same channel.";
+"A device in the route was unplugged." = "A device in the route was unplugged.";
+"Pick an input and an output first." = "Pick an input and an output first.";
+"The input and the output cannot be the same device." = "The input and the output cannot be the same device.";
+"The selected applications could not be captured." = "The selected applications could not be captured.";
+"Those two devices share no usable channels." = "Those two devices share no usable channels.";

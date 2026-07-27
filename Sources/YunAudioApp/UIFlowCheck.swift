@@ -270,6 +270,48 @@ enum UIFlowCheck {
                     .allSatisfy { offered.contains($0.destination.channel) })
         }
 
+        print("\ndevice changes")
+        // A real change to the device list, not a simulated one: creating an
+        // aggregate makes CoreAudio publish kAudioHardwarePropertyDevices, which
+        // is the same notification an unplug produces. What is being checked is
+        // that the watcher is actually wired and that a change to devices the
+        // route does not use leaves the route alone.
+        let cyclesBeforeChange = model.cycleCountForDiagnostics
+        let deviceCountBefore = model.outputDevices.count
+        if let destination = model.selectedDestination,
+            let decoy = try? AggregateDevice(
+                name: "YunAudio Flow Check",
+                subDevices: [.init(uid: destination.uid, driftCompensation: true)],
+                clockMasterUID: destination.uid)
+        {
+            await pause(1.0)
+            check(
+                "the device list picked up the new device",
+                model.outputDevices.count > deviceCountBefore)
+            check("an unrelated device did not stop the route", model.isRunning)
+            check(
+                "audio kept flowing across the change",
+                model.cycleCountForDiagnostics > cyclesBeforeChange)
+            check("no error was reported", model.lastError == nil)
+
+            // Stopping on purpose must clear the interruption flag, or the
+            // next device change resurrects a route the user put down.
+            model.stop()
+            await waitUntil("it came down", { !model.isRunning }, timeout: 5)
+            decoy.destroy()
+            await pause(1.5)
+            check("a deliberate stop stays stopped across a change", !model.isRunning)
+            model.start()
+            await waitUntil("it came back", { model.isRunning }, timeout: 5)
+            await pause(0.5)
+            check(
+                "the device list picked up the removal",
+                model.outputDevices.count == deviceCountBefore)
+            check("still running after the removal", model.isRunning)
+        } else {
+            note("could not build a decoy device — skipped")
+        }
+
         print("\nintegrity check")
         // The project's central claim, and until now it could only be made from
         // a terminal: somebody who installs the app had no way to find out

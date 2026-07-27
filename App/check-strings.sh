@@ -4,18 +4,18 @@
 #
 # The flow check compares the two string tables against each other and walks
 # every label built from an enum, but neither can see a literal that was passed
-# straight to a view — and four of those survived every other check, including
-# the whole preferences sidebar and "Open at login" sitting in English beside
-# Chinese content. The literals that were wrapped correctly look exactly like
-# the ones that were not, so this is a job for a scanner rather than for
-# reading.
+# straight to a view or assigned to something the interface reads — and nine of
+# those survived every other check, including the whole preferences sidebar and
+# every error message the router can produce. The literals that were wrapped
+# correctly look exactly like the ones that were not, so this is a job for a
+# scanner rather than for reading.
 #
 #   ./App/check-strings.sh
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-python3 - "$@" <<'PYTHON'
+python3 - <<'PYTHON'
 import pathlib
 import re
 import sys
@@ -23,27 +23,48 @@ import sys
 # Views that take a user-visible string as their first argument.
 CONSTRUCTORS = (
     "Text", "Toggle", "Button", "YunBadge", "YunStatusPill", "YunDetailRow",
-    "YunEmptyState", "YunDisclosure", "YunCard",
+    "YunEmptyState", "YunDisclosure",
 )
-PATTERN = re.compile(
-    r"\b(" + "|".join(CONSTRUCTORS) + r")\(\s*\n?\s*(\"(?:[^\"\\\\]|\\\\.)+\")"
+CONSTRUCTED = re.compile(
+    r"\b(" + "|".join(CONSTRUCTORS) + r")\(\s*\n?\s*(\"(?:[^\"\\]|\\.)+\")"
 )
-# Literals that carry no words: symbols, numbers, units, interpolation only.
-WORDLESS = re.compile(r'"[\s\d%@.,:;·×→←+\-/()]*"')
+
+# Assignments to something the interface displays. Five user-facing error
+# messages sat in English behind these for the life of the project, because an
+# assignment is not a view argument and the constructor scan could not see them.
+ASSIGNED = re.compile(
+    r"\b(\w*[Ee]rror|\w*[Mm]essage|\w*[Tt]itle|\w*[Ss]ubtitle|\w*[Dd]etail)"
+    r"\s*=\s*(\"(?:[^\"\\]|\\.)+\")"
+)
+
+INTERPOLATION = re.compile(r"\\\((?:[^()]|\([^()]*\))*\)")
+
+
+def carries_words(literal):
+    """True when what is left after the values is something a person reads."""
+    # An interpolated value is not a label: "\(count) items" is one, "×\(count)"
+    # is not, and the difference is whether any letters survive the strip.
+    text = INTERPOLATION.sub("", literal[1:-1])
+    return any(character.isalpha() for character in text)
+
+
+# The verification harnesses print for whoever is running them, not for the
+# person using the app, so their strings are deliberately not translated.
+HARNESSES = {"WindowCapture.swift", "PanelRenderer.swift", "UIFlowCheck.swift"}
 
 failures = []
 for directory in ("Sources/YunAudioApp", "Sources/YunDesign"):
     for path in sorted(pathlib.Path(directory).glob("*.swift")):
+        if path.name in HARNESSES:
+            continue
         source = path.read_text()
-        for match in PATTERN.finditer(source):
-            literal = match.group(2)
-            if WORDLESS.fullmatch(literal):
-                continue
-            # An interpolation with no literal words is a value, not a label.
-            if re.fullmatch(r'"\\\\\(.*\)"', literal):
-                continue
-            line = source[: match.start()].count("\n") + 1
-            failures.append(f"{path}:{line}: {match.group(1)}({literal})")
+        for pattern in (CONSTRUCTED, ASSIGNED):
+            for match in pattern.finditer(source):
+                literal = match.group(2)
+                if not carries_words(literal):
+                    continue
+                line = source[: match.start()].count("\n") + 1
+                failures.append(f"{path}:{line}: {match.group(1)} {literal}")
 
 if failures:
     print("user-facing literals not passed through loc():\n")

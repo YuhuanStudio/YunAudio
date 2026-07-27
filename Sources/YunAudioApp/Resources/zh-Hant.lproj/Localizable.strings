@@ -176,3 +176,8 @@
 "the signal did not come back" = "訊號沒有回來";
 "Mean error" = "平均誤差";
 "Nothing recognisable came back. The output may not loop back to its own input, or something else is writing to the same channel." = "沒有收回任何可辨識的訊號。這個輸出可能不會迴路回自己的輸入，或是有別的東西正在寫同一個聲道。";
+"A device in the route was unplugged." = "路由中的某個裝置被拔除了。";
+"Pick an input and an output first." = "請先選擇輸入與輸出。";
+"The input and the output cannot be the same device." = "輸入與輸出不能是同一個裝置。";
+"The selected applications could not be captured." = "無法擷取所選的應用程式。";
+"Those two devices share no usable channels." = "這兩個裝置之間沒有可用的聲道。";

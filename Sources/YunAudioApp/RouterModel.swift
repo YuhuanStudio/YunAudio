@@ -746,6 +746,15 @@ final class RouterModel {
         monoChannel = 0
     }
 
+    /// True when routing stopped because hardware went away, rather than
+    /// because anybody asked it to.
+    ///
+    /// A flag of its own, not `lastError != nil`. Using the error as the marker
+    /// meant that any unrelated failure — a start that found no usable
+    /// channels, a recording that could not be written — armed the resume, and
+    /// then plugging in headphones started routing that nobody had asked for.
+    private var wasInterruptedByDeviceLoss = false
+
     private func handleDeviceChange() {
         refreshDevices()
         let sourceGone =
@@ -759,9 +768,11 @@ final class RouterModel {
 
         if isRunning, sourceGone || destinationGone {
             stop()
-            lastError = "a device in the route was unplugged"
-        } else if !isRunning, lastError != nil, !sourceGone, !destinationGone {
+            wasInterruptedByDeviceLoss = true
+            lastError = loc("A device in the route was unplugged.")
+        } else if !isRunning, wasInterruptedByDeviceLoss, !sourceGone, !destinationGone {
             // Everything is back; pick up where we left off.
+            wasInterruptedByDeviceLoss = false
             lastError = nil
             start()
         }
@@ -803,11 +814,11 @@ final class RouterModel {
     func start(selftest: Bool) {
         guard !isBusy else { return }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
-            lastError = "pick an input and an output first"
+            lastError = loc("Pick an input and an output first.")
             return
         }
         guard source != destination else {
-            lastError = "the input and output cannot be the same device"
+            lastError = loc("The input and the output cannot be the same device.")
             return
         }
         refreshApps()
@@ -832,12 +843,12 @@ final class RouterModel {
                                 deviceUID: destination, channel: channel)))
                 }
             } else {
-                lastError = "could not capture the selected applications"
+                lastError = loc("The selected applications could not be captured.")
             }
         }
 
         guard !routeList.isEmpty else {
-            lastError = "no usable channels between those devices"
+            lastError = loc("Those two devices share no usable channels.")
             return
         }
 
@@ -895,7 +906,10 @@ final class RouterModel {
         }
     }
 
-    func stop() { stop(then: nil) }
+    func stop() {
+        wasInterruptedByDeviceLoss = false
+        stop(then: nil)
+    }
 
     /// - Parameter completion: Runs on the main actor once the engine is fully
     ///   down and `isBusy` has been cleared, so a caller can start again.
