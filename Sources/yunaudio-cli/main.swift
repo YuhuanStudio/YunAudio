@@ -464,6 +464,106 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     exit(0)
 }
 
+// Measures how much echo the canceller actually removes.
+//
+// A tone is played through the speaker and the microphone level is measured
+// twice over the same acoustic path — once with voice processing active, once
+// bypassed. Everything but the canceller is identical between the two, so the
+// difference is the cancellation.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard let mic = all.first(where: { $0.name.contains("MacBook") && $0.hasInput }),
+          let speaker = all.first(where: { $0.name.contains("MacBook") && $0.hasOutput })
+    else { print("need the built-in microphone and speakers"); exit(1) }
+
+    guard let capture = EchoCancellingCapture(
+        microphoneUID: mic.uid, speakerUID: speaker.uid)
+    else { print("could not set up the unit"); exit(1) }
+
+    // Accumulators are touched by the audio thread and the main thread, so they
+    // go behind a lock. Without one, Swift's exclusivity checking traps the
+    // process the moment both threads reach the same property — which is
+    // exactly what happened the first time this was written.
+    final class State: @unchecked Sendable {
+        private let lock = NSLock()
+        var phase: Float = 0        // audio thread only
+        private var sum: Double = 0
+        private var count: Int = 0
+        private var measuring = false
+
+        func beginMeasuring() {
+            lock.lock(); defer { lock.unlock() }
+            sum = 0; count = 0; measuring = true
+        }
+
+        func endMeasuring() -> (sum: Double, count: Int) {
+            lock.lock(); defer { lock.unlock() }
+            measuring = false
+            return (sum, count)
+        }
+
+        func accumulate(_ energy: Double, frames: Int) {
+            lock.lock(); defer { lock.unlock() }
+            guard measuring else { return }
+            sum += energy
+            count += frames
+        }
+    }
+    let state = State()
+    let rate = Float(capture.sampleRate)
+
+    // A quiet 440 Hz tone. Loud enough to be picked up by a microphone a few
+    // centimetres away, quiet enough not to be unpleasant.
+    let amplitude: Float = 0.1
+    let increment = 2 * Float.pi * 440 / rate
+
+    _ = capture.start(capture: { samples, count, _ in
+        var energy: Double = 0
+        for index in 0..<count {
+            let value = Double(samples[index])
+            energy += value * value
+        }
+        state.accumulate(energy, frames: count)
+    }, farEnd: { buffer, frames in
+        for index in 0..<frames {
+            buffer[index] = sin(state.phase) * amplitude
+            state.phase += increment
+            if state.phase > 2 * .pi { state.phase -= 2 * .pi }
+        }
+        return frames
+    })
+
+    func measure(bypassed: Bool, label: String) -> Double {
+        capture.setBypassed(bypassed)
+        Thread.sleep(forTimeInterval: 0.8)   // let the canceller settle
+        state.beginMeasuring()
+        Thread.sleep(forTimeInterval: 2.0)
+        let (sum, count) = state.endMeasuring()
+        guard count > 0 else { return -120 }
+        let rms = (sum / Double(count)).squareRoot()
+        let db = rms > 0 ? 20 * log10(rms) : -120
+        print(String(format: "  %@  %.1f dBFS RMS", label, db))
+        return db
+    }
+
+    print("playing a quiet 440 Hz tone through \(speaker.name)")
+    print("measuring \(mic.name)\n")
+    let bypassed = measure(bypassed: true, label: "processing bypassed")
+    let processed = measure(bypassed: false, label: "processing active   ")
+    capture.stop()
+
+    let reduction = bypassed - processed
+    print(String(format: "\n  echo reduction: %.1f dB", reduction))
+    if reduction > 6 {
+        print("  the canceller is removing the speaker signal from the microphone")
+    } else if reduction > 0 {
+        print("  some reduction, but less than a canceller should manage")
+    } else {
+        print("  no measurable reduction — the far end is not reaching the canceller")
+    }
+    exit(0)
+}
+
 // Runs echo-cancelled capture against a real microphone/speaker pair.
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
     let micMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "MacBook Pro的麥克風"

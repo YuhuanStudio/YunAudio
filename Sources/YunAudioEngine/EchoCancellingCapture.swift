@@ -228,6 +228,19 @@ public final class EchoCancellingCapture {
         return true
     }
 
+    /// Turns the voice processing off while leaving the same IO path in place.
+    ///
+    /// This is what makes the effect measurable: with bypass on and off the
+    /// acoustic path, the devices, the buffer size and the signal are all
+    /// identical, so the difference in what the microphone returns is the
+    /// cancellation and nothing else.
+    public func setBypassed(_ bypassed: Bool) {
+        var value: UInt32 = bypassed ? 1 : 0
+        AudioUnitSetProperty(
+            unit, AudioUnitPropertyID(kAUVoiceIOProperty_BypassVoiceProcessing),
+            kAudioUnitScope_Global, 0, &value, UInt32(MemoryLayout<UInt32>.size))
+    }
+
     public func stop() {
         guard isRunning else { return }
         AudioOutputUnitStop(unit)
