@@ -143,6 +143,106 @@ struct LoudnessReadout: View {
             }
 
             verdict
+            YunDivider()
+            autoLevel
+        }
+    }
+
+    /// The levelling loop, and what the model is hearing.
+    ///
+    /// The two belong together: the classifier's verdict is the reason the
+    /// levelling can be trusted, and showing it is what stops the feature being
+    /// a black box. When it says it is waiting, the readout says why.
+    @ViewBuilder
+    private var autoLevel: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Toggle(isOn: $model.isAutoLevelling) { EmptyView() }
+                .toggleStyle(YunToggleStyle())
+                .labelsHidden()
+            VStack(alignment: .leading, spacing: 1) {
+                Text(loc("Hold this level automatically"))
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                Text(
+                    loc(
+                        "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+
+        HStack(spacing: Yun.Space.sm) {
+            heardBadge
+            Spacer(minLength: 0)
+            if model.isAutoLevelling {
+                Text(autoLevelState)
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(
+                        model.autoLevelIsAtLimit
+                            ? Yun.Palette.warning : Yun.Palette.textTertiary
+                    )
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private var autoLevelState: String {
+        if model.autoLevelIsAtLimit { return loc("out of range") }
+        if model.autoLevelIsWaiting { return loc("waiting for speech") }
+        return String(format: "%+.1f dB", model.autoLevelOffset)
+    }
+
+    /// What the classifier hears, as a small badge.
+    private var heardBadge: some View {
+        HStack(spacing: 5) {
+            Image(systemName: symbol(for: model.heardVerdict))
+                .font(.system(size: 10))
+            Text(title(for: model.heardVerdict))
+                .font(Yun.Text.caption)
+        }
+        .foregroundStyle(tint(for: model.heardVerdict))
+        .padding(.horizontal, Yun.Space.sm)
+        .padding(.vertical, 3)
+        .background(
+            tint(for: model.heardVerdict).opacity(0.12),
+            in: .rect(cornerRadius: Yun.Radius.pill)
+        )
+        // The model's own label is finer than the badge, and is what somebody
+        // debugging their room actually wants.
+        .help(model.analysis.verdictLabel)
+    }
+
+    private func symbol(for verdict: SoundClassifier.Verdict) -> String {
+        switch verdict {
+        case .speech: "waveform"
+        case .typing: "keyboard"
+        case .music: "music.note"
+        case .noise: "wind"
+        case .quiet: "moon.zzz"
+        }
+    }
+
+    private func title(for verdict: SoundClassifier.Verdict) -> String {
+        switch verdict {
+        case .speech: loc("Speech")
+        case .typing: loc("Typing")
+        case .music: loc("Music")
+        case .noise: loc("Room noise")
+        case .quiet: loc("Quiet")
+        }
+    }
+
+    private func tint(for verdict: SoundClassifier.Verdict) -> Color {
+        switch verdict {
+        case .speech: Yun.Palette.success
+        case .typing: Yun.Palette.warning
+        case .music: Yun.Palette.info
+        case .noise: Yun.Palette.textTertiary
+        case .quiet: Yun.Palette.textMuted
         }
     }
 

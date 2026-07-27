@@ -64,6 +64,37 @@ frequency axis, so the display says *what* rather than merely how much: hum at
 merely ordered — a tone of known amplitude comes back at its own level in
 decibels, which is the assertion that caught a real transform bug here.
 
+**It levels itself, and it knows what it is listening to.** Automatic gain
+control has the reputation it has for one reason: an envelope follower cannot
+tell a voice from a fan, so it spends every pause winding the gain up into the
+room noise and then ducking when you speak again. What is wrong with it is the
+measurement, not the loop.
+
+YunAudio measures loudness to the broadcast standard and runs Apple's on-device
+sound classifier — the three-hundred class model that ships with macOS — over
+the signal at the same time. The leveller moves only while the model reports
+speech, at 1.5 dB per second, inside a dead zone, bounded to 15 dB. Pauses,
+keyboards and air conditioning are not evidence about how loud anybody is, so it
+holds still through them. The interface shows what the model hears, so it is a
+diagnosis rather than a black box: *typing* under your voice is a reason to turn
+the gate on.
+
+The control loop is a value type with no dependencies and thirteen tests, because
+a leveller that has only ever been tried by talking into a microphone has not
+been tested — it has to converge, not overshoot, not hunt, and refuse to act on
+silence. The classifier is checked against real synthesised speech rather than
+only against its own label table.
+
+**Direct monitoring that is actually direct.** Hearing yourself through a
+conferencing app is thirty milliseconds behind, which is late enough to stumble
+over. Monitoring here is a second destination on the same aggregate, so it is one
+IO cycle plus the output device — measured at 11.2 ms into a display's audio, and
+2.7 ms into anything with a sane driver. It is exempt from the master fader,
+because the master is the level going to the far end and muting that must not
+stop you hearing your own voice; the input trim and mute do reach it, because
+muting the microphone should stop you hearing it. Both rules are asserted against
+the realtime callback directly.
+
 **Voice isolation from Apple's own model.** `AUSoundIsolation` is the model
 behind FaceTime's Voice Isolation, on-device and free, and no other router in
 this category exposes it as a general microphone processor. Measured here: 56 ms

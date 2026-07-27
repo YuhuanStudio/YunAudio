@@ -95,8 +95,17 @@ if [[ "${VERIFY}" == "1" ]]; then
 	set -e
 	mv "${ISOLATED}/.build-hidden" .build
 	if [[ "${STATUS}" != "0" ]]; then
-		echo "error: the app is not self-contained" >&2
-		head -5 "${ISOLATED}/out.txt" >&2
+		# The isolated run is the flow check, so a non-zero exit means either
+		# the bundle is incomplete or a flow failed. Saying "not
+		# self-contained" for both sent an hour chasing a missing resource
+		# bundle that was present all along.
+		if grep -q "flow(s) failed" "${ISOLATED}/out.txt"; then
+			echo "error: the bundle is fine, but flows failed:" >&2
+			sed -n '/flow(s) failed/,$p' "${ISOLATED}/out.txt" >&2
+		else
+			echo "error: the app is not self-contained" >&2
+			head -5 "${ISOLATED}/out.txt" >&2
+		fi
 		rm -rf "${ISOLATED}"
 		exit 1
 	fi

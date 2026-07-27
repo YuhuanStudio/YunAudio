@@ -283,6 +283,11 @@ struct MainWindow: View {
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
                             label: loc("Output level"))
 
+                        if !model.monitorOptions.isEmpty {
+                            YunDivider()
+                            monitor
+                        }
+
                         if let source = model.selectedSource, source.inputChannels > 1 {
                             YunDivider()
                             YunSegmented(
@@ -337,6 +342,58 @@ struct MainWindow: View {
                     }
                 }
             }
+        }
+    }
+
+    /// Hearing yourself, on a second output.
+    ///
+    /// It sits with the devices rather than under processing because it is not
+    /// processing — nothing about the signal going to the far end changes. It
+    /// is a second destination, which is exactly what the picker says.
+    @ViewBuilder
+    private var monitor: some View {
+        deviceRow(loc("Monitor"), symbol: "headphones") {
+            YunSelect(
+                selection: $model.monitorDeviceUID,
+                placeholder: loc("Off"),
+                options: [.init(value: String?.none, title: loc("Off"))]
+                    + model.monitorOptions.map {
+                        .init(
+                            value: $0.uid as String?, title: $0.name,
+                            detail: "\($0.outputChannels)ch")
+                    })
+        }
+        if model.monitorDeviceUID != nil {
+            HStack(spacing: Yun.Space.sm) {
+                Image(systemName: "speaker.wave.1")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Yun.Palette.textMuted)
+                    .frame(width: 22, height: 22)
+                YunSlider(
+                    fraction: Binding(
+                        get: { Double(model.monitorFraction) },
+                        set: { model.monitorFraction = Float($0) }))
+                Text(model.monitorLabel)
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .monospacedDigit()
+                    .frame(width: 58, alignment: .trailing)
+            }
+            Text(
+                model.monitorMayFeedBack
+                    ? loc(
+                        "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to."
+                    )
+                    : String(
+                        format: loc("Hear yourself, %@ ms behind."),
+                        String(format: "%.1f", model.monitorLatencyMilliseconds))
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(
+                model.monitorMayFeedBack
+                    ? Yun.Palette.warning : Yun.Palette.textTertiary
+            )
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 

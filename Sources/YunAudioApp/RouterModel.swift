@@ -192,6 +192,102 @@ final class RouterModel {
         }
     }
 
+    // MARK: Direct monitoring
+
+    /// Where the microphone is also sent so the user can hear themselves, or
+    /// nil when monitoring is off.
+    ///
+    /// This goes through the same IOProc cycle as everything else, so the delay
+    /// is one buffer plus the output device's own — 2.7 ms at 128 frames, which
+    /// is below what anybody perceives as an echo of their own voice. Software
+    /// monitoring through a conferencing app is typically thirty times that,
+    /// which is why people reach for a mixer instead.
+    var monitorDeviceUID: String? {
+        didSet {
+            guard oldValue != monitorDeviceUID else { return }
+            persist()
+            restartIfRunning()
+        }
+    }
+
+    /// How loud the monitor is, independent of everything else.
+    var monitorDecibels: Float = -6 {
+        didSet {
+            guard oldValue != monitorDecibels else { return }
+            applyMonitorGain()
+            persist()
+        }
+    }
+
+    /// Outputs that can be monitored on: anything with output channels that is
+    /// not already carrying the mix, and never our own virtual device — sending
+    /// the microphone back into the thing the far end is listening to is a loop,
+    /// not a monitor.
+    var monitorOptions: [AudioDevice] {
+        outputDevices.filter {
+            $0.uid != selectedDestinationUID && $0.uid != selectedSourceUID
+                && !$0.name.localizedCaseInsensitiveContains("YunAudio")
+        }
+    }
+
+    /// True when the chosen monitor is a loudspeaker rather than headphones, as
+    /// far as its transport can say. Monitoring on speakers puts the microphone
+    /// into the room the microphone is in, which is feedback.
+    var monitorMayFeedBack: Bool {
+        guard let uid = monitorDeviceUID,
+            let device = outputDevices.first(where: { $0.uid == uid })
+        else { return false }
+        let name = device.name.lowercased()
+        let headphoneWords = ["headphone", "耳機", "earphone", "headset", "airpods"]
+        return !headphoneWords.contains { name.contains($0) }
+    }
+
+    /// The index of the monitor routes inside `activeRoutes`, so the gain can be
+    /// pushed without rebuilding.
+    @ObservationIgnored private var monitorRouteIndices: [Int] = []
+
+    /// The monitor fader as a 0...1 travel, matching the hardware gain slider
+    /// beside it rather than the decibel rows above.
+    var monitorFraction: Float {
+        get {
+            let span = -Self.minimumDecibels
+            return max(0, min(1, (monitorDecibels - Self.minimumDecibels) / span))
+        }
+        set {
+            let span = -Self.minimumDecibels
+            monitorDecibels = Self.minimumDecibels + max(0, min(1, newValue)) * span
+        }
+    }
+
+    var monitorLabel: String {
+        monitorDecibels <= Self.minimumDecibels
+            ? "−∞ dB" : String(format: "%+.1f dB", monitorDecibels)
+    }
+
+    /// What the monitor actually costs, end to end.
+    ///
+    /// One IO cycle through the shared aggregate plus the output device's own
+    /// reported latency and safety offset. Quoting only the buffer would be the
+    /// flattering number rather than the true one.
+    var monitorLatencyMilliseconds: Double {
+        let rate = pathQuality?.sampleRate ?? 48000
+        guard rate > 0 else { return 0 }
+        let bufferFrames = Double(pathQuality?.bufferFrames ?? Int(self.bufferFrames))
+        let device = monitorDeviceUID.flatMap { uid in
+            outputDevices.first(where: { $0.uid == uid })
+        }
+        let deviceFrames = Double(
+            device?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0)
+        return (bufferFrames + deviceFrames) / rate * 1000
+    }
+
+    private func applyMonitorGain() {
+        let gain = Self.gain(fromDecibels: monitorDecibels)
+        for index in monitorRouteIndices {
+            engine.setGain(gain, forRouteAt: index)
+        }
+    }
+
     /// Below this the fader reads as −∞ and the gain is exactly zero, so the
     /// bottom of the travel is silence rather than something very quiet.
     static let minimumDecibels: Float = -40
@@ -828,7 +924,11 @@ final class RouterModel {
     /// Label for one source channel, named where the device is known.
     func sourceChannelLabel(_ channel: Int) -> String {
         if let names = sourceChannelNames, channel < names.count {
-            return names[channel].name
+            // Through loc() like everything else. The translations for these
+            // were in both tables from the day the names were added and the
+            // label was returning the raw English, so a Chinese interface
+            // showed "After the expander" next to "單聲道".
+            return loc(names[channel].name)
         }
         return "\(loc("Ch")) \(channel + 1)"
     }
@@ -982,6 +1082,15 @@ final class RouterModel {
         isOutputMuted = saved.isOutputMuted ?? false
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
+        monitorDecibels = saved.monitorDecibels ?? -6
+        isAutoLevelling = saved.isAutoLevelling ?? false
+        // Only restored when the device is actually present: a monitor pointing
+        // at headphones that are not plugged in would fail the whole start.
+        if let uid = saved.monitorDeviceUID,
+            outputDevices.contains(where: { $0.uid == uid })
+        {
+            monitorDeviceUID = uid
+        }
         style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
         YunTheme.shared.style = style
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
@@ -1004,7 +1113,7 @@ final class RouterModel {
     }
 
     private func persist() {
-        guard !isRestoring, !isApplyingPreset else { return }
+        guard !isRestoring, !isApplyingPreset, !isAutoAdjusting else { return }
         PreferencesStore.save(
             Preferences(
                 sourceDeviceUID: selectedSourceUID,
@@ -1029,7 +1138,10 @@ final class RouterModel {
                 isInputMuted: isInputMuted,
                 outputDecibels: outputDecibels,
                 isOutputMuted: isOutputMuted,
-                loudnessTarget: loudnessTarget.rawValue))
+                loudnessTarget: loudnessTarget.rawValue,
+                monitorDeviceUID: monitorDeviceUID,
+                monitorDecibels: monitorDecibels,
+                isAutoLevelling: isAutoLevelling))
     }
 
     // MARK: Devices
@@ -1208,6 +1320,31 @@ final class RouterModel {
             }
         }
 
+        // Monitoring last, so its routes sit at the end and their indices are
+        // stable regardless of how many applications are being captured.
+        monitorRouteIndices = []
+        if let monitorUID = monitorDeviceUID,
+            let monitor = outputDevices.first(where: { $0.uid == monitorUID }),
+            let sourceDevice = selectedSource
+        {
+            let monitorChannels = min(2, monitor.outputChannels)
+            let gain = Self.gain(fromDecibels: monitorDecibels)
+            let sourceChannel = min(monoChannel, max(0, sourceDevice.inputChannels - 1))
+            for channel in 0..<monitorChannels {
+                // Mono sources feed both ears; a stereo source keeps its sides.
+                let takenChannel =
+                    channelMode == .stereo
+                    ? min(channel, sourceDevice.inputChannels - 1) : sourceChannel
+                monitorRouteIndices.append(routeList.count)
+                routeList.append(
+                    Route(
+                        source: ChannelRef(
+                            deviceUID: sourceDevice.uid, channel: takenChannel),
+                        destination: ChannelRef(deviceUID: monitorUID, channel: channel),
+                        gain: gain))
+            }
+        }
+
         guard !routeList.isEmpty else {
             lastError = loc("Those two devices share no usable channels.")
             return
@@ -1230,6 +1367,7 @@ final class RouterModel {
         // and asking someone to name that twice would be asking them to do the
         // app's job.
         let echo = echoSettings(fallbackProcessIDs: processIDs)
+        let monitor = monitorDeviceUID
         // Copied so the queue closure and the main actor are not reading and
         // writing the same array. Route is a value type, so this is a real copy.
         let routes = routeList
@@ -1243,6 +1381,7 @@ final class RouterModel {
                     destinationDeviceUID: destination,
                     routes: routes,
                     taps: handle.taps,
+                    monitorDeviceUID: monitor,
                     effects: effects,
                     preferredSampleRate: rate,
                     bufferFrames: buffer,
@@ -1435,7 +1574,13 @@ final class RouterModel {
         // hand the loudness meter a stream with holes in it and report an
         // integrated figure for audio it never saw.
         analyser?.drain(from: engine)
-        if isAnalysisVisible { analysis = analyser?.reading() ?? .silent }
+        // The reading is published whenever the window wants it, and also
+        // whenever the levelling loop needs it — it cannot act on a number
+        // nobody refreshed.
+        if isAnalysisVisible || isAutoLevelling {
+            analysis = analyser?.reading() ?? .silent
+        }
+        if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
         lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
@@ -1473,6 +1618,78 @@ final class RouterModel {
     var loudnessOffset: Double? {
         guard analysis.duration >= 10, analysis.integrated.isFinite else { return nil }
         return analysis.integrated - loudnessTarget.lufs
+    }
+
+    // MARK: Automatic levelling
+
+    /// Holds the microphone at the chosen platform's loudness, by itself.
+    ///
+    /// What makes this different from the automatic gain control everybody
+    /// turns off is what it measures and when it acts: loudness to the
+    /// broadcast standard rather than an envelope, and only while Apple's
+    /// on-device model says it is hearing speech. A conventional AGC has no way
+    /// to tell a voice from a fan, so it spends every pause winding the gain up
+    /// into the room noise.
+    var isAutoLevelling = false {
+        didSet {
+            guard oldValue != isAutoLevelling else { return }
+            if isAutoLevelling {
+                autoLevel.reset()
+                autoLevelBase = inputDecibels
+                autoLevelTick = Date()
+                autoLevelOffset = 0
+            }
+            persist()
+        }
+    }
+
+    @ObservationIgnored private var autoLevel = AutoLevel()
+    /// The trim as the user left it. The loop works relative to this rather
+    /// than absolutely, so switching it off leaves them where they started.
+    @ObservationIgnored private var autoLevelBase: Float = 0
+    @ObservationIgnored private var autoLevelTick = Date()
+    /// True while the loop is driving the trim, so the trim's own persistence
+    /// does not write to disk twenty times a second.
+    @ObservationIgnored private var isAutoAdjusting = false
+
+    /// How far the loop has moved the trim, in decibels.
+    private(set) var autoLevelOffset: Double = 0
+    /// True when it is holding still because there is nothing to act on.
+    var autoLevelIsWaiting: Bool { autoLevel.isWaiting }
+    /// True when it has run out of range and the setup needs a human.
+    var autoLevelIsAtLimit: Bool { autoLevel.isAtLimit }
+
+    /// What the on-device model hears right now.
+    var heardVerdict: SoundClassifier.Verdict { analysis.verdict }
+    var heardConfidence: Double { analysis.verdictConfidence }
+
+    private func stepAutoLevel() {
+        let now = Date()
+        // Clamped: the first tick after switching it on, or after the app was
+        // suspended, would otherwise be a single step of many decibels — the
+        // slew limit is per second and would faithfully allow it.
+        let elapsed = min(0.5, max(0, now.timeIntervalSince(autoLevelTick)))
+        autoLevelTick = now
+
+        // The reading comes off the bus after the master, so the master is
+        // taken back out before the loop sees it. Without that, pulling the
+        // master down makes the loop push the microphone up to compensate and
+        // the master quietly stops doing anything.
+        let master = isOutputMuted ? Double.infinity : Double(outputDecibels)
+        let preMaster = analysis.shortTerm - master
+
+        let offset = autoLevel.update(
+            loudness: preMaster,
+            target: loudnessTarget.lufs,
+            hearsSpeech: analyser?.classifier?.hearsSpeech ?? false,
+            elapsed: elapsed)
+        autoLevelOffset = offset
+
+        let wanted = autoLevelBase + Float(offset)
+        guard abs(wanted - inputDecibels) > 0.01 else { return }
+        isAutoAdjusting = true
+        inputDecibels = wanted
+        isAutoAdjusting = false
     }
 
     /// Starts the integrated measurement over.

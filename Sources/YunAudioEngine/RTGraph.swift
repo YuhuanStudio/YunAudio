@@ -114,6 +114,25 @@ struct RTGraph {
     var recordScratch: UnsafeMutablePointer<Float>
     var recordScratchCapacity: Int32
 
+    /// Which output buffer is the destination the router is actually feeding.
+    ///
+    /// Everything that means "what the far end receives" — the recorder, the
+    /// loudness meter, the spectrum — has to read this one. They all used
+    /// `output[0]` on the assumption that there is only ever one destination,
+    /// which stopped being true the moment monitoring could send the microphone
+    /// somewhere else as well: the aggregate lists sub-devices in its own order,
+    /// so buffer zero can perfectly well be the headphones.
+    var mainOutputBuffer: Int32
+
+    /// An output buffer the master fader does not apply to, or -1 for none.
+    ///
+    /// This is the monitor. The master is the level going to the far end, and
+    /// pulling it down — or muting it — must not take away the ability to hear
+    /// yourself. The input trim and input mute *do* reach the monitor, through
+    /// the route's own `appliesInputTrim`, which is the behaviour anybody
+    /// expects: muting the microphone should stop you hearing it.
+    var masterExemptBuffer: Int32
+
     /// Trim on the microphone, applied before any route reads it, and the
     /// master on the output bus, applied after everything is mixed into it.
     ///
@@ -276,6 +295,8 @@ struct RTGraph {
                 recordChannels: 0,
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
+                mainOutputBuffer: 0,
+                masterExemptBuffer: -1,
                 inputGain: 1,
                 inputMuted: 0,
                 outputGain: 1,
@@ -404,6 +425,9 @@ func yunAudioIOProc(
     let input = UnsafeMutableAudioBufferListPointer(
         UnsafeMutablePointer(mutating: inputData))
     let output = UnsafeMutableAudioBufferListPointer(outputData)
+    // The destination the router is feeding, which is not necessarily buffer
+    // zero once monitoring adds a second output device to the aggregate.
+    let mainIndex = Int(graph.pointee.mainOutputBuffer)
 
     // CoreAudio does not promise a zeroed output buffer, and routes accumulate
     // into it, so clear first. Any channel with no route feeding it must end up
@@ -422,10 +446,10 @@ func yunAudioIOProc(
     // repeating audio here would be heard as a stutter and would also give the
     // canceller a phantom to chase.
     graph.pointee.cancelledFrames = 0
-    if let ring = graph.pointee.cancelledRing, output.count > 0 {
-        let stride = max(1, Int(output[0].mNumberChannels))
+    if let ring = graph.pointee.cancelledRing, mainIndex < output.count {
+        let stride = max(1, Int(output[mainIndex].mNumberChannels))
         let wanted = min(
-            Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride),
+            Int(output[mainIndex].mDataByteSize) / (MemoryLayout<Float>.size * stride),
             Int(graph.pointee.cancelledCapacity))
         if wanted > 0 {
             let buffer = graph.pointee.cancelledBuffer
@@ -575,7 +599,8 @@ func yunAudioIOProc(
     // is what the far end hears — which is the recorder's whole premise.
     let master = graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain
     if master != 1 {
-        for index in 0..<output.count {
+        let exempt = Int(graph.pointee.masterExemptBuffer)
+        for index in 0..<output.count where index != exempt {
             guard let data = output[index].mData else { continue }
             let samples = Int(output[index].mDataByteSize) / MemoryLayout<Float>.size
             let pointer = data.assumingMemoryBound(to: Float.self)
@@ -593,13 +618,13 @@ func yunAudioIOProc(
     // Averaged rather than summed: two copies of one signal are the same
     // loudness, not twice it, and summing would read three units high on
     // anything panned centre.
-    if let ring = graph.pointee.analysisRing, output.count > 0,
-        let data = output[0].mData
+    if let ring = graph.pointee.analysisRing, mainIndex < output.count,
+        let data = output[mainIndex].mData
     {
-        let stride = Int(output[0].mNumberChannels)
+        let stride = Int(output[mainIndex].mNumberChannels)
         if stride > 0 {
             let frames = min(
-                Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride),
+                Int(output[mainIndex].mDataByteSize) / (MemoryLayout<Float>.size * stride),
                 Int(graph.pointee.analysisCapacity))
             let source = data.assumingMemoryBound(to: Float.self)
             let scratch = graph.pointee.analysisScratch
@@ -671,11 +696,12 @@ func yunAudioIOProc(
 
     // Feed the recorder from the destination bus: what is written to disk
     // should be what the far end receives, not what arrived at the input.
-    if let ring = graph.pointee.recordRing, output.count > 0 {
+    if let ring = graph.pointee.recordRing, mainIndex < output.count {
         let channels = Int(graph.pointee.recordChannels)
-        if let data = output[0].mData, channels > 0 {
-            let stride = Int(output[0].mNumberChannels)
-            let frames = Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride)
+        if let data = output[mainIndex].mData, channels > 0 {
+            let stride = Int(output[mainIndex].mNumberChannels)
+            let frames =
+                Int(output[mainIndex].mDataByteSize) / (MemoryLayout<Float>.size * stride)
             let source = data.assumingMemoryBound(to: Float.self)
             if stride == channels {
                 _ = yun_rt_ring_write(ring, source, UInt32(frames * channels))

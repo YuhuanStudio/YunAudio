@@ -245,3 +245,15 @@
 "%@ LU louder than %@ expects — it will be turned down." = "比 %2$@ 的標準大 %1$@ LU——它會被壓下去。";
 "%@ LU quieter than %@ expects — raise the master or gain." = "比 %2$@ 的標準小 %1$@ LU——請提高主輸出或增益。";
 "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate." = "請再講幾秒——在有足夠素材可供閘控之前，整體響度沒有意義。";
+"Monitor" = "監聽";
+"Hear yourself, %@ ms behind." = "聽見自己，延遲 %@ 毫秒。";
+"This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "這個輸出看起來不是耳機。用喇叭監聽會把麥克風的聲音送回它正在收音的房間裡。";
+"Hold this level automatically" = "自動維持這個響度";
+"Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "只在 Apple 的裝置端模型聽見說話時才調整增益，所以停頓和打字不會把音量越推越高。";
+"out of range" = "已達調整上限";
+"waiting for speech" = "等待說話中";
+"Speech" = "說話";
+"Typing" = "打字";
+"Music" = "音樂";
+"Room noise" = "環境噪音";
+"Quiet" = "安靜";

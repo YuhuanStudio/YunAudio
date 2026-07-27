@@ -220,6 +220,10 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   - taps: Application captures to fold in as extra source channels.
     ///   - additionalDestinationUIDs: Further outputs to bind, so a tapped
     ///     application can be sent somewhere other than the main destination.
+    ///   - monitorDeviceUID: A second output the microphone is also sent to, so
+    ///     the user can hear themselves. Exempt from the master fader, because
+    ///     the master is the level going to the far end and pulling it down
+    ///     must not stop somebody hearing their own voice.
     ///   - effects: Processing stages to insert ahead of the routes. More than
     ///     one supersedes `voiceIsolation`, which is the single-stage form.
     ///   - preferredSampleRate: Used when both devices support it, rather than
@@ -239,6 +243,7 @@ public final class RoutingEngine: @unchecked Sendable {
         routes: [Route],
         taps: [ProcessTap] = [],
         additionalDestinationUIDs: [String] = [],
+        monitorDeviceUID: String? = nil,
         effects: [EffectKind] = [],
         preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
@@ -267,7 +272,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // than the microphone's destination — one app to the headphones while
         // the rest of the mix goes to the virtual device.
         let extras =
-            additionalDestinationUIDs
+            (additionalDestinationUIDs + (monitorDeviceUID.map { [$0] } ?? []))
             .filter { $0 != sourceDeviceUID && $0 != destinationDeviceUID }
             .compactMap { try? AudioDevices.device(uid: $0) }
         // Every device involved is aligned, including the microphone even when
@@ -488,6 +493,17 @@ public final class RoutingEngine: @unchecked Sendable {
             isolationBlock = block
             graph.pointee.voiceIsolation = block
         }
+
+        // Which buffer the recorder, the loudness meter and the spectrum read.
+        // Not assumed to be zero: the aggregate lists its sub-devices in its own
+        // order, so with a monitor attached buffer zero may well be the
+        // headphones, and every one of those three would then be measuring or
+        // recording the wrong device.
+        graph.pointee.mainOutputBuffer =
+            outputMap[ChannelRef(deviceUID: destinationDeviceUID, channel: 0)]?.buffer ?? 0
+        graph.pointee.masterExemptBuffer =
+            monitorDeviceUID
+            .flatMap { outputMap[ChannelRef(deviceUID: $0, channel: 0)]?.buffer } ?? -1
 
         // The integrity check writes its sequence to the destination's first
         // output channel and reads the same channel back off its input. Both
@@ -797,6 +813,8 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.inputMuted = previous.pointee.inputMuted
         next.pointee.outputGain = previous.pointee.outputGain
         next.pointee.outputMuted = previous.pointee.outputMuted
+        next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
+        next.pointee.masterExemptBuffer = previous.pointee.masterExemptBuffer
 
         // The analysis ring is handed over rather than replaced. Its consumer
         // lives outside the graph and holds a running integrated loudness; a

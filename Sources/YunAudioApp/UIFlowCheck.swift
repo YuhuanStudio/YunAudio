@@ -182,9 +182,13 @@ enum UIFlowCheck {
             check(
                 "every named channel says what it is", names.allSatisfy { !$0.detail.isEmpty })
             check("exactly one is the default", names.filter(\.isDefault).count == 1)
+            // Against the translated name, not the raw one. The label goes
+            // through loc() like every other string, so asserting the English
+            // here would fail on a Chinese system for the right reason and
+            // look like a bug.
             check(
                 "the label comes from the name rather than the index",
-                model.sourceChannelLabel(0) == names[0].name)
+                model.sourceChannelLabel(0) == loc(names[0].name))
         } else {
             note("this input has no known topology — labels fall back to numbers")
             check(
@@ -381,6 +385,95 @@ enum UIFlowCheck {
 
         model.resetLoudness()
         check("reset clears the reading", model.analysis.duration == 0)
+
+        print("\nwhat the on-device model hears")
+        model.isAnalysisVisible = true
+        await pause(2.0)
+        // The classifier is what makes the levelling trustworthy, so the check
+        // is that it is actually producing a verdict — not what the verdict is.
+        // A quiet room says "quiet", and that is a correct answer.
+        note("heard \(model.heardVerdict.rawValue) (\(model.analysis.verdictLabel))")
+        check(
+            "the model produced a verdict",
+            SoundClassifier.Verdict.allCases.contains(model.heardVerdict))
+        check(
+            "confidence is a probability",
+            model.heardConfidence >= 0 && model.heardConfidence <= 1)
+
+        print("\nautomatic levelling")
+        let trimBefore = model.inputDecibels
+        model.isAutoLevelling = true
+        await pause(1.5)
+        check("no rebuild was needed to engage it", model.isRunning && !model.isBusy)
+        // In a quiet room it must hold still. That is the entire difference
+        // between this and the AGC everybody switches off: with no speech there
+        // is no evidence about level, so there is nothing to act on.
+        if !model.heardVerdict.isSpeech {
+            check("it holds still with no speech to act on", model.autoLevelIsWaiting)
+            check("and has not moved the trim", model.inputDecibels == trimBefore)
+            note("room is quiet — convergence not exercised here, it is unit tested")
+        } else {
+            note(
+                String(
+                    format: "speech present, offset %+.1f dB", model.autoLevelOffset))
+            check("the correction stayed inside its limit", !model.autoLevelIsAtLimit)
+        }
+        // Switching it off keeps whatever level it settled on rather than
+        // snapping back: the point was to find a good trim, and throwing that
+        // away the moment somebody disengages would undo the work.
+        let settled = model.inputDecibels
+        model.isAutoLevelling = false
+        await pause(0.3)
+        check("switching it off keeps the level it settled on", model.inputDecibels == settled)
+        check("routing continues without it", model.isRunning && !model.isBusy)
+
+        print("\ndirect monitoring")
+        if let monitor = model.monitorOptions.first {
+            let routesBefore = model.activeRoutes.count
+            model.monitorDeviceUID = monitor.uid
+            await waitUntil("the monitor came up", { !model.isBusy }, timeout: 12)
+            check("no error was reported", model.lastError == nil)
+            check("still routing", model.isRunning)
+            check("monitoring added routes", model.activeRoutes.count > routesBefore)
+            note("\(routesBefore) → \(model.activeRoutes.count) routes on \(monitor.name)")
+            note(
+                String(
+                    format: "%.1f ms behind", model.monitorLatencyMilliseconds))
+            // The whole claim of direct monitoring is that it is one cycle, not
+            // a software round trip. Anything past about fifteen milliseconds
+            // and a person hears their own voice as an echo.
+            check(
+                "the monitor is genuinely direct",
+                model.monitorLatencyMilliseconds > 0
+                    && model.monitorLatencyMilliseconds < 30)
+
+            // The master is the level going to the far end. Muting it must not
+            // take away the ability to hear yourself, which is the one thing
+            // that would make monitoring useless exactly when it is needed.
+            let cyclesBeforeMute = model.cycleCountForDiagnostics
+            model.isOutputMuted = true
+            await pause(0.4)
+            check("muting the master did not rebuild", model.isRunning && !model.isBusy)
+            check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBeforeMute)
+            model.isOutputMuted = false
+
+            // And its own fader moves without a rebuild.
+            let cyclesBeforeGain = model.cycleCountForDiagnostics
+            model.monitorDecibels = -18
+            await pause(0.4)
+            check("the monitor level reads back", model.monitorDecibels == -18)
+            check(
+                "changing it did not interrupt audio",
+                model.cycleCountForDiagnostics > cyclesBeforeGain && !model.isBusy)
+
+            model.monitorDeviceUID = nil
+            await waitUntil("monitoring came back out", { !model.isBusy }, timeout: 12)
+            check("routing continues without it", model.isRunning)
+            check(
+                "the extra routes went away", model.activeRoutes.count == routesBefore)
+        } else {
+            note("no second output to monitor on — skipped")
+        }
 
         print("\nswitching channel mode while running")
         let before = model.activeRoutes.count

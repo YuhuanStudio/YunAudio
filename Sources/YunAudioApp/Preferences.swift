@@ -45,6 +45,11 @@ struct Preferences: Codable, Equatable, Sendable {
     var isOutputMuted: Bool?
     /// Which platform the loudness readout is compared against.
     var loudnessTarget: String?
+    /// Where the microphone is also sent so the user can hear themselves.
+    var monitorDeviceUID: String?
+    var monitorDecibels: Float?
+    /// Hold the microphone at the target loudness automatically.
+    var isAutoLevelling: Bool?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -69,7 +74,10 @@ struct Preferences: Codable, Equatable, Sendable {
         isInputMuted: false,
         outputDecibels: 0,
         isOutputMuted: false,
-        loudnessTarget: LoudnessTarget.discord.rawValue)
+        loudnessTarget: LoudnessTarget.discord.rawValue,
+        monitorDeviceUID: nil,
+        monitorDecibels: -6,
+        isAutoLevelling: false)
 }
 
 @MainActor

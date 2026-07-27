@@ -30,16 +30,25 @@ public final class SignalAnalyser {
         /// figure is not meaningful yet rather than showing a number that will
         /// move by five units in the next ten seconds.
         public var duration: Double
+        /// What the on-device model hears in the signal.
+        public var verdict: SoundClassifier.Verdict
+        public var verdictConfidence: Double
+        /// The model's own label, which is finer than the verdict.
+        public var verdictLabel: String
 
         public static let silent = Reading(
             momentary: -.infinity, shortTerm: -.infinity, integrated: -.infinity,
             range: 0, peak: -.infinity,
             bands: [Float](repeating: 0, count: SpectrumAnalyser.bandCount),
-            duration: 0)
+            duration: 0, verdict: .quiet, verdictConfidence: 0, verdictLabel: "")
     }
 
     private var loudness: LoudnessMeter
     private var spectrum: SpectrumAnalyser?
+    /// Apple's on-device sound model. Optional because it can fail to build,
+    /// and everything here still works without it — the levelling simply holds
+    /// still rather than guessing.
+    public let classifier: SoundClassifier?
     private let sampleRate: Double
     private var buffer: [Float]
     private var measuredFrames: Int = 0
@@ -48,6 +57,7 @@ public final class SignalAnalyser {
         self.sampleRate = sampleRate
         loudness = LoudnessMeter(sampleRate: sampleRate)
         spectrum = SpectrumAnalyser(sampleRate: sampleRate)
+        classifier = SoundClassifier(sampleRate: sampleRate)
         // A quarter of a second at 96 kHz. The drain runs far more often than
         // that; the headroom is for the case where the main thread was busy and
         // several polls' worth piled up.
@@ -69,6 +79,7 @@ public final class SignalAnalyser {
                 let base = pointer.baseAddress!
                 loudness.add(base, count: taken)
                 spectrum?.add(base, count: taken)
+                classifier?.add(base, count: taken)
             }
             measuredFrames += taken
             if taken < buffer.count { return }
@@ -83,7 +94,10 @@ public final class SignalAnalyser {
             range: loudness.range,
             peak: loudness.peak,
             bands: spectrum?.bands ?? [Float](repeating: 0, count: SpectrumAnalyser.bandCount),
-            duration: Double(measuredFrames) / sampleRate)
+            duration: Double(measuredFrames) / sampleRate,
+            verdict: classifier?.verdict ?? .quiet,
+            verdictConfidence: classifier?.confidence ?? 0,
+            verdictLabel: classifier?.label ?? "")
     }
 
     /// Starts the integrated measurement over. Bound to a button, because an
@@ -93,6 +107,7 @@ public final class SignalAnalyser {
     public func reset() {
         loudness.reset()
         spectrum?.reset()
+        classifier?.reset()
         measuredFrames = 0
     }
 }

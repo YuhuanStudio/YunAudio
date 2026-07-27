@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreAudio
 import Testing
 import YunAudioRT
@@ -232,17 +233,28 @@ struct RealtimeCellTests {
     @Test("waiting succeeds once two cycles have been retired")
     func waitSucceedsAfterTwoCycles() throws {
         let cell = try #require(yun_rt_cell_create(nil))
-        defer { yun_rt_cell_free(cell) }
 
         // Stand in for the IO thread.
+        //
+        // The cell is freed only once this thread has finished, and that is not
+        // fussiness: the first version let the test return while the thread was
+        // still retiring, so the freed cell was written to for another fifteen
+        // milliseconds. Whichever test allocated next got that address and had
+        // its cycle counter advanced underneath it, which made two unrelated
+        // assertions here fail perhaps one run in three. AddressSanitizer named
+        // it in one line after an hour of it looking like a product bug.
+        let finished = DispatchSemaphore(value: 0)
         let retiring = Thread {
             for _ in 0..<8 {
                 yun_rt_cell_retire(cell)
                 usleep(2000)
             }
+            finished.signal()
         }
         retiring.start()
         #expect(yun_rt_cell_wait_for_swap(cell, 500))
+        _ = finished.wait(timeout: .now() + 2)
+        yun_rt_cell_free(cell)
     }
 
     /// One cycle is not enough: the swap may land midway through a cycle that
@@ -869,5 +881,772 @@ struct SpectrumTests {
         for index in 0..<SpectrumAnalyser.bandCount {
             #expect(abs(whole.bands[index] - pieces.bands[index]) < 0.02)
         }
+    }
+}
+
+// MARK: - The realtime callback itself
+
+/// Drives `yunAudioIOProc` directly with synthetic buffer lists.
+///
+/// Everything else about the router can be checked from the outside, but the
+/// mixing rules cannot: the flow check can say audio kept flowing, and no
+/// amount of that proves the master fader skipped the monitor or that the
+/// recorder read the destination rather than whichever buffer happened to be
+/// first. Those are claims about which sample lands where, and the only way to
+/// assert them is to hand the callback known input and read the output back.
+@Suite("Realtime callback")
+struct IOProcTests {
+
+    /// One interleaved buffer, allocated for the length of a test.
+    private final class Bus {
+        let list: UnsafeMutableAudioBufferListPointer
+        private var storage: [UnsafeMutablePointer<Float>] = []
+        let frames: Int
+
+        init(channelCounts: [Int], frames: Int, fill: Float = 0) {
+            self.frames = frames
+            list = AudioBufferList.allocate(maximumBuffers: channelCounts.count)
+            for (index, channels) in channelCounts.enumerated() {
+                let samples = frames * channels
+                let pointer = UnsafeMutablePointer<Float>.allocate(capacity: samples)
+                pointer.initialize(repeating: fill, count: samples)
+                storage.append(pointer)
+                list[index] = AudioBuffer(
+                    mNumberChannels: UInt32(channels),
+                    mDataByteSize: UInt32(samples * MemoryLayout<Float>.size),
+                    mData: UnsafeMutableRawPointer(pointer))
+            }
+        }
+
+        func channel(_ buffer: Int, _ channel: Int, _ frame: Int) -> Float {
+            let stride = Int(list[buffer].mNumberChannels)
+            return storage[buffer][frame * stride + channel]
+        }
+
+        func set(_ buffer: Int, _ channel: Int, to value: Float) {
+            let stride = Int(list[buffer].mNumberChannels)
+            for frame in 0..<frames { storage[buffer][frame * stride + channel] = value }
+        }
+
+        deinit {
+            for pointer in storage { pointer.deallocate() }
+            free(list.unsafeMutablePointer)
+        }
+    }
+
+    /// Runs one cycle and returns the output bus.
+    private func cycle(
+        graph: UnsafeMutablePointer<RTGraph>, input: Bus, output: Bus, cycles: Int = 1
+    ) {
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mSampleTime = 0
+        time.mFlags = .sampleTimeValid
+        for _ in 0..<cycles {
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+                output.list.unsafeMutablePointer, &time,
+                UnsafeMutableRawPointer(cell))
+        }
+    }
+
+    /// Two output buffers: buffer 0 the monitor, buffer 1 the destination. That
+    /// ordering is deliberate — it is the case the old code got wrong, because
+    /// it assumed the destination was always buffer zero.
+    private func twoDestinationGraph() -> UnsafeMutablePointer<RTGraph> {
+        let graph = RTGraph.allocate(
+            routes: [
+                // Microphone into the destination.
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 1, destinationChannel: 0,
+                    appliesInputTrim: true),
+                // The same microphone into the monitor.
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    appliesInputTrim: true),
+            ],
+            bufferFrames: 64)
+        graph.pointee.mainOutputBuffer = 1
+        graph.pointee.masterExemptBuffer = 0
+        return graph
+    }
+
+    @Test("a route copies its source channel into its destination channel")
+    func basicRouting() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.1)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(output.channel(0, 0, 0) == 0.5)
+        // Nothing routed there, so it must be silent rather than whatever the
+        // buffer held.
+        #expect(output.channel(0, 1, 0) == 0)
+    }
+
+    /// The master is the level going to the far end. Pulling it down must not
+    /// take away the ability to hear yourself, or monitoring stops working at
+    /// exactly the moment somebody mutes to cough.
+    @Test("the master does not reach the monitor")
+    func masterSkipsMonitor() {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.outputGain = 0.25
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        // Destination scaled by the master.
+        #expect(abs(output.channel(1, 0, 0) - 0.2) < 0.0001)
+        // Monitor untouched by it.
+        #expect(abs(output.channel(0, 0, 0) - 0.8) < 0.0001)
+    }
+
+    @Test("muting the master leaves the monitor audible")
+    func masterMuteSkipsMonitor() {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.outputMuted = 1
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(output.channel(1, 0, 0) == 0)
+        #expect(abs(output.channel(0, 0, 0) - 0.8) < 0.0001)
+    }
+
+    /// The input trim and mute are the microphone's own level, so they reach
+    /// everything the microphone feeds — including the monitor. Muting the
+    /// microphone and still hearing it would be the worse surprise of the two.
+    @Test("muting the input silences the monitor as well")
+    func inputMuteReachesMonitor() {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.inputMuted = 1
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(output.channel(1, 0, 0) == 0)
+        #expect(output.channel(0, 0, 0) == 0)
+    }
+
+    /// The analysers measure what the far end receives. With a monitor present
+    /// buffer zero is the headphones, so a fold that assumed buffer zero would
+    /// be measuring the wrong device entirely — and would report a healthy
+    /// signal while the destination was silent.
+    @Test("the analysis tap follows the destination, not buffer zero")
+    func analysisReadsDestination() throws {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        // Destination muted by the master, monitor still loud.
+        graph.pointee.outputMuted = 1
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output, cycles: 4)
+
+        let ring = try #require(graph.pointee.analysisRing)
+        var drained = [Float](repeating: 99, count: 512)
+        let taken = drained.withUnsafeMutableBufferPointer {
+            Int(yun_rt_ring_read(ring, $0.baseAddress!, UInt32($0.count)))
+        }
+        #expect(taken == 256)
+        // Silence, because the destination is muted — not 0.8 from the monitor.
+        #expect(drained[0..<taken].allSatisfy { $0 == 0 })
+    }
+
+    /// And when the destination is the one carrying signal, the fold has to
+    /// find it — averaged across the pair rather than summed, or two copies of
+    /// one voice would read three decibels louder than one.
+    @Test("the analysis tap averages the destination pair")
+    func analysisAverages() throws {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        // A second route so both destination channels carry the signal.
+        graph.pointee.routes[1] = RTRoute(
+            sourceBuffer: 0, sourceChannel: 0,
+            destinationBuffer: 1, destinationChannel: 1)
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.5)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+
+        let ring = try #require(graph.pointee.analysisRing)
+        var drained = [Float](repeating: 0, count: 128)
+        let taken = drained.withUnsafeMutableBufferPointer {
+            Int(yun_rt_ring_read(ring, $0.baseAddress!, UInt32($0.count)))
+        }
+        #expect(taken == 64)
+        // 0.5 on both channels averages to 0.5, not 1.0.
+        #expect(drained[0..<taken].allSatisfy { abs($0 - 0.5) < 0.0001 })
+    }
+
+    /// Several routes into one destination channel sum. That is what makes an
+    /// application's audio and a microphone arrive as one mix.
+    @Test("routes sharing a destination are summed")
+    func summing() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 0),
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.25)
+        input.set(0, 1, to: 0.5)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(abs(output.channel(0, 0, 0) - 0.75) < 0.0001)
+    }
+
+    /// The output buffer is not promised to arrive zeroed, and routes add into
+    /// it. A channel nothing feeds has to come out silent rather than replaying
+    /// whatever the last cycle left.
+    @Test("an unfed channel is cleared rather than left holding stale audio")
+    func clearsOutput() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.3)
+        // Pre-filled with something loud, as a real buffer might be.
+        let output = Bus(channelCounts: [2], frames: 64, fill: 0.9)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(abs(output.channel(0, 0, 0) - 0.3) < 0.0001)
+        #expect(output.channel(0, 1, 0) == 0)
+        // And it does not accumulate across cycles.
+        cycle(graph: graph, input: input, output: output)
+        #expect(abs(output.channel(0, 0, 0) - 0.3) < 0.0001)
+    }
+
+    /// A muted route contributes nothing, but is still metered — the meter
+    /// shows what arrived, which is what lets somebody see they are talking
+    /// into a muted microphone.
+    @Test("a muted route is silent but still metered")
+    func mutedRouteMeters() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0, muted: true)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.6)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(output.channel(0, 0, 0) == 0)
+        #expect(abs(graph.pointee.peaks[0] - 0.6) < 0.0001)
+    }
+
+    /// The recorder is fed from the destination for the same reason the
+    /// analysers are, and gets the same test: with a monitor in the aggregate,
+    /// reading buffer zero would put the monitor feed on disk.
+    @Test("the recorder is fed from the destination, not buffer zero")
+    func recorderReadsDestination() throws {
+        let graph = twoDestinationGraph()
+        defer { RTGraph.deallocate(graph) }
+        let ring = try #require(yun_rt_ring_create(4096))
+        defer { yun_rt_ring_free(ring) }
+        graph.pointee.recordRing = ring
+        graph.pointee.recordChannels = 2
+        // Destination at a quarter, monitor at full, so the two are separable.
+        graph.pointee.outputGain = 0.25
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [2, 2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+
+        var drained = [Float](repeating: 0, count: 256)
+        let taken = drained.withUnsafeMutableBufferPointer {
+            Int(yun_rt_ring_read(ring, $0.baseAddress!, UInt32($0.count)))
+        }
+        #expect(taken == 128)
+        // Interleaved stereo: channel 0 carries the routed signal after the
+        // master, channel 1 nothing.
+        #expect(abs(drained[0] - 0.2) < 0.0001)
+        #expect(drained[1] == 0)
+    }
+
+    /// The command queue is what makes a fader move without rebuilding the
+    /// graph, so it has to be drained before the samples it applies to.
+    @Test("a queued gain change takes effect in the same cycle")
+    func commandsApplyBeforeMixing() throws {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let commands = try #require(graph.pointee.commands)
+        #expect(
+            yun_rt_queue_push(
+                commands,
+                YunRTCommand(
+                    kind: Int32(kYunRTCommandSetGain.rawValue), index: 0, value: 0.5)))
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.8)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(abs(output.channel(0, 0, 0) - 0.4) < 0.0001)
+    }
+
+    /// A route pointing at a buffer the device did not provide has to be
+    /// skipped, not followed. Device configurations change underneath a running
+    /// graph, and an out-of-range index is a crash rather than a glitch.
+    @Test("a route pointing past the buffer list is skipped")
+    func outOfRangeRoute() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 9, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 9, destinationChannel: 0),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 7,
+                    destinationBuffer: 0, destinationChannel: 0),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0),
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.3)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        // Only the last route was valid, and it contributed exactly once.
+        #expect(abs(output.channel(0, 0, 0) - 0.3) < 0.0001)
+    }
+
+    /// The cycle counter is what the control thread waits on before freeing a
+    /// graph it has replaced. If it stopped advancing, a swap would free memory
+    /// the realtime thread was still reading.
+    @Test("every cycle advances the counter and the clock")
+    func counterAdvances() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        let output = Bus(channelCounts: [1], frames: 64)
+        cycle(graph: graph, input: input, output: output, cycles: 5)
+        #expect(graph.pointee.cycleCounter.pointee == 5)
+    }
+}
+
+// MARK: - Automatic levelling
+
+/// A control loop that has only ever been tried by talking into a microphone
+/// has not been tested. These drive it with known loudness sequences and assert
+/// the properties that decide whether it is pleasant or maddening to use:
+/// that it converges, that it does not overshoot, that it does not hunt, and
+/// that it refuses to act on anything that is not speech.
+@Suite("Automatic levelling")
+struct AutoLevelTests {
+
+    /// Runs the loop against a signal whose loudness moves with the gain, which
+    /// is what a real one does.
+    private func settle(
+        from start: Double, target: Double, seconds: Double = 60,
+        hearsSpeech: Bool = true, step: Double = 0.05
+    ) -> (loop: AutoLevel, loudness: Double, history: [Double]) {
+        var loop = AutoLevel()
+        var history: [Double] = []
+        var loudness = start
+        for _ in 0..<Int(seconds / step) {
+            let offset = loop.update(
+                loudness: loudness, target: target, hearsSpeech: hearsSpeech,
+                elapsed: step)
+            loudness = start + offset
+            history.append(loudness)
+        }
+        return (loop, loudness, history)
+    }
+
+    /// The point of the thing. A voice ten units too quiet has to end up at the
+    /// target and stay there.
+    @Test("a quiet source converges on the target")
+    func convergesFromQuiet() {
+        let result = settle(from: -28, target: -18)
+        #expect(abs(result.loudness - -18) <= AutoLevel.deadZone)
+    }
+
+    @Test("a loud source converges on the target")
+    func convergesFromLoud() {
+        let result = settle(from: -8, target: -18)
+        #expect(abs(result.loudness - -18) <= AutoLevel.deadZone)
+    }
+
+    /// Overshoot is what a leveller must never do: correcting a quiet voice by
+    /// going loud and coming back is exactly the pumping people complain about.
+    @Test("it approaches the target without overshooting past it")
+    func noOvershoot() {
+        let result = settle(from: -28, target: -18)
+        // Coming up from below, nothing may ever exceed the target by more
+        // than the dead zone.
+        #expect(result.history.allSatisfy { $0 <= -18 + AutoLevel.deadZone + 0.001 })
+    }
+
+    /// And once settled it has to stay still. A loop that keeps moving inside
+    /// its own measurement noise is audible as slow breathing.
+    @Test("it stops moving once it is inside the dead zone")
+    func doesNotHunt() {
+        let result = settle(from: -28, target: -18)
+        let tail = result.history.suffix(200)
+        let spread = (tail.max() ?? 0) - (tail.min() ?? 0)
+        #expect(spread < 0.001)
+    }
+
+    /// The whole reason for the classifier. Without a speech verdict the loop
+    /// must not move at all — this is the failure mode of every conventional
+    /// AGC, which spends the pauses amplifying the room.
+    @Test("it does not move when the model does not hear speech")
+    func silenceDoesNotMoveIt() {
+        let result = settle(from: -40, target: -18, hearsSpeech: false)
+        #expect(result.loop.offset == 0)
+        #expect(result.loop.isWaiting)
+    }
+
+    /// And a speech verdict on something far below the floor is the model being
+    /// polite about silence, not evidence of level.
+    @Test("it does not act on a signal below the floor")
+    func floorHolds() {
+        var loop = AutoLevel()
+        for _ in 0..<200 {
+            loop.update(
+                loudness: AutoLevel.floor - 5, target: -18, hearsSpeech: true,
+                elapsed: 0.05)
+        }
+        #expect(loop.offset == 0)
+        #expect(loop.isWaiting)
+    }
+
+    /// An infinite reading is what silence produces, and arithmetic on it would
+    /// put the offset at NaN and leave the trim there permanently.
+    @Test("an infinite reading is ignored rather than propagated")
+    func infiniteLoudness() {
+        var loop = AutoLevel()
+        loop.update(
+            loudness: -.infinity, target: -18, hearsSpeech: true, elapsed: 0.05)
+        #expect(loop.offset == 0)
+        loop.update(loudness: .nan, target: -18, hearsSpeech: true, elapsed: 0.05)
+        #expect(loop.offset == 0)
+        #expect(!loop.offset.isNaN)
+    }
+
+    /// The slew limit is what makes the correction inaudible. A single call
+    /// with a huge error must not be allowed to take the whole error at once.
+    @Test("no single step exceeds the slew limit")
+    func slewLimited() {
+        var loop = AutoLevel()
+        // Above the floor, or this would pass because the loop refused to act
+        // rather than because it limited itself — which is how the first
+        // version of this test was written, and it proved nothing.
+        loop.update(loudness: -40, target: 0, hearsSpeech: true, elapsed: 0.05)
+        #expect(loop.offset > 0)
+        #expect(loop.offset <= AutoLevel.slewPerSecond * 0.05 + 0.0001)
+    }
+
+    /// And it is per second, not per call, so a slower poll does not mean a
+    /// slower leveller.
+    @Test("the rate is per second rather than per call")
+    func rateIsPerSecond() {
+        var fast = AutoLevel()
+        for _ in 0..<20 {
+            fast.update(loudness: -40, target: -18, hearsSpeech: true, elapsed: 0.05)
+        }
+        var slow = AutoLevel()
+        for _ in 0..<2 {
+            slow.update(loudness: -40, target: -18, hearsSpeech: true, elapsed: 0.5)
+        }
+        #expect(abs(fast.offset - slow.offset) < 0.0001)
+    }
+
+    /// Past the limit something is wrong with the setup, and silently adding
+    /// forty decibels of make-up would hide it rather than fix it.
+    @Test("the correction is bounded and says when it ran out")
+    func limited() {
+        var loop = AutoLevel()
+        // 40 units of error against a 15 dB limit, and above the floor so the
+        // loop actually engages.
+        for _ in 0..<4000 {
+            loop.update(loudness: -40, target: 0, hearsSpeech: true, elapsed: 0.05)
+        }
+        #expect(loop.offset <= AutoLevel.limit + 0.0001)
+        #expect(loop.isAtLimit)
+    }
+
+    @Test("reset returns it to no correction at all")
+    func resets() {
+        var loop = AutoLevel()
+        for _ in 0..<100 {
+            loop.update(loudness: -30, target: -18, hearsSpeech: true, elapsed: 0.05)
+        }
+        #expect(loop.offset != 0)
+        loop.reset()
+        #expect(loop.offset == 0)
+        #expect(loop.isWaiting)
+    }
+
+    /// Settling has to be quick enough to be useful. Ten units at 1.5 dB per
+    /// second is under seven, and a leveller that took a minute would have the
+    /// first half of every call at the wrong level.
+    @Test("it settles within a few seconds")
+    func settlesQuickly() {
+        var loop = AutoLevel()
+        var loudness = -28.0
+        var seconds = 0.0
+        while abs(loudness - -18) > AutoLevel.deadZone, seconds < 30 {
+            let offset = loop.update(
+                loudness: loudness, target: -18, hearsSpeech: true, elapsed: 0.05)
+            loudness = -28 + offset
+            seconds += 0.05
+        }
+        #expect(seconds < 10)
+    }
+}
+
+// MARK: - Sound classification
+
+@Suite("Sound classification")
+struct SoundClassifierTests {
+    /// The model's taxonomy is far finer than anything worth showing, so the
+    /// labels are folded. A label landing in the wrong bucket would mean the
+    /// leveller acting on a keyboard.
+    @Test("model labels fold onto the right verdict")
+    func folding() {
+        #expect(SoundClassifier.fold("speech") == .speech)
+        #expect(SoundClassifier.fold("shout") == .speech)
+        #expect(SoundClassifier.fold("whispering") == .speech)
+        #expect(SoundClassifier.fold("computer_keyboard") == .typing)
+        #expect(SoundClassifier.fold("typing") == .typing)
+        #expect(SoundClassifier.fold("singing") == .music)
+        #expect(SoundClassifier.fold("acoustic_guitar") == .music)
+        #expect(SoundClassifier.fold("air_conditioning") == .noise)
+        #expect(SoundClassifier.fold("hum") == .noise)
+    }
+
+    /// Anything unrecognised has to land somewhere harmless. The one thing it
+    /// must never do is default to speech, which would let the leveller act on
+    /// a sound nobody identified.
+    @Test("an unknown label never becomes speech")
+    func unknownIsNotSpeech() {
+        for label in ["", "zither", "helicopter", "unknown_thing"] {
+            #expect(SoundClassifier.fold(label) != .speech)
+        }
+    }
+
+    /// Building it against a real rate has to work, or the levelling silently
+    /// never engages.
+    @Test("the classifier builds at the rates the router uses")
+    func builds() {
+        for rate in [44100.0, 48000.0, 96000.0] {
+            #expect(SoundClassifier(sampleRate: rate) != nil)
+        }
+    }
+}
+
+// MARK: - The classifier against real speech
+
+/// Folding labels proves the table is right. It does not prove the model ever
+/// says "speech" about speech, and the whole levelling feature rests on that.
+///
+/// `AVSpeechSynthesizer.write` renders to buffers without touching any audio
+/// hardware, so a real utterance can be pushed through the real classifier with
+/// no microphone, no room and no timing.
+@Suite("Classifier against speech")
+struct ClassifierSpeechTests {
+
+    /// Renders an utterance to mono float samples.
+    ///
+    /// Time-bounded, and nil rather than a hang when it does not deliver.
+    /// `AVSpeechSynthesizer.write` needs the main queue to be serviced to call
+    /// back, and a test process is not guaranteed to be doing that — the first
+    /// version of this waited on a continuation that never resumed and took the
+    /// whole suite with it. A test that cannot run has to say so and get out of
+    /// the way, not block.
+    private func render(_ text: String) async -> (samples: [Float], rate: Double)? {
+        let box = Box()
+        await MainActor.run {
+            let synthesiser = AVSpeechSynthesizer()
+            box.synthesiser = synthesiser
+            let utterance = AVSpeechUtterance(string: text)
+            utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+            synthesiser.write(utterance) { buffer in
+                guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
+                    box.finish()
+                    return
+                }
+                let frames = Int(pcm.frameLength)
+                box.lock.lock()
+                box.rate = pcm.format.sampleRate
+                if let channel = pcm.floatChannelData {
+                    box.samples.append(
+                        contentsOf: UnsafeBufferPointer(start: channel[0], count: frames))
+                } else if let channel = pcm.int16ChannelData {
+                    // The default voice renders 16-bit, so this is the branch
+                    // that actually runs.
+                    box.samples.append(
+                        contentsOf: (0..<frames).map {
+                            Float(channel[0][$0]) / Float(Int16.max)
+                        })
+                }
+                box.lock.unlock()
+            }
+        }
+
+        // Poll rather than wait on a signal, so the deadline is real.
+        for _ in 0..<100 {
+            try? await Task.sleep(for: .milliseconds(100))
+            if box.isReady { break }
+        }
+        return box.result()
+    }
+
+    /// Carries the rendered audio out of the callback.
+    private final class Box: @unchecked Sendable {
+        let lock = NSLock()
+        var samples: [Float] = []
+        var rate: Double = 0
+        var isFinished = false
+        var synthesiser: AVSpeechSynthesizer?
+
+        func finish() {
+            lock.lock()
+            isFinished = true
+            lock.unlock()
+        }
+
+        /// Scoped accessors, because `NSLock.lock()` is unavailable from an
+        /// async context — holding a lock across a suspension point is exactly
+        /// the deadlock the compiler is refusing to let anybody write.
+        var isReady: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return isFinished && !samples.isEmpty
+        }
+
+        func result() -> (samples: [Float], rate: Double)? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !samples.isEmpty, rate > 0 else { return nil }
+            return (samples, rate)
+        }
+    }
+
+    /// The assertion the levelling depends on: real speech is recognised as
+    /// speech, confidently enough to act on.
+    @Test("synthesised speech is recognised as speech")
+    func recognisesSpeech() async throws {
+        guard
+            let rendered = await render(
+                "The quick brown fox jumps over the lazy dog. "
+                    + "Testing the loudness of this microphone, one two three.")
+        else {
+            // Not a pass dressed up as one: the synthesiser did not deliver, so
+            // this run has no evidence either way and says so.
+            Issue.record("the speech synthesiser produced nothing — claim unverified")
+            return
+        }
+        let classifier = try #require(SoundClassifier(sampleRate: rendered.rate))
+
+        // Fed in device-sized blocks rather than one lump, because that is how
+        // it is fed in the application and the windowing has to survive it.
+        var offset = 0
+        rendered.samples.withUnsafeBufferPointer { pointer in
+            while offset < pointer.count {
+                let take = min(512, pointer.count - offset)
+                classifier.add(pointer.baseAddress! + offset, count: take)
+                offset += take
+            }
+        }
+        // The analyser reports on its own queue, so the verdict lands shortly
+        // after the last buffer goes in.
+        try await Task.sleep(for: .seconds(2))
+
+        #expect(classifier.verdict == .speech)
+        #expect(classifier.hearsSpeech)
+    }
+
+    /// And silence is not. A classifier that called silence speech would let
+    /// the leveller wind the gain up through every pause, which is the exact
+    /// failure this feature exists to avoid.
+    @Test("silence is not recognised as speech")
+    func silenceIsNotSpeech() async throws {
+        let classifier = try #require(SoundClassifier(sampleRate: 48000))
+        let silence = [Float](repeating: 0, count: 48000 * 3)
+        silence.withUnsafeBufferPointer {
+            classifier.add($0.baseAddress!, count: $0.count)
+        }
+        try await Task.sleep(for: .seconds(1))
+        #expect(classifier.verdict == .quiet)
+        #expect(!classifier.hearsSpeech)
+    }
+
+    /// Neither is a sine tone, whatever the model decides to call it — the RMS
+    /// floor is not the only guard, the verdict has to be wrong-shaped too.
+    @Test("a steady tone is not recognised as speech")
+    func toneIsNotSpeech() async throws {
+        let classifier = try #require(SoundClassifier(sampleRate: 48000))
+        let count = 48000 * 3
+        var tone = [Float](repeating: 0, count: count)
+        for index in 0..<count {
+            tone[index] = 0.3 * Float(sin(2 * Double.pi * 440 * Double(index) / 48000))
+        }
+        tone.withUnsafeBufferPointer { classifier.add($0.baseAddress!, count: $0.count) }
+        try await Task.sleep(for: .seconds(1))
+        #expect(!classifier.hearsSpeech)
     }
 }

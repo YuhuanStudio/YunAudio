@@ -245,3 +245,15 @@
 "%@ LU louder than %@ expects — it will be turned down." = "%@ LU louder than %@ expects — it will be turned down.";
 "%@ LU quieter than %@ expects — raise the master or gain." = "%@ LU quieter than %@ expects — raise the master or gain.";
 "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate." = "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate.";
+"Monitor" = "Monitor";
+"Hear yourself, %@ ms behind." = "Hear yourself, %@ ms behind.";
+"This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to.";
+"Hold this level automatically" = "Hold this level automatically";
+"Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up.";
+"out of range" = "out of range";
+"waiting for speech" = "waiting for speech";
+"Speech" = "Speech";
+"Typing" = "Typing";
+"Music" = "Music";
+"Room noise" = "Room noise";
+"Quiet" = "Quiet";
