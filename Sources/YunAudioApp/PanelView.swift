@@ -114,7 +114,7 @@ struct PanelView: View {
                     Text(loc(preset.name))
                 }
                 .buttonStyle(YunButtonStyle(isActive ? .primary : .secondary, small: true))
-                .help(preset.note)
+                .help(loc(preset.note))
             }
             Spacer(minLength: 0)
         }
@@ -230,10 +230,11 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
                 if let quality = model.pathQuality {
                     YunDetailRow(
-                        "Path",
-                        value: quality.isBitExact
-                            ? "bit-exact"
-                            : (quality.hasProcessing ? "processed" : "resampled"),
+                        loc("Path"),
+                        value: loc(
+                            quality.isBitExact
+                                ? "bit-exact"
+                                : (quality.hasProcessing ? "processed" : "resampled")),
                         tone: quality.isBitExact ? .success : .warning)
                     YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                     YunDetailRow(

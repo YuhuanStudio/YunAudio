@@ -152,3 +152,12 @@
 "Glass" = "玻璃";
 "Opaque cards and hairline borders." = "不透明卡片與髮絲邊框。";
 "Translucent surfaces that pick up the desktop behind them." = "半透明表面，會透出後方的桌面。";
+"Shortcuts" = "快捷鍵";
+"Diagnostics" = "診斷";
+"About" = "關於";
+"Start / stop routing" = "開始／停止路由";
+"Mute / unmute" = "靜音／取消靜音";
+"48 kHz and a small buffer. Anything higher is resampled back down at the far end." = "48 kHz 與小緩衝區。更高的取樣率只會在對方端被重採樣回來。";
+"Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact." = "加上 Apple 的人聲隔離。代價是 56 毫秒延遲，且路徑不再位元精確。";
+"96 kHz, untouched signal. Latency matters less than keeping the capture intact." = "96 kHz，訊號不經處理。此時延遲的重要性低於保住錄音的完整。";
+"Path" = "路徑";

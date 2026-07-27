@@ -118,7 +118,7 @@ struct MainWindow: View {
                     .buttonStyle(
                         YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true)
                     )
-                    .help(preset.note)
+                    .help(loc(preset.note))
             }
 
             Spacer()

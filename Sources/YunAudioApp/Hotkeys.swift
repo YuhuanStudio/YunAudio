@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import YunDesign
 
 /// Global keyboard shortcuts.
 ///
@@ -17,8 +18,8 @@ final class HotkeyManager {
 
         var title: String {
             switch self {
-            case .toggleRouting: "Start / stop routing"
-            case .toggleMute: "Mute / unmute"
+            case .toggleRouting: loc("Start / stop routing")
+            case .toggleMute: loc("Mute / unmute")
             }
         }
 

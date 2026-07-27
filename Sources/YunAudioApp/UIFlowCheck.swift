@@ -327,6 +327,29 @@ enum UIFlowCheck {
             note("untranslated: \(key.prefix(50))…")
         }
         note("\(english.count) keys in each table")
+
+        // Comparing the two tables cannot catch a string that was never put in
+        // either — and the whole preferences sidebar was exactly that, four
+        // English words beside Chinese content. Every label the interface
+        // builds from an enum is checked against the table by name.
+        var displayed: [String] = PreferencesWindow.Section.allCases.map(\.title)
+        displayed += YunStyle.allCases.map(\.title)
+        displayed += YunStyle.allCases.map(\.detail)
+        displayed += EffectKind.allCases.map { loc($0.title) }
+        displayed += EffectKind.allCases.map { loc($0.detail) }
+        displayed += SourceChannelMode.allCases.map(\.title)
+        displayed += TapMuteBehavior.allCases.map { loc($0.title) }
+        displayed += RoutePreset.builtIn.map(\.name)
+        displayed += RoutePreset.builtIn.map { loc($0.note) }
+        displayed += HotkeyManager.Action.allCases.map(\.title)
+
+        // In Chinese, anything still made of Latin letters and spaces never
+        // reached the table — a translated string would not be.
+        let stillEnglish = displayed.filter { text in
+            text.count > 3 && text.allSatisfy { $0.isASCII }
+        }
+        check("every enum-built label is translated", stillEnglish.isEmpty)
+        for text in stillEnglish.prefix(4) { note("not in the table: \(text)") }
     }
 
     private static func pause(_ seconds: TimeInterval) async {

@@ -127,7 +127,7 @@ its own. There is nothing to tap.
 Run the audio tests against a release build. Debug builds report hundreds of
 allocations per IO cycle that come from Swift's own checking machinery.
 
-The interface is verified three ways, because each is blind to what the others
+The interface is verified four ways, because each is blind to what the others
 catch:
 
 ```bash
@@ -135,6 +135,7 @@ catch:
 YUNAUDIO_FLOWCHECK=1  ./build/YunAudio.app/Contents/MacOS/YunAudioApp   # behaviour
 YUNAUDIO_RENDER=out   ./build/YunAudio.app/Contents/MacOS/YunAudioApp   # colour
 YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp # the real window
+./App/check-strings.sh                                                 # localisation
 ```
 
 The flow check drives the model through every path a person can take and
@@ -143,6 +144,10 @@ appearances, which is the only way to catch a colour that works in one theme and
 vanishes in the other. The screenshot photographs the actual window at its
 minimum size, including the title bar and the traffic lights — everything the
 window itself contributes, which an offscreen render structurally cannot show.
+The string check fails on any user-facing literal that never went through
+`loc()` — a wrapped literal looks exactly like an unwrapped one, so nothing but
+a scanner finds them, and four survived every other check including the whole
+preferences sidebar sitting in English beside Chinese content.
 
 ## Razer hardware control
 

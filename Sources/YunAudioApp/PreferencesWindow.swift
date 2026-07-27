@@ -28,10 +28,10 @@ struct PreferencesWindow: View {
 
         var title: String {
             switch self {
-            case .general: "General"
-            case .shortcuts: "Shortcuts"
-            case .diagnostics: "Diagnostics"
-            case .about: "About"
+            case .general: loc("General")
+            case .shortcuts: loc("Shortcuts")
+            case .diagnostics: loc("Diagnostics")
+            case .about: loc("About")
             }
         }
 
@@ -122,7 +122,7 @@ struct PreferencesWindow: View {
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
                     Toggle(
-                        "Open at login",
+                        loc("Open at login"),
                         isOn: Binding(
                             get: { model.launchesAtLogin },
                             set: { model.launchesAtLogin = $0 })
@@ -263,6 +263,7 @@ struct PreferencesWindow: View {
                         Text(loc("Start routing to see live measurements."))
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
             }

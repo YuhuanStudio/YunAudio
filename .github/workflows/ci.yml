@@ -42,3 +42,14 @@ jobs:
             echo "::error::swift-format reported issues"
             exit 1
           fi
+
+  strings:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # Neither the linter nor the flow check can see a user-facing literal that
+      # was never passed through loc(): a wrapped one looks exactly like an
+      # unwrapped one. Four survived every other check, including the whole
+      # preferences sidebar.
+      - name: Check that every user-facing string is localised
+        run: ./App/check-strings.sh

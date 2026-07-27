@@ -152,3 +152,12 @@
 "Glass" = "Glass";
 "Opaque cards and hairline borders." = "Opaque cards and hairline borders.";
 "Translucent surfaces that pick up the desktop behind them." = "Translucent surfaces that pick up the desktop behind them.";
+"Shortcuts" = "Shortcuts";
+"Diagnostics" = "Diagnostics";
+"About" = "About";
+"Start / stop routing" = "Start / stop routing";
+"Mute / unmute" = "Mute / unmute";
+"48 kHz and a small buffer. Anything higher is resampled back down at the far end." = "48 kHz and a small buffer. Anything higher is resampled back down at the far end.";
+"Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact." = "Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact.";
+"96 kHz, untouched signal. Latency matters less than keeping the capture intact." = "96 kHz, untouched signal. Latency matters less than keeping the capture intact.";
+"Path" = "Path";
