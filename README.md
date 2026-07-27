@@ -96,7 +96,19 @@ swift run -c release yunaudio-cli route "Mic" "YunAudio" 5
 swift run -c release yunaudio-cli dsp                 # measure voice isolation
 swift run -c release yunaudio-cli apps                # list tappable processes
 swift run -c release yunaudio-cli tap Discord         # route an app's audio
+swift run -c release yunaudio-cli tone 12 &           # a tappable noise source
+swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
 ```
+
+`far-end` checks the thing inspection cannot: that real frames cross the ring
+between the tap's IO thread and the canceller's. Against `tone`, whose amplitude
+is 0.2, it should report a peak of −14.0 dBFS and an RMS of −17.0 — a sine's
+RMS sits 3.01 dB below its peak, so those two numbers together say the downmix
+is level-correct and the ring is not touching the samples.
+
+`afplay` is not a usable fixture: it never appears in the HAL process list,
+because it hands its audio to a system process instead of opening a client of
+its own. There is nothing to tap.
 
 Run the audio tests against a release build. Debug builds report hundreds of
 allocations per IO cycle that come from Swift's own checking machinery.

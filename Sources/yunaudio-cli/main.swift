@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreAudio
 import Foundation
 import YunAudioEngine
@@ -758,6 +759,178 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     exit(0)
 }
 
+// A tappable noise source, for verifying capture paths against a known signal.
+//
+// `afplay` looks like the obvious tool and is not: it never appears in
+// `kAudioHardwarePropertyProcessObjectList`, because it hands its audio to a
+// system process rather than opening a client of its own, so there is nothing
+// to tap. An AVAudioEngine playing into the default output does register, which
+// is what makes it usable as a fixture.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tone" {
+    let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 10 : 10
+    let frequency =
+        CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 440 : 440
+
+    let engine = AVAudioEngine()
+    let output = engine.outputNode
+    let rate = output.inputFormat(forBus: 0).sampleRate
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else {
+        print("could not build a format")
+        exit(1)
+    }
+
+    // The phase lives in a box and the closure is `@Sendable`, both for the same
+    // reason: top-level code in Swift 6 is main-actor isolated, so a render
+    // block that closes over a local `var` inherits that isolation and asserts
+    // it is running on the main queue. The audio thread is not the main queue,
+    // and the assertion is a SIGTRAP rather than a warning.
+    let phase = TonePhase()
+    let increment = 2 * Double.pi * frequency / rate
+    let source = AVAudioSourceNode(format: format) {
+        @Sendable _, _, frameCount, audioBufferList in
+        let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
+        for frame in 0..<Int(frameCount) {
+            let value = Float(sin(phase.value) * 0.2)
+            phase.value += increment
+            if phase.value > 2 * .pi { phase.value -= 2 * .pi }
+            for buffer in buffers {
+                buffer.mData?.assumingMemoryBound(to: Float.self)[frame] = value
+            }
+        }
+        return noErr
+    }
+
+    engine.attach(source)
+    engine.connect(source, to: output, format: format)
+    do {
+        try engine.start()
+    } catch {
+        print("could not start: \(error)")
+        exit(1)
+    }
+    print("pid \(ProcessInfo.processInfo.processIdentifier)")
+    print("playing \(Int(frequency)) Hz for \(seconds)s at \(Int(rate)) Hz")
+    fflush(stdout)
+    Thread.sleep(forTimeInterval: seconds)
+    engine.stop()
+    exit(0)
+}
+
+// Proves an application's own audio reaches the canceller's far-end input.
+//
+// The tap goes into an aggregate of its own and an IOProc pushes it into a
+// lock-free ring; this drains that ring from the other side, exactly as the
+// voice processing unit's render callback will. What it checks is the thing
+// that cannot be checked by inspection: that real frames, at a real level,
+// actually cross between the two threads.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "far-end" {
+    let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Discord"
+    let seconds = CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 6 : 6
+
+    guard let applications = try? AudioApplications.grouped() else {
+        print("could not enumerate applications")
+        exit(1)
+    }
+    // Fall back to the raw process list. Anything without a bundle identifier
+    // is not offered in the interface — capture is keyed on that identifier —
+    // but `afplay` and its kind are exactly what one reaches for to put a known
+    // signal through this path, so the command should be able to name them.
+    let target: (name: String, ids: [AudioObjectID], count: Int)
+    if let application = applications.first(where: {
+        $0.name.localizedCaseInsensitiveContains(match)
+            || $0.bundleID.localizedCaseInsensitiveContains(match)
+    }) {
+        target = (application.name, application.processIDs, application.processCount)
+    } else {
+        // A bare executable has no bundle identifier and no entry in the
+        // running-application list, so it has no name to match on — a process
+        // id is the only handle it has.
+        let wantedPID = pid_t(match)
+        let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? [])
+            .filter {
+                if let wantedPID { return $0.pid == wantedPID }
+                return $0.name.localizedCaseInsensitiveContains(match)
+                    || ($0.bundleID?.localizedCaseInsensitiveContains(match) ?? false)
+            }
+        guard !processes.isEmpty else {
+            print("nothing matching \"\(match)\" is producing audio")
+            exit(1)
+        }
+        target = (processes[0].name, processes.map(\.id), processes.count)
+    }
+
+    // Unmuted: this is a measurement, and silencing the application would
+    // remove the very thing being measured from the speakers as well.
+    guard
+        let capture = FarEndCapture(
+            processIDs: target.ids, muteBehavior: .unmuted)
+    else {
+        print("could not build the far-end capture")
+        exit(1)
+    }
+
+    print(
+        """
+        far end  \(target.name)  ·  \(target.count) process(es)
+        format   \(Int(capture.sampleRate)) Hz · \(capture.sourceChannels)ch → mono
+
+        """)
+    guard capture.start() else {
+        print("the capture would not start")
+        exit(1)
+    }
+
+    let block = 1024
+    var buffer = [Float](repeating: 0, count: block)
+    var totalRead = 0
+    var peak: Float = 0
+    var energy: Double = 0
+
+    let deadline = Date().addingTimeInterval(seconds)
+    while Date() < deadline {
+        let frames = buffer.withUnsafeMutableBufferPointer {
+            capture.read(into: $0.baseAddress!, frames: block)
+        }
+        if frames == 0 {
+            usleep(5000)
+            continue
+        }
+        totalRead += frames
+        for index in 0..<frames {
+            let value = buffer[index]
+            peak = max(peak, abs(value))
+            energy += Double(value) * Double(value)
+        }
+    }
+    capture.stop()
+
+    let decibels = peak > 0 ? 20 * log10(Double(peak)) : -.infinity
+    let rms = totalRead > 0 ? (energy / Double(totalRead)).squareRoot() : 0
+    let rmsDecibels = rms > 0 ? 20 * log10(rms) : -.infinity
+
+    print("produced  \(capture.producedFrames) frames")
+    print("drained   \(totalRead) frames")
+    print("buffered  \(capture.bufferedFrames) frames still in the ring")
+    print("dropped   \(capture.droppedFrames) frames")
+    print(String(format: "peak      %.1f dBFS", decibels))
+    print(String(format: "rms       %.1f dBFS", rmsDecibels))
+
+    if totalRead == 0 {
+        print("\nnothing crossed the ring — is the application producing audio?")
+        exit(1)
+    }
+    if peak == 0 {
+        print("\nframes crossed but every one was silent")
+        exit(1)
+    }
+    // The distinction that matters is not tone versus music — it is that the
+    // signal came out of another process through a tap and across a ring,
+    // rather than being synthesised inside the canceller where nothing can go
+    // wrong with it.
+    print("\nthe reference is another process's audio, carried across the ring")
+    exit(0)
+}
+
 // Measures how much echo the canceller actually removes.
 //
 // A tone is played through the speaker and the microphone level is measured
@@ -1015,4 +1188,12 @@ do {
 } catch {
     print("probe failed: \(error)")
     exit(1)
+}
+
+/// The tone generator's oscillator phase.
+///
+/// `@unchecked Sendable` because only the audio thread ever touches it: the
+/// main thread creates it, hands it over and then sleeps.
+final class TonePhase: @unchecked Sendable {
+    var value = 0.0
 }
