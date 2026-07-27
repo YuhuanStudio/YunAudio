@@ -366,6 +366,8 @@ struct PanelView: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .disabled(bundle.isEmpty)
+        .accessibilityLabel(Text(process.name))
+        .accessibilityAddTraits(isCaptured ? [.isSelected] : [])
     }
 
     // MARK: Route mixer

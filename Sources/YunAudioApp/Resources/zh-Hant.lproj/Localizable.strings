@@ -91,3 +91,8 @@
 "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0." = "虛擬裝置是對著 CoreAudio 的 AudioServerPlugIn 介面從零寫的，與 GPL-3.0 的 BlackHole 沒有共用任何程式碼。";
 "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact." = "時鐘鎖定中斷，已改回啟用漂移補償。音訊安全，但不再位元精確。";
 "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image." = "請從原始碼執行 ./Driver/build-driver.sh --install，或使用磁碟映像檔中的副本。";
+"Gain" = "增益";
+"Level" = "電平";
+"silent" = "無訊號";
+"Mute" = "靜音";
+"Unmute" = "取消靜音";

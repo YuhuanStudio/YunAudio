@@ -269,8 +269,15 @@ public struct YunLevelMeter: View {
             }
         }
         .frame(height: 6)
-        .accessibilityLabel("input level")
-        .accessibilityValue("\(Int(normalized(level) * 100)) percent")
+        .accessibilityElement()
+        .accessibilityLabel(Text(loc("Level")))
+        // Decibels rather than a percentage: the percentage is a position on a
+        // bar, which is meaningless without seeing the bar.
+        .accessibilityValue(
+            Text(
+                level > 0
+                    ? String(format: "%.0f dBFS", 20 * log10(Double(level)))
+                    : loc("silent")))
     }
 }
 

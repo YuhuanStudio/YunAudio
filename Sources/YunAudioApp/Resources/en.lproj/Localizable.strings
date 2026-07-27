@@ -91,3 +91,8 @@
 "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0." = "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0.";
 "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact." = "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact.";
 "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image." = "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image.";
+"Gain" = "Gain";
+"Level" = "Level";
+"silent" = "silent";
+"Mute" = "Mute";
+"Unmute" = "Unmute";

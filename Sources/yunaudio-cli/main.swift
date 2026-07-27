@@ -339,6 +339,59 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+// Measures how the driver's reported latency and safety offset affect the path.
+//
+// The driver reports zero for both, which is unusual — real hardware reports a
+// safety offset because the HAL needs headroom ahead of the IO cycle. Whether
+// zero is fine or merely appears fine is an empirical question.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "driver-timing" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard let source = all.first(where: { $0.hasInput && $0.transport == .usb }) else {
+        print("need a USB input")
+        exit(1)
+    }
+    let virtuals = all.filter { $0.transport.isVirtual && $0.inputChannels > 0 }
+    guard !virtuals.isEmpty else {
+        print("no virtual devices to compare")
+        exit(1)
+    }
+
+    print("clock master: \(source.name)\n")
+    // %s takes a C string; a Swift String through it reads a pointer that is
+    // not one and crashes. %@ is the Swift form.
+    print(
+        String(
+            format: "%-18@ %8@ %8@ %10@ %12@",
+            "device", "in lat", "out lat", "buffer", "selftest"))
+
+    for device in virtuals {
+        let inLatency = device.latencyFrames(scope: kAudioObjectPropertyScopeInput)
+        let outLatency = device.latencyFrames(scope: kAudioObjectPropertyScopeOutput)
+
+        // Run the integrity check to see what the reported figures translate to.
+        let engine = RoutingEngine()
+        var verdict = "—"
+        if (try? engine.start(
+            sourceDeviceUID: source.uid, destinationDeviceUID: device.uid,
+            routes: [], selftest: true)) != nil
+        {
+            while engine.selftestProgress < 1.0 { Thread.sleep(forTimeInterval: 0.2) }
+            if let result = engine.evaluateSelftest() {
+                verdict =
+                    result.isBitExact
+                    ? "exact @\(result.delayFrames)" : "MISMATCH"
+            }
+            engine.stop()
+        }
+        print(
+            String(
+                format: "%-18@ %8d %8d %10d %12@",
+                String(device.name.prefix(18)), inLatency, outLatency,
+                Int(device.currentBufferFrameSize ?? 0), verdict))
+    }
+    exit(0)
+}
+
 // Proves a route change no longer interrupts audio.
 //
 // Cycles are counted across a topology change. A restart shows a gap of about

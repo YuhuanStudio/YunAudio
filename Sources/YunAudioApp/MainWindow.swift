@@ -196,6 +196,8 @@ struct MainWindow: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .disabled(bundle.isEmpty)
+        .accessibilityLabel(Text(process.name))
+        .accessibilityAddTraits(isCaptured ? [.isSelected] : [])
     }
 
     // MARK: Mixer
@@ -249,6 +251,8 @@ struct MainWindow: View {
                     }
                     .buttonStyle(.plain)
                     .focusEffectDisabled()
+                    .accessibilityLabel(Text(isMuted ? loc("Unmute") : loc("Mute")))
+                    .accessibilityValue(Text(model.label(for: route)))
 
                     Text(model.label(for: route))
                         .font(Yun.Text.body)

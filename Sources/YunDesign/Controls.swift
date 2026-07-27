@@ -141,6 +141,8 @@ public struct YunSegmented<Value: Hashable>: View {
                         }
                 }
                 .buttonStyle(.plain)
+                .accessibilityLabel(Text(option.title))
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
                 .focused($focused, equals: option.value)
                 // The system focus effect is a blue ring, which would be the
                 // only saturated colour in an otherwise monochrome panel. The
@@ -366,6 +368,18 @@ public struct YunFader: View {
                     })
         }
         .frame(height: 14)
+        .accessibilityElement()
+        .accessibilityLabel(Text(loc("Gain")))
+        .accessibilityValue(Text(String(format: "%.1f dB", decibels)))
+        .accessibilityAdjustableAction { direction in
+            // One decibel a step: the range is 52 dB wide, so a percentage step
+            // would be too coarse to set a level with.
+            switch direction {
+            case .increment: decibels = min(range.upperBound, decibels + 1)
+            case .decrement: decibels = max(range.lowerBound, decibels - 1)
+            @unknown default: break
+            }
+        }
     }
 }
 
