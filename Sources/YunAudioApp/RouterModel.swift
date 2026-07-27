@@ -46,11 +46,20 @@ final class RouterModel {
         }
     }
     var channelMode: SourceChannelMode = .mono {
-        didSet { if oldValue != channelMode { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != channelMode else { return }
+            persist()
+            // Only the channel map moves, so this can be swapped in silently.
+            if !reconfigureIfPossible() { restartIfRunning() }
+        }
     }
     /// Which source channel a mono route takes, zero-based.
     var monoChannel: Int = 0 {
-        didSet { if oldValue != monoChannel { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != monoChannel else { return }
+            persist()
+            if !reconfigureIfPossible() { restartIfRunning() }
+        }
     }
 
     /// Registered with the system, not mirrored locally — the login item state
@@ -652,10 +661,28 @@ final class RouterModel {
         let taps: [ProcessTap]
     }
 
+    /// Applies a configuration change to a running route.
+    ///
+    /// Changes that only move channels around are swapped in place, which is
+    /// silent. Anything that changes the devices, the taps or the processing
+    /// chain still has to rebuild the aggregate, and that costs about 108 ms of
+    /// audio — so the two cases are kept apart rather than treated alike.
     private func restartIfRunning() {
         guard isRunning else { return }
         stop()
         start()
+    }
+
+    /// Reroutes without stopping. Returns false when the change needs a rebuild.
+    @discardableResult
+    private func reconfigureIfPossible() -> Bool {
+        guard isRunning, capturedAppBundleIDs.isEmpty else { return false }
+        let updated = routes
+        guard !updated.isEmpty, engine.updateRoutes(updated) else { return false }
+        activeRoutes = engine.currentRoutes
+        routeGains = activeRoutes.map(\.gain)
+        routeMutes = activeRoutes.map(\.isMuted)
+        return true
     }
 
     // MARK: Polling
