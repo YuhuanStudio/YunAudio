@@ -30,6 +30,15 @@ public struct RTRoute: Sendable, Equatable {
     /// also moved the applications would be a master, and there is one of
     /// those already.
     public var appliesInputTrim: Int32
+    /// Which stem file this route's source belongs to, or -1 for none.
+    ///
+    /// Stems are recorded per source rather than per route, so a stereo source
+    /// lands in one two-channel file rather than two mono ones — and the two
+    /// stay in step, which two independent rings could not guarantee.
+    public var stemIndex: Int32
+    /// Which channel of that stem this route carries.
+    public var stemChannel: Int32
+
     /// Non-zero when this route gets out of the way while somebody is talking.
     ///
     /// Set for application audio, never for the microphone: ducking is the
@@ -45,7 +54,9 @@ public struct RTRoute: Sendable, Equatable {
         usesIsolatedSource: Bool = false,
         usesCancelledSource: Bool = false,
         appliesInputTrim: Bool = false,
-        isDuckable: Bool = false
+        isDuckable: Bool = false,
+        stemIndex: Int32 = -1,
+        stemChannel: Int32 = 0
     ) {
         self.sourceBuffer = sourceBuffer
         self.sourceChannel = sourceChannel
@@ -57,6 +68,8 @@ public struct RTRoute: Sendable, Equatable {
         self.usesCancelledSource = usesCancelledSource ? 1 : 0
         self.appliesInputTrim = appliesInputTrim ? 1 : 0
         self.isDuckable = isDuckable ? 1 : 0
+        self.stemIndex = stemIndex
+        self.stemChannel = stemChannel
     }
 }
 
@@ -259,6 +272,28 @@ struct RTGraph {
     /// rather than performed for nobody.
     var analysisEnabled: Int32
 
+    // MARK: Stems
+
+    /// One ring per source being recorded separately, or null.
+    ///
+    /// Recording the mix answers "what did the far end hear"; recording each
+    /// source answers "what did each of us say", which is the question anybody
+    /// editing a podcast afterwards actually has. The two are different files
+    /// and both are worth having.
+    var stemRings: UnsafeMutablePointer<OpaquePointer?>
+    /// Channels each stem expects per frame.
+    var stemChannels: UnsafeMutablePointer<Int32>
+    /// Interleaved scratch, `stemCapacity` frames of `maxStemChannels` per stem.
+    /// Written during the route loop and drained once at the end, so a stereo
+    /// source goes into its ring as whole frames rather than two half-frames
+    /// that could be split by a short write.
+    var stemScratch: UnsafeMutablePointer<Float>
+    var stemCount: Int32
+    var stemCapacity: Int32
+    /// Frames put into the scratch this cycle.
+    var stemFrames: Int32
+    static let maxStemChannels = 2
+
     /// Ring carrying a mono fold of the output bus to the analysers.
     ///
     /// Separate from `recordRing` even though both come off the same bus,
@@ -376,6 +411,18 @@ struct RTGraph {
             capacity: cancelledCapacity)
         cancelledStorage.initialize(repeating: 0, count: cancelledCapacity)
 
+        // One slot per route is the most stems there can be, and costs a
+        // pointer each.
+        let stemRingStorage = UnsafeMutablePointer<OpaquePointer?>.allocate(capacity: count)
+        stemRingStorage.initialize(repeating: nil, count: count)
+        let stemChannelStorage = UnsafeMutablePointer<Int32>.allocate(capacity: count)
+        stemChannelStorage.initialize(repeating: 0, count: count)
+        let stemCapacity = max(bufferFrames, 4096)
+        let stemScratchCount = count * stemCapacity * maxStemChannels
+        let stemScratchStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: stemScratchCount)
+        stemScratchStorage.initialize(repeating: 0, count: stemScratchCount)
+
         let analysisCapacity = max(bufferFrames, 4096)
         let analysisScratch = UnsafeMutablePointer<Float>.allocate(
             capacity: analysisCapacity)
@@ -447,6 +494,12 @@ struct RTGraph {
                 // short enough that a stalled consumer discards stale audio
                 // rather than showing a reading from a second ago.
                 analysisEnabled: 0,
+                stemRings: stemRingStorage,
+                stemChannels: stemChannelStorage,
+                stemScratch: stemScratchStorage,
+                stemCount: Int32(count),
+                stemCapacity: Int32(stemCapacity),
+                stemFrames: 0,
                 analysisRing: yun_rt_ring_create(131_072),
                 analysisScratch: analysisScratch,
                 analysisCapacity: Int32(analysisCapacity),
@@ -483,6 +536,14 @@ struct RTGraph {
             graph.pointee.clockHostTime.deinitialize(count: 1)
             graph.pointee.clockHostTime.deallocate()
         }
+        graph.pointee.stemRings.deinitialize(count: count)
+        graph.pointee.stemRings.deallocate()
+        graph.pointee.stemChannels.deinitialize(count: count)
+        graph.pointee.stemChannels.deallocate()
+        let stemScratchCount =
+            count * Int(graph.pointee.stemCapacity) * maxStemChannels
+        graph.pointee.stemScratch.deinitialize(count: stemScratchCount)
+        graph.pointee.stemScratch.deallocate()
         graph.pointee.analysisScratch.deinitialize(
             count: Int(graph.pointee.analysisCapacity))
         graph.pointee.analysisScratch.deallocate()
@@ -684,6 +745,7 @@ func yunAudioIOProc(
     let rms = graph.pointee.rms
     let calibrating = graph.pointee.calibrating != 0
     var micPeak: Float = 0
+    graph.pointee.stemFrames = 0
 
     for index in 0..<routeCount {
         let route = routes[index]
@@ -766,6 +828,30 @@ func yunAudioIOProc(
             let magnitude = abs(sample)
             if magnitude > peak { peak = magnitude }
             energy += sample * sample
+        }
+
+        // Into the stem scratch, before the fader and before the master: a
+        // stem is what that source produced, which is the whole point of having
+        // it separately. Anything else and the file is a record of this
+        // session's mix decisions rather than of the performance.
+        let stem = Int(route.stemIndex)
+        if stem >= 0, stem < Int(graph.pointee.stemCount) {
+            let channels = Int(graph.pointee.stemChannels[stem])
+            let channel = Int(route.stemChannel)
+            let capacity = Int(graph.pointee.stemCapacity)
+            if channels > 0, channel < channels {
+                let usable = min(frames, capacity)
+                let base =
+                    graph.pointee.stemScratch
+                    + stem * capacity * RTGraph.maxStemChannels
+                for frame in 0..<usable {
+                    base[frame * channels + channel] =
+                        source[frame * sourceStride + sourceChannel]
+                }
+                if Int32(usable) > graph.pointee.stemFrames {
+                    graph.pointee.stemFrames = Int32(usable)
+                }
+            }
         }
 
         let blockRMS = frames > 0 ? (energy / Float(frames)).squareRoot() : 0
@@ -915,6 +1001,21 @@ func yunAudioIOProc(
                 }
                 selftest.pointee.captureCount.pointee = Int32(stored)
             }
+        }
+    }
+
+    // Each stem into its own ring, once, as whole frames. Written after the
+    // route loop rather than inside it so a stereo source cannot be split
+    // across two writes and arrive half a frame out of step.
+    if graph.pointee.stemFrames > 0 {
+        let frames = Int(graph.pointee.stemFrames)
+        let capacity = Int(graph.pointee.stemCapacity)
+        for stem in 0..<Int(graph.pointee.stemCount) {
+            guard let ring = graph.pointee.stemRings[stem] else { continue }
+            let channels = Int(graph.pointee.stemChannels[stem])
+            guard channels > 0 else { continue }
+            let base = graph.pointee.stemScratch + stem * capacity * RTGraph.maxStemChannels
+            _ = yun_rt_ring_write(ring, base, UInt32(frames * channels))
         }
     }
 

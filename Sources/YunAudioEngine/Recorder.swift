@@ -74,16 +74,22 @@ public final class Recorder: @unchecked Sendable {
     ///     the name is reproducible in a test.
     /// - Throws: Whatever `AVAudioFile` throws when the destination cannot be
     ///   created — a directory that does not exist, or is not writable.
+    /// - Parameter name: Appended to the file name, so several files written
+    ///   at the same instant do not collide and can be told apart afterwards.
     public init(
-        directory: URL, format: Format, channels: Int, sampleRate: Double, timestamp: Date
+        directory: URL, format: Format, channels: Int, sampleRate: Double,
+        timestamp: Date, name: String? = nil
     ) throws {
         self.channels = max(1, channels)
         self.sampleRate = sampleRate
 
         let stamp = DateFormatter()
         stamp.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        // A stem's own name in the file, because "YunAudio 2026-07-28 01.12.33"
+        // three times over is not something anybody can sort out later.
+        let suffix = name.map { " \(Self.sanitised($0))" } ?? ""
         url = directory.appendingPathComponent(
-            "YunAudio \(stamp.string(from: timestamp)).\(format.fileExtension)")
+            "YunAudio \(stamp.string(from: timestamp))\(suffix).\(format.fileExtension)")
 
         var settings: [String: Any] = [
             AVSampleRateKey: sampleRate,
@@ -195,6 +201,17 @@ public final class Recorder: @unchecked Sendable {
                 break
             }
         }
+    }
+
+    /// Samples the realtime side had to drop because the writer fell behind.
+    public var droppedSamples: UInt64 { yun_rt_ring_dropped(ring) }
+
+    /// An application's name can contain anything, including a path separator.
+    public static func sanitised(_ name: String) -> String {
+        let allowed = name.map { character -> Character in
+            character == "/" || character == ":" ? "-" : character
+        }
+        return String(allowed).trimmingCharacters(in: .whitespaces)
     }
 
     public var duration: TimeInterval {

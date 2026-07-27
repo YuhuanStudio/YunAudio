@@ -824,6 +824,41 @@ enum UIFlowCheck {
         model.toggleRecording()
         check("the recording stopped", !model.isRecording)
         check("stopping clears the pause", !model.isRecordingPaused)
+
+        print("\nstems")
+        // A file per source alongside the mix. What cannot be recovered from a
+        // mix at any price is who said what, so this is the recording that
+        // matters for anything edited afterwards.
+        model.recordsStems = true
+        model.toggleRecording()
+        check("it started", model.isRecording)
+        check("no error was reported", model.lastError == nil)
+        let stems = model.stemURLs
+        check("a file was named per source", stems.count == model.sourceGroups.count)
+        note(
+            "\(stems.count) stem(s): \(stems.map(\.lastPathComponent).joined(separator: ", "))")
+        // Named after the source rather than numbered: three files called
+        // "YunAudio 01.12.33" is not something anybody can sort out later.
+        check(
+            "each is named after its source",
+            zip(stems, model.sourceGroups).allSatisfy { url, group in
+                guard let route = model.representative(of: group) else { return false }
+                let title = Recorder.sanitised(model.routeTitle(route))
+                return title.isEmpty || url.lastPathComponent.contains(title)
+            })
+        await pause(2.0)
+        model.toggleRecording()
+        await pause(0.6)
+        for url in stems {
+            let size =
+                (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+                as? Int ?? 0
+            check("\(url.lastPathComponent) holds audio", size > 100_000)
+            try? FileManager.default.removeItem(at: url)
+        }
+        check("no stem dropped samples", model.engineStemDrops == 0)
+        if let mix = model.recordingURL { try? FileManager.default.removeItem(at: mix) }
+        model.recordsStems = false
         // The duration has to survive the stop. Reading it after releasing the
         // recorder returned zero, so the elapsed time snapped to 00:00 at
         // exactly the moment anyone would look at it.

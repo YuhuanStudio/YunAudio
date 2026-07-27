@@ -338,3 +338,5 @@
 "A small move in both. Harder to recognise rather than somebody else." = "兩者都小幅移動。目的是不容易被認出，而不是變成另一個人。";
 "Pitch" = "音高";
 "Hz" = "Hz";
+"A file per source as well" = "同時每個來源各存一個檔";
+"The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix." = "混音檔記錄的是對方聽到什麼。每個來源各一個檔記錄的是你們各自說了什麼——這是後製再怎麼修都無法從混音裡還原的。";

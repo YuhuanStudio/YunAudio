@@ -62,6 +62,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var pluginValues: [String: Float]?
     /// A whole voice, rather than the two stages it is made of.
     var voicePreset: String?
+    /// Write a separate file per source alongside the mix.
+    var recordsStems: Bool?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -96,7 +98,8 @@ struct Preferences: Codable, Equatable, Sendable {
         isPushToTalkEnabled: false,
         plugins: [],
         pluginValues: [:],
-        voicePreset: VoicePreset.none.rawValue)
+        voicePreset: VoicePreset.none.rawValue,
+        recordsStems: false)
 }
 
 @MainActor

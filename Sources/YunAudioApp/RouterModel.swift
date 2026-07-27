@@ -572,10 +572,25 @@ final class RouterModel {
         engine.setRecordingPaused(isRecordingPaused)
     }
 
+    /// Write a separate file per source alongside the mix.
+    ///
+    /// The mix answers "what did the far end hear". The stems answer "what did
+    /// each of us say" — which cannot be recovered from a mix at any price, and
+    /// is the question anybody editing a podcast afterwards actually has.
+    var recordsStems = false {
+        didSet { if oldValue != recordsStems { persist() } }
+    }
+
+    private(set) var stemURLs: [URL] = []
+
+    /// Samples any stem had to drop. Non-zero means a file has gaps in it.
+    var engineStemDrops: UInt64 { engine.stemDroppedSamples }
+
     func toggleRecording() {
         if isRecording {
             isRecordingPaused = false
             engine.setRecordingPaused(false)
+            engine.stopStemRecording()
             // Read the duration first: stopping releases the recorder, and
             // asking a released recorder how long it ran returns zero, so the
             // elapsed time snapped back to 00:00 exactly when someone would
@@ -592,6 +607,17 @@ final class RouterModel {
         do {
             recordingURL = try engine.startRecording(
                 to: recordingDirectory, format: recordingFormat)
+            if recordsStems {
+                let groups = sourceGroups
+                stemURLs =
+                    (try? engine.startStemRecording(
+                        to: recordingDirectory,
+                        groups: groups.map(\.routes),
+                        names: groups.map { group in
+                            representative(of: group).map(routeTitle) ?? ""
+                        },
+                        format: recordingFormat)) ?? []
+            }
             isRecording = true
             isRecordingPaused = false
             recordingSeconds = 0
@@ -1440,6 +1466,7 @@ final class RouterModel {
         enabledPlugins = saved.plugins ?? []
         pluginValues = saved.pluginValues ?? [:]
         voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
+        recordsStems = saved.recordsStems ?? false
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1504,7 +1531,8 @@ final class RouterModel {
                 isPushToTalkEnabled: isPushToTalkEnabled,
                 plugins: enabledPlugins,
                 pluginValues: pluginValues,
-                voicePreset: voicePreset.rawValue))
+                voicePreset: voicePreset.rawValue,
+                recordsStems: recordsStems))
     }
 
     // MARK: Devices

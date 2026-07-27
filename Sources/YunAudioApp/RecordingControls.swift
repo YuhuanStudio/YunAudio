@@ -85,6 +85,29 @@ struct RecordingControls: View {
                 Spacer(minLength: 0)
             }
 
+            if !isCompact {
+                HStack(spacing: Yun.Space.sm) {
+                    Toggle(isOn: $model.recordsStems) { EmptyView() }
+                        .toggleStyle(YunToggleStyle())
+                        .labelsHidden()
+                        .disabled(model.isRecording)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(loc("A file per source as well"))
+                            .font(Yun.Text.label)
+                            .foregroundStyle(Yun.Palette.textPrimary)
+                        Text(
+                            loc(
+                                "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+            }
+
             if !model.isRunning && !model.isRecording {
                 Text(loc("Start routing before recording."))
                     .font(Yun.Text.caption)

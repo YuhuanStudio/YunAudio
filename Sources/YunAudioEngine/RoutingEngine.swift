@@ -660,6 +660,7 @@ public final class RoutingEngine: @unchecked Sendable {
         if let graphCell { yun_rt_cell_free(graphCell) }
         graphCell = nil
         stopRecordingLocked()
+        stopStemRecordingLocked()
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
         selftestBlock = nil
 
@@ -808,6 +809,90 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     public var isRecordingPaused: Bool { graph?.pointee.recordPaused != 0 }
+
+    /// Starts a separate file per source alongside the mix.
+    ///
+    /// Recording the mix answers "what did the far end hear". Recording each
+    /// source answers "what did each of us say", which is the question anybody
+    /// editing afterwards actually has — and the one that cannot be recovered
+    /// from a mix at any price.
+    ///
+    /// - Parameter groups: One entry per stem: the routes it is made of, in
+    ///   channel order.
+    /// - Returns: The files created, in the same order.
+    @discardableResult
+    public func startStemRecording(
+        to directory: URL, groups: [[Int]], names: [String],
+        format: Recorder.Format = .wav, now: Date = Date()
+    ) throws -> [URL] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isRunning, let graph, let device = aggregate?.device else {
+            throw RecorderError.couldNotAllocate
+        }
+        stopStemRecordingLocked()
+
+        let rate = device.currentSampleRate ?? 48000
+        var urls: [URL] = []
+        for (stem, routes) in groups.enumerated() {
+            let channels = min(RTGraph.maxStemChannels, max(1, routes.count))
+            let recorder = try Recorder(
+                directory: directory, format: format, channels: channels,
+                sampleRate: rate, timestamp: now,
+                name: stem < names.count ? names[stem] : "Source \(stem + 1)")
+            stemRecorders.append(recorder)
+            urls.append(recorder.url)
+
+            graph.pointee.stemChannels[stem] = Int32(channels)
+            graph.pointee.stemRings[stem] = recorder.ringHandle
+            for (channel, route) in routes.enumerated()
+            where route < Int(graph.pointee.routeCount) && channel < channels {
+                graph.pointee.routes[route].stemIndex = Int32(stem)
+                graph.pointee.routes[route].stemChannel = Int32(channel)
+            }
+        }
+        return urls
+    }
+
+    public func stopStemRecording() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        stopStemRecordingLocked()
+    }
+
+    private func stopStemRecordingLocked() {
+        guard !stemRecorders.isEmpty else { return }
+        // Detached from the graph first: the writer threads must not be
+        // draining rings the IO thread is still filling while they are torn
+        // down.
+        if let graph {
+            for stem in 0..<Int(graph.pointee.stemCount) {
+                graph.pointee.stemRings[stem] = nil
+                graph.pointee.stemChannels[stem] = 0
+            }
+            for route in 0..<Int(graph.pointee.routeCount) {
+                graph.pointee.routes[route].stemIndex = -1
+            }
+        }
+        for recorder in stemRecorders { recorder.stop() }
+        stemRecorders.removeAll()
+    }
+
+    private var stemRecorders: [Recorder] = []
+
+    /// True while separate files are being written.
+    public var isRecordingStems: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return !stemRecorders.isEmpty
+    }
+
+    /// Samples any stem had to drop. Non-zero means a file has gaps.
+    public var stemDroppedSamples: UInt64 {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return stemRecorders.reduce(0) { $0 + $1.droppedSamples }
+    }
 
     public func stopRecording() {
         stateLock.lock()
