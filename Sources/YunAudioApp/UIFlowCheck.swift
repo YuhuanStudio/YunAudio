@@ -475,6 +475,41 @@ enum UIFlowCheck {
         }
         check("it is back to idle", model.calibrationPhase == .idle)
 
+        print("\nsources rather than wires")
+        // A stereo source is two routes, and it used to be two strips: two
+        // faders, two mutes and two solo buttons for one microphone. Worse, the
+        // balance pass measured each channel separately and proposed a gain for
+        // each, so applying it to a stereo source would have pulled the image
+        // apart.
+        let groups = model.sourceGroups
+        note("\(model.activeRoutes.count) route(s) in \(groups.count) source(s)")
+        check(
+            "every route belongs to exactly one source",
+            groups.flatMap(\.routes).count == model.activeRoutes.count)
+        check("no source is empty", groups.allSatisfy { !$0.routes.isEmpty })
+        check("sources are distinct", Set(groups.map(\.uid)).count == groups.count)
+
+        if let group = groups.first, group.routes.count > 1 {
+            // The property that matters: every channel of a source moves
+            // together, because moving one side of a stereo pair is not a
+            // volume change.
+            model.setFaderDecibels(-9, for: group)
+            await pause(0.2)
+            let each = group.routes.map { model.faderDecibels(forRouteAt: $0) }
+            check("one fader moves every channel of its source", each.allSatisfy { $0 == -9 })
+            model.setFaderDecibels(0, for: group)
+
+            model.setMuted(true, for: group)
+            check("one mute silences every channel", model.isMuted(group))
+            check(
+                "and no channel is left behind",
+                group.routes.allSatisfy { model.routeMutes[$0] })
+            model.setMuted(false, for: group)
+            check("unmuting restores every channel", !model.isMuted(group))
+        } else {
+            note("no multi-channel source to exercise grouping against")
+        }
+
         print("\nper-application taps")
         // One tap per application rather than one for all of them, which is
         // what makes Discord and Spotify separable at all.
@@ -985,6 +1020,10 @@ enum UIFlowCheck {
         displayed += RoutePreset.builtIn.map { loc($0.note) }
         displayed += HotkeyManager.Action.allCases.map(\.title)
         displayed += LevelCalibration.Role.allCases.map { loc($0.title) }
+        displayed += EffectKind.Flavour.allCases.map { loc($0.title) }
+        displayed += EffectKind.allCases.flatMap { kind in
+            kind.parameters.map { loc($0.title) }
+        }
         displayed += LoudnessTarget.allCases.map(\.title)
         displayed += LightingMode.allCases.map(\.title)
 

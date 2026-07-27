@@ -317,9 +317,10 @@ struct PanelView: View {
                 Text(loc("Mixer"))
                     .font(Yun.Text.label)
                     .foregroundStyle(Yun.Palette.textPrimary)
-                ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
-                    RouteStrip(model: model, index: index, route: route, isCompact: true)
-                    if index < model.activeRoutes.count - 1 { YunDivider() }
+                ForEach(Array(model.sourceGroups.enumerated()), id: \.element.id) {
+                    index, group in
+                    RouteStrip(model: model, group: group, isCompact: true)
+                    if index < model.sourceGroups.count - 1 { YunDivider() }
                 }
             }
         }

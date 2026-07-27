@@ -480,9 +480,8 @@ struct MainWindow: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 } else {
-                    ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) {
-                        index, route in
-                        YunCard { RouteStrip(model: model, index: index, route: route) }
+                    ForEach(model.sourceGroups) { group in
+                        YunCard { RouteStrip(model: model, group: group) }
                     }
                 }
             }
@@ -655,7 +654,29 @@ struct MainWindow: View {
         }
     }
 
+    @ViewBuilder
     private func parameterRow(_ parameter: EffectParameter, in kind: EffectKind) -> some View {
+        // A choice is not a quantity. Nobody wants "ring modulator at 137 Hz"
+        // on a slider — they want to pick "robot" — and a slider that lands
+        // between two named voices is a control with no correct position.
+        if parameter.isChoice {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(loc(parameter.title))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                YunSegmented(
+                    selection: Binding(
+                        get: { Int(model.value(of: parameter, in: kind).rounded()) },
+                        set: { model.setValue(Float($0), of: parameter, in: kind) }),
+                    options: parameter.options.enumerated().map { ($0.offset, loc($0.element)) }
+                )
+            }
+        } else {
+            slider(parameter, in: kind)
+        }
+    }
+
+    private func slider(_ parameter: EffectParameter, in kind: EffectKind) -> some View {
         let value = model.value(of: parameter, in: kind)
         return VStack(alignment: .leading, spacing: 2) {
             HStack {

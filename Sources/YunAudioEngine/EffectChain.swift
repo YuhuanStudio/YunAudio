@@ -8,6 +8,20 @@ import Foundation
 /// anything about the Audio Unit behind it — adding a stage should not mean
 /// adding a matching case to a switch in a view.
 public struct EffectParameter: Identifiable, Hashable, Sendable {
+    public init(
+        id: String, title: String, minimum: Float, maximum: Float, unit: String,
+        defaultValue: Float, isLogarithmic: Bool, options: [String] = []
+    ) {
+        self.id = id
+        self.title = title
+        self.minimum = minimum
+        self.maximum = maximum
+        self.unit = unit
+        self.defaultValue = defaultValue
+        self.isLogarithmic = isLogarithmic
+        self.options = options
+    }
+
     public let id: String
     public let title: String
     public let minimum: Float
@@ -16,6 +30,16 @@ public struct EffectParameter: Identifiable, Hashable, Sendable {
     public let defaultValue: Float
     /// Log-scaled parameters (frequency) need a curve; the rest are linear.
     public let isLogarithmic: Bool
+    /// Named positions, for a parameter that is a choice rather than a
+    /// quantity. Empty for an ordinary knob.
+    ///
+    /// A voice character is not a number anybody can reason about — nobody
+    /// wants "ring modulator at 137 Hz", they want "robot" — so the parameter
+    /// carries the names and the chain maps each one onto a whole bundle of
+    /// unit settings.
+    public var options: [String] = []
+
+    public var isChoice: Bool { !options.isEmpty }
 
     /// Position on a 0…1 slider for a value.
     public func fraction(for value: Float) -> Double {
@@ -62,8 +86,16 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     /// preferences call it; it has only ever been a high-pass.
     case equaliser
     case compressor
-    /// Pitch shift with the speed left alone, which is what a voice changer is.
+    /// Pitch shift with the speed left alone.
+    ///
+    /// Half of a voice changer, and on its own the disappointing half: moving
+    /// pitch without touching anything else is what makes somebody sound like a
+    /// chipmunk rather than like a different person. The other half is the
+    /// character below.
     case pitch
+    /// Ring modulation, decimation and soft clipping — the machinery behind
+    /// every robot, radio and monster voice there has ever been.
+    case character
     /// A room around the voice. The thing a karaoke box sells.
     case reverb
     /// Repeats. The other half of that same box.
@@ -79,6 +111,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .equaliser: "High-pass"
         case .compressor: "Compressor"
         case .pitch: "Pitch"
+        case .character: "Character"
         case .reverb: "Reverb"
         case .echo: "Echo"
         case .limiter: "Limiter"
@@ -96,10 +129,42 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .pitch:
             "Moves the voice up or down without changing its speed. Costs latency, "
                 + "and enough of a shift stops sounding like a person."
+        case .character:
+            "Robot, radio, monster. Pitch alone only makes somebody sound small; "
+                + "this is what makes them sound like something else."
         case .reverb:
             "Puts the voice in a room. Small amounts flatter it; large amounts hide it."
         case .echo: "Repeats. Musical in small doses, unusable on a call in large ones."
         case .limiter: "Stops the signal exceeding full scale. Cheap insurance."
+        }
+    }
+
+    /// The voices the character stage can put on.
+    ///
+    /// Each is a bundle of settings on one distortion unit rather than a
+    /// separate effect, because that unit already contains a ring modulator, a
+    /// decimator and a soft clipper — which between them are what every robot,
+    /// radio and monster voice has ever been made of.
+    public enum Flavour: Int, CaseIterable, Sendable {
+        /// Ring modulation at a low frequency: the classic robot.
+        case robot
+        /// Bandwidth thrown away and clipped: a bad connection.
+        case radio
+        /// Heavy soft clipping with a slow modulator under it.
+        case monster
+        /// Sample rate and word length destroyed on purpose.
+        case bitcrush
+        /// Two ring modulators slightly apart, beating against each other.
+        case alien
+
+        public var title: String {
+            switch self {
+            case .robot: "Robot"
+            case .radio: "Radio"
+            case .monster: "Monster"
+            case .bitcrush: "Bitcrush"
+            case .alien: "Alien"
+            }
         }
     }
 
@@ -147,6 +212,17 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                 EffectParameter(
                     id: "cents", title: "Shift", minimum: -1200, maximum: 1200,
                     unit: "cents", defaultValue: 0, isLogarithmic: false)
+            ]
+        case .character:
+            [
+                EffectParameter(
+                    id: "flavour", title: "Voice type", minimum: 0,
+                    maximum: Float(Flavour.allCases.count - 1), unit: "",
+                    defaultValue: 0, isLogarithmic: false,
+                    options: Flavour.allCases.map(\.title)),
+                EffectParameter(
+                    id: "amount", title: "Amount", minimum: 0, maximum: 100,
+                    unit: "%", defaultValue: 60, isLogarithmic: false),
             ]
         case .reverb:
             [
@@ -198,6 +274,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .equaliser: kAudioUnitSubType_NBandEQ
         case .compressor: kAudioUnitSubType_DynamicsProcessor
         case .pitch: kAudioUnitSubType_NewTimePitch
+        case .character: kAudioUnitSubType_Distortion
         case .reverb: kAudioUnitSubType_Reverb2
         case .echo: kAudioUnitSubType_Delay
         case .limiter: kAudioUnitSubType_PeakLimiter
@@ -219,14 +296,17 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         // After the gate: shifting first would move the noise floor along with
         // the voice and give the gate a moving target.
         case .pitch: 3
-        case .compressor: 4
+        // After the shift, so the character is applied to the voice at the
+        // pitch it is going to be heard at rather than the one it arrived at.
+        case .character: 4
+        case .compressor: 5
         // The room goes on after the level has been evened out, or the reverb
         // tail gets compressed along with the voice and breathes.
-        case .echo: 5
-        case .reverb: 6
+        case .echo: 6
+        case .reverb: 7
         // Always last. Anything after a limiter can put the signal back over
         // full scale, which is the one thing it was there to prevent.
-        case .limiter: 7
+        case .limiter: 8
         }
     }
 }
@@ -456,6 +536,8 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, AudioUnitParameterID(kNewTimePitchParam_Rate),
                     kAudioUnitScope_Global, 0, 1, 0)
+            case .character:
+                applyFlavour(.robot, amount: 60, to: unit)
             case .reverb:
                 // Small and short. The unit's own default is a concert hall,
                 // which on a voice call sounds like a fault rather than an
@@ -503,6 +585,93 @@ final class EffectChain {
         }
     }
 
+    /// Puts one voice on the distortion unit.
+    ///
+    /// The unit is a bag of independent processes — a ring modulator, a
+    /// decimator, a soft clipper, a short delay — and the interesting part is
+    /// not any one of them but which combination sounds like a thing. Every
+    /// process not wanted by a flavour is explicitly zeroed rather than left
+    /// alone, because the unit keeps whatever the last flavour set and the
+    /// leftovers are what make a robot and a radio sound like the same mess.
+    private func applyFlavour(
+        _ flavour: EffectKind.Flavour, amount: Float, to unit: AudioComponentInstance
+    ) {
+        func set(_ parameter: AudioUnitParameterID, _ value: Float) {
+            AudioUnitSetParameter(unit, parameter, kAudioUnitScope_Global, 0, value, 0)
+        }
+
+        // Everything off first.
+        set(AudioUnitParameterID(kDistortionParam_Delay), 0.1)
+        set(AudioUnitParameterID(kDistortionParam_Decay), 0)
+        set(AudioUnitParameterID(kDistortionParam_DelayMix), 0)
+        set(AudioUnitParameterID(kDistortionParam_Decimation), 0)
+        set(AudioUnitParameterID(kDistortionParam_Rounding), 0)
+        set(AudioUnitParameterID(kDistortionParam_PolynomialMix), 0)
+        set(AudioUnitParameterID(kDistortionParam_RingModFreq1), 100)
+        set(AudioUnitParameterID(kDistortionParam_RingModFreq2), 100)
+        set(AudioUnitParameterID(kDistortionParam_RingModBalance), 50)
+        set(AudioUnitParameterID(kDistortionParam_RingModMix), 0)
+        set(AudioUnitParameterID(kDistortionParam_SoftClipGain), -6)
+        set(AudioUnitParameterID(kDistortionParam_FinalMix), amount)
+
+        switch flavour {
+        case .robot:
+            // A single modulator low enough to be heard as a pitch rather than
+            // as noise. Above about 300 Hz it stops sounding mechanical and
+            // starts sounding broken.
+            set(AudioUnitParameterID(kDistortionParam_RingModFreq1), 130)
+            set(AudioUnitParameterID(kDistortionParam_RingModMix), 90)
+            set(AudioUnitParameterID(kDistortionParam_RingModBalance), 100)
+        case .radio:
+            // Not a filter — this unit has none — but decimation plus a little
+            // clipping gives the same impression of a signal that has been
+            // through something narrow.
+            set(AudioUnitParameterID(kDistortionParam_Decimation), 35)
+            set(AudioUnitParameterID(kDistortionParam_Rounding), 20)
+            set(AudioUnitParameterID(kDistortionParam_SoftClipGain), 6)
+            set(AudioUnitParameterID(kDistortionParam_PolynomialMix), 40)
+        case .monster:
+            // Heavy clipping is what makes something sound large; the slow
+            // modulator underneath adds the growl. Pair it with the pitch stage
+            // a few semitones down for the full effect — the two are separate
+            // on purpose, because a character that also moved pitch could not
+            // be used on a voice that was already being shifted.
+            set(AudioUnitParameterID(kDistortionParam_SoftClipGain), 20)
+            set(AudioUnitParameterID(kDistortionParam_PolynomialMix), 70)
+            set(AudioUnitParameterID(kDistortionParam_RingModFreq1), 40)
+            set(AudioUnitParameterID(kDistortionParam_RingModMix), 25)
+        case .bitcrush:
+            set(AudioUnitParameterID(kDistortionParam_Decimation), 70)
+            set(AudioUnitParameterID(kDistortionParam_Rounding), 65)
+        case .alien:
+            // Two modulators a little apart beat against each other, which is
+            // what stops it sounding like a single steady tone.
+            set(AudioUnitParameterID(kDistortionParam_RingModFreq1), 220)
+            set(AudioUnitParameterID(kDistortionParam_RingModFreq2), 275)
+            set(AudioUnitParameterID(kDistortionParam_RingModBalance), 50)
+            set(AudioUnitParameterID(kDistortionParam_RingModMix), 85)
+            set(AudioUnitParameterID(kDistortionParam_Decimation), 15)
+        }
+    }
+
+    /// The flavour each character stage is currently wearing, so changing the
+    /// amount does not reset the voice.
+    private var flavours: [EffectKind: EffectKind.Flavour] = [:]
+    private var amounts: [EffectKind: Float] = [:]
+
+    /// The character stage's current voice and depth, for tests and for the
+    /// interface to read back rather than assume.
+    struct CharacterState: Equatable {
+        let flavour: EffectKind.Flavour
+        let amount: Float
+    }
+
+    var characterState: CharacterState? {
+        guard stages.contains(.character) else { return nil }
+        return CharacterState(
+            flavour: flavours[.character] ?? .robot, amount: amounts[.character] ?? 60)
+    }
+
     /// True when this stage knows what to do with that knob.
     ///
     /// The setter is deliberately silent about pairs it does not recognise, so
@@ -528,6 +697,8 @@ final class EffectChain {
         Pair(kind: .compressor, parameter: "threshold"),
         Pair(kind: .compressor, parameter: "headroom"),
         Pair(kind: .pitch, parameter: "cents"),
+        Pair(kind: .character, parameter: "flavour"),
+        Pair(kind: .character, parameter: "amount"),
         Pair(kind: .reverb, parameter: "mix"),
         Pair(kind: .reverb, parameter: "decay"),
         Pair(kind: .echo, parameter: "mix"),
@@ -542,6 +713,18 @@ final class EffectChain {
         guard let index = stages.firstIndex(of: kind), index < units.count else { return }
         let unit = units[index]
         switch (kind, parameter) {
+        case (.character, "flavour"):
+            let flavour =
+                EffectKind.Flavour(rawValue: Int(value.rounded())) ?? .robot
+            flavours[kind] = flavour
+            applyFlavour(flavour, amount: amounts[kind] ?? 60, to: unit)
+        case (.character, "amount"):
+            amounts[kind] = value
+            // Re-applied whole rather than only setting the final mix: the
+            // flavour and the amount are one state, and setting half of it is
+            // how a control ends up doing something different depending on
+            // which order the two were touched in.
+            applyFlavour(flavours[kind] ?? .robot, amount: value, to: unit)
         case (.pitch, "cents"):
             AudioUnitSetParameter(
                 unit, AudioUnitParameterID(kNewTimePitchParam_Pitch),

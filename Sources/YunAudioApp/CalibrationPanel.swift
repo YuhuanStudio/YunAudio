@@ -93,8 +93,10 @@ struct CalibrationPanel: View {
             // Per-source progress while it listens, so somebody can tell they
             // are not being heard before the ten seconds are over rather than
             // afterwards.
-            ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
-                if index < model.calibrationHeard.count {
+            ForEach(Array(model.sourceGroups.enumerated()), id: \.element.id) { index, group in
+                if index < model.calibrationHeard.count,
+                    let route = model.representative(of: group)
+                {
                     HStack(spacing: Yun.Space.sm) {
                         Image(
                             systemName: model.calibrationHeard[index] >= 1
@@ -135,8 +137,9 @@ struct CalibrationPanel: View {
             // A tool that silently moves somebody's faders is one they stop
             // trusting the first time it gets something wrong.
             ForEach(model.calibrationProposals, id: \.id) { entry in
-                if entry.id < model.activeRoutes.count {
-                    let route = model.activeRoutes[entry.id]
+                if entry.id < model.calibrationGroups.count,
+                    let route = model.representative(of: model.calibrationGroups[entry.id])
+                {
                     HStack(spacing: Yun.Space.sm) {
                         Text(model.routeTitle(route))
                             .font(Yun.Text.caption)

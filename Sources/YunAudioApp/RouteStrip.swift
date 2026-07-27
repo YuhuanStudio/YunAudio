@@ -9,19 +9,35 @@ import YunDesign
 /// recording controls, the echo cancellation controls and the level row.
 struct RouteStrip: View {
     @Bindable var model: RouterModel
-    let index: Int
-    let route: Route
+    /// One logical source and all of its channels, rather than one wire.
+    ///
+    /// A stereo source used to be two strips: two faders, two mutes and two
+    /// solo buttons for one microphone, kept in step by hand until somebody
+    /// moved one of them.
+    let group: RouterModel.SourceGroup
     /// The panel is 340 points wide; the window has room for the readout.
     var isCompact = false
 
     var body: some View {
-        let muted = index < model.routeMutes.count && model.routeMutes[index]
-        let silenced = model.isSilenced(index)
-        let soloed = model.soloedRoute == index
-        let level = index < model.routeLevels.count ? model.routeLevels[index] : 0
-        let hold = index < model.peakHolds.count ? model.peakHolds[index] : 0
-        let clipping = index < model.clipped.count && model.clipped[index]
+        guard let route = model.representative(of: group) else {
+            return AnyView(EmptyView())
+        }
+        let muted = model.isMuted(group)
+        let silenced = model.isSilenced(group)
+        let soloed = model.soloedGroup == group.uid
+        let level = model.level(of: group)
+        let hold = model.peakHold(of: group)
+        let clipping = model.isClipped(group)
+        return AnyView(
+            strip(
+                route: route, muted: muted, silenced: silenced, soloed: soloed,
+                level: level, hold: hold, clipping: clipping))
+    }
 
+    private func strip(
+        route: Route, muted: Bool, silenced: Bool, soloed: Bool,
+        level: Float, hold: Float, clipping: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             HStack(spacing: Yun.Space.sm) {
                 iconButton(
@@ -29,7 +45,7 @@ struct RouteStrip: View {
                     tone: muted ? Yun.Palette.danger : Yun.Palette.textSecondary,
                     label: muted ? loc("Unmute") : loc("Mute")
                 ) {
-                    model.setMuted(!muted, forRouteAt: index)
+                    model.setMuted(!muted, for: group)
                 }
 
                 // Solo is a view of the mix, not a setting: it silences
@@ -41,15 +57,34 @@ struct RouteStrip: View {
                     background: soloed ? Yun.Palette.accent : Yun.Palette.elevated,
                     label: loc("Solo")
                 ) {
-                    model.toggleSolo(index)
+                    model.toggleSolo(group)
                 }
 
-                Text(model.label(for: route))
+                Text(model.sourceLabel(for: group))
                     .font(Yun.Text.body)
                     .foregroundStyle(
                         silenced ? Yun.Palette.textMuted : Yun.Palette.textPrimary
                     )
                     .lineLimit(1)
+
+                // What this source counts as, and a way to correct it.
+                //
+                // The balance pass needs to know which sources are people and
+                // which are music, and it guesses from the bundle identifier —
+                // a guess that is right for Discord and Spotify and cannot
+                // possibly be right for everything. Putting it on the strip
+                // means correcting it is one click at the moment somebody
+                // notices, rather than a setting they have to go and find.
+                if !isCompact, model.canChangeRole(of: route) {
+                    Button {
+                        model.toggleRole(of: route)
+                    } label: {
+                        YunBadge(loc(model.role(of: route).title))
+                    }
+                    .buttonStyle(.plain)
+                    .focusEffectDisabled()
+                    .help(loc("What this source counts as when balancing. Click to change."))
+                }
 
                 Spacer(minLength: Yun.Space.sm)
 
@@ -79,13 +114,13 @@ struct RouteStrip: View {
 
             YunFader(
                 decibels: Binding(
-                    get: { model.faderDecibels(forRouteAt: index) },
-                    set: { model.setFaderDecibels($0, forRouteAt: index) }))
+                    get: { model.faderDecibels(of: group) },
+                    set: { model.setFaderDecibels($0, for: group) }))
         }
     }
 
     private var readout: String {
-        let decibels = model.faderDecibels(forRouteAt: index)
+        let decibels = model.faderDecibels(of: group)
         return decibels <= RouterModel.minimumDecibels
             ? "−∞" : String(format: "%+.1f dB", decibels)
     }

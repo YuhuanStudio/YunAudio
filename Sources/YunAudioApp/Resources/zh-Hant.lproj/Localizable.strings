@@ -293,3 +293,15 @@
 "Shift" = "移調";
 "Size" = "空間大小";
 "Repeats" = "重複次數";
+"What this source counts as when balancing. Click to change." = "自動平衡時這個來源算什麼。點一下可切換。";
+"Character" = "音色";
+"Robot, radio, monster. Pitch alone only makes somebody sound small; this is what makes them sound like something else." = "機器人、無線電、怪物。單純移調只會讓人聽起來變小隻；這個才是讓人聽起來像別的東西。";
+"Voice" = "人聲";
+"Amount" = "強度";
+"Robot" = "機器人";
+"Radio" = "無線電";
+"Monster" = "怪物";
+"Bitcrush" = "數位破碎";
+"Alien" = "外星人";
+"Voice type" = "變聲種類";
+"Time" = "延遲時間";

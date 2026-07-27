@@ -322,8 +322,8 @@ struct EffectParameterTests {
         let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
         #expect(
             ordered == [
-                .voiceIsolation, .equaliser, .gate, .pitch, .compressor, .echo, .reverb,
-                .limiter,
+                .voiceIsolation, .equaliser, .gate, .pitch, .character, .compressor,
+                .echo, .reverb, .limiter,
             ])
         // Every stage has a distinct position, or the sort is not deterministic
         // and the same set of switches can build two different chains.
@@ -2524,5 +2524,78 @@ struct SourceRoleTests {
     @Test("an unidentified source is background rather than voice")
     func unknownIsBackground() {
         #expect(LevelCalibration.Role.default(forBundleID: nil) == .background)
+    }
+}
+
+// MARK: - The voice changer
+
+/// Pitch on its own only makes somebody sound small. These check the half that
+/// makes them sound like something else.
+@Suite("Voice character")
+struct VoiceCharacterTests {
+
+    /// Every voice has to be reachable from the parameter, or a name appears in
+    /// the picker that nothing can select.
+    @Test("every flavour has a position on the control")
+    func flavoursAreSelectable() throws {
+        let parameter = try #require(
+            EffectKind.character.parameters.first { $0.id == "flavour" })
+        #expect(parameter.isChoice)
+        #expect(parameter.options.count == EffectKind.Flavour.allCases.count)
+        for flavour in EffectKind.Flavour.allCases {
+            #expect(Float(flavour.rawValue) >= parameter.minimum)
+            #expect(Float(flavour.rawValue) <= parameter.maximum)
+            #expect(parameter.options[flavour.rawValue] == flavour.title)
+        }
+    }
+
+    /// The flavours have to be distinct, which is the one thing a bundle of
+    /// settings on a shared unit can quietly fail to be.
+    @Test("every flavour is named and different")
+    func flavoursAreDistinct() {
+        let titles = EffectKind.Flavour.allCases.map(\.title)
+        #expect(Set(titles).count == titles.count)
+        #expect(titles.allSatisfy { !$0.isEmpty })
+    }
+
+    /// Setting the amount must not reset the voice, and setting the voice must
+    /// not reset the amount. They are one state and the unit keeps whatever it
+    /// was last told, so touching them in either order has to give the same
+    /// result.
+    @Test("voice and amount do not overwrite each other")
+    func stateSurvivesEitherOrder() throws {
+        let first = try #require(
+            EffectChain(kinds: [.character], sampleRate: 48000, maximumFrames: 512))
+        first.set("flavour", of: .character, to: 2)
+        first.set("amount", of: .character, to: 35)
+
+        let second = try #require(
+            EffectChain(kinds: [.character], sampleRate: 48000, maximumFrames: 512))
+        second.set("amount", of: .character, to: 35)
+        second.set("flavour", of: .character, to: 2)
+
+        // Both landed on the same unit state, which is what "one state" means.
+        #expect(first.characterState == second.characterState)
+        #expect(first.characterState?.flavour == .monster)
+        #expect(first.characterState?.amount == 35)
+    }
+
+    /// An out-of-range position falls back rather than crashing on a preferences
+    /// file written by a later version.
+    @Test("an unknown voice falls back instead of trapping")
+    func unknownFlavour() throws {
+        let chain = try #require(
+            EffectChain(kinds: [.character], sampleRate: 48000, maximumFrames: 512))
+        chain.set("flavour", of: .character, to: 99)
+        #expect(chain.characterState?.flavour == .robot)
+    }
+
+    /// It is a real audio unit and it renders.
+    @Test("the character stage builds and reports its latency")
+    func builds() throws {
+        let chain = try #require(
+            EffectChain(kinds: [.character], sampleRate: 48000, maximumFrames: 512))
+        #expect(chain.stages == [.character])
+        #expect(chain.latencyFrames >= 0)
     }
 }

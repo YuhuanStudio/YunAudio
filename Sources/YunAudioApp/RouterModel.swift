@@ -832,6 +832,108 @@ final class RouterModel {
     /// The source name is dropped when every route shares it, which is the
     /// common case: repeating "Razer Seiren V3 Pro" on each row only pushes the
     /// channels out of view behind an ellipsis.
+    // MARK: Sources rather than wires
+
+    /// One logical source and every route carrying it.
+    ///
+    /// A stereo source is two routes, and the mixer used to show two strips for
+    /// it — two faders, two mutes and two solo buttons for one microphone,
+    /// which have to be kept in step by hand and silently drift apart the first
+    /// time somebody moves one. The balance pass made that worse rather than
+    /// better: it measured each channel separately and proposed a gain for
+    /// each, so applying it to a stereo source would put the two sides at
+    /// different levels and pull the image apart.
+    ///
+    /// It is the same mistake as capturing every application through one tap,
+    /// pointing the other way. That one collapsed several things into one so
+    /// they could not be addressed separately; this one split one thing into
+    /// several so it could not be addressed at all. Both come from letting the
+    /// wiring decide what the interface shows.
+    struct SourceGroup: Identifiable, Equatable {
+        let uid: String
+        /// Indices into `activeRoutes`, in order.
+        let routes: [Int]
+        var id: String { uid }
+    }
+
+    /// Routes grouped by where they come from, in the order they appear.
+    var sourceGroups: [SourceGroup] {
+        var order: [String] = []
+        var members: [String: [Int]] = [:]
+        for (index, route) in activeRoutes.enumerated() {
+            let uid = route.source.deviceUID
+            if members[uid] == nil { order.append(uid) }
+            members[uid, default: []].append(index)
+        }
+        return order.map { SourceGroup(uid: $0, routes: members[$0] ?? []) }
+    }
+
+    /// The first route of a group, which is what every per-route accessor is
+    /// keyed on.
+    func representative(of group: SourceGroup) -> Route? {
+        guard let first = group.routes.first, first < activeRoutes.count else { return nil }
+        return activeRoutes[first]
+    }
+
+    func level(of group: SourceGroup) -> Float {
+        group.routes.compactMap { $0 < levels.count ? levels[$0] : nil }.max() ?? 0
+    }
+
+    func peakHold(of group: SourceGroup) -> Float {
+        group.routes.compactMap { $0 < peakHolds.count ? peakHolds[$0] : nil }.max() ?? 0
+    }
+
+    func isClipped(_ group: SourceGroup) -> Bool {
+        group.routes.contains { $0 < clipped.count && clipped[$0] }
+    }
+
+    func isMuted(_ group: SourceGroup) -> Bool {
+        // Muted only when every channel is: a half-muted source is a state the
+        // interface should never be able to produce, but it can arrive from a
+        // preset written before grouping existed.
+        !group.routes.isEmpty
+            && group.routes.allSatisfy { $0 < routeMutes.count && routeMutes[$0] }
+    }
+
+    func isSilenced(_ group: SourceGroup) -> Bool {
+        group.routes.allSatisfy { isSilenced($0) }
+    }
+
+    func setMuted(_ muted: Bool, for group: SourceGroup) {
+        for index in group.routes { setMuted(muted, forRouteAt: index) }
+    }
+
+    var soloedGroup: String? {
+        guard let soloedRoute, soloedRoute < activeRoutes.count else { return nil }
+        return activeRoutes[soloedRoute].source.deviceUID
+    }
+
+    func toggleSolo(_ group: SourceGroup) {
+        guard let first = group.routes.first else { return }
+        toggleSolo(first)
+    }
+
+    /// The group's fader. Every channel moves together, which is the whole
+    /// point — moving one side of a stereo pair is not a volume change, it is
+    /// a balance change nobody asked for.
+    func faderDecibels(of group: SourceGroup) -> Float {
+        guard let first = group.routes.first else { return 0 }
+        return faderDecibels(forRouteAt: first)
+    }
+
+    func setFaderDecibels(_ decibels: Float, for group: SourceGroup) {
+        for index in group.routes { setFaderDecibels(decibels, forRouteAt: index) }
+    }
+
+    /// What a source is called in the mixer: its name, and how many channels
+    /// it carries when that is worth saying.
+    func sourceLabel(for group: SourceGroup) -> String {
+        guard let route = representative(of: group) else { return "" }
+        let name = routeTitle(route)
+        guard group.routes.count > 1 else { return name }
+        return "\(name)  \(group.routes.count)ch"
+    }
+
     func label(for route: Route) -> String {
         let channels = "ch\(route.source.channel + 1) → ch\(route.destination.channel + 1)"
         let sources = Set(activeRoutes.map(\.source.deviceUID))
@@ -843,14 +945,15 @@ final class RouterModel {
         let source: String
         if let device = inputDevices.first(where: { $0.uid == route.source.deviceUID }) {
             source = device.name
+        } else if let application = application(of: route) {
+            // A tap's UID is a UUID, so the only way to a name is the map built
+            // when the taps were created. This used to name whichever captured
+            // application happened to be first in the list, which was right
+            // exactly when there was one of them — every strip said "Discord"
+            // whether it carried Discord or Spotify.
+            source = application.name
         } else if route.source.deviceUID.contains("-") {
-            // Tap UIDs are UUIDs; name the applications they carry instead.
-            source =
-                capturedAppBundleIDs.isEmpty
-                ? loc("Application audio")
-                : availableApps
-                    .first { capturedAppBundleIDs.contains($0.bundleID) }?.name
-                    ?? loc("Application audio")
+            source = loc("Application audio")
         } else {
             source = route.source.deviceUID
         }
@@ -1762,6 +1865,17 @@ final class RouterModel {
         return sourceRoles[bundleID] ?? LevelCalibration.Role.default(forBundleID: bundleID)
     }
 
+    /// Only sources that can be either are worth offering a choice for. The
+    /// microphone is a person by definition.
+    func canChangeRole(of route: Route) -> Bool {
+        route.source.deviceUID != selectedSourceUID && tapOwners[route.source.deviceUID] != nil
+    }
+
+    func toggleRole(of route: Route) {
+        guard let bundleID = tapOwners[route.source.deviceUID] else { return }
+        sourceRoles[bundleID] = role(of: route) == .voice ? .background : .voice
+    }
+
     var isCalibrating: Bool {
         switch calibrationPhase {
         case .idle, .failed, .proposing: false
@@ -1777,7 +1891,8 @@ final class RouterModel {
     func startCalibration() {
         guard canCalibrate, !isCalibrating else { return }
         calibrationProposals = []
-        calibrationHeard = Array(repeating: 0, count: activeRoutes.count)
+        calibrationGroups = []
+        calibrationHeard = Array(repeating: 0, count: sourceGroups.count)
         calibrationPhase = .countdown(Self.calibrationCountdown)
         calibrationRemaining = Double(Self.calibrationCountdown)
         scheduleCalibrationTick()
@@ -1790,6 +1905,7 @@ final class RouterModel {
         calibrationPhase = .idle
         calibrationRemaining = 0
         calibrationProposals = []
+        calibrationGroups = []
     }
 
     private func scheduleCalibrationTick() {
@@ -1816,7 +1932,10 @@ final class RouterModel {
             }
         case .listening:
             let rate = pathQuality?.sampleRate ?? 48000
-            calibrationHeard = engine.calibrationLevels(sampleRate: rate).map(\.seconds)
+            let seconds = engine.calibrationLevels(sampleRate: rate).map(\.seconds)
+            calibrationHeard = sourceGroups.map { group in
+                group.routes.compactMap { $0 < seconds.count ? seconds[$0] : nil }.max() ?? 0
+            }
             if calibrationRemaining <= 0 { finishCalibration() }
         default:
             calibrationTimer?.invalidate()
@@ -1831,16 +1950,29 @@ final class RouterModel {
 
         let rate = pathQuality?.sampleRate ?? 48000
         let levels = engine.calibrationLevels(sampleRate: rate)
-        let measurements = activeRoutes.enumerated().compactMap {
-            index, route -> LevelCalibration.Measurement? in
-            guard index < levels.count else { return nil }
+        // Measured per source, not per channel.
+        //
+        // A stereo source is two routes, and proposing a gain for each would
+        // put the two sides at different levels — a balance change nobody asked
+        // for, and one that pulls the image apart. The group's level is its
+        // loudest channel and its seconds are the longest, because a source was
+        // heard if any of its channels heard something.
+        let groups = sourceGroups
+        let measurements = groups.enumerated().compactMap {
+            index, group -> LevelCalibration.Measurement? in
+            guard let route = representative(of: group) else { return nil }
+            let members = group.routes.filter { $0 < levels.count }
+            guard !members.isEmpty else { return nil }
+            let decibels = members.map { levels[$0].decibels }.max() ?? -.infinity
+            let seconds = members.map { levels[$0].seconds }.max() ?? 0
             return LevelCalibration.Measurement(
                 id: index,
                 role: role(of: route),
-                decibels: levels[index].decibels,
-                seconds: levels[index].seconds,
-                currentGain: Double(faderDecibels(forRouteAt: index)))
+                decibels: decibels,
+                seconds: seconds,
+                currentGain: Double(faderDecibels(of: group)))
         }
+        calibrationGroups = groups
 
         if let problem = LevelCalibration.problem(with: measurements) {
             switch problem {
@@ -1850,8 +1982,10 @@ final class RouterModel {
                 return
             case .silentSources(let ids):
                 let names = ids.compactMap { id -> String? in
-                    guard id < activeRoutes.count else { return nil }
-                    return routeTitle(activeRoutes[id])
+                    guard id < groups.count,
+                        let route = representative(of: groups[id])
+                    else { return nil }
+                    return routeTitle(route)
                 }
                 // Not fatal: the sources that did produce something can still
                 // be balanced against each other, and saying which one stayed
@@ -1876,12 +2010,18 @@ final class RouterModel {
             : .proposing
     }
 
-    /// Applies what it worked out.
+    /// The groups the last proposal was computed against, so its ids still
+    /// mean something if the route set changes underneath it.
+    private(set) var calibrationGroups: [SourceGroup] = []
+
+    /// Applies what it worked out. Every channel of a source moves together.
     func applyCalibration() {
         for proposal in calibrationProposals {
-            setFaderDecibels(Float(proposal.gain), forRouteAt: proposal.id)
+            guard proposal.id < calibrationGroups.count else { continue }
+            setFaderDecibels(Float(proposal.gain), for: calibrationGroups[proposal.id])
         }
         calibrationProposals = []
+        calibrationGroups = []
         calibrationPhase = .idle
     }
 

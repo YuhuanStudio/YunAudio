@@ -293,3 +293,15 @@
 "Shift" = "Shift";
 "Size" = "Size";
 "Repeats" = "Repeats";
+"What this source counts as when balancing. Click to change." = "What this source counts as when balancing. Click to change.";
+"Character" = "Character";
+"Robot, radio, monster. Pitch alone only makes somebody sound small; this is what makes them sound like something else." = "Robot, radio, monster. Pitch alone only makes somebody sound small; this is what makes them sound like something else.";
+"Voice" = "Voice";
+"Amount" = "Amount";
+"Robot" = "Robot";
+"Radio" = "Radio";
+"Monster" = "Monster";
+"Bitcrush" = "Bitcrush";
+"Alien" = "Alien";
+"Voice type" = "Voice type";
+"Time" = "Time";
