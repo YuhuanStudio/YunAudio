@@ -101,3 +101,8 @@
 "Threshold" = "閾值";
 "Headroom" = "餘裕";
 "Pre-gain" = "前級增益";
+"Patchbay" = "接線盤";
+"Pick a destination" = "選擇目的地";
+"Cancel" = "取消";
+"Ch" = "聲道";
+"Pick an input and an output to start patching." = "選好輸入與輸出後即可開始接線。";

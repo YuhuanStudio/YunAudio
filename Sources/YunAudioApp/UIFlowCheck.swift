@@ -103,6 +103,33 @@ enum UIFlowCheck {
         model.apply(.voiceChat)
         await pause(1.0)
 
+        print("\npatching")
+        let sourcePorts = model.canvasSources
+        let destinationPorts = model.canvasDestinations
+        check("the canvas offers sources", !sourcePorts.isEmpty)
+        check("the canvas offers destinations", !destinationPorts.isEmpty)
+
+        if let source = sourcePorts.first, let destination = destinationPorts.first,
+            let lastChannel = destination.channels.last
+        {
+            let newCable = ChannelRef(deviceUID: destination.uid, channel: lastChannel)
+            let before = model.activeRoutes.count
+            let cyclesBefore = model.cycleCountForDiagnostics
+            model.connect(
+                source: ChannelRef(deviceUID: source.uid, channel: source.channels[0]),
+                destination: newCable)
+            await pause(0.4)
+            check("a cable was added", model.activeRoutes.count > before)
+            check(
+                "audio kept flowing while patching",
+                model.cycleCountForDiagnostics > cyclesBefore)
+
+            model.disconnect(destination: newCable)
+            await pause(0.4)
+            check("the cable was pulled", model.activeRoutes.count == before)
+            check("still running after patching", model.isRunning)
+        }
+
         print("\nstopping")
         model.stop()
         await waitUntil("the route came down", { !model.isRunning }, timeout: 5)

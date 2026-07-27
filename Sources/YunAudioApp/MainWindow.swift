@@ -205,6 +205,8 @@ struct MainWindow: View {
     private var mixer: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                RoutingCanvas(model: model)
+
                 sectionHeading(loc("Mixer"))
 
                 if model.activeRoutes.isEmpty {

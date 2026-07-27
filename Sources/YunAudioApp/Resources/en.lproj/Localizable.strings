@@ -101,3 +101,8 @@
 "Threshold" = "Threshold";
 "Headroom" = "Headroom";
 "Pre-gain" = "Pre-gain";
+"Patchbay" = "Patchbay";
+"Pick a destination" = "Pick a destination";
+"Cancel" = "Cancel";
+"Ch" = "Ch";
+"Pick an input and an output to start patching." = "Pick an input and an output to start patching.";

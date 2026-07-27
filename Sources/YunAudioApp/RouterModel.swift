@@ -191,6 +191,78 @@ final class RouterModel {
     /// Per-route peak levels, aligned with `routes`.
     var routeLevels: [Float] { levels }
 
+    // MARK: Patchbay
+
+    /// Ports the canvas offers on the left.
+    ///
+    /// The selected input plus every captured application: a tap is a source
+    /// like any other as far as the matrix is concerned.
+    var canvasSources: [PortGroup] {
+        var groups: [PortGroup] = []
+        if let source = selectedSource {
+            groups.append(
+                PortGroup(
+                    uid: source.uid, name: source.name,
+                    channels: Array(0..<min(source.inputChannels, 8))))
+        }
+        // Tap channels only exist while a route is up, since the tap is created
+        // then; before that there is nothing to offer.
+        for route in activeRoutes
+        where !inputDevices.contains(where: {
+            $0.uid == route.source.deviceUID
+        }) {
+            guard !groups.contains(where: { $0.uid == route.source.deviceUID }) else {
+                continue
+            }
+            groups.append(
+                PortGroup(
+                    uid: route.source.deviceUID,
+                    name: loc("Application audio"),
+                    channels: [0, 1]))
+        }
+        return groups
+    }
+
+    var canvasDestinations: [PortGroup] {
+        guard let destination = selectedDestination else { return [] }
+        return [
+            PortGroup(
+                uid: destination.uid, name: destination.name,
+                channels: Array(0..<min(destination.outputChannels, 8)))
+        ]
+    }
+
+    /// Adds a cable. Silent when the route is already up, because the graph is
+    /// swapped rather than rebuilt.
+    func connect(source: ChannelRef, destination: ChannelRef) {
+        guard
+            !activeRoutes.contains(where: {
+                $0.source == source && $0.destination == destination
+            })
+        else { return }
+        applyPatch(activeRoutes + [Route(source: source, destination: destination)])
+    }
+
+    /// Pulls every cable reaching a destination.
+    func disconnect(destination: ChannelRef) {
+        let remaining = activeRoutes.filter { $0.destination != destination }
+        guard remaining.count != activeRoutes.count else { return }
+        applyPatch(remaining)
+    }
+
+    private func applyPatch(_ routes: [Route]) {
+        guard isRunning else {
+            // Nothing to swap into; the patch takes effect when routing starts.
+            activeRoutes = routes
+            return
+        }
+        if engine.updateRoutes(routes) {
+            activeRoutes = engine.currentRoutes
+            routeGains = activeRoutes.map(\.gain)
+            routeMutes = activeRoutes.map(\.isMuted)
+        }
+    }
+
     // MARK: Per-route control
 
     private(set) var routeGains: [Float] = []
