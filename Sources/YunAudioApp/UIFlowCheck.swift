@@ -129,6 +129,29 @@ enum UIFlowCheck {
         model.setMuted(false, forRouteAt: 0)
         check("unmuting took", model.routeMutes.first == false)
 
+        print("\nsolo, peak hold and clipping")
+        check("peak holds are being tracked", model.peakHolds.count == model.activeRoutes.count)
+        check("clip latches exist too", model.clipped.count == model.activeRoutes.count)
+        // The hold never sits below the instantaneous level, or the marker
+        // would be drawn inside the bar rather than at its high-water mark.
+        check(
+            "the hold is never below the level",
+            zip(model.peakHolds, model.routeLevels).allSatisfy { $0 >= $1 - 0.001 })
+
+        if model.activeRoutes.count > 1 {
+            model.toggleSolo(0)
+            check("the soloed route is audible", !model.isSilenced(0))
+            check("everything else is silenced", model.isSilenced(1))
+            // Solo is a view of the mix: releasing it has to restore exactly
+            // what was there, including a mute pressed while it was on.
+            let mutesUnderSolo = model.routeMutes
+            model.toggleSolo(0)
+            check("releasing solo restores the mix", model.routeMutes == mutesUnderSolo)
+            check("and nothing is left silenced", !model.isSilenced(0) && !model.isSilenced(1))
+        } else {
+            note("only one route — solo not exercised")
+        }
+
         print("\nmoving a fader")
         model.setFaderDecibels(-12, forRouteAt: 0)
         check(

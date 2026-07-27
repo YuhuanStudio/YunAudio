@@ -277,57 +277,9 @@ struct MainWindow: View {
                 } else {
                     ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) {
                         index, route in
-                        routeStrip(index: index, route: route)
+                        YunCard { RouteStrip(model: model, index: index, route: route) }
                     }
                 }
-            }
-        }
-    }
-
-    private func routeStrip(index: Int, route: Route) -> some View {
-        let level = index < model.routeLevels.count ? model.routeLevels[index] : 0
-        let isMuted = index < model.routeMutes.count ? model.routeMutes[index] : false
-        let decibels = model.faderDecibels(forRouteAt: index)
-
-        return YunCard {
-            VStack(alignment: .leading, spacing: Yun.Space.md) {
-                HStack(spacing: Yun.Space.md) {
-                    Button {
-                        model.setMuted(!isMuted, forRouteAt: index)
-                    } label: {
-                        Image(
-                            systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"
-                        )
-                        .font(.system(size: 11))
-                        .foregroundStyle(
-                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary
-                        )
-                        .frame(width: 24, height: 24)
-                        .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
-                    }
-                    .buttonStyle(.plain)
-                    .focusEffectDisabled()
-                    .accessibilityLabel(Text(isMuted ? loc("Unmute") : loc("Mute")))
-                    .accessibilityValue(Text(model.label(for: route)))
-
-                    Text(model.label(for: route))
-                        .font(Yun.Text.body)
-                        .foregroundStyle(Yun.Palette.textPrimary)
-                        .lineLimit(1)
-
-                    Spacer(minLength: Yun.Space.md)
-
-                    Text(decibels <= -40 ? "−∞" : String(format: "%+.1f dB", decibels))
-                        .font(Yun.Text.mono)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                }
-
-                YunLevelMeter(level: isMuted ? 0 : level, segments: 32)
-
-                YunFader(
-                    decibels: Binding(
-                        get: { model.faderDecibels(forRouteAt: index) },
-                        set: { model.setFaderDecibels($0, forRouteAt: index) }))
             }
         }
     }

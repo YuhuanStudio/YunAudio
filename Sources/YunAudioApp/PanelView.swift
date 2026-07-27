@@ -312,48 +312,10 @@ struct PanelView: View {
                     .font(Yun.Text.label)
                     .foregroundStyle(Yun.Palette.textPrimary)
                 ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
-                    routeRow(index: index, route: route)
+                    RouteStrip(model: model, index: index, route: route, isCompact: true)
                     if index < model.activeRoutes.count - 1 { YunDivider() }
                 }
             }
-        }
-    }
-
-    private func routeRow(index: Int, route: Route) -> some View {
-        let level = index < model.routeLevels.count ? model.routeLevels[index] : 0
-        let isMuted = index < model.routeMutes.count ? model.routeMutes[index] : false
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: Yun.Space.sm) {
-                Button {
-                    model.setMuted(!isMuted, forRouteAt: index)
-                } label: {
-                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(
-                            isMuted ? Yun.Palette.danger : Yun.Palette.textSecondary
-                        )
-                        .frame(width: 18, height: 18)
-                        .background(Yun.Palette.elevated, in: .rect(cornerRadius: 5))
-                }
-                .buttonStyle(.plain)
-                .focusEffectDisabled()
-
-                Text(model.label(for: route))
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textSecondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-
-                Spacer(minLength: Yun.Space.sm)
-
-                YunLevelMeter(level: isMuted ? 0 : level, segments: 12)
-                    .frame(width: 90)
-            }
-
-            YunFader(
-                decibels: Binding(
-                    get: { model.faderDecibels(forRouteAt: index) },
-                    set: { model.setFaderDecibels($0, forRouteAt: index) }))
         }
     }
 

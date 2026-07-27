@@ -370,6 +370,50 @@ final class RouterModel {
     /// Per-route peak levels, aligned with `routes`.
     var routeLevels: [Float] { levels }
 
+    /// The highest level each route has reached lately, and whether it has ever
+    /// hit full scale.
+    ///
+    /// A bar that only shows the instantaneous peak is unreadable for speech:
+    /// the loudest moment is a few milliseconds long and the eye never catches
+    /// it. The hold marker is the one that tells you whether you are actually
+    /// near clipping, and the clip latch is the one that tells you that you
+    /// were — once, twenty seconds ago, which is exactly the event a meter that
+    /// only falls will hide.
+    private(set) var peakHolds: [Float] = []
+    private(set) var clipped: [Bool] = []
+
+    /// Clears the clip latches. Deliberately manual: a latch that clears itself
+    /// is a latch nobody sees.
+    func clearClipping() { clipped = clipped.map { _ in false } }
+
+    /// The level on a particular route, for the patchbay to draw on its cable.
+    func level(of route: Route) -> Float {
+        guard let index = activeRoutes.firstIndex(of: route), index < levels.count,
+            !isSilenced(index)
+        else { return 0 }
+        return levels[index]
+    }
+
+    /// Full scale in float is 1.0, and anything at or above it has already been
+    /// truncated by whatever converts to the wire format downstream.
+    private static let clipThreshold: Float = 0.999
+
+    private func refreshPeaks(_ current: [Float]) {
+        if peakHolds.count != current.count {
+            peakHolds = current
+            clipped = current.map { $0 >= Self.clipThreshold }
+            return
+        }
+        for index in current.indices {
+            // Rises at once, falls slowly. The poll runs twenty times a second,
+            // so this is roughly a second and a half of hold.
+            peakHolds[index] =
+                current[index] > peakHolds[index]
+                ? current[index] : peakHolds[index] * 0.97
+            if current[index] >= Self.clipThreshold { clipped[index] = true }
+        }
+    }
+
     // MARK: Patchbay
 
     /// Ports the canvas offers on the left.
@@ -474,6 +518,31 @@ final class RouterModel {
     private(set) var routeGains: [Float] = []
     private(set) var routeMutes: [Bool] = []
 
+    /// The route being soloed, if any.
+    ///
+    /// Solo is a view of the mix rather than a setting: it mutes everything
+    /// else without touching what each route's own mute says, so turning it off
+    /// puts the mix back exactly as it was. Storing it as "which one" rather
+    /// than a flag per route is what makes that reversible.
+    private(set) var soloedRoute: Int?
+
+    func toggleSolo(_ index: Int) {
+        soloedRoute = soloedRoute == index ? nil : index
+        applyMutes()
+    }
+
+    /// True when this route is silent right now, for whatever reason.
+    func isSilenced(_ index: Int) -> Bool {
+        if let soloedRoute { return index != soloedRoute }
+        return index < routeMutes.count && routeMutes[index]
+    }
+
+    private func applyMutes() {
+        for index in routeMutes.indices {
+            engine.setMuted(isSilenced(index), forRouteAt: index)
+        }
+    }
+
     func setGain(_ gain: Float, forRouteAt index: Int) {
         guard index < routeGains.count else { return }
         routeGains[index] = gain
@@ -523,6 +592,13 @@ final class RouterModel {
     }
 
     func setMuted(_ muted: Bool, forRouteAt index: Int) {
+        // Solo owns what is audible while it is on, so a mute pressed under it
+        // records the intent and takes effect when solo is released.
+        guard soloedRoute == nil else {
+            if index < routeMutes.count { routeMutes[index] = muted }
+            persist()
+            return
+        }
         guard index < routeMutes.count else { return }
         routeMutes[index] = muted
         engine.setMuted(muted, forRouteAt: index)
@@ -1021,6 +1097,8 @@ final class RouterModel {
         }
         stopPolling()
         levels = []
+        peakHolds = []
+        clipped = []
         activeRoutes = []
         routeGains = []
         routeMutes = []
@@ -1129,6 +1207,7 @@ final class RouterModel {
     private func poll() {
         guard isRunning else { return }
         levels = engine.routePeaks
+        refreshPeaks(levels)
         pathQuality = engine.pathQuality
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio

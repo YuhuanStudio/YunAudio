@@ -189,3 +189,6 @@
 "Unmuted" = "Unmuted";
 "none captured" = "none captured";
 "%d captured" = "%d captured";
+"Solo" = "Solo";
+"CLIP" = "CLIP";
+"The signal reached full scale. Click to reset." = "The signal reached full scale. Click to reset.";

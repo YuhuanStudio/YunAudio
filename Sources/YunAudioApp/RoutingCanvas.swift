@@ -217,13 +217,30 @@ struct RoutingCanvas: View {
                 let isHighlighted =
                     hoveredPort == route.source || hoveredPort == route.destination
                 let willBeRemoved = hoveredPort == route.destination
+
+                // The cable carries its own level. A patchbay whose cables all
+                // look the same cannot answer the question anybody actually has
+                // in front of it — which of these is carrying anything — and
+                // the meters that could are in a different card.
+                let level = model.level(of: route)
+                let lit = min(1, Double(level) * 4)
+
                 context.stroke(
                     path,
                     with: .color(
                         willBeRemoved
                             ? Yun.Palette.danger
-                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.45)),
+                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.35)),
                     lineWidth: isHighlighted ? 2 : 1.5)
+
+                if lit > 0.02 && !willBeRemoved {
+                    // Drawn over the top rather than instead: the quiet line
+                    // stays as the route, and this is the signal on it.
+                    context.stroke(
+                        path,
+                        with: .color(Yun.Palette.success.opacity(0.35 + 0.65 * lit)),
+                        lineWidth: 1.5 + 2 * lit)
+                }
             }
         }
     }
