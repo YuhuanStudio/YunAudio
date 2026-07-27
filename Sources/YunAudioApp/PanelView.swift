@@ -37,19 +37,25 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 header
                 if model.isDriverInstalled || forcesRoutedLayout {
-                    // Deliberately thin. This drops from the status item and has
-                    // to stay glanceable; everything that needs room lives in
-                    // the main window.
+                    // A menu bar panel can be long — it scrolls, and the ones
+                    // people actually use are. Sections that are read rather
+                    // than watched still collapse, so the height is the user's
+                    // choice instead of a fixed cost.
+                    presets
                     signalPath
+                    devicePickers
+                    appSources
+                    if !model.activeRoutes.isEmpty { mixer }
                     if model.isRunning { runtimeDetail }
                     if let error = model.lastError { errorRow(error) }
+                    voiceIsolation
                     footer
                 } else {
                     driverMissing
                 }
             }
             .padding(Yun.Space.lg)
-            .frame(width: 320)
+            .frame(width: 340)
         }
         .background(.clear)
     }
