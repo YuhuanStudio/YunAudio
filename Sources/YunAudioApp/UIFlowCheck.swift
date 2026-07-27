@@ -111,6 +111,26 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
+        print("\nchannel naming")
+        // CoreAudio says a device has three input channels and nothing about
+        // what is on them. On the Seiren all three carry audio — processed, dry,
+        // and past the microphone's own expander — so a number is not just
+        // unhelpful, it is misleading.
+        if let names = model.sourceChannelNames {
+            note("named channels: \(names.map(\.name).joined(separator: ", "))")
+            check(
+                "every named channel says what it is", names.allSatisfy { !$0.detail.isEmpty })
+            check("exactly one is the default", names.filter(\.isDefault).count == 1)
+            check(
+                "the label comes from the name rather than the index",
+                model.sourceChannelLabel(0) == names[0].name)
+        } else {
+            note("this input has no known topology — labels fall back to numbers")
+            check(
+                "the fallback label is still a channel number",
+                model.sourceChannelLabel(0).contains("1"))
+        }
+
         print("\nlocalisation")
         checkLocalisation()
 
@@ -150,6 +170,11 @@ enum UIFlowCheck {
 
         await waitUntil("levels started arriving", { !model.routeLevels.isEmpty }, timeout: 3)
         check("path quality is being reported", model.pathQuality != nil)
+        // The application routed audio into a virtual device and never said the
+        // one thing it exists to enable: that the conferencing application has
+        // to be pointed at that device.
+        check("it says what to do next", model.nextStep != nil)
+        if let next = model.nextStep { note(next) }
 
         print("\nmuting the first route")
         model.setMuted(true, forRouteAt: 0)

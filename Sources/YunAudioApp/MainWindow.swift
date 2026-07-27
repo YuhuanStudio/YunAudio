@@ -70,6 +70,10 @@ struct MainWindow: View {
                 DriverOnboarding(model: model, isCompact: true)
                     .padding(.horizontal, Yun.Space.xl)
                     .padding(.bottom, Yun.Space.md)
+            } else if let next = model.nextStep {
+                nextStepBanner(next)
+                    .padding(.horizontal, Yun.Space.xl)
+                    .padding(.bottom, Yun.Space.md)
             }
 
             // Columns separated by space rather than rules: the cards already
@@ -94,6 +98,25 @@ struct MainWindow: View {
         .focusEffectDisabled()
         .background(shortcuts)
         .background(RemembersFrame(name: "YunAudioMainWindow").frame(width: 0, height: 0))
+    }
+
+    /// The last step, which happens in another application.
+    ///
+    /// Quiet rather than an alert: it is the normal state of a working setup,
+    /// not a problem. It disappears when routing stops.
+    private func nextStepBanner(_ text: String) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Image(systemName: "arrow.turn.down.right")
+                .font(.system(size: 11))
+                .foregroundStyle(Yun.Palette.success)
+            Text(text)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textSecondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Yun.Space.md)
+        .padding(.vertical, Yun.Space.sm)
+        .background(Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.button))
     }
 
     /// Keyboard shortcuts for the things done most often.
@@ -239,13 +262,20 @@ struct MainWindow: View {
                                 YunSegmented(
                                     selection: $model.monoChannel,
                                     options: (0..<source.inputChannels).map {
-                                        ($0, "Ch \($0 + 1)")
+                                        ($0, model.sourceChannelLabel($0))
                                     })
+                                // Where the device's topology is known, say
+                                // what the chosen channel actually is instead
+                                // of admitting we do not know.
                                 Text(
-                                    String(
-                                        format: loc(
-                                            "This device reports %d input channels; not all of them necessarily carry audio."
-                                        ), source.inputChannels)
+                                    model.sourceChannelNames.flatMap {
+                                        $0.indices.contains(model.monoChannel)
+                                            ? loc($0[model.monoChannel].detail) : nil
+                                    }
+                                        ?? String(
+                                            format: loc(
+                                                "This device reports %d input channels; not all of them necessarily carry audio."
+                                            ), source.inputChannels)
                                 )
                                 .font(Yun.Text.caption)
                                 .foregroundStyle(Yun.Palette.textTertiary)

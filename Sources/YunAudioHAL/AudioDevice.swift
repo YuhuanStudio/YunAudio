@@ -121,6 +121,9 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public let outputChannels: Int
     public let nominalSampleRate: Double
     public let availableSampleRates: [Double]
+    /// Stable across units of the same product, unlike `uid`. What device-
+    /// specific knowledge keys on.
+    public let modelUID: String?
     /// Devices sharing a non-zero clock domain are driven by one clock, so a
     /// path between them needs no rate conversion. Zero means "not published",
     /// which is not the same as "shared" — see `ClockRelationship`.
@@ -134,6 +137,7 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         uid = try id.string(of: .deviceUID)
         name = id.optionalString(of: .deviceName) ?? uid
         manufacturer = id.optionalString(of: .manufacturer)
+        modelUID = id.optionalString(of: .modelUID)
         transport = AudioTransport(rawValue: id.optionalValue(of: .transportType))
         inputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeInput)
         outputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeOutput)

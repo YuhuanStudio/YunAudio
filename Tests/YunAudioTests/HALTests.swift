@@ -286,3 +286,45 @@ struct RazerLightingTests {
         #expect(Array(frame[17...49]).allSatisfy { $0 == 0 })
     }
 }
+
+// MARK: - Device channel names
+
+/// The Seiren V3 Pro's three input channels are three versions of the same
+/// microphone, and CoreAudio will not say which is which. Getting the mapping
+/// wrong hands somebody a signal that sounds nearly right, which is worse than
+/// one that sounds broken.
+@Suite("Device channel names")
+struct DeviceChannelNameTests {
+    @Test("the Seiren's three inputs are named from its own topology")
+    func seirenInputs() throws {
+        let channels = try #require(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeInput))
+        #expect(channels.count == 3)
+        #expect(channels[0].isDefault)
+        // Channel 2 is the one worth knowing about: the device has an expander
+        // ahead of its own converter, which no host-side gate can be equivalent
+        // to.
+        #expect(channels[2].name == "After the expander")
+        #expect(channels.filter(\.isDefault).count == 1)
+    }
+
+    @Test("an unknown device gets no invented names")
+    func unknownDevice() {
+        #expect(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Some Other Microphone",
+                scope: kAudioObjectPropertyScopeInput) == nil)
+    }
+
+    /// The names describe capture. Applying them to an output scope would label
+    /// a speaker "Dry".
+    @Test("output scopes are never named")
+    func outputScope() {
+        #expect(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeOutput) == nil)
+    }
+}

@@ -121,7 +121,9 @@ struct RoutingCanvas: View {
                 ForEach(group.channels, id: \.self) { channel in
                     port(
                         ChannelRef(deviceUID: group.uid, channel: channel),
-                        label: "\(loc("Ch")) \(channel + 1)",
+                        label: isSource
+                            ? model.sourceChannelLabel(channel)
+                            : "\(loc("Ch")) \(channel + 1)",
                         isSource: isSource, pitch: pitch)
                 }
             }

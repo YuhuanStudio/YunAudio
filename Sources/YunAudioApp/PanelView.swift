@@ -212,15 +212,21 @@ struct PanelView: View {
                         .frame(width: Self.labelColumn, alignment: .leading)
                     YunSegmented(
                         selection: $model.monoChannel,
-                        options: (0..<source.inputChannels).map { ($0, "Ch \($0 + 1)") })
+                        options: (0..<source.inputChannels).map {
+                            ($0, model.sourceChannelLabel($0))
+                        })
                 }
                 // The Seiren V3 Pro presents three input channels with only the
                 // first carrying the capsule, so this is not an exotic case.
                 Text(
-                    String(
-                        format: loc(
-                            "This device reports %d input channels; not all of them necessarily carry audio."
-                        ), source.inputChannels)
+                    model.sourceChannelNames.flatMap {
+                        $0.indices.contains(model.monoChannel)
+                            ? loc($0[model.monoChannel].detail) : nil
+                    }
+                        ?? String(
+                            format: loc(
+                                "This device reports %d input channels; not all of them necessarily carry audio."
+                            ), source.inputChannels)
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)

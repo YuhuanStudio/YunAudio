@@ -694,6 +694,47 @@ final class RouterModel {
 
     /// True when the YunAudio driver is installed, which is what the onboarding
     /// flow keys off.
+    /// What each of the source's input channels carries, when the device is one
+    /// whose topology is known.
+    ///
+    /// The interface used to say "this device reports 3 input channels; not all
+    /// of them necessarily carry audio" — true, unhelpful, and on the Seiren V3
+    /// Pro actively misleading. All three carry audio; they are three different
+    /// versions of the same microphone, and picking the wrong one gets a signal
+    /// that sounds nearly right.
+    var sourceChannelNames: [DeviceChannelNames.Channel]? {
+        guard let source = selectedSource else { return nil }
+        return DeviceChannelNames.channels(
+            modelUID: source.modelUID, name: source.name,
+            scope: kAudioObjectPropertyScopeInput)
+    }
+
+    /// Label for one source channel, named where the device is known.
+    func sourceChannelLabel(_ channel: Int) -> String {
+        if let names = sourceChannelNames, channel < names.count {
+            return names[channel].name
+        }
+        return "\(loc("Ch")) \(channel + 1)"
+    }
+
+    /// What the user still has to do somewhere else for any of this to matter.
+    ///
+    /// The application routed audio into a virtual device and never said the
+    /// one thing it exists to enable: that the conferencing application has to
+    /// be pointed at that device. Somebody could get everything here right,
+    /// watch the meters move, and still be on a call with the wrong microphone.
+    var nextStep: String? {
+        guard isRunning, let destination = selectedDestination else { return nil }
+        guard destination.transport.isVirtual else {
+            // A real output is monitoring rather than routing somewhere, and
+            // needs no further step.
+            return nil
+        }
+        return String(
+            format: loc("Now choose %@ as the microphone in Discord, Zoom or OBS."),
+            destination.name)
+    }
+
     /// The loopback endpoint standing in for our driver, when it is absent and
     /// something else is doing the job.
     var loopbackFallback: AudioDevice? {
@@ -921,6 +962,16 @@ final class RouterModel {
     private func applyChannelDefaults() {
         // Restoring must not overwrite what the user chose last time.
         guard !isRestoring, let source = selectedSource else { return }
+        // A device whose topology is known says which channel is the one
+        // anybody wants, which is better than the first one by position: on the
+        // Seiren the first is right, but that is luck rather than a rule.
+        if let names = sourceChannelNames,
+            let preferred = names.firstIndex(where: \.isDefault)
+        {
+            channelMode = .mono
+            monoChannel = preferred
+            return
+        }
         channelMode =
             source.inputChannels % 2 == 0 && source.inputChannels >= 2
             ? .stereo : .mono

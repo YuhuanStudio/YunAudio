@@ -209,3 +209,10 @@
 "Run the integrity check under Diagnostics to measure your own path rather than taking these." = "Run the integrity check under Diagnostics to measure your own path rather than taking these.";
 "2.67 ms at 128 frames" = "2.67 ms at 128 frames";
 "0.40% of one core" = "0.40% of one core";
+"Now choose %@ as the microphone in Discord, Zoom or OBS." = "Now choose %@ as the microphone in Discord, Zoom or OBS.";
+"Microphone" = "Microphone";
+"Dry" = "Dry";
+"After the expander" = "After the expander";
+"The capsule as the device presents it." = "The capsule as the device presents it.";
+"The same capsule with none of the device's own processing." = "The same capsule with none of the device's own processing.";
+"Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first." = "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first.";

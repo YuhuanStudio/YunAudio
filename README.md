@@ -49,6 +49,14 @@ behind FaceTime's Voice Isolation, on-device and free, and no other router in
 this category exposes it as a general microphone processor. Measured here: 56 ms
 of added latency, under a quarter of the IO deadline in CPU.
 
+**It knows what your microphone's channels actually are.** CoreAudio reports
+that a Seiren V3 Pro has three inputs and nothing about what is on them. They
+are the processed capsule, the dry capsule, and the capsule past the
+microphone's own expander — which sits ahead of the converter, so it removes
+room noise before anything can clip. The picker names all three and says what
+each is for. That mapping came out of the device's own module dumping its
+internal topology, and nothing else on macOS will tell you.
+
 **Application audio with no extra driver.** Capture any app through
 `AudioHardwareCreateProcessTap`, optionally silencing its normal output. Loopback
 and its peers need their own plug-in for this; here it is a documented API.
@@ -225,6 +233,12 @@ swift run -c release yunaudio-cli light off
 
 Every one of those writes to the device, so each has to be asked for by name.
 Nothing sweeps or probes on its own.
+
+The same capture settled the microphone's internal topology, which is where
+the three input channels come from — `Device_Mic`, `Device_MicDry`,
+`Device_MicPostExp` on pin 1 — and the volume ranges behind them: the capsule
+takes 0 to +36 dB of gain, the headphone output −64 to 0 dB, both in the UAC2
+1/256 dB units CoreAudio already exposes.
 
 Still open: the physical order of the twelve LEDs, which needs `light led`
 walked from 0 to 11 with the ring in view. And the same capture established
