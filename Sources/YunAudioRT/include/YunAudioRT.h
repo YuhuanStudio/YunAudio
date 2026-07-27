@@ -155,6 +155,32 @@ bool yun_rt_cell_wait_for_swap(YunRTCell *_Nonnull cell, uint32_t timeoutMillise
 /// question worth asking of it.
 uint64_t yun_rt_cell_cycles(YunRTCell *_Nonnull cell);
 
+#pragma mark - Sample ring (realtime -> writer)
+
+/// A lock-free ring of floats.
+///
+/// Distinct from the command queue: that carries a handful of parameter changes,
+/// this carries continuous audio and has to be sized in seconds rather than
+/// messages. Same discipline — one producer on the realtime thread, one
+/// consumer, neither ever blocking.
+typedef struct YunRTRing YunRTRing;
+
+YunRTRing *_Nullable yun_rt_ring_create(uint32_t capacity);
+void yun_rt_ring_free(YunRTRing *_Nullable ring);
+
+/// Producer. Returns how many samples were taken; a short count means the
+/// consumer fell behind and the remainder was dropped, which is the right
+/// trade — stalling the IO thread would cost the live signal too.
+uint32_t yun_rt_ring_write(
+    YunRTRing *_Nonnull ring, const float *_Nonnull samples, uint32_t count);
+
+/// Consumer. Returns how many samples were taken.
+uint32_t yun_rt_ring_read(
+    YunRTRing *_Nonnull ring, float *_Nonnull destination, uint32_t capacity);
+
+/// Samples the producer had to drop. Non-zero means the recording has gaps.
+uint64_t yun_rt_ring_dropped(YunRTRing *_Nonnull ring);
+
 #pragma mark - Allocation tripwire (debug builds)
 
 /// Installs a hook on the allocator that records any allocation made while the

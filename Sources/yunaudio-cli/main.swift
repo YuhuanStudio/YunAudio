@@ -339,6 +339,49 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+// Records the routed signal to a file.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "record" {
+    let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
+    let all = (try? AudioDevices.all()) ?? []
+    // Any input will do; the USB microphone is often unplugged.
+    guard let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let destination = all.first(where: { $0.transport.isVirtual && $0.hasOutput })
+    else {
+        print("need an input and a virtual output")
+        exit(1)
+    }
+    let engine = RoutingEngine()
+    let routes = (0..<2).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    }
+    try engine.start(
+        sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid, routes: routes)
+
+    let url = try engine.startRecording(to: FileManager.default.temporaryDirectory)
+    print("recording \(source.name) for \(Int(seconds))s")
+    print("  → \(url.path)\n")
+    for _ in 0..<Int(seconds * 2) {
+        Thread.sleep(forTimeInterval: 0.5)
+        print(String(format: "  %.1fs written", engine.recordingDuration))
+    }
+    // Read before stopping: stopRecording releases the recorder, and the
+    // duration lives on it.
+    let recorded = engine.recordingDuration
+    engine.stopRecording()
+    engine.stop()
+
+    let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int ?? 0
+    let expected = Int(recorded * 48000 * 2 * 4)
+    print(String(format: "\n  %.1f s, %d bytes on disk", recorded, size))
+    print(
+        String(
+            format: "  %.0f%% of what %.1f s of 48k stereo float32 should weigh",
+            Double(size) / Double(max(expected, 1)) * 100, recorded))
+    exit(size > 0 ? 0 : 1)
+}
+
 // Measures how the driver's reported latency and safety offset affect the path.
 //
 // The driver reports zero for both, which is unusual — real hardware reports a

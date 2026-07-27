@@ -80,6 +80,19 @@ struct RTGraph {
     /// the single isolation unit. They render through different types.
     var isolationIsChain: Int32
 
+    /// Ring the recorder drains, or null when nothing is recording. Fed with
+    /// the destination bus after all processing, so what lands on disk is what
+    /// the far end hears.
+    var recordRing: OpaquePointer?
+    /// Channels the recorder expects per frame.
+    var recordChannels: Int32
+    /// Scratch for de-striding the destination bus before it goes into the ring.
+    /// Allocated with the graph, because the IO thread cannot allocate and the
+    /// destination is usually wider than the recording — BlackHole presents
+    /// sixteen channels for a two-channel capture.
+    var recordScratch: UnsafeMutablePointer<Float>
+    var recordScratchCapacity: Int32
+
     /// Parameter changes waiting to be applied. Drained at the top of each
     /// cycle so a fader move lands without rebuilding anything.
     var commands: OpaquePointer?
@@ -117,6 +130,12 @@ struct RTGraph {
         let counterStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
         counterStorage.initialize(to: 0)
 
+        // Sized for the largest block the device is likely to ask for, times a
+        // stereo frame.
+        let scratchCapacity = max(bufferFrames, 4096) * 2
+        let scratchStorage = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
+        scratchStorage.initialize(repeating: 0, count: scratchCapacity)
+
         let clockSampleStorage = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
         clockSampleStorage.initialize(to: 0)
         let clockHostStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
@@ -134,6 +153,10 @@ struct RTGraph {
                 clockHostTime: clockHostStorage,
                 voiceIsolation: nil,
                 isolationIsChain: 0,
+                recordRing: nil,
+                recordChannels: 0,
+                recordScratch: scratchStorage,
+                recordScratchCapacity: Int32(scratchCapacity),
                 commands: yun_rt_queue_create(256),
                 selftest: nil))
         return graph
@@ -147,6 +170,9 @@ struct RTGraph {
         graph.pointee.peaks.deallocate()
         graph.pointee.cycleCounter.deinitialize(count: 1)
         graph.pointee.cycleCounter.deallocate()
+        graph.pointee.recordScratch.deinitialize(
+            count: Int(graph.pointee.recordScratchCapacity))
+        graph.pointee.recordScratch.deallocate()
         graph.pointee.clockSampleTime.deinitialize(count: 1)
         graph.pointee.clockSampleTime.deallocate()
         graph.pointee.clockHostTime.deinitialize(count: 1)
@@ -369,6 +395,34 @@ func yunAudioIOProc(
                     stored += 1
                 }
                 selftest.pointee.captureCount.pointee = Int32(stored)
+            }
+        }
+    }
+
+    // Feed the recorder from the destination bus: what is written to disk
+    // should be what the far end receives, not what arrived at the input.
+    if let ring = graph.pointee.recordRing, output.count > 0 {
+        let channels = Int(graph.pointee.recordChannels)
+        if let data = output[0].mData, channels > 0 {
+            let stride = Int(output[0].mNumberChannels)
+            let frames = Int(output[0].mDataByteSize) / (MemoryLayout<Float>.size * stride)
+            let source = data.assumingMemoryBound(to: Float.self)
+            if stride == channels {
+                _ = yun_rt_ring_write(ring, source, UInt32(frames * channels))
+            } else {
+                // The destination is wider than the recording, so the wanted
+                // channels are gathered into the graph's own scratch first.
+                let scratch = graph.pointee.recordScratch
+                let usable = min(frames, Int(graph.pointee.recordScratchCapacity) / channels)
+                for frame in 0..<usable {
+                    for channel in 0..<channels {
+                        scratch[frame * channels + channel] =
+                            source[frame * stride + channel]
+                    }
+                }
+                if usable > 0 {
+                    _ = yun_rt_ring_write(ring, scratch, UInt32(usable * channels))
+                }
             }
         }
     }

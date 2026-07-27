@@ -218,6 +218,71 @@ bool yun_rt_cell_wait_for_swap(YunRTCell *cell, uint32_t timeoutMilliseconds) {
     return false;
 }
 
+#pragma mark - Sample ring
+
+struct YunRTRing {
+    float *samples;
+    uint32_t capacity;  // power of two
+    uint32_t mask;
+    _Atomic uint32_t writeIndex;
+    _Atomic uint32_t readIndex;
+    _Atomic uint64_t dropped;
+};
+
+YunRTRing *yun_rt_ring_create(uint32_t capacity) {
+    uint32_t slots = RoundUpToPowerOfTwo(capacity < 1024 ? 1024 : capacity);
+    YunRTRing *ring = calloc(1, sizeof(YunRTRing));
+    if (ring == NULL) return NULL;
+    ring->samples = calloc(slots, sizeof(float));
+    if (ring->samples == NULL) {
+        free(ring);
+        return NULL;
+    }
+    ring->capacity = slots;
+    ring->mask = slots - 1;
+    return ring;
+}
+
+void yun_rt_ring_free(YunRTRing *ring) {
+    if (ring == NULL) return;
+    free(ring->samples);
+    free(ring);
+}
+
+uint32_t yun_rt_ring_write(YunRTRing *ring, const float *samples, uint32_t count) {
+    uint32_t write = atomic_load_explicit(&ring->writeIndex, memory_order_relaxed);
+    uint32_t read = atomic_load_explicit(&ring->readIndex, memory_order_acquire);
+    uint32_t free_slots = ring->capacity - (write - read) - 1;
+    uint32_t taken = count < free_slots ? count : free_slots;
+
+    for (uint32_t index = 0; index < taken; ++index) {
+        ring->samples[(write + index) & ring->mask] = samples[index];
+    }
+    atomic_store_explicit(&ring->writeIndex, write + taken, memory_order_release);
+
+    if (taken < count) {
+        atomic_fetch_add_explicit(&ring->dropped, count - taken, memory_order_relaxed);
+    }
+    return taken;
+}
+
+uint32_t yun_rt_ring_read(YunRTRing *ring, float *destination, uint32_t capacity) {
+    uint32_t read = atomic_load_explicit(&ring->readIndex, memory_order_relaxed);
+    uint32_t write = atomic_load_explicit(&ring->writeIndex, memory_order_acquire);
+    uint32_t available = write - read;
+    uint32_t taken = available < capacity ? available : capacity;
+
+    for (uint32_t index = 0; index < taken; ++index) {
+        destination[index] = ring->samples[(read + index) & ring->mask];
+    }
+    atomic_store_explicit(&ring->readIndex, read + taken, memory_order_release);
+    return taken;
+}
+
+uint64_t yun_rt_ring_dropped(YunRTRing *ring) {
+    return atomic_load_explicit(&ring->dropped, memory_order_relaxed);
+}
+
 #pragma mark - Allocation tripwire
 
 /// The allocator calls this on every operation when it is non-NULL. It is a

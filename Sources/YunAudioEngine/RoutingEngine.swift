@@ -451,6 +451,7 @@ public final class RoutingEngine: @unchecked Sendable {
         graph = nil
         if let graphCell { yun_rt_cell_free(graphCell) }
         graphCell = nil
+        stopRecordingLocked()
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
         selftestBlock = nil
 
@@ -500,6 +501,56 @@ public final class RoutingEngine: @unchecked Sendable {
             routes: configuration.routes,
             bufferFrames: configuration.bufferFrames)
         onClockLockFailure?()
+    }
+
+    // MARK: Recording
+
+    private var recorder: Recorder?
+
+    /// True while audio is being written to disk.
+    public var isRecording: Bool { recorder != nil }
+    public var recordingURL: URL? { recorder?.url }
+    public var recordingDuration: TimeInterval { recorder?.duration ?? 0 }
+
+    /// Starts writing the routed signal to a file.
+    ///
+    /// - Throws: Whatever creating the file throws — a directory that does not
+    ///   exist, or is not writable.
+    @discardableResult
+    public func startRecording(
+        to directory: URL, format: Recorder.Format = .wav, now: Date = Date()
+    ) throws -> URL {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isRunning, let graph, let device = aggregate?.device else {
+            throw RecorderError.couldNotAllocate
+        }
+        stopRecordingLocked()
+
+        let channels = min(2, device.outputChannels)
+        let recorder = try Recorder(
+            directory: directory, format: format, channels: channels,
+            sampleRate: device.currentSampleRate ?? 48000, timestamp: now)
+        self.recorder = recorder
+        graph.pointee.recordChannels = Int32(channels)
+        graph.pointee.recordRing = recorder.ringHandle
+        return recorder.url
+    }
+
+    public func stopRecording() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        stopRecordingLocked()
+    }
+
+    private func stopRecordingLocked() {
+        guard let recorder else { return }
+        // Detach from the graph first: the writer thread must not be draining a
+        // ring the IO thread is still filling while it is being torn down.
+        graph?.pointee.recordRing = nil
+        graph?.pointee.recordChannels = 0
+        recorder.stop()
+        self.recorder = nil
     }
 
     // MARK: Live topology
