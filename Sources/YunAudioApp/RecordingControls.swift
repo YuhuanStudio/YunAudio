@@ -69,20 +69,25 @@ struct RecordingControls: View {
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.warning)
                     }
-                } else {
-                    // No fixed width. It was pinned at 140 points, which fitted
-                    // two formats and truncated three the day FLAC was added —
-                    // the picker read "W… F… …" and nothing in the code said
-                    // so. A segmented control should be as wide as its
-                    // segments.
-                    YunSegmented(
-                        selection: $model.recordingFormat,
-                        options: Recorder.Format.allCases.map { ($0, $0.title) }
-                    )
-                    .fixedSize()
                 }
 
                 Spacer(minLength: 0)
+            }
+
+            // The format on its own line rather than beside the button.
+            //
+            // Three formats and a button do not fit across a 292-point column,
+            // and what gave way was the button: it read "開始…". Widths were
+            // fought over twice here — first a segmented control pinned at 140
+            // points that truncated the day FLAC was added, then the button
+            // once that control was allowed its natural size. A row that cannot
+            // fit is a row that should be two.
+            if !model.isRecording {
+                YunSegmented(
+                    selection: $model.recordingFormat,
+                    options: Recorder.Format.allCases.map { ($0, $0.title) }
+                )
+                .fixedSize()
             }
 
             // While it runs, what is actually being written. A recording that
@@ -126,6 +131,7 @@ struct RecordingControls: View {
                         Text(loc("A file per source as well"))
                             .font(Yun.Text.label)
                             .foregroundStyle(Yun.Palette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text(
                             loc(
                                 "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix."
