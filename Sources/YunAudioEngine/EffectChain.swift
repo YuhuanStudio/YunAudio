@@ -52,6 +52,14 @@ public struct EffectParameter: Identifiable, Hashable, Sendable {
 /// One stage of the processing chain.
 public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     case voiceIsolation
+    /// A noise gate, built from the dynamics processor's expander.
+    ///
+    /// Razer's own is host-side — the device module has no gate function at
+    /// all, and the slider in Synapse drives a THX processing object on the PC.
+    /// So there is nothing to send a microphone and this is ours to write.
+    case gate
+    /// Kept as `equaliser` in the stored form because that is what shipped
+    /// preferences call it; it has only ever been a high-pass.
     case equaliser
     case compressor
     case limiter
@@ -61,7 +69,8 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     public var title: String {
         switch self {
         case .voiceIsolation: "Voice isolation"
-        case .equaliser: "Equaliser"
+        case .gate: "Noise gate"
+        case .equaliser: "High-pass"
         case .compressor: "Compressor"
         case .limiter: "Limiter"
         }
@@ -70,7 +79,10 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     public var detail: String {
         switch self {
         case .voiceIsolation: "Apple's on-device model. Adds about 56 ms."
-        case .equaliser: "Ten bands of parametric EQ."
+        case .gate:
+            "Turns the signal down when nothing is being said. Cheaper than voice "
+                + "isolation and it leaves speech untouched."
+        case .equaliser: "Removes rumble below the voice. It has never been more than this."
         case .compressor: "Evens out level. Useful before a limiter, not instead of one."
         case .limiter: "Stops the signal exceeding full scale. Cheap insurance."
         }
@@ -85,10 +97,22 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                     id: "mix", title: "Amount", minimum: 0, maximum: 100,
                     unit: "%", defaultValue: 100, isLogarithmic: false)
             ]
+        case .gate:
+            [
+                EffectParameter(
+                    id: "threshold", title: "Opens above", minimum: -80, maximum: -10,
+                    unit: "dB", defaultValue: -45, isLogarithmic: false),
+                EffectParameter(
+                    id: "ratio", title: "Depth", minimum: 1, maximum: 50,
+                    unit: ":1", defaultValue: 20, isLogarithmic: true),
+                EffectParameter(
+                    id: "release", title: "Release", minimum: 20, maximum: 1000,
+                    unit: "ms", defaultValue: 200, isLogarithmic: true),
+            ]
         case .equaliser:
             [
                 EffectParameter(
-                    id: "frequency", title: "High-pass", minimum: 20, maximum: 500,
+                    id: "frequency", title: "Corner", minimum: 20, maximum: 500,
                     unit: "Hz", defaultValue: 80, isLogarithmic: true)
             ]
         case .compressor:
@@ -112,6 +136,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     var subType: OSType {
         switch self {
         case .voiceIsolation: SoundIsolation.componentSubType
+        case .gate: kAudioUnitSubType_DynamicsProcessor
         case .equaliser: kAudioUnitSubType_NBandEQ
         case .compressor: kAudioUnitSubType_DynamicsProcessor
         case .limiter: kAudioUnitSubType_PeakLimiter
@@ -125,9 +150,13 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     var chainOrder: Int {
         switch self {
         case .voiceIsolation: 0
+        // Ahead of the high-pass on purpose: gating first would key the gate
+        // off rumble the high-pass is about to remove, and hold it open on
+        // noise nobody can hear.
         case .equaliser: 1
-        case .compressor: 2
-        case .limiter: 3
+        case .gate: 2
+        case .compressor: 3
+        case .limiter: 4
         }
     }
 }
@@ -284,6 +313,31 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
                     kAudioUnitScope_Global, 0, 100, 0)
+            case .gate:
+                // The dynamics processor does both jobs; a gate is its expander
+                // with the compressor half left alone. The compression side is
+                // pushed out of the way rather than merely unset — its own
+                // defaults are tuned for music and would squash speech.
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_ExpansionThreshold,
+                    kAudioUnitScope_Global, 0, -45, 0)
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_ExpansionRatio,
+                    kAudioUnitScope_Global, 0, 20, 0)
+                // Fast enough not to clip the start of a word, slow enough not
+                // to chatter on breath between them.
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_AttackTime,
+                    kAudioUnitScope_Global, 0, 0.002, 0)
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_ReleaseTime,
+                    kAudioUnitScope_Global, 0, 0.2, 0)
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_Threshold,
+                    kAudioUnitScope_Global, 0, 0, 0)
+                AudioUnitSetParameter(
+                    unit, kDynamicsProcessorParam_OverallGain,
+                    kAudioUnitScope_Global, 0, 0, 0)
             case .equaliser:
                 // A high-pass at 80 Hz: everything below is rumble, handling
                 // noise and plosive energy, none of it voice.
@@ -340,6 +394,18 @@ final class EffectChain {
             AudioUnitSetParameter(
                 unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
                 kAudioUnitScope_Global, 0, value, 0)
+        case (.gate, "threshold"):
+            AudioUnitSetParameter(
+                unit, kDynamicsProcessorParam_ExpansionThreshold,
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.gate, "ratio"):
+            AudioUnitSetParameter(
+                unit, kDynamicsProcessorParam_ExpansionRatio,
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.gate, "release"):
+            AudioUnitSetParameter(
+                unit, kDynamicsProcessorParam_ReleaseTime,
+                kAudioUnitScope_Global, 0, value / 1000, 0)
         case (.equaliser, "frequency"):
             AudioUnitSetParameter(
                 unit, AudioUnitParameterID(kAUNBandEQParam_Frequency),

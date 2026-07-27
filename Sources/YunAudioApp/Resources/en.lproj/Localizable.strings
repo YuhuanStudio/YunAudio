@@ -216,3 +216,11 @@
 "The capsule as the device presents it." = "The capsule as the device presents it.";
 "The same capsule with none of the device's own processing." = "The same capsule with none of the device's own processing.";
 "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first." = "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first.";
+"Noise gate" = "Noise gate";
+"High-pass" = "High-pass";
+"Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched." = "Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched.";
+"Removes rumble below the voice. It has never been more than this." = "Removes rumble below the voice. It has never been more than this.";
+"Opens above" = "Opens above";
+"Depth" = "Depth";
+"Release" = "Release";
+"Corner" = "Corner";

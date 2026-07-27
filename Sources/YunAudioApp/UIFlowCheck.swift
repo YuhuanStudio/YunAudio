@@ -233,10 +233,24 @@ enum UIFlowCheck {
         check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBeforeLevels)
         check("no rebuild was needed", model.isRunning && !model.isBusy)
 
-        // Muting the input has to reach the samples, not just the model.
-        await pause(0.6)
-        check("the meters fell while muted", model.routeLevels.allSatisfy { $0 < 0.02 })
+        // Muting the input has to reach the meters, not just the samples.
+        //
+        // A fixed pause and a threshold was the wrong assertion: the meter
+        // falls at 20 dB a second, so how long it takes depends on how loud the
+        // room was, and the check passed or failed with the traffic outside.
+        // What is actually being claimed is that the meters read zero while
+        // muted, so that is what is waited for.
+        await waitUntil(
+            "the meters fell while muted",
+            { (0..<model.activeRoutes.count).allSatisfy { model.isSilenced($0) } },
+            timeout: 3)
+        check(
+            "every route reads as silenced",
+            (0..<model.activeRoutes.count).allSatisfy { model.isSilenced($0) })
         model.isInputMuted = false
+        check(
+            "and stops reading silenced when unmuted",
+            !(0..<model.activeRoutes.count).allSatisfy { model.isSilenced($0) })
 
         // And a restart must not quietly reset them, since the graph is rebuilt.
         model.channelMode = model.channelMode == .mono ? .stereo : .mono
@@ -385,6 +399,34 @@ enum UIFlowCheck {
         check("and that is fewer than doing them loose", batched < unbatched)
         await waitUntil("the batch settled", { !model.isBusy }, timeout: 10)
         check("routing survived both", model.isRunning)
+
+        print("\nprocessing chain")
+        // Every stage has to build against the real Audio Unit. A knob wired to
+        // a parameter the unit does not have fails silently — the slider moves
+        // and nothing happens.
+        for kind in EffectKind.allCases where kind != .voiceIsolation {
+            model.setEffect(kind, enabled: true)
+            // Enabling a stage rebuilds the graph, and a fixed pause lands in
+            // the middle of it — the same race that made the echo canceller
+            // look broken twice.
+            await waitUntil(
+                "\(kind.rawValue) came up", { !model.isBusy && model.isRunning },
+                timeout: 10)
+            check("\(kind.rawValue) built and audio kept flowing", model.isRunning)
+            check("no error from \(kind.rawValue)", model.lastError == nil)
+            for parameter in kind.parameters {
+                model.setValue(parameter.defaultValue, of: parameter, in: kind)
+                check(
+                    "\(kind.rawValue).\(parameter.id) reads back",
+                    abs(model.value(of: parameter, in: kind) - parameter.defaultValue)
+                        < 0.001)
+            }
+            model.setEffect(kind, enabled: false)
+            await waitUntil(
+                "\(kind.rawValue) came back out", { !model.isBusy && model.isRunning },
+                timeout: 10)
+        }
+        check("routing survived the whole chain", model.isRunning)
 
         print("\npatching")
         let sourcePorts = model.canvasSources

@@ -532,7 +532,19 @@ final class RouterModel {
     }
 
     /// True when this route is silent right now, for whatever reason.
+    ///
+    /// Including reasons upstream of the route. Peaks are metered before the
+    /// fader on purpose — a meter should show what arrived, not what the fader
+    /// did to it — but that also meant muting the microphone left every meter
+    /// moving, which reads as "the mute did not work".
     func isSilenced(_ index: Int) -> Bool {
+        if index < activeRoutes.count,
+            activeRoutes[index].source.deviceUID == selectedSourceUID,
+            isInputMuted
+        {
+            return true
+        }
+        if isOutputMuted { return true }
         if let soloedRoute { return index != soloedRoute }
         return index < routeMutes.count && routeMutes[index]
     }

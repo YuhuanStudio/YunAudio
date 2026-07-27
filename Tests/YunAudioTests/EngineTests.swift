@@ -308,7 +308,7 @@ struct EffectParameterTests {
     @Test("stages carry a signal order independent of when they were enabled")
     func chainOrder() {
         let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
-        #expect(ordered == [.voiceIsolation, .equaliser, .compressor, .limiter])
+        #expect(ordered == [.voiceIsolation, .equaliser, .gate, .compressor, .limiter])
     }
 }
 
@@ -438,5 +438,46 @@ struct LoopbackGradingTests {
         let result = grade(delay: 100) { _, _ in 0 }
         #expect(!result.didAlign)
         #expect(!result.isBitExact)
+    }
+}
+
+@Suite("Processing chain")
+struct ProcessingChainTests {
+
+    /// Gating before the high-pass would key the gate off rumble the high-pass
+    /// is about to remove — holding it open on energy nobody can hear.
+    @Test("the high-pass runs before the gate")
+    func highPassBeforeGate() {
+        #expect(EffectKind.equaliser.chainOrder < EffectKind.gate.chainOrder)
+    }
+
+    @Test("every stage names itself and says what it costs")
+    func described() {
+        for kind in EffectKind.allCases {
+            #expect(!kind.title.isEmpty)
+            #expect(!kind.detail.isEmpty)
+        }
+    }
+
+    /// Every knob has to sit inside its own range, or the first render clamps
+    /// it somewhere the interface never showed.
+    @Test("every default sits inside its own range")
+    func defaultsInRange() {
+        for kind in EffectKind.allCases {
+            for parameter in kind.parameters {
+                #expect(parameter.defaultValue >= parameter.minimum)
+                #expect(parameter.defaultValue <= parameter.maximum)
+            }
+        }
+    }
+
+    /// The stored form has to stay put: a preferences file written before the
+    /// stage was renamed still says `equaliser`, and changing the raw value
+    /// would silently drop it from everybody's saved chain.
+    @Test("the high-pass keeps its old stored name")
+    func storedNameIsStable() {
+        #expect(EffectKind.equaliser.rawValue == "equaliser")
+        #expect(EffectKind(rawValue: "equaliser") == .equaliser)
+        #expect(EffectKind.gate.rawValue == "gate")
     }
 }

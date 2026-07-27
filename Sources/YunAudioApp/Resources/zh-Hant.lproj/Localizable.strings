@@ -216,3 +216,11 @@
 "The capsule as the device presents it." = "裝置處理後的音頭訊號。";
 "The same capsule with none of the device's own processing." = "同一顆音頭，未經裝置任何處理。";
 "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first." = "經過麥克風自己的擴展器，它位於類比轉換之前——所以能在任何東西削波之前就先去掉房間噪音。";
+"Noise gate" = "雜訊閘";
+"High-pass" = "高通濾波";
+"Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched." = "沒有人說話時把訊號壓下去。比人聲隔離便宜得多，而且不動說話的部分。";
+"Removes rumble below the voice. It has never been more than this." = "去掉人聲以下的低頻隆隆聲。它一直就只有這個功能。";
+"Opens above" = "開啟門檻";
+"Depth" = "壓制深度";
+"Release" = "釋放時間";
+"Corner" = "轉折頻率";
