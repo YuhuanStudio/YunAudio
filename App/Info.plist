@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>YunAudioApp</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.yuhuanstudio.yunaudio</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>YunAudio</string>
+	<key>CFBundleDisplayName</key>
+	<string>YunAudio</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>26.0</string>
+
+	<!-- Accessory application: menu bar only, no Dock icon, no main window. -->
+	<key>LSUIElement</key>
+	<true/>
+
+	<key>NSMicrophoneUsageDescription</key>
+	<string>YunAudio reads your microphone so it can forward the signal to its virtual audio device.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>YunAudio can capture audio from other applications so it can be mixed into a route.</string>
+
+	<key>NSHumanReadableCopyright</key>
+	<string>Yuhuan Studio</string>
+</dict>
+</plist>
