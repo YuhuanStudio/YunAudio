@@ -31,6 +31,12 @@ struct MainWindow: View {
         VStack(spacing: 0) {
             header
 
+            if !model.isDriverInstalled {
+                DriverOnboarding(model: model, isCompact: true)
+                    .padding(.horizontal, Yun.Space.xl)
+                    .padding(.bottom, Yun.Space.md)
+            }
+
             // Columns separated by space rather than rules: the cards already
             // carry the boundaries, and a 1px line through the middle of a card
             // layout is what made this read as a wireframe.
@@ -141,17 +147,7 @@ struct MainWindow: View {
 
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                        if model.availableApps.isEmpty {
-                            YunEmptyState(
-                                symbol: "speaker.slash",
-                                message: loc("Nothing is producing audio right now.")
-                            )
-                            .frame(maxWidth: .infinity)
-                        } else {
-                            ForEach(model.availableApps.prefix(10)) { process in
-                                appRow(process)
-                            }
-                        }
+                        AppSourceList(model: model, limit: 8, showsRefresh: false)
                         if !model.capturedAppBundleIDs.isEmpty {
                             YunDivider()
                             Text(loc("While routed"))
@@ -167,39 +163,6 @@ struct MainWindow: View {
         }
     }
 
-    private func appRow(_ process: AudioProcess) -> some View {
-        let bundle = process.bundleID ?? ""
-        let isCaptured = model.capturedAppBundleIDs.contains(bundle)
-        return Button {
-            guard !bundle.isEmpty else { return }
-            if isCaptured {
-                model.capturedAppBundleIDs.remove(bundle)
-            } else {
-                model.capturedAppBundleIDs.insert(bundle)
-            }
-        } label: {
-            YunHoverRow {
-                HStack(spacing: Yun.Space.sm) {
-                    Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(
-                            isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
-                    Text(process.name)
-                        .font(Yun.Text.body)
-                        .foregroundStyle(Yun.Palette.textPrimary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    if process.isPlaying { YunBadge("playing") }
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .disabled(bundle.isEmpty)
-        .accessibilityLabel(Text(process.name))
-        .accessibilityAddTraits(isCaptured ? [.isSelected] : [])
-    }
-
     // MARK: Mixer
 
     private var mixer: some View {
@@ -212,9 +175,10 @@ struct MainWindow: View {
                 if model.activeRoutes.isEmpty {
                     YunCard {
                         Text(
-                            model.isRunning
-                                ? "No routes are carrying audio."
-                                : "Start routing to see the mix."
+                            loc(
+                                model.isRunning
+                                    ? "No routes are carrying audio."
+                                    : "Start routing to see the mix.")
                         )
                         .font(Yun.Text.body)
                         .foregroundStyle(Yun.Palette.textTertiary)
@@ -292,7 +256,9 @@ struct MainWindow: View {
                         }
                         if model.enabledEffects.contains(.voiceIsolation) {
                             Text(
-                                "Processing means the path is no longer bit-exact. That is the trade, not a fault."
+                                loc(
+                                    "Processing means the path is no longer bit-exact. That is the trade, not a fault."
+                                )
                             )
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.warning)
@@ -307,9 +273,10 @@ struct MainWindow: View {
                         if let quality = model.pathQuality {
                             YunDetailRow(
                                 loc("Integrity"),
-                                value: quality.isBitExact
-                                    ? "bit-exact"
-                                    : (quality.hasProcessing ? "processed" : "resampled"),
+                                value: loc(
+                                    quality.isBitExact
+                                        ? "bit-exact"
+                                        : (quality.hasProcessing ? "processed" : "resampled")),
                                 tone: quality.isBitExact ? .success : .warning)
                             YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                             YunDetailRow(

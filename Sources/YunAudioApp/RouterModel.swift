@@ -104,7 +104,24 @@ final class RouterModel {
     /// Applications that can be captured. Refreshed on demand — the list churns
     /// as apps come and go, and polling it continuously would be wasteful for
     /// something only looked at when a menu is opened.
-    private(set) var availableApps: [AudioProcess] = []
+    private(set) var availableApps: [AudioApplication] = []
+
+    /// Whether the daemons are shown alongside the applications. Off by
+    /// default: they outnumber the real applications four to one, and none of
+    /// them is what anyone came here to capture.
+    var showsBackgroundApps = false
+
+    /// What the list actually offers, which is the applications plus, when
+    /// asked for, everything else. A background process that is audible right
+    /// now is always shown — something making noise is worth being able to
+    /// point at, whatever its activation policy says.
+    var visibleApps: [AudioApplication] {
+        showsBackgroundApps
+            ? availableApps
+            : availableApps.filter { !$0.isBackground || $0.isPlaying }
+    }
+
+    var hiddenAppCount: Int { availableApps.count - visibleApps.count }
 
     /// Bundle identifiers of the applications being captured alongside the
     /// microphone. Stored by bundle id rather than pid so the choice survives
@@ -170,22 +187,19 @@ final class RouterModel {
     }
 
     func refreshApps() {
-        availableApps = (try? AudioProcesses.all()) ?? []
+        availableApps = (try? AudioApplications.grouped()) ?? []
     }
 
     /// Resolves the saved bundle identifiers to the processes running right now.
     /// An application splits its audio across helper processes — Discord uses
-    /// four — so every process sharing the prefix is captured, not just the one
-    /// the user picked.
+    /// four — so the whole group is captured, not just the process that happened
+    /// to head the entry.
     private var tappableProcessIDs: [AudioObjectID] {
         guard !capturedAppBundleIDs.isEmpty else { return [] }
         return
             availableApps
-            .filter { process in
-                guard let bundle = process.bundleID else { return false }
-                return capturedAppBundleIDs.contains { bundle.hasPrefix($0) }
-            }
-            .map(\.id)
+            .filter { capturedAppBundleIDs.contains($0.bundleID) }
+            .flatMap(\.processIDs)
     }
 
     /// Per-route peak levels, aligned with `routes`.
@@ -306,12 +320,10 @@ final class RouterModel {
             // Tap UIDs are UUIDs; name the applications they carry instead.
             source =
                 capturedAppBundleIDs.isEmpty
-                ? "Application audio"
+                ? loc("Application audio")
                 : availableApps
-                    .first { process in
-                        guard let bundle = process.bundleID else { return false }
-                        return capturedAppBundleIDs.contains { bundle.hasPrefix($0) }
-                    }?.name ?? "Application audio"
+                    .first { capturedAppBundleIDs.contains($0.bundleID) }?.name
+                    ?? loc("Application audio")
         } else {
             source = route.source.deviceUID
         }
@@ -412,6 +424,13 @@ final class RouterModel {
 
     /// True when the YunAudio driver is installed, which is what the onboarding
     /// flow keys off.
+    /// The loopback endpoint standing in for our driver, when it is absent and
+    /// something else is doing the job.
+    var loopbackFallback: AudioDevice? {
+        guard !isDriverInstalled else { return nil }
+        return selectedDestination.flatMap { $0.transport.isVirtual ? $0 : nil }
+    }
+
     var isDriverInstalled: Bool {
         outputDevices.contains { $0.uid == ClockAnchorPublisher.driverDeviceUID }
     }
@@ -548,9 +567,15 @@ final class RouterModel {
                 ?? inputDevices.first?.uid
         }
         if selectedDestinationUID == nil {
+            // Our own device first, then any other loopback endpoint. Never a
+            // real output: routing the microphone into the speakers the moment
+            // someone presses Start is an acoustic feedback loop, and "it
+            // preselected something" is no defence for handing a user howling
+            // feedback in a call.
             selectedDestinationUID =
                 outputDevices
                 .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
+                ?? outputDevices.first { $0.transport.isVirtual && $0.inputChannels > 0 }?.uid
         }
         applyChannelDefaults()
     }

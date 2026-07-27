@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import SwiftUI
 
 /// Renders the panel to PNGs so its layout and colours can actually be looked
@@ -6,6 +7,7 @@ import SwiftUI
 @MainActor
 enum PanelRenderer {
     static func write(to directory: String, model: RouterModel) {
+        verifyPipeline()
         model.prepareForRendering()
         render(
             PanelView(model: model, forcesRoutedLayout: true),
@@ -16,7 +18,11 @@ enum PanelRenderer {
         render(
             MainWindow(model: model, isRendering: true),
             basename: "window", directory: directory,
-            size: CGSize(width: 1000, height: 620))
+            // Taller than the window's minimum so the whole layout is visible
+            // at once. The columns scroll in the running app; here they do not,
+            // and a clipped capture hides exactly the defects this exists to
+            // find.
+            size: CGSize(width: 1060, height: 860))
 
         for section in PreferencesWindow.Section.allCases {
             render(
@@ -46,7 +52,7 @@ enum PanelRenderer {
                         ? Color(hex: 0xF2F2F4) : Color(hex: 0x0C0C0E))
 
             let renderer = ImageRenderer(content: content)
-            renderer.scale = 2
+            renderer.scale = scale
             // ImageRenderer resolves dynamic NSColor against the process
             // appearance, not the environment, so the appearance is switched
             // for the duration of the render.
@@ -55,11 +61,7 @@ enum PanelRenderer {
                 named: scheme == .light ? .aqua : .darkAqua)
             defer { NSApp?.appearance = previous }
 
-            guard let image = renderer.nsImage,
-                let tiff = image.tiffRepresentation,
-                let bitmap = NSBitmapImageRep(data: tiff),
-                let png = bitmap.representation(using: .png, properties: [:])
-            else {
+            guard let png = pngData(from: renderer) else {
                 FileHandle.standardError.write(Data("failed to render \(name)\n".utf8))
                 continue
             }
@@ -67,6 +69,122 @@ enum PanelRenderer {
             try? png.write(to: url)
             print("wrote \(url.path)")
         }
+    }
+
+    private static let scale: CGFloat = 2
+
+    /// Sends a known colour through the real capture path and checks it comes
+    /// back unchanged.
+    ///
+    /// The previous pipeline corrupted every colour in every window capture and
+    /// said nothing: one wide-gamut application icon in the tree was enough to
+    /// push `ImageRenderer` into a sixteen-bit backing store, and the TIFF round
+    /// trip then flattened that half-transparent over grey, mapping every value
+    /// through `0.49·v + 0.11`. A capture that lies is worse than no capture,
+    /// because its whole purpose is judging colour, and a uniform wash reads as
+    /// a design choice rather than a bug.
+    ///
+    /// The probe includes an icon, since that is what triggered it, and it
+    /// checks the pipeline rather than any particular view — a view's own
+    /// corner pixel is a legitimate design decision and cannot be asserted on.
+    private static func verifyPipeline() {
+        let probe = Color(hex: 0x3B82F6)
+        let icon = NSWorkspace.shared.icon(forFile: "/System/Applications/Music.app")
+        let renderer = ImageRenderer(
+            content: ZStack {
+                probe
+                Image(nsImage: icon).resizable().frame(width: 8, height: 8)
+            }
+            .frame(width: 40, height: 40))
+        renderer.scale = scale
+
+        guard let png = pngData(from: renderer),
+            let source = CGImageSourceCreateWithData(png as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+            let sampled = pixel(at: CGPoint(x: 2, y: 2), of: image)
+        else {
+            FileHandle.standardError.write(Data("the capture pipeline failed\n".utf8))
+            return
+        }
+
+        let drift = max(
+            abs(Int(sampled.r) - 0x3B), abs(Int(sampled.g) - 0x82),
+            abs(Int(sampled.b) - 0xF6))
+        guard drift > 2 else { return }
+        FileHandle.standardError.write(
+            Data(
+                String(
+                    format:
+                        "⚠︎ the capture pipeline is altering colour: #3B82F6 came back as #%02X%02X%02X. Every capture below is unreliable.\n",
+                    sampled.r, sampled.g, sampled.b
+                ).utf8))
+    }
+
+    private static func pixel(
+        at point: CGPoint, of image: CGImage
+    ) -> (r: UInt8, g: UInt8, b: UInt8)? {
+        var bytes = [UInt8](repeating: 0, count: 4)
+        guard let space = CGColorSpace(name: CGColorSpace.sRGB),
+            let context = bytes.withUnsafeMutableBytes({ raw in
+                CGContext(
+                    data: raw.baseAddress, width: 1, height: 1, bitsPerComponent: 8,
+                    bytesPerRow: 4, space: space,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            })
+        else { return nil }
+        context.draw(
+            image,
+            in: CGRect(
+                x: -point.x, y: -(CGFloat(image.height) - point.y - 1),
+                width: CGFloat(image.width), height: CGFloat(image.height)))
+        return (bytes[0], bytes[1], bytes[2])
+    }
+
+    /// Rasterises into a context this code owns, in sRGB, at eight bits.
+    ///
+    /// The obvious route — `renderer.nsImage`, `tiffRepresentation`,
+    /// `NSBitmapImageRep` — is wrong, and wrong in the worst way: silently.
+    /// One application icon in the view is enough to push `ImageRenderer` into
+    /// a sixteen-bit wide-gamut backing store, and the TIFF round trip then
+    /// converts that to `NSCalibratedRGB` by compositing it half-transparent
+    /// over grey. Every colour in the capture came out as `0.49·v + 0.11`: a
+    /// near-white background read as mid grey, near-black text as dark grey.
+    ///
+    /// That made the captures worse than useless, because the whole point of
+    /// them is to judge colour, and a uniform wash looks like a design choice
+    /// rather than a bug. Owning the context removes the conversion entirely.
+    private static func pngData<Content: View>(from renderer: ImageRenderer<Content>) -> Data? {
+        // `render` hands the context to a closure and returns nothing, so the
+        // result comes back out through a captured variable.
+        var result: Data?
+        renderer.render(rasterizationScale: scale) { size, draw in
+            let width = Int((size.width * scale).rounded())
+            let height = Int((size.height * scale).rounded())
+            guard width > 0, height > 0,
+                let space = CGColorSpace(name: CGColorSpace.sRGB),
+                let context = CGContext(
+                    data: nil, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return }
+
+            // Scale only. The closure flips the context itself, so flipping it
+            // here as well hands back a capture that is upside down — which is
+            // obvious in a screenshot and was, at least, caught immediately.
+            context.scaleBy(x: scale, y: scale)
+            draw(context)
+
+            guard let image = context.makeImage() else { return }
+            let data = NSMutableData()
+            guard
+                let destination = CGImageDestinationCreateWithData(
+                    data, "public.png" as CFString, 1, nil)
+            else { return }
+            CGImageDestinationAddImage(destination, image, nil)
+            guard CGImageDestinationFinalize(destination) else { return }
+            result = data as Data
+        }
+        return result
     }
 }
 

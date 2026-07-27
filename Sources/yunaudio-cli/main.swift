@@ -669,13 +669,17 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "razer" {
 
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "apps" {
     do {
-        let processes = try AudioProcesses.all()
-        print("tappable processes — \(processes.count)\n")
-        for process in processes {
-            let marker = process.isPlaying ? "▶" : " "
+        let applications = try AudioApplications.grouped()
+        let foreground = applications.filter { !$0.isBackground }
+        print(
+            "tappable applications — \(foreground.count) foreground, "
+                + "\(applications.count) total\n")
+        for application in applications {
+            let marker = application.isPlaying ? "▶" : " "
+            let origin = application.isBackground ? "  (background)" : ""
+            let folded = application.processCount > 1 ? "  ×\(application.processCount)" : ""
             print(
-                "  \(marker) \(process.name)  ·  pid \(process.pid)  ·  \(process.bundleID ?? "—")"
-            )
+                "  \(marker) \(application.name)  ·  \(application.bundleID)\(folded)\(origin)")
         }
     } catch {
         print("could not enumerate processes: \(error)")

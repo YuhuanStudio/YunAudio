@@ -36,7 +36,14 @@ struct PanelView: View {
         GlassEffectContainer {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 header
-                if model.isDriverInstalled || forcesRoutedLayout {
+                // The onboarding card sits above the controls rather than
+                // replacing them. Another loopback endpoint routes audio
+                // perfectly well, so hiding everything behind "install the
+                // driver" turned a working configuration into a dead end.
+                if !model.isDriverInstalled && !forcesRoutedLayout {
+                    DriverOnboarding(model: model)
+                }
+                if model.selectedDestination != nil || forcesRoutedLayout {
                     // A menu bar panel can be long — it scrolls, and the ones
                     // people actually use are. Sections that are read rather
                     // than watched still collapse, so the height is the user's
@@ -50,8 +57,6 @@ struct PanelView: View {
                     if let error = model.lastError { errorRow(error) }
                     voiceIsolation
                     footer
-                } else {
-                    driverMissing
                 }
             }
             .padding(Yun.Space.lg)
@@ -247,49 +252,6 @@ struct PanelView: View {
             .fixedSize(horizontal: false, vertical: true)
     }
 
-    // MARK: Driver onboarding
-
-    private var driverMissing: some View {
-        YunCard {
-            VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Text(loc("The YunAudio device is not installed"))
-                    .font(Yun.Text.label)
-                    .foregroundStyle(Yun.Palette.textPrimary)
-                Text(
-                    "Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio."
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: Yun.Space.sm) {
-                    if model.canInstallDriver {
-                        Button(model.isInstallingDriver ? "Installing…" : "Install") {
-                            model.installDriver()
-                        }
-                        .buttonStyle(YunButtonStyle(.primary, small: true))
-                        .disabled(model.isInstallingDriver)
-                    }
-                    Button(loc("Check again")) { model.refreshDevices() }
-                        .buttonStyle(YunButtonStyle(.secondary, small: true))
-                }
-                if !model.canInstallDriver {
-                    Text(
-                        "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image."
-                    )
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-                if let message = model.driverMessage {
-                    Text(message)
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.danger)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        }
-    }
-
     // MARK: Application sources
 
     private var appSources: some View {
@@ -300,24 +262,7 @@ struct PanelView: View {
             isExpanded: $showsApps
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                HStack {
-                    Text(loc("Pick the applications to mix in"))
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                    Spacer()
-                    Button(loc("Refresh")) { model.refreshApps() }
-                        .buttonStyle(YunButtonStyle(.ghost, small: true))
-                }
-
-                if model.availableApps.isEmpty {
-                    Text(loc("No applications are producing audio right now."))
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                } else {
-                    ForEach(model.availableApps.prefix(6)) { process in
-                        appRow(process)
-                    }
-                }
+                AppSourceList(model: model, limit: 6)
 
                 if !model.capturedAppBundleIDs.isEmpty {
                     YunDivider()
@@ -333,41 +278,6 @@ struct PanelView: View {
                 }
             }
         }
-    }
-
-    private func appRow(_ process: AudioProcess) -> some View {
-        let bundle = process.bundleID ?? ""
-        let isCaptured = model.capturedAppBundleIDs.contains(bundle)
-        return Button {
-            guard !bundle.isEmpty else { return }
-            if isCaptured {
-                model.capturedAppBundleIDs.remove(bundle)
-            } else {
-                model.capturedAppBundleIDs.insert(bundle)
-            }
-        } label: {
-            YunHoverRow {
-                HStack(spacing: Yun.Space.sm) {
-                    Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(
-                            isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
-                    Text(process.name)
-                        .font(Yun.Text.body)
-                        .foregroundStyle(Yun.Palette.textPrimary)
-                        .lineLimit(1)
-                    if process.isPlaying {
-                        YunBadge("playing")
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .focusEffectDisabled()
-        .disabled(bundle.isEmpty)
-        .accessibilityLabel(Text(process.name))
-        .accessibilityAddTraits(isCaptured ? [.isSelected] : [])
     }
 
     // MARK: Route mixer

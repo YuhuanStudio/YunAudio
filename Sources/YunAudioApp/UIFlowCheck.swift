@@ -60,6 +60,21 @@ enum UIFlowCheck {
         check(
             "no listed application shows a raw bundle fragment",
             !model.availableApps.contains { $0.name == "Renderer" || $0.name == "client" })
+        check(
+            "helper processes folded into their parent",
+            !model.availableApps.contains { $0.bundleID.lowercased().contains(".helper") })
+        check(
+            "every entry can actually be captured",
+            model.availableApps.allSatisfy { !$0.bundleID.isEmpty && !$0.processIDs.isEmpty })
+        // The point of the grouping: the default list is short enough to read.
+        check(
+            "the daemons are held back by default",
+            model.visibleApps.count < model.availableApps.count
+                || model.availableApps.allSatisfy { !$0.isBackground })
+        note("\(model.visibleApps.count) shown, \(model.hiddenAppCount) held back")
+        model.showsBackgroundApps = true
+        check("they can still be shown", model.visibleApps.count == model.availableApps.count)
+        model.showsBackgroundApps = false
 
         print("\nstarting")
         model.start()

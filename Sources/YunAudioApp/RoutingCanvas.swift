@@ -15,7 +15,8 @@ struct RoutingCanvas: View {
 
     /// The port waiting for its other end, if a source has been clicked.
     @State private var pendingSource: ChannelRef?
-    @State private var hoveredRoute: Route?
+    /// The port under the cursor, when it carries cables. Highlights them.
+    @State private var hoveredPort: ChannelRef?
 
     private var sources: [PortGroup] { model.canvasSources }
     private var destinations: [PortGroup] { model.canvasDestinations }
@@ -51,6 +52,11 @@ struct RoutingCanvas: View {
         }
     }
 
+    /// Width of each port column. The cables are anchored against it, so it is
+    /// a constant rather than a layout result.
+    private static let columnWidth: CGFloat = 132
+    private static let dotRadius: CGFloat = 4.5
+
     private var patchbay: some View {
         // A fixed row pitch is what lets the cables be drawn from arithmetic
         // rather than from a preference-key dance to collect real port frames.
@@ -76,14 +82,16 @@ struct RoutingCanvas: View {
     }
 
     private func column(_ groups: [PortGroup], isSource: Bool, pitch: CGFloat) -> some View {
-        VStack(alignment: isSource ? .leading : .trailing, spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(groups) { group in
                 Text(group.name)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                    .frame(height: pitch, alignment: isSource ? .leading : .trailing)
+                    .frame(
+                        maxWidth: .infinity, minHeight: pitch, maxHeight: pitch,
+                        alignment: isSource ? .leading : .trailing)
                 ForEach(group.channels, id: \.self) { channel in
                     port(
                         ChannelRef(deviceUID: group.uid, channel: channel),
@@ -92,7 +100,7 @@ struct RoutingCanvas: View {
                 }
             }
         }
-        .frame(width: 132, alignment: isSource ? .leading : .trailing)
+        .frame(width: Self.columnWidth)
     }
 
     private func port(
@@ -102,29 +110,57 @@ struct RoutingCanvas: View {
         let isConnected = model.activeRoutes.contains {
             isSource ? $0.source == reference : $0.destination == reference
         }
+        // The dot is pinned to the column's inner edge in both columns, because
+        // that edge is where `cables` starts and ends its curves. Letting the
+        // label's width decide where the dot lands is what left a forty-point
+        // gap between every cable and the port it claimed to reach.
+        let dot = Circle()
+            .fill(
+                isPending
+                    ? Yun.Palette.info
+                    : (isConnected ? Yun.Palette.accent : Yun.Palette.elevated)
+            )
+            .overlay { Circle().strokeBorder(Yun.Palette.border, lineWidth: 1) }
+            .frame(width: Self.dotRadius * 2, height: Self.dotRadius * 2)
+
         return Button {
             tap(reference, isSource: isSource)
         } label: {
             HStack(spacing: 6) {
-                if !isSource { Spacer(minLength: 0) }
-                if isSource { Text(label) }
-                Circle()
-                    .fill(
-                        isPending
-                            ? Yun.Palette.info
-                            : (isConnected ? Yun.Palette.accent : Yun.Palette.elevated)
-                    )
-                    .overlay { Circle().strokeBorder(Yun.Palette.border, lineWidth: 1) }
-                    .frame(width: 9, height: 9)
-                if !isSource { Text(label) }
-                if isSource { Spacer(minLength: 0) }
+                if isSource {
+                    Text(label)
+                    Spacer(minLength: 4)
+                    dot
+                } else {
+                    dot
+                    Text(label)
+                    Spacer(minLength: 4)
+                }
             }
             .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.textSecondary)
-            .frame(height: pitch)
+            .foregroundStyle(
+                isConnected ? Yun.Palette.textPrimary : Yun.Palette.textSecondary
+            )
+            .frame(maxWidth: .infinity, minHeight: pitch, maxHeight: pitch)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        // Hovering a connected port lights the cables it carries, so what a
+        // click is about to remove is visible before the click.
+        .onHover { inside in
+            if inside {
+                hoveredPort = isConnected ? reference : nil
+            } else if hoveredPort == reference {
+                hoveredPort = nil
+            }
+        }
+        .help(
+            isSource
+                ? loc("Click to start a cable from this channel.")
+                : (isConnected
+                    ? loc("Click to pull every cable reaching this channel.")
+                    : loc("Click to land the pending cable here."))
+        )
         .accessibilityLabel(Text(label))
         .accessibilityAddTraits(isConnected ? [.isSelected] : [])
     }
@@ -138,8 +174,8 @@ struct RoutingCanvas: View {
                     let end = position(of: route.destination, in: destinations, pitch: pitch)
                 else { continue }
 
-                let from = CGPoint(x: 132, y: start)
-                let to = CGPoint(x: size.width - 132, y: end)
+                let from = CGPoint(x: Self.columnWidth - Self.dotRadius, y: start)
+                let to = CGPoint(x: size.width - Self.columnWidth + Self.dotRadius, y: end)
                 var path = Path()
                 path.move(to: from)
                 // A flat S rather than a straight line: parallel diagonals of
@@ -148,12 +184,20 @@ struct RoutingCanvas: View {
                     to: to,
                     control1: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: from.y),
                     control2: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: to.y))
+
+                // Red rather than merely brighter: hovering a destination is
+                // one click away from pulling these out, and the colour should
+                // say which way that click goes.
+                let isHighlighted =
+                    hoveredPort == route.source || hoveredPort == route.destination
+                let willBeRemoved = hoveredPort == route.destination
                 context.stroke(
                     path,
                     with: .color(
-                        hoveredRoute == route
-                            ? Yun.Palette.danger : Yun.Palette.accent.opacity(0.5)),
-                    lineWidth: hoveredRoute == route ? 2 : 1.5)
+                        willBeRemoved
+                            ? Yun.Palette.danger
+                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.45)),
+                    lineWidth: isHighlighted ? 2 : 1.5)
             }
         }
     }
