@@ -225,3 +225,8 @@
 "Release" = "Release";
 "Corner" = "Corner";
 "The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom." = "The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom.";
+"Light ring" = "Light ring";
+"Off" = "Off";
+"Solid" = "Solid";
+"Spectrum" = "Spectrum";
+"The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute." = "The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute.";

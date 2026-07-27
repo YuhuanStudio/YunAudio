@@ -89,7 +89,12 @@ struct YunAudioApp: App {
     @MainActor
     private func installStatusItem() {
         guard termination.statusItem == nil else { return }
-        termination.onTerminate = { model.shutDown() }
+        termination.onTerminate = {
+            // The ring is hardware state that outlives the process. Leaving it
+            // lit after quitting would look like a fault rather than a setting.
+            model.lighting.stop()
+            model.shutDown()
+        }
         termination.flowCheckModel = model
         termination.statusItem = StatusItemController(model: model) {
             NSApp.activate(ignoringOtherApps: true)

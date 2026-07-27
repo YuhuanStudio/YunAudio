@@ -236,6 +236,7 @@ including both checksums — which is how the checksum rule was confirmed before
 anything was written to the microphone.
 
 ```bash
+swift run -c release yunaudio-cli light walk          # map the ring
 swift run -c release yunaudio-cli light on            # brightness
 swift run -c release yunaudio-cli light solid 255 0 0
 swift run -c release yunaudio-cli light led 0 255 255 255   # one LED, to map the ring
@@ -252,8 +253,16 @@ the three input channels come from — `Device_Mic`, `Device_MicDry`,
 takes 0 to +36 dB of gain, the headphone output −64 to 0 dB, both in the UAC2
 1/256 dB units CoreAudio already exposes.
 
-Still open: the physical order of the twelve LEDs, which needs `light led`
-walked from 0 to 11 with the ring in view. And the same capture established
+The ring is driven from the application, not just the CLI. Because the device
+renders nothing itself, the twelve LEDs are a display this project already has
+something to put on: **the ring shows the input level and turns red the moment
+you mute.** Index 0 is at six o'clock and they run clockwise, which is why the
+level fills by height rather than by index — filling by index sweeps round like
+a chase, filling by height rises up both sides at once the way a meter should.
+That geometry could not be read off the device; it came from `light walk`
+lighting them one at a time.
+
+The same capture established
 that Synapse's EQ, noise reduction, voice gate and vocal clarity are **host-side
 THX processing rather than device commands** — there is nothing to send for
 those, which is why this project implements its own.

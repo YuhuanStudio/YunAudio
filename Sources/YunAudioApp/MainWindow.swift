@@ -391,6 +391,34 @@ struct MainWindow: View {
                     }
                 }
 
+                if model.lighting.isAvailable {
+                    sectionHeading(loc("Light ring"))
+                    YunCard {
+                        VStack(alignment: .leading, spacing: Yun.Space.md) {
+                            YunSegmented(
+                                selection: Binding(
+                                    get: { model.lightingMode },
+                                    set: { model.lightingMode = $0 }
+                                ),
+                                options: LightingMode.allCases.map { ($0, $0.title) })
+                            Text(
+                                loc(
+                                    "The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            if let error = model.lighting.lastError {
+                                Text(error)
+                                    .font(Yun.Text.caption)
+                                    .foregroundStyle(Yun.Palette.danger)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+
                 sectionHeading(loc("Recording"))
                 YunCard {
                     RecordingControls(model: model)

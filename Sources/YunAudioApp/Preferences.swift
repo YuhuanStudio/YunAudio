@@ -34,6 +34,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var style: String?
     /// The input trim and the master, in decibels. Optional for the same
     /// reason.
+    /// What the microphone's light ring shows.
+    var lightingMode: String?
     var inputDecibels: Float?
     var isInputMuted: Bool?
     var outputDecibels: Float?
@@ -55,6 +57,7 @@ struct Preferences: Codable, Equatable, Sendable {
         cancelsEcho: false,
         echoSpeakerUID: nil,
         style: YunStyle.flat.rawValue,
+        lightingMode: LightingMode.off.rawValue,
         inputDecibels: 0,
         isInputMuted: false,
         outputDecibels: 0,

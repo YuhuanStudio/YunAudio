@@ -112,6 +112,22 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
+        print("\nlight ring")
+        if model.lighting.isAvailable {
+            for mode in LightingMode.allCases {
+                model.lightingMode = mode
+                await pause(0.4)
+                check("\(mode.rawValue) applied", model.lightingMode == mode)
+                check("no error from \(mode.rawValue)", model.lighting.lastError == nil)
+            }
+            // Left dark: hardware state outlives the process, and a ring stuck
+            // on a colour after quitting looks like a fault.
+            model.lightingMode = .off
+            check("it ends dark", model.lightingMode == .off)
+        } else {
+            note("no device with a light ring attached")
+        }
+
         print("\nhardware gain")
         // The microphone's own gain sits before the converter, so raising it
         // costs no headroom, while the trim afterwards can only amplify what

@@ -199,6 +199,26 @@ final class RouterModel {
         decibels <= minimumDecibels ? 0 : pow(10, decibels / 20)
     }
 
+    // MARK: Light ring
+
+    /// The microphone's own light ring, driven from the same numbers the meters
+    /// use.
+    ///
+    /// The capture established that the device renders no effects of its own —
+    /// every animation is computed on the host and pushed — which turns the
+    /// ring into a twelve-pixel display this application already has something
+    /// to put on.
+    let lighting = LightingController()
+
+    var lightingMode: LightingMode {
+        get { lighting.mode }
+        set {
+            guard lighting.mode != newValue else { return }
+            lighting.mode = newValue
+            persist()
+        }
+    }
+
     // MARK: Hardware gain
 
     /// The microphone's own gain, if it publishes one.
@@ -926,6 +946,8 @@ final class RouterModel {
         effectValues = saved.effectValues
         cancelsEcho = saved.cancelsEcho ?? false
         echoSpeakerUID = saved.echoSpeakerUID
+        lighting.mode =
+            saved.lightingMode.flatMap(LightingMode.init(rawValue:)) ?? .off
         inputDecibels = saved.inputDecibels ?? 0
         isInputMuted = saved.isInputMuted ?? false
         outputDecibels = saved.outputDecibels ?? 0
@@ -970,6 +992,7 @@ final class RouterModel {
                 cancelsEcho: cancelsEcho,
                 echoSpeakerUID: echoSpeakerUID,
                 style: style.rawValue,
+                lightingMode: lighting.mode.rawValue,
                 inputDecibels: inputDecibels,
                 isInputMuted: isInputMuted,
                 outputDecibels: outputDecibels,
@@ -1368,6 +1391,9 @@ final class RouterModel {
         isClockLocked = engine.isClockLocked
         measuredRateRatio = engine.measuredRateRatio
         refreshRecordingState()
+        // The ring follows the loudest route, which is what a single ring can
+        // honestly represent when several are running.
+        lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
     }
 
     /// Sample rates both selected devices can present.

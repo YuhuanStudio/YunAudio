@@ -328,3 +328,34 @@ struct DeviceChannelNameTests {
                 scope: kAudioObjectPropertyScopeOutput) == nil)
     }
 }
+
+/// The ring's geometry, which the protocol capture could not settle — it came
+/// from lighting one LED at a time and looking.
+@Suite("Light ring geometry")
+struct LightRingGeometryTests {
+    @Test("index 0 is at the bottom and index 6 at the top")
+    func extremes() {
+        #expect(RazerLightingCommand.height(ofLED: 0) == 0)
+        #expect(abs(RazerLightingCommand.height(ofLED: 6) - 1) < 0.0001)
+    }
+
+    /// Filling by height is only a level meter if the two sides match. If they
+    /// drifted the ring would fill lopsidedly, which reads as a fault.
+    @Test("the two sides sit at matching heights")
+    func symmetric() {
+        for index in 1...5 {
+            let left = RazerLightingCommand.height(ofLED: index)
+            let right = RazerLightingCommand.height(ofLED: 12 - index)
+            #expect(abs(left - right) < 0.0001)
+        }
+    }
+
+    @Test("height rises monotonically up one side")
+    func monotonic() {
+        for index in 0..<6 {
+            #expect(
+                RazerLightingCommand.height(ofLED: index)
+                    < RazerLightingCommand.height(ofLED: index + 1))
+        }
+    }
+}

@@ -62,6 +62,22 @@ public struct RazerLightingCommand {
     /// the highest index rather than a count, which is what fixes it at twelve.
     public static let ledCount = 12
 
+    /// How high up the ring an LED sits, from 0 at the bottom to 1 at the top.
+    ///
+    /// Index 0 is at six o'clock and the indices run clockwise from there, one
+    /// hour apart. That could not be read off the device — the capture settled
+    /// every byte of the protocol and nothing about the geometry — so it came
+    /// from lighting them one at a time and looking at the ring.
+    ///
+    /// Knowing it is what makes a level meter possible rather than a chase:
+    /// indices 1 and 11 sit at the same height, as do 2 and 10, so filling by
+    /// height rises up both sides at once the way a meter should, instead of
+    /// sweeping round.
+    public static func height(ofLED index: Int) -> Double {
+        let angle = Double(index) / Double(ledCount) * 2 * .pi
+        return (1 - cos(angle)) / 2
+    }
+
     public var transactionID: UInt8
     public var command: Command
     public var arguments: [UInt8]

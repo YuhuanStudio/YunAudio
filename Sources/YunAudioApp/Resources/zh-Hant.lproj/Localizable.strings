@@ -225,3 +225,8 @@
 "Release" = "釋放時間";
 "Corner" = "轉折頻率";
 "The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom." = "麥克風自己的增益，位於類比轉換之前。請先調它再調下方的 trim——它不佔用任何動態餘裕。";
+"Light ring" = "燈環";
+"Off" = "關閉";
+"Solid" = "純色";
+"Spectrum" = "光譜";
+"The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute." = "麥克風自己不算任何效果——全部在這裡算，所以燈環可以顯示音量，並在你按下靜音的瞬間變紅。";
