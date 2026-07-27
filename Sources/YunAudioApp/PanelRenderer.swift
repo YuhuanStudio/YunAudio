@@ -32,7 +32,12 @@ enum PanelRenderer {
             // at once. The columns scroll in the running app; here they do not,
             // and a clipped capture hides exactly the defects this exists to
             // find.
-            size: CGSize(width: 1060, height: 860))
+            // Tall enough for the whole layout. It was 860, and the content
+            // outgrew that some time ago: the capture clipped its own top, so
+            // the window header and the inspector's tab bar were missing from
+            // every design check without anything saying so. A capture that
+            // silently crops is worse than no capture.
+            size: CGSize(width: 1060, height: 1180))
 
         for section in PreferencesWindow.Section.allCases {
             render(

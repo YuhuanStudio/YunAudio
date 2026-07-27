@@ -123,9 +123,7 @@ struct RecordingControls: View {
 
             if !isCompact {
                 HStack(spacing: Yun.Space.sm) {
-                    Toggle(isOn: $model.recordsStems) { EmptyView() }
-                        .toggleStyle(YunToggleStyle())
-                        .labelsHidden()
+                    YunSwitch(isOn: $model.recordsStems)
                         .disabled(model.isRecording)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(loc("A file per source as well"))

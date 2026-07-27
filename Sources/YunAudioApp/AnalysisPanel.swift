@@ -162,9 +162,7 @@ struct LoudnessReadout: View {
     @ViewBuilder
     private var autoLevel: some View {
         HStack(spacing: Yun.Space.sm) {
-            Toggle(isOn: $model.isAutoLevelling) { EmptyView() }
-                .toggleStyle(YunToggleStyle())
-                .labelsHidden()
+            YunSwitch(isOn: $model.isAutoLevelling)
             VStack(alignment: .leading, spacing: 1) {
                 Text(loc("Hold this level automatically"))
                     .font(Yun.Text.label)

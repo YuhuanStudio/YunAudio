@@ -522,6 +522,46 @@ public struct YunToggleStyle: ToggleStyle {
     }
 }
 
+/// A switch with no label layout of its own.
+///
+/// `YunToggleStyle` lays out a label, a spacer and the switch, which is right
+/// when the toggle owns its own label. Beside custom content — a title and a
+/// paragraph explaining what the thing costs — the label is empty, and the
+/// spacer then expands to whatever width the toggle is given and shoves the
+/// switch to the far right. Every row built that way had a hundred points of
+/// gutter down its left side and nothing in the code to suggest it.
+///
+/// This is the same switch with nothing around it, for exactly that case.
+public struct YunSwitch: View {
+    @Binding private var isOn: Bool
+
+    public init(isOn: Binding<Bool>) { _isOn = isOn }
+
+    public var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            ZStack(alignment: isOn ? .trailing : .leading) {
+                Capsule()
+                    .fill(isOn ? Yun.Palette.accent : Yun.Palette.elevated)
+                    .overlay {
+                        Capsule().strokeBorder(
+                            isOn ? .clear : Yun.Palette.border, lineWidth: 1)
+                    }
+                    .frame(width: 32, height: 18)
+                Circle()
+                    .fill(isOn ? Yun.Palette.accentForeground : Yun.Palette.card)
+                    .frame(width: 14, height: 14)
+                    .padding(.horizontal, 2)
+                    .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
+            }
+        }
+        .buttonStyle(.plain)
+        .focusEffectDisabled()
+        .animation(.easeOut(duration: 0.18), value: isOn)
+    }
+}
+
 /// Runs an action on an option-click, leaving every other click alone.
 ///
 /// SwiftUI's tap gestures carry no modifier flags, so the state of the option

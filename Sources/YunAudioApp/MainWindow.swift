@@ -13,6 +13,7 @@ import YunDesign
 /// on a machine that is not a phone.
 struct MainWindow: View {
     @Bindable var model: RouterModel
+    @State private var inspectorTab: Inspector = .sound
     @State private var isNamingPreset = false
     @State private var presetName = ""
     /// Skips the scroll views. `ImageRenderer` gives a ScrollView no height, so
@@ -391,9 +392,7 @@ struct MainWindow: View {
     @ViewBuilder
     private var ducking: some View {
         HStack(spacing: Yun.Space.sm) {
-            Toggle(isOn: $model.isDucking) { EmptyView() }
-                .toggleStyle(YunToggleStyle())
-                .labelsHidden()
+            YunSwitch(isOn: $model.isDucking)
             VStack(alignment: .leading, spacing: 1) {
                 Text(loc("Duck under my voice"))
                     .font(Yun.Text.label)
@@ -663,9 +662,7 @@ struct MainWindow: View {
     @ViewBuilder
     private var pushToTalk: some View {
         HStack(spacing: Yun.Space.sm) {
-            Toggle(isOn: $model.isPushToTalkEnabled) { EmptyView() }
-                .toggleStyle(YunToggleStyle())
-                .labelsHidden()
+            YunSwitch(isOn: $model.isPushToTalkEnabled)
             VStack(alignment: .leading, spacing: 1) {
                 HStack(spacing: Yun.Space.sm) {
                     Text(loc("Hold to talk"))
@@ -790,148 +787,208 @@ struct MainWindow: View {
 
     // MARK: Inspector
 
+    /// What the right-hand column is showing.
+    ///
+    /// It used to be everything, stacked: voice, ten processing stages,
+    /// plugins, the light ring, recording, echo cancellation and the signal
+    /// path, in one column a mile long. Each of them arrived reasonably and the
+    /// result stopped being reasonable somewhere around the sixth — you cannot
+    /// see the thing you are adjusting and the thing it affects at the same
+    /// time, and finding anything means remembering where in the scroll it was.
+    ///
+    /// The left and middle columns stay put on purpose: devices and the live
+    /// meters are what you check *while* changing something in here, so hiding
+    /// them behind a tab would trade one problem for a worse one.
+    enum Inspector: String, CaseIterable, Identifiable {
+        case sound
+        case plugins
+        case recording
+        case hardware
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .sound: loc("Sound")
+            case .plugins: loc("Plugins")
+            case .recording: loc("Record")
+            case .hardware: loc("Device")
+            }
+        }
+    }
+
     private var inspector: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                sectionHeading(loc("Voice"))
-                YunCard { voice }
+                YunSegmented(
+                    selection: $inspectorTab,
+                    options: Inspector.allCases.map { ($0, $0.title) })
 
-                sectionHeading(loc("Processing"))
-                YunCard {
-                    VStack(alignment: .leading, spacing: Yun.Space.md) {
-                        ForEach(EffectKind.allCases) { kind in
-                            effectRow(kind)
-                            if kind != EffectKind.allCases.last { YunDivider() }
-                        }
-                        if model.enabledEffects.contains(.voiceIsolation) {
-                            Text(
-                                loc(
-                                    "Processing means the path is no longer bit-exact. That is the trade, not a fault."
-                                )
+                switch inspectorTab {
+                case .sound: soundTab
+                case .plugins: pluginsTab
+                case .recording: recordingTab
+                case .hardware: hardwareTab
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var soundTab: some View {
+        Group {
+            sectionHeading(loc("Voice"))
+            YunCard { voice }
+
+            sectionHeading(loc("Processing"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    ForEach(EffectKind.allCases) { kind in
+                        effectRow(kind)
+                        if kind != EffectKind.allCases.last { YunDivider() }
+                    }
+                    if model.enabledEffects.contains(.voiceIsolation) {
+                        Text(
+                            loc(
+                                "Processing means the path is no longer bit-exact. That is the trade, not a fault."
                             )
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                        }
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+            }
 
-                if !model.availablePlugins.isEmpty || !model.enabledPlugins.isEmpty {
-                    sectionHeading(loc("Plugins"))
-                    YunCard { pluginList }
-                }
+        }
+    }
 
-                if model.lighting.isAvailable {
-                    sectionHeading(loc("Light ring"))
-                    YunCard {
-                        VStack(alignment: .leading, spacing: Yun.Space.md) {
-                            YunSegmented(
-                                selection: Binding(
-                                    get: { model.lightingMode },
-                                    set: { model.lightingMode = $0 }
-                                ),
-                                options: LightingMode.allCases.map { ($0, $0.title) })
-                            Text(
-                                loc(
-                                    "The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute."
-                                )
+    @ViewBuilder
+    private var pluginsTab: some View {
+        Group {
+            sectionHeading(loc("Plugins"))
+            YunCard { pluginList }
+        }
+    }
+
+    @ViewBuilder
+    private var hardwareTab: some View {
+        Group {
+            if model.lighting.isAvailable {
+                sectionHeading(loc("Light ring"))
+                YunCard {
+                    VStack(alignment: .leading, spacing: Yun.Space.md) {
+                        YunSegmented(
+                            selection: Binding(
+                                get: { model.lightingMode },
+                                set: { model.lightingMode = $0 }
+                            ),
+                            options: LightingMode.allCases.map { ($0, $0.title) })
+                        Text(
+                            loc(
+                                "The microphone renders nothing itself — every effect is computed here, so the ring can show the level and turn red the moment you mute."
                             )
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            if model.lightingMode != .off {
-                                YunDivider()
-                                // A hue strip rather than a colour well: the
-                                // ring is one saturated colour at a time, and a
-                                // full picker would offer greys it cannot show.
-                                if model.lightingMode != .spectrum {
-                                    HStack(spacing: Yun.Space.sm) {
-                                        Text(loc("Colour"))
-                                            .font(Yun.Text.caption)
-                                            .foregroundStyle(Yun.Palette.textTertiary)
-                                            .frame(width: 62, alignment: .leading)
-                                        HueStrip(hue: $model.lightingHue)
-                                    }
-                                }
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        if model.lightingMode != .off {
+                            YunDivider()
+                            // A hue strip rather than a colour well: the
+                            // ring is one saturated colour at a time, and a
+                            // full picker would offer greys it cannot show.
+                            if model.lightingMode != .spectrum {
                                 HStack(spacing: Yun.Space.sm) {
-                                    Text(loc("Brightness"))
+                                    Text(loc("Colour"))
                                         .font(Yun.Text.caption)
                                         .foregroundStyle(Yun.Palette.textTertiary)
                                         .frame(width: 62, alignment: .leading)
-                                    YunSlider(
-                                        fraction: Binding(
-                                            get: { model.lightingBrightness },
-                                            set: { model.lightingBrightness = $0 }))
-                                    Text("\(Int(model.lightingBrightness * 100))%")
-                                        .font(Yun.Text.mono)
-                                        .foregroundStyle(Yun.Palette.textTertiary)
-                                        .monospacedDigit()
-                                        .frame(width: 40, alignment: .trailing)
+                                    HueStrip(hue: $model.lightingHue)
                                 }
                             }
-
-                            if let error = model.lighting.lastError {
-                                Text(error)
+                            HStack(spacing: Yun.Space.sm) {
+                                Text(loc("Brightness"))
                                     .font(Yun.Text.caption)
-                                    .foregroundStyle(Yun.Palette.danger)
-                                    .fixedSize(horizontal: false, vertical: true)
+                                    .foregroundStyle(Yun.Palette.textTertiary)
+                                    .frame(width: 62, alignment: .leading)
+                                YunSlider(
+                                    fraction: Binding(
+                                        get: { model.lightingBrightness },
+                                        set: { model.lightingBrightness = $0 }))
+                                Text("\(Int(model.lightingBrightness * 100))%")
+                                    .font(Yun.Text.mono)
+                                    .foregroundStyle(Yun.Palette.textTertiary)
+                                    .monospacedDigit()
+                                    .frame(width: 40, alignment: .trailing)
                             }
+                        }
+
+                        if let error = model.lighting.lastError {
+                            Text(error)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.danger)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                 }
+            }
 
-                sectionHeading(loc("Recording"))
-                YunCard {
-                    RecordingControls(model: model)
-                }
+            sectionHeading(loc("Echo cancellation"))
+            YunCard {
+                EchoCancellationControls(model: model, labelColumn: nil)
+            }
 
-                sectionHeading(loc("Echo cancellation"))
-                YunCard {
-                    EchoCancellationControls(model: model, labelColumn: nil)
-                }
-
-                sectionHeading(loc("Signal path"))
-                YunCard {
-                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                        if let quality = model.pathQuality {
+            sectionHeading(loc("Signal path"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    if let quality = model.pathQuality {
+                        YunDetailRow(
+                            loc("Integrity"),
+                            value: loc(quality.integrityKey),
+                            tone: quality.isBitExact ? .success : .warning)
+                        YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
+                        YunDetailRow(
+                            loc("Buffer"),
+                            value: String(
+                                format: "%d · %.2f ms",
+                                quality.bufferFrames, quality.bufferLatencyMilliseconds))
+                        if model.isClockLocked {
                             YunDetailRow(
-                                loc("Integrity"),
-                                value: loc(quality.integrityKey),
-                                tone: quality.isBitExact ? .success : .warning)
-                            YunDetailRow(loc("Rate"), value: "\(Int(quality.sampleRate)) Hz")
-                            YunDetailRow(
-                                loc("Buffer"),
+                                loc("Clock"),
                                 value: String(
-                                    format: "%d · %.2f ms",
-                                    quality.bufferFrames, quality.bufferLatencyMilliseconds))
-                            if model.isClockLocked {
-                                YunDetailRow(
-                                    loc("Clock"),
-                                    value: String(
-                                        format: "locked %.6f", model.measuredRateRatio),
-                                    tone: .success)
-                                YunDetailRow(
-                                    loc("Crystal"),
-                                    value: String(
-                                        format: "%+.1f ppm",
-                                        (model.measuredRateRatio - 1) * 1_000_000))
-                            }
-                        } else {
-                            YunEmptyState(
-                                symbol: "waveform.path.ecg",
-                                message: loc("Start routing to measure the path.")
-                            )
-                            .frame(maxWidth: .infinity)
-                        }
-                        if model.addedLatencyMilliseconds > 0 {
+                                    format: "locked %.6f", model.measuredRateRatio),
+                                tone: .success)
                             YunDetailRow(
-                                loc("Added by DSP"),
+                                loc("Crystal"),
                                 value: String(
-                                    format: "%.0f ms", model.addedLatencyMilliseconds),
-                                tone: .warning)
+                                    format: "%+.1f ppm",
+                                    (model.measuredRateRatio - 1) * 1_000_000))
                         }
+                    } else {
+                        YunEmptyState(
+                            symbol: "waveform.path.ecg",
+                            message: loc("Start routing to measure the path.")
+                        )
+                        .frame(maxWidth: .infinity)
+                    }
+                    if model.addedLatencyMilliseconds > 0 {
+                        YunDetailRow(
+                            loc("Added by DSP"),
+                            value: String(
+                                format: "%.0f ms", model.addedLatencyMilliseconds),
+                            tone: .warning)
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var recordingTab: some View {
+        Group {
+            sectionHeading(loc("Recording"))
+            YunCard {
+                RecordingControls(model: model)
             }
         }
     }
