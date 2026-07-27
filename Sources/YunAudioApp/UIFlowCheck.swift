@@ -157,6 +157,55 @@ enum UIFlowCheck {
             check("a silent room reports no pitch", pitch == 0)
         }
 
+        print("\nsaved presets")
+        // A snapshot of everything, not a chosen subset. Somebody saving one
+        // has just spent time getting a setup right, and one that quietly left
+        // out the thing they were adjusting is worse than none.
+        let presetsBefore = model.userPresets.count
+        model.inputDecibels = -7
+        model.voicePreset = .child
+        model.saveCurrentAsPreset(named: "Flow check")
+        check("it was saved", model.userPresets.count == presetsBefore + 1)
+        check("and became the active one", model.activePresetName == "Flow check")
+
+        // Change everything it captured, then bring it back.
+        model.inputDecibels = 0
+        model.voicePreset = .none
+        if let saved = model.userPresets.first(where: { $0.name == "Flow check" }) {
+            model.apply(saved)
+            await waitUntil("applying it settled", { !model.isBusy }, timeout: 12)
+            check("the level came back", model.inputDecibels == -7)
+            check("the voice came back", model.voicePreset == .child)
+            check("no error was reported", model.lastError == nil)
+        } else {
+            check("the saved preset can be found again", false)
+        }
+
+        // Saving over a name replaces rather than making a second one: a list
+        // of "Podcast", "Podcast 2", "Podcast 3" with no way to tell which is
+        // current is worse than refusing.
+        model.saveCurrentAsPreset(named: "Flow check")
+        check(
+            "saving the same name replaces it",
+            model.userPresets.filter { $0.name == "Flow check" }.count == 1)
+        // A blank name is not a preset.
+        model.saveCurrentAsPreset(named: "   ")
+        check(
+            "a blank name is refused",
+            model.userPresets.count == presetsBefore + 1)
+
+        if let saved = model.userPresets.first(where: { $0.name == "Flow check" }) {
+            model.deletePreset(saved)
+        }
+        check("it can be deleted", model.userPresets.count == presetsBefore)
+        // The built-in four are not somebody's to delete.
+        if let builtIn = RoutePreset.builtIn.first {
+            model.deletePreset(builtIn)
+            check("a built-in preset is not deleted", RoutePreset.builtIn.count == 4)
+        }
+        model.voicePreset = .none
+        model.inputDecibels = 0
+
         print("\nvoice presets")
         // The claim is that both halves move together. Pitch alone is a
         // chipmunk and formants alone is somebody talking through a tube; the

@@ -341,3 +341,10 @@
 "A file per source as well" = "同時每個來源各存一個檔";
 "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix." = "混音檔記錄的是對方聽到什麼。每個來源各一個檔記錄的是你們各自說了什麼——這是後製再怎麼修都無法從混音裡還原的。";
 "%@ samples dropped — a file has gaps." = "已丟失 %@ 個樣本——檔案裡有斷點。";
+"Save the current setup as a preset" = "把目前的設定存成預設集";
+"Save this setup" = "儲存這個設定";
+"Devices, levels, the processing chain, the voice and which applications are captured." = "裝置、電平、處理鏈、變聲，以及正在擷取哪些應用程式。";
+"Name" = "名稱";
+"Save" = "儲存";
+"Delete" = "刪除";
+"Saved from the current setup." = "從目前的設定儲存。";

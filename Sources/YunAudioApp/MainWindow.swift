@@ -13,6 +13,8 @@ import YunDesign
 /// on a machine that is not a phone.
 struct MainWindow: View {
     @Bindable var model: RouterModel
+    @State private var isNamingPreset = false
+    @State private var presetName = ""
     /// Skips the scroll views. `ImageRenderer` gives a ScrollView no height, so
     /// the offscreen design captures come out as three empty columns otherwise.
     var isRendering = false
@@ -173,6 +175,36 @@ struct MainWindow: View {
                         YunButtonStyle(model.matches(preset) ? .primary : .ghost, small: true)
                     )
                     .help("\(loc(preset.note))  (⌘\(index + 1))")
+            }
+
+            // Saved ones after the built-in four, with the same shape: the
+            // distinction between "the four we chose" and "the ones you saved"
+            // matters when deleting and nowhere else.
+            ForEach(model.userPresets) { preset in
+                Button(preset.name) { model.apply(preset) }
+                    .buttonStyle(
+                        YunButtonStyle(
+                            model.activePresetName == preset.name ? .primary : .ghost,
+                            small: true)
+                    )
+                    .help(preset.note)
+                    .contextMenu {
+                        Button(loc("Delete")) { model.deletePreset(preset) }
+                    }
+            }
+
+            Button {
+                isNamingPreset = true
+                presetName = ""
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 10))
+                    .frame(width: 14)
+            }
+            .buttonStyle(YunButtonStyle(.ghost, small: true))
+            .help(loc("Save the current setup as a preset"))
+            .popover(isPresented: $isNamingPreset, arrowEdge: .bottom) {
+                savePreset
             }
 
             Spacer()
@@ -394,6 +426,56 @@ struct MainWindow: View {
                     .frame(width: 58, alignment: .trailing)
             }
         }
+    }
+
+    /// Naming a preset before it is saved.
+    ///
+    /// A snapshot of everything, not a chosen subset: somebody saving a preset
+    /// has just spent time getting a setup right, and one that quietly left out
+    /// the thing they were adjusting is worse than none.
+    private var savePreset: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            Text(loc("Save this setup"))
+                .font(Yun.Text.label)
+                .foregroundStyle(Yun.Palette.textPrimary)
+            Text(
+                loc(
+                    "Devices, levels, the processing chain, the voice and which applications are captured."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            TextField(loc("Name"), text: $presetName)
+                .textFieldStyle(.plain)
+                .font(Yun.Text.body)
+                .padding(.horizontal, Yun.Space.sm)
+                .padding(.vertical, 6)
+                .background(Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.control))
+                .overlay {
+                    RoundedRectangle(cornerRadius: Yun.Radius.control)
+                        .strokeBorder(Yun.Palette.border, lineWidth: 1)
+                }
+                .onSubmit { commitPreset() }
+
+            HStack(spacing: Yun.Space.sm) {
+                Button(loc("Save")) { commitPreset() }
+                    .buttonStyle(YunButtonStyle(.primary, small: true))
+                    .disabled(
+                        presetName.trimmingCharacters(in: .whitespaces).isEmpty)
+                Button(loc("Cancel")) { isNamingPreset = false }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(Yun.Space.lg)
+        .frame(width: 320)
+    }
+
+    private func commitPreset() {
+        model.saveCurrentAsPreset(named: presetName)
+        isNamingPreset = false
     }
 
     /// A whole voice, rather than the two stages it is made of.

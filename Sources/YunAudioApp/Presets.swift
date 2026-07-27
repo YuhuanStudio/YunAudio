@@ -24,6 +24,28 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     /// Container to record in. WAV keeps a lossless path lossless on disk.
     var recordingFormat: String
     var note: String
+    /// True for one somebody saved themselves.
+    ///
+    /// The built-in four cannot be edited or deleted; a saved one can be both.
+    /// Keeping the distinction in the data rather than in a separate list means
+    /// there is one thing to iterate and one thing to persist.
+    var isUserDefined: Bool = false
+    /// Everything a saved preset captures that the built-in ones do not.
+    ///
+    /// The built-in four describe how to route — sample rate, buffer, a stage
+    /// or two — because that is the part of the decision that is general. A
+    /// preset somebody saves is a snapshot of *their* setup, so it carries what
+    /// they had set: the processing chain, the voice, the levels and the
+    /// devices themselves.
+    var effects: [String]?
+    var effectValues: [String: Float]?
+    var voicePreset: String?
+    var inputDecibels: Float?
+    var outputDecibels: Float?
+    var monitorDeviceUID: String?
+    var sourceDeviceUID: String?
+    var destinationDeviceUID: String?
+    var capturedAppBundleIDs: [String]?
 
     static let voiceChat = RoutePreset(
         name: loc("Voice chat"),
@@ -83,6 +105,30 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     ]
 }
 
+/// Presets somebody saved, on disk.
+@MainActor
+enum UserPresets {
+    private static let key = "com.yuhuanstudio.yunaudio.presets"
+
+    static func load() -> [RoutePreset] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+            let decoded = try? JSONDecoder().decode([RoutePreset].self, from: data)
+        else { return [] }
+        // Whatever was stored, they are user-defined by definition of where
+        // they came from — a file edited by hand cannot claim to be built in.
+        return decoded.map {
+            var preset = $0
+            preset.isUserDefined = true
+            return preset
+        }
+    }
+
+    static func save(_ presets: [RoutePreset]) {
+        guard let data = try? JSONEncoder().encode(presets) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
 extension RouterModel {
     /// Applies a preset. Device selection is deliberately left alone — a preset
     /// describes how to route, not what to route.
@@ -102,8 +148,90 @@ extension RouterModel {
             if let format = Recorder.Format(rawValue: preset.recordingFormat) {
                 recordingFormat = format
             }
+
+            // The extra fields a saved preset carries. Absent on the built-in
+            // four, which describe how to route rather than what somebody's
+            // setup was.
+            if let effects = preset.effects {
+                enabledEffects = Set(effects.compactMap(EffectKind.init(rawValue:)))
+            }
+            if let values = preset.effectValues { effectValues = values }
+            if let voice = preset.voicePreset.flatMap(VoicePreset.init(rawValue:)) {
+                voicePreset = voice
+            }
+            if let level = preset.inputDecibels { inputDecibels = level }
+            if let level = preset.outputDecibels { outputDecibels = level }
+            // Devices are restored only when they are actually present.
+            // Pointing at a microphone somebody unplugged would fail the start
+            // and blame the preset.
+            if let uid = preset.sourceDeviceUID,
+                inputDevices.contains(where: { $0.uid == uid })
+            {
+                selectedSourceUID = uid
+            }
+            if let uid = preset.destinationDeviceUID,
+                outputDevices.contains(where: { $0.uid == uid })
+            {
+                selectedDestinationUID = uid
+            }
+            monitorDeviceUID =
+                preset.monitorDeviceUID.flatMap { uid in
+                    monitorOptions.contains(where: { $0.uid == uid }) ? uid : nil
+                } ?? monitorDeviceUID
+            if let apps = preset.capturedAppBundleIDs {
+                capturedAppBundleIDs = Set(apps)
+            }
+
             activePresetName = preset.name
         }
+    }
+
+    /// Everything the interface offers, saved ones after the built-in four.
+    var allPresets: [RoutePreset] { RoutePreset.builtIn + userPresets }
+
+    /// A snapshot of everything as it is now.
+    ///
+    /// Deliberately everything rather than a chosen subset: somebody who saves
+    /// a preset has just spent time getting a setup right, and a snapshot that
+    /// quietly left out the thing they were adjusting is worse than no snapshot
+    /// at all.
+    func saveCurrentAsPreset(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var preset = RoutePreset(
+            name: trimmed,
+            sampleRate: preferredSampleRate,
+            bufferFrames: bufferFrames,
+            voiceIsolationEnabled: voiceIsolationEnabled,
+            voiceIsolationMix: voiceIsolationMix,
+            channelMode: channelMode.rawValue,
+            cancelsEcho: cancelsEcho,
+            recordingFormat: recordingFormat.rawValue,
+            note: loc("Saved from the current setup."),
+            isUserDefined: true)
+        preset.effects = enabledEffects.map(\.rawValue)
+        preset.effectValues = effectValues
+        preset.voicePreset = voicePreset.rawValue
+        preset.inputDecibels = inputDecibels
+        preset.outputDecibels = outputDecibels
+        preset.monitorDeviceUID = monitorDeviceUID
+        preset.sourceDeviceUID = selectedSourceUID
+        preset.destinationDeviceUID = selectedDestinationUID
+        preset.capturedAppBundleIDs = Array(capturedAppBundleIDs)
+
+        // Saving over a name that exists replaces it rather than making a
+        // second one: the alternative is a list of "Podcast", "Podcast 2",
+        // "Podcast 3" and no way to tell which is current.
+        var presets = userPresets.filter { $0.name != trimmed }
+        presets.append(preset)
+        userPresets = presets
+        activePresetName = trimmed
+    }
+
+    func deletePreset(_ preset: RoutePreset) {
+        guard preset.isUserDefined else { return }
+        userPresets.removeAll { $0.name == preset.name }
+        if activePresetName == preset.name { activePresetName = nil }
     }
 
     /// True when the current settings still match the named preset.

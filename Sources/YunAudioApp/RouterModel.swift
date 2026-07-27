@@ -225,6 +225,14 @@ final class RouterModel {
     /// hand so the UI never claims a preset is active when it is not.
     var activePresetName: String?
 
+    /// Presets somebody saved themselves.
+    var userPresets: [RoutePreset] = [] {
+        didSet {
+            guard oldValue != userPresets else { return }
+            UserPresets.save(userPresets)
+        }
+    }
+
     // MARK: Application sources
 
     /// Applications that can be captured. Refreshed on demand — the list churns
@@ -1155,7 +1163,11 @@ final class RouterModel {
 
     /// Knob positions, keyed by "<stage>.<parameter>". Persisted so a chain
     /// comes back tuned the way it was left rather than at its defaults.
-    private(set) var effectValues: [String: Float] = [:]
+    ///
+    /// Settable rather than read-only because a saved preset restores the whole
+    /// chain, and a chain restored without its knob positions is a different
+    /// chain wearing the same name.
+    var effectValues: [String: Float] = [:]
 
     func value(of parameter: EffectParameter, in kind: EffectKind) -> Float {
         effectValues["\(kind.rawValue).\(parameter.id)"] ?? parameter.defaultValue
@@ -1296,6 +1308,7 @@ final class RouterModel {
         // Before restoring, so a remembered plugin that has since been
         // uninstalled is dropped rather than failing to load on every start.
         refreshPlugins()
+        userPresets = UserPresets.load()
         restore()
 
         engine.onClockLockFailure = { [weak self] in

@@ -341,3 +341,10 @@
 "A file per source as well" = "A file per source as well";
 "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix." = "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix.";
 "%@ samples dropped — a file has gaps." = "%@ samples dropped — a file has gaps.";
+"Save the current setup as a preset" = "Save the current setup as a preset";
+"Save this setup" = "Save this setup";
+"Devices, levels, the processing chain, the voice and which applications are captured." = "Devices, levels, the processing chain, the voice and which applications are captured.";
+"Name" = "Name";
+"Save" = "Save";
+"Delete" = "Delete";
+"Saved from the current setup." = "Saved from the current setup.";
