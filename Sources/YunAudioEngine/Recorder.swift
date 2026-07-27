@@ -72,10 +72,10 @@ public final class Recorder: @unchecked Sendable {
     ///   - sampleRate: Rate of the material being recorded.
     ///   - timestamp: Used in the file name. Passed in rather than read here so
     ///     the name is reproducible in a test.
+    ///   - name: Appended to the file name, so several files written at the
+    ///     same instant do not collide and can be told apart afterwards.
     /// - Throws: Whatever `AVAudioFile` throws when the destination cannot be
     ///   created — a directory that does not exist, or is not writable.
-    /// - Parameter name: Appended to the file name, so several files written
-    ///   at the same instant do not collide and can be told apart afterwards.
     public init(
         directory: URL, format: Format, channels: Int, sampleRate: Double,
         timestamp: Date, name: String? = nil

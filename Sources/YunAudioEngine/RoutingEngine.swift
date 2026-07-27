@@ -817,9 +817,16 @@ public final class RoutingEngine: @unchecked Sendable {
     /// editing afterwards actually has — and the one that cannot be recovered
     /// from a mix at any price.
     ///
-    /// - Parameter groups: One entry per stem: the routes it is made of, in
-    ///   channel order.
+    /// - Parameters:
+    ///   - directory: Where the files go.
+    ///   - groups: One entry per stem: the routes it is made of, in channel
+    ///     order.
+    ///   - names: What each stem is called, in the same order.
+    ///   - format: Container and encoding, the same as the mix.
+    ///   - now: Used in the file names.
     /// - Returns: The files created, in the same order.
+    /// - Throws: `RecorderError.couldNotAllocate` when nothing is routing, or
+    ///   whatever creating a file throws.
     @discardableResult
     public func startStemRecording(
         to directory: URL, groups: [[Int]], names: [String],

@@ -85,6 +85,37 @@ struct RecordingControls: View {
                 Spacer(minLength: 0)
             }
 
+            // While it runs, what is actually being written. A recording that
+            // claims to be making four files is worth being able to see the
+            // four names of — and a stem that is dropping samples is a file
+            // with holes in it, which is the one thing nobody discovers until
+            // they open it.
+            if model.isRecording, !model.stemURLs.isEmpty {
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(model.stemURLs, id: \.self) { url in
+                        HStack(spacing: 5) {
+                            Image(systemName: "waveform")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Yun.Palette.textMuted)
+                            Text(url.lastPathComponent)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    if model.engineStemDrops > 0 {
+                        Text(
+                            String(
+                                format: loc("%@ samples dropped — a file has gaps."),
+                                "\(model.engineStemDrops)")
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.danger)
+                    }
+                }
+            }
+
             if !isCompact {
                 HStack(spacing: Yun.Space.sm) {
                     Toggle(isOn: $model.recordsStems) { EmptyView() }

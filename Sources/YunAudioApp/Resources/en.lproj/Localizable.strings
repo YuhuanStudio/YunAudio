@@ -340,3 +340,4 @@
 "Hz" = "Hz";
 "A file per source as well" = "A file per source as well";
 "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix." = "The mix says what the far end heard. A file per source says what each of you said, which no amount of editing can recover from a mix.";
+"%@ samples dropped — a file has gaps." = "%@ samples dropped — a file has gaps.";
