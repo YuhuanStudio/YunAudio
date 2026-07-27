@@ -293,7 +293,9 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// That is not a test artifact: it is how the application could quit and
     /// leave somebody's interface at 8 kHz.
     ///
-    /// - Parameter timeout: How long to wait for the device to arrive.
+    /// - Parameters:
+    ///   - rate: The rate to move to.
+    ///   - timeout: How long to wait for the device to arrive.
     /// - Throws: `AudioError` if the HAL rejects the request outright.
     /// - Returns: True when the device was observed at the new rate. False
     ///   means it was accepted and had not arrived within the timeout, which is

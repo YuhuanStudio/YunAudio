@@ -1,0 +1,20 @@
+{
+  "match": "seiren v3 pro",
+  "displayName": "Razer Seiren V3 Pro",
+  "note": "Publishes no settable gain to macOS. The only gain before the converter is the knob on the device.",
+  "inputChannels": [
+    {
+      "name": "Microphone",
+      "detail": "The capsule as the device presents it.",
+      "isDefault": true
+    },
+    {
+      "name": "Dry",
+      "detail": "The same capsule with none of the device's own processing."
+    },
+    {
+      "name": "After the expander",
+      "detail": "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first."
+    }
+  ]
+}

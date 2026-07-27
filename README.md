@@ -95,6 +95,33 @@ stop you hearing your own voice; the input trim and mute do reach it, because
 muting the microphone should stop you hearing it. Both rules are asserted against
 the realtime callback directly.
 
+**A voice changer that changes the voice, not just the pitch.** Pitch shifting
+moves the whole spectrum — the fundamental and the resonances of the throat and
+mouth sitting on top of it — and the ear reads that as a smaller head rather
+than a different person. That is why every pitch shifter makes a chipmunk. A
+tall man and a small woman can sing the same note; what differs is where their
+formants sit.
+
+So the formants shift independently, which nothing on macOS provides and is
+written out here: the spectral envelope is estimated from the low-quefrency part
+of the log spectrum, stretched along the frequency axis, and divided back in,
+leaving the harmonics — and therefore the pitch — exactly where they were. The
+tests assert both halves of that, because a test that only checked the
+resonances moved would pass for a plain pitch shifter. Alongside it, a character
+stage built on ring modulation, decimation and soft clipping: robot, radio,
+monster, bitcrush, alien.
+
+**Devices are described by documents, not by code.** CoreAudio says a microphone
+has three input channels and nothing about what is on them. Knowing that the
+Seiren V3 Pro's three are the processed capsule, the dry capsule and the output
+of the microphone's own expander took taking the thing apart — and that
+knowledge used to be compiled in, so every new microphone was a code change and
+a release for a table of strings. It is a JSON file now, and anything dropped in
+`~/Library/Application Support/YunAudio/Devices` is loaded on top. Deliberately
+data and not plugins: a profile describes hardware, it does not execute, and
+loading code from a folder would mean signing, versioning, a stable ABI and a
+way for a bad one to take the audio system down with it.
+
 **Voice isolation from Apple's own model.** `AUSoundIsolation` is the model
 behind FaceTime's Voice Isolation, on-device and free, and no other router in
 this category exposes it as a general microphone processor. Measured here: 56 ms

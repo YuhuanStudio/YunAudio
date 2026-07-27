@@ -189,6 +189,20 @@ enum UIFlowCheck {
             note("this input publishes no settable gain of its own")
         }
 
+        print("\ndevice profiles")
+        // Loaded from documents beside the application rather than compiled in,
+        // which is the only reason supporting somebody else's microphone is a
+        // text file rather than a release. It is also the sort of thing that
+        // works in the build tree and ships broken, so the check is that they
+        // are really there.
+        note("\(DeviceChannelNames.shared.library.profiles.count) profile(s) loaded")
+        check(
+            "the shipped device profiles were found",
+            !DeviceChannelNames.shared.library.profiles.isEmpty)
+        check(
+            "none of them failed to parse", DeviceChannelNames.shared.problems.isEmpty)
+        for problem in DeviceChannelNames.shared.problems.prefix(3) { note(problem) }
+
         print("\nchannel naming")
         // CoreAudio says a device has three input channels and nothing about
         // what is on them. On the Seiren all three carry audio — processed, dry,

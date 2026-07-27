@@ -432,3 +432,157 @@ struct LightRingRenderingTests {
         #expect(zip(start, turned).allSatisfy { abs(Int($0) - Int($1)) <= 1 })
     }
 }
+
+// MARK: - Device profiles
+
+/// Knowledge about hardware is a document now rather than a compiled table, so
+/// these check both that the shipped document still says what it should and
+/// that a bad one cannot take the application with it.
+@Suite("Device profiles")
+struct DeviceProfileTests {
+
+    /// That the file was actually read, not that the fallback happens to agree
+    /// with it.
+    ///
+    /// Two tests here passed for a while with nothing loading at all, because
+    /// what they asserted was also true of the compiled-in fallback. This one
+    /// cannot be satisfied that way.
+    @Test("the shipped profiles are really loaded from disk")
+    func libraryIsPopulated() {
+        #expect(!DeviceChannelNames.shared.library.profiles.isEmpty)
+        #expect(DeviceChannelNames.shared.problems.isEmpty)
+    }
+
+    @Test("the shipped profile still names the Seiren's three inputs")
+    func shippedProfileLoads() throws {
+        let channels = try #require(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeInput))
+        #expect(channels.count == 3)
+        #expect(channels[0].name == "Microphone")
+        #expect(channels[2].name == "After the expander")
+        #expect(channels.filter(\.isDefault).count == 1)
+        #expect(channels.allSatisfy { !$0.detail.isEmpty })
+    }
+
+    /// The note is what tells somebody their microphone exposes no gain to
+    /// macOS, which is the difference between a useful instruction and a
+    /// useless one.
+    @Test("a profile can carry a note about the device")
+    func note() throws {
+        let note = try #require(
+            DeviceChannelNames.note(modelUID: nil, name: "Razer Seiren V3 Pro"))
+        #expect(note.lowercased().contains("gain"))
+    }
+
+    @Test("an unknown device gets nothing invented for it")
+    func unknownDevice() {
+        #expect(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Some Other Microphone",
+                scope: kAudioObjectPropertyScopeInput) == nil)
+    }
+
+    /// Output scopes are never named: the profiles describe inputs.
+    @Test("output scopes are not matched")
+    func outputScope() {
+        #expect(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeOutput) == nil)
+    }
+
+    /// Longest match wins, or a general entry dropped in a folder silently
+    /// takes over from every specific one already there.
+    @Test("a more specific profile beats a general one")
+    func specificWins() {
+        let library = DeviceProfileLibrary(profiles: [
+            DeviceProfile(
+                match: "seiren",
+                inputChannels: [DeviceProfile.Channel(name: "General", detail: "x")]),
+            DeviceProfile(
+                match: "seiren v3 pro",
+                inputChannels: [DeviceProfile.Channel(name: "Specific", detail: "x")]),
+        ])
+        #expect(
+            library.profile(modelUID: nil, name: "Razer Seiren V3 Pro")?
+                .inputChannels.first?.name == "Specific")
+        #expect(
+            library.profile(modelUID: nil, name: "Razer Seiren V2 X")?
+                .inputChannels.first?.name == "General")
+    }
+
+    /// These files come from outside. One that will not parse must be skipped,
+    /// not fatal — a bad file in the folder cannot be allowed to stop the
+    /// application knowing about the rest of them, let alone to stop it
+    /// starting.
+    @Test("a malformed file is skipped and named rather than fatal")
+    func malformedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-profiles-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        try "this is not json".write(
+            to: directory.appendingPathComponent("broken.json"), atomically: true,
+            encoding: .utf8)
+        try #"""
+        {"match":"test mic","inputChannels":[{"name":"One","detail":"d"}]}
+        """#.write(
+            to: directory.appendingPathComponent("good.json"), atomically: true,
+            encoding: .utf8)
+
+        let (loaded, problems) = DeviceProfileLibrary.load(from: directory)
+        if loaded.count != 1 { Issue.record("problems: \(problems)") }
+        #expect(loaded.count == 1)
+        #expect(loaded[0].match == "test mic")
+        #expect(problems.count == 1)
+        // Named, so somebody can fix theirs.
+        #expect(problems[0].contains("broken.json"))
+    }
+
+    /// The whole point of the format is that somebody can write one by hand,
+    /// so everything optional has to actually be optional. A Swift default
+    /// value does not make a key optional to a decoder — the synthesised
+    /// decoder demanded `isDefault` on every channel until this was written
+    /// out.
+    @Test("only the name is required of a hand-written channel")
+    func minimalProfile() throws {
+        let data = Data(#"{"match":"x","inputChannels":[{"name":"Only"}]}"#.utf8)
+        let profile = try JSONDecoder().decode(DeviceProfile.self, from: data)
+        #expect(profile.inputChannels.count == 1)
+        #expect(profile.inputChannels[0].name == "Only")
+        #expect(profile.inputChannels[0].detail.isEmpty)
+        #expect(!profile.inputChannels[0].isDefault)
+        #expect(profile.displayName == nil)
+        #expect(profile.note == nil)
+    }
+
+    /// A folder that is not there at all is the normal case for somebody who
+    /// has never added a profile.
+    @Test("a missing folder is not a problem")
+    func missingFolder() {
+        let (loaded, problems) = DeviceProfileLibrary.load(
+            from: URL(fileURLWithPath: "/nonexistent/yunaudio/devices"))
+        #expect(loaded.isEmpty)
+        #expect(problems.isEmpty)
+    }
+
+    /// The round trip has to survive, or a profile written by the application
+    /// cannot be read back by it.
+    @Test("a profile survives being written and read")
+    func roundTrip() throws {
+        let original = DeviceProfile(
+            match: "example",
+            displayName: "Example",
+            inputChannels: [
+                DeviceProfile.Channel(name: "A", detail: "first", isDefault: true),
+                DeviceProfile.Channel(name: "B", detail: "second"),
+            ],
+            note: "something worth knowing")
+        let data = try JSONEncoder().encode(original)
+        #expect(try JSONDecoder().decode(DeviceProfile.self, from: data) == original)
+    }
+}

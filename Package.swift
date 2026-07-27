@@ -16,7 +16,12 @@ let package = Package(
         // realtime threads"), so every call into them lives here.
         .target(name: "YunAudioRT"),
 
-        .target(name: "YunAudioHAL", dependencies: ["YunAudioRT"]),
+        .target(
+            name: "YunAudioHAL", dependencies: ["YunAudioRT"],
+            // Device profiles ship as documents rather than compiled tables, so
+            // supporting somebody else's microphone is a text file rather than
+            // a release.
+            resources: [.copy("Resources/Devices")]),
 
         .target(name: "YunAudioEngine", dependencies: ["YunAudioHAL", "YunAudioRT"]),
 

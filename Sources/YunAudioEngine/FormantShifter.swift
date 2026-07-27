@@ -109,8 +109,9 @@ public final class FormantShifter {
 
     /// Processes in place, a hop at a time.
     ///
-    /// - Parameter count: Must be a multiple of `hop`. The chain calls this with
-    ///   whatever block the device gave it, so the caller buffers.
+    /// - Parameters:
+    ///   - samples: The block to rewrite.
+    ///   - count: Whole hops only; a remainder is left for the next call.
     public func process(_ samples: UnsafeMutablePointer<Float>, count: Int) {
         var offset = 0
         while offset + Self.hop <= count {

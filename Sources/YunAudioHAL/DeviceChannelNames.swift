@@ -34,19 +34,57 @@ public enum DeviceChannelNames {
         modelUID: String?, name: String, scope: AudioObjectPropertyScope
     ) -> [Channel]? {
         guard scope == kAudioObjectPropertyScopeInput else { return nil }
-        let haystack = "\(modelUID ?? "") \(name)".lowercased()
-        guard haystack.contains("seiren v3 pro") else { return nil }
-        return seirenV3ProInputs
+        guard let profile = shared.library.profile(modelUID: modelUID, name: name) else {
+            return nil
+        }
+        return profile.inputChannels.map {
+            Channel(name: $0.name, detail: $0.detail, isDefault: $0.isDefault)
+        }
     }
 
-    /// The Seiren V3 Pro's three input channels.
+    /// Anything worth saying about the device as a whole.
+    public static func note(modelUID: String?, name: String) -> String? {
+        shared.library.profile(modelUID: modelUID, name: name)?.note
+    }
+
+    /// The loaded profiles, and anything that would not load.
+    ///
+    /// Built once. Reading a folder on every channel lookup would be a
+    /// filesystem hit inside a device enumeration that runs on every hot-plug.
+    public static let shared = Loaded()
+
+    public struct Loaded: Sendable {
+        public let library: DeviceProfileLibrary
+        /// Files that would not parse, named so somebody can fix theirs.
+        public let problems: [String]
+
+        init() {
+            let bundled = Bundle.moduleIfPresent?.url(
+                forResource: "Devices", withExtension: nil)
+            let (library, problems) = DeviceProfileLibrary.standard(
+                bundled: bundled, userDirectory: DeviceProfileLibrary.userDirectory)
+            self.library = library
+            self.problems = problems
+        }
+    }
+
+    /// The Seiren V3 Pro's three input channels, as the profile file states
+    /// them. Kept as a symbol because the tests assert the shipped file still
+    /// says what it is supposed to.
     ///
     /// The order is the device's own: channel 0 is the processed capsule,
     /// channel 1 is untouched, channel 2 has been through the microphone's own
     /// expander. That last one is the interesting discovery — the hardware has
     /// a gate of its own, ahead of the converter, which is a thing no amount of
     /// software can do after the fact.
-    public static let seirenV3ProInputs: [Channel] = [
+    public static var seirenV3ProInputs: [Channel] {
+        channels(
+            modelUID: nil, name: "Razer Seiren V3 Pro",
+            scope: kAudioObjectPropertyScopeInput) ?? fallbackSeirenInputs
+    }
+
+    /// What the shipped profile says, in case the resource is missing.
+    static let fallbackSeirenInputs: [Channel] = [
         Channel(
             name: "Microphone",
             detail: "The capsule as the device presents it.",

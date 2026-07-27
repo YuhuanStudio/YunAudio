@@ -42,12 +42,22 @@ cp build/YunAudio.icns "${BUNDLE}/Contents/Resources/"
 # when it cannot find the bundle beside the executable, so the app worked
 # perfectly on this machine and would have shipped with no icon and no
 # translations at all — a defect only visible on somebody else's Mac.
-MODULE_BUNDLE=".build/${CONFIGURATION}/YunAudioKit_YunAudioApp.bundle"
-if [[ ! -d "${MODULE_BUNDLE}" ]]; then
-	echo "error: ${MODULE_BUNDLE} is missing — the app would ship untranslated" >&2
+# Every module bundle, not just the app's.
+#
+# This copied one bundle by name, which was right until a second module grew
+# resources of its own — the device profiles live with the HAL now, and an app
+# built by this script would have shipped without knowing anything about any
+# microphone. A loop over what SwiftPM actually produced cannot go out of date
+# the same way.
+MODULE_BUNDLES=(.build/"${CONFIGURATION}"/*.bundle)
+if [[ ! -d "${MODULE_BUNDLES[0]}" ]]; then
+	echo "error: no module bundles in .build/${CONFIGURATION} — the app would ship untranslated" >&2
 	exit 1
 fi
-cp -R "${MODULE_BUNDLE}" "${BUNDLE}/Contents/Resources/"
+for MODULE_BUNDLE in "${MODULE_BUNDLES[@]}"; do
+	cp -R "${MODULE_BUNDLE}" "${BUNDLE}/Contents/Resources/"
+	echo "  bundled $(basename "${MODULE_BUNDLE}")"
+done
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
 
