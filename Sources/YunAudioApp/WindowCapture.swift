@@ -27,12 +27,45 @@ enum WindowCapture {
         ("tall", CGSize(width: 1180, height: 900)),
     ]
 
-    static func write(to directory: String) {
+    static func write(to directory: String, model: RouterModel? = nil) async {
         guard let window = mainWindow() else {
             FileHandle.standardError.write(Data("no window to photograph\n".utf8))
             return
         }
 
+        photograph(window, sizes: sizes, into: directory)
+
+        // The state that matters most is the one nothing else can show: meters
+        // moving, the status strip carrying real numbers, a mixer with strips
+        // in it. Every capture until now was of an idle window, which is the
+        // state a user spends the least time looking at.
+        guard let model, model.selectedDestination != nil, !model.isRunning else { return }
+        model.start()
+        for _ in 0..<80 where !model.isRunning {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        guard model.isRunning else {
+            FileHandle.standardError.write(
+                Data("could not start routing — no running capture\n".utf8))
+            return
+        }
+        // Long enough for the meters to have something in them.
+        try? await Task.sleep(for: .seconds(2))
+        model.toggleRecording()
+        try? await Task.sleep(for: .seconds(2))
+
+        photograph(
+            window, sizes: [("running", CGSize(width: 1180, height: 900))],
+            into: directory)
+
+        model.toggleRecording()
+        if let url = model.recordingURL { try? FileManager.default.removeItem(at: url) }
+        model.stop()
+    }
+
+    private static func photograph(
+        _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String
+    ) {
         for (label, size) in sizes {
             window.setContentSize(size)
             for scheme in [NSAppearance.Name.aqua, .darkAqua] {

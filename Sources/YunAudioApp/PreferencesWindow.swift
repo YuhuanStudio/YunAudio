@@ -256,18 +256,46 @@ struct PreferencesWindow: View {
             heading(loc("Realtime safety"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                    YunDetailRow(
-                        loc("IO thread allocations"),
-                        value: "\(model.allocationViolations)",
-                        tone: model.allocationViolations == 0 ? .success : .warning)
+                    Toggle(
+                        loc("Watch the IO thread for allocations"),
+                        isOn: $model.watchesIOAllocations
+                    )
+                    .toggleStyle(YunToggleStyle())
                     Text(
                         loc(
-                            "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app."
+                            "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running."
                         )
                     )
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                    if model.watchesIOAllocations {
+                        YunDivider()
+                        YunDetailRow(
+                            loc("IO thread allocations"),
+                            value: "\(model.allocationViolations)",
+                            tone: model.allocationViolations == 0 ? .success : .warning)
+                        Text(
+                            loc(
+                                "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                        if model.isDebugBuild {
+                            Text(
+                                loc(
+                                    "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                 }
             }
         }

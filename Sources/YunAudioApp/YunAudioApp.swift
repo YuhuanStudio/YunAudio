@@ -35,7 +35,7 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
                 window.makeKeyAndOrderFront(nil)
             }
             Task { @MainActor in
-                WindowCapture.write(to: directory)
+                await WindowCapture.write(to: directory, model: flowCheckModel)
                 NSApp.terminate(nil)
             }
             return

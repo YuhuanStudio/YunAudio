@@ -763,6 +763,21 @@ public final class RoutingEngine: @unchecked Sendable {
     /// allocator process-wide.
     public static func enableAllocationTripwire() { yun_rt_tripwire_enable() }
 
+    /// Takes the hook back out. Worth doing: it is process-wide, so while it is
+    /// installed every allocation anywhere in the process goes through it.
+    public static func disableAllocationTripwire() { yun_rt_tripwire_disable() }
+
+    /// True when this is an unoptimised build, in which case the violation
+    /// count is Swift's own bounds and exclusivity machinery rather than
+    /// anything about the code that ships, and says nothing.
+    public static var isDebugBuild: Bool {
+        #if DEBUG
+            true
+        #else
+            false
+        #endif
+    }
+
     /// Allocations seen on the IO thread. Any non-zero value is a bug in the
     /// realtime path, not a tuning opportunity.
     public static var allocationViolations: UInt64 { yun_rt_tripwire_violations() }

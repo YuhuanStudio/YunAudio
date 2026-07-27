@@ -136,3 +136,14 @@
 "idle" = "閒置";
 "locked · %.6f" = "已鎖定 · %.6f";
 "Crystal error" = "石英誤差";
+"Devices" = "裝置";
+"In" = "輸入";
+"Out" = "輸出";
+"REC" = "錄音";
+"Working" = "處理中";
+"%d IO allocations" = "%d 次 IO 配置";
+"%llu dropped" = "遺失 %llu";
+"no driver" = "無驅動";
+"Watch the IO thread for allocations" = "監看 IO 執行緒的記憶體配置";
+"The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running." = "這個攔截器會攔下整個程序的每一次記憶體配置，所以它是要用時才開啟的量測工具，不該一直開著。";
+"This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships." = "這是未最佳化的建置，計數來自 Swift 自己的邊界與獨佔性檢查機具，與出貨的程式碼無關。";

@@ -78,7 +78,7 @@ struct MainWindow: View {
             .padding(.bottom, Yun.Space.lg)
             .frame(maxHeight: .infinity, alignment: .top)
 
-            footer
+            statusBar
         }
         .frame(minWidth: 980, minHeight: 600)
         .background(Yun.Palette.windowBackground)
@@ -114,13 +114,44 @@ struct MainWindow: View {
 
             Spacer()
 
-            YunStatusPill(
-                loc(model.isRunning ? "Routing" : "Idle"),
-                tone: model.isRunning ? .success : .neutral)
+            if let error = model.lastError {
+                Text(error)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.danger)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(error)
+            }
+
+            // The one action the window exists for, in the corner the eye goes
+            // to last and reaches for first. It used to sit in a tall bar along
+            // the bottom, which spent forty points of height on a single button.
+            Button(model.isBusy ? "…" : loc(model.isRunning ? "Stop" : "Start")) {
+                model.toggle()
+            }
+            .buttonStyle(YunButtonStyle(.primary))
+            .disabled(model.isBusy)
+            .keyboardShortcut(.return, modifiers: [.command])
         }
         .padding(.horizontal, Yun.Space.xl)
         .padding(.top, trafficLightInset)
         .padding(.bottom, Yun.Space.md)
+    }
+
+    /// A labelled device picker. The glyph carries the direction so the label
+    /// can stay two characters wide and the picker gets the rest.
+    private func deviceRow(
+        _ label: String, symbol: String, @ViewBuilder _ control: () -> some View
+    ) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Image(systemName: symbol)
+                .font(.system(size: 10))
+                .foregroundStyle(Yun.Palette.textMuted)
+                .frame(width: 14)
+            control()
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(Text(label))
     }
 
     // MARK: Sources
@@ -128,16 +159,31 @@ struct MainWindow: View {
     private var sources: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                sectionHeading(loc("Input"))
+                // One card for both ends of the signal. They were a column
+                // apart, with the output alone in a bar across the bottom —
+                // which put the two halves of a single decision at opposite
+                // corners of the window.
+                sectionHeading(loc("Devices"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {
-                        YunSelect(
-                            selection: $model.selectedSourceUID,
-                            options: model.inputDevices.map {
-                                .init(
-                                    value: $0.uid as String?, title: $0.name,
-                                    detail: "\($0.inputChannels)ch")
-                            })
+                        deviceRow(loc("In"), symbol: "mic") {
+                            YunSelect(
+                                selection: $model.selectedSourceUID,
+                                options: model.inputDevices.map {
+                                    .init(
+                                        value: $0.uid as String?, title: $0.name,
+                                        detail: "\($0.inputChannels)ch")
+                                })
+                        }
+                        deviceRow(loc("Out"), symbol: "arrow.right.to.line") {
+                            YunSelect(
+                                selection: $model.selectedDestinationUID,
+                                options: model.outputDevices.map {
+                                    .init(
+                                        value: $0.uid as String?, title: $0.name,
+                                        detail: "\($0.outputChannels)ch")
+                                })
+                        }
 
                         if let source = model.selectedSource, source.inputChannels > 1 {
                             YunDivider()
@@ -443,44 +489,113 @@ struct MainWindow: View {
         }
     }
 
-    // MARK: Footer
+    // MARK: Status bar
 
-    private var footer: some View {
-        HStack(spacing: Yun.Space.md) {
-            Text(loc("Output"))
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-            YunSelect(
-                selection: $model.selectedDestinationUID,
-                options: model.outputDevices.map {
-                    .init(
-                        value: $0.uid as String?, title: $0.name,
-                        detail: "\($0.outputChannels)ch")
+    /// A thin strip of live numbers along the bottom, after OBS.
+    ///
+    /// What was here before was a forty-point bar carrying one device picker
+    /// and one button, both of which belong somewhere else — the picker beside
+    /// its opposite number, the button in the corner. What a bottom bar is
+    /// actually good for is the readings you glance at without stopping: is it
+    /// running, at what rate, how much latency, how long have I been recording.
+    private var statusBar: some View {
+        HStack(spacing: 0) {
+            // The lamp. Green while audio moves, red while recording, grey at
+            // rest — the one thing readable from across a desk.
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(lampColour)
+                    .frame(width: 7, height: 7)
+                Text(statusWord)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+            }
+            .padding(.trailing, Yun.Space.md)
+
+            if let quality = model.pathQuality {
+                statusDivider
+                statusField("\(Int(quality.sampleRate / 1000)) kHz")
+                statusDivider
+                statusField(
+                    String(
+                        format: "%d f · %.2f ms", quality.bufferFrames,
+                        quality.bufferLatencyMilliseconds))
+                statusDivider
+                statusField(
+                    loc(
+                        quality.isBitExact
+                            ? "bit-exact"
+                            : (quality.hasProcessing ? "processed" : "resampled")),
+                    tone: quality.isBitExact ? Yun.Palette.success : Yun.Palette.warning)
+                if model.isClockLocked {
+                    statusDivider
+                    statusField(
+                        String(
+                            format: "%+.1f ppm", (model.measuredRateRatio - 1) * 1_000_000),
+                        tone: Yun.Palette.success)
                 }
-            )
-            .frame(width: 280)
-
-            if let error = model.lastError {
-                Text(error)
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.danger)
-                    .lineLimit(1)
             }
 
-            Spacer()
-
-            Button(model.isBusy ? "…" : loc(model.isRunning ? "Stop" : "Start")) {
-                model.toggle()
+            if model.isRecording {
+                statusDivider
+                statusField(
+                    "\(loc("REC"))  \(Self.clock(model.recordingSeconds))",
+                    tone: Yun.Palette.danger)
             }
-            .buttonStyle(YunButtonStyle(.primary))
-            .disabled(model.isBusy)
+
+            Spacer(minLength: Yun.Space.md)
+
+            // Dropouts last, on the right, where a number that is normally zero
+            // can sit without drawing the eye until it is not.
+            if model.watchesIOAllocations && model.allocationViolations > 0 {
+                statusField(
+                    String(
+                        format: loc("%d IO allocations"), model.allocationViolations),
+                    tone: Yun.Palette.warning)
+            }
+            if let dropped = model.echoStatus?.dropped, dropped > 0 {
+                statusDivider
+                statusField(
+                    String(format: loc("%llu dropped"), dropped),
+                    tone: Yun.Palette.danger)
+            }
+            statusField(model.isDriverInstalled ? loc("YunAudio") : loc("no driver"))
         }
+        .font(Yun.Text.mono)
+        .frame(height: 26)
         .padding(.horizontal, Yun.Space.xl)
-        .padding(.vertical, Yun.Space.md)
         .background(Yun.Palette.card)
         .overlay(alignment: .top) {
             Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
         }
+    }
+
+    private var lampColour: Color {
+        if model.isRecording { return Yun.Palette.danger }
+        return model.isRunning ? Yun.Palette.success : Yun.Palette.textMuted
+    }
+
+    private var statusWord: String {
+        if model.isBusy { return loc("Working") }
+        return loc(model.isRunning ? "Routing" : "Idle")
+    }
+
+    private func statusField(_ text: String, tone: Color? = nil) -> some View {
+        Text(text)
+            .foregroundStyle(tone ?? Yun.Palette.textTertiary)
+            .monospacedDigit()
+            .fixedSize()
+            .padding(.horizontal, Yun.Space.md)
+    }
+
+    private var statusDivider: some View {
+        Rectangle()
+            .fill(Yun.Palette.borderHairline)
+            .frame(width: 1, height: 12)
+    }
+
+    private static func clock(_ seconds: TimeInterval) -> String {
+        let whole = Int(seconds)
+        return String(format: "%02d:%02d", whole / 60, whole % 60)
     }
 
     private func sectionHeading(_ text: String) -> some View {

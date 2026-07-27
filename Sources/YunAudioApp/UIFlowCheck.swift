@@ -51,6 +51,16 @@ enum UIFlowCheck {
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
 
+        print("\nrealtime tripwire")
+        // The hook is process-wide, so leaving it armed taxes every allocation
+        // in SwiftUI, AppKit and CoreAudio for a diagnostics page almost nobody
+        // opens. It used to be armed from launch.
+        check("the allocator hook is not armed at launch", !model.watchesIOAllocations)
+        model.watchesIOAllocations = true
+        check("it can be armed", model.watchesIOAllocations)
+        model.watchesIOAllocations = false
+        check("and disarmed again", !model.watchesIOAllocations)
+
         print("\nlocalisation")
         checkLocalisation()
 

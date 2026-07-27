@@ -203,7 +203,16 @@ uint32_t yun_rt_ring_available(YunRTRing *_Nonnull ring);
 /// Measure against an OPTIMISED build. A debug build reports hundreds of
 /// allocations per cycle because Swift's own bounds and exclusivity checking
 /// machinery allocates; that says nothing about the code that ships.
+///
+/// The hook is process-wide and sits in front of EVERY allocation the process
+/// makes, not only the ones on the IO thread — there is no way to install it
+/// selectively. So it is a measurement to switch on, not a thing to leave
+/// running: an application that arms it at launch makes every allocation in
+/// SwiftUI, AppKit and CoreAudio pay for a diagnostic nobody asked for.
 void yun_rt_tripwire_enable(void);
+
+/// Removes the hook and puts the allocator back the way it was found.
+void yun_rt_tripwire_disable(void);
 
 /// Marks the calling thread as realtime for the duration of an IO cycle.
 void yun_rt_tripwire_mark_realtime(bool isRealtime);

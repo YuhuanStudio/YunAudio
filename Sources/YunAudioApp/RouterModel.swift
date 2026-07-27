@@ -598,9 +598,6 @@ final class RouterModel {
             Task { @MainActor in self?.handleDeviceChange() }
         }
 
-        // The tripwire is on from launch so the diagnostics page reports a real
-        // number rather than zero-because-nobody-was-counting.
-        RoutingEngine.enableAllocationTripwire()
         installHotkeys()
 
         if autoStart, selectedSource != nil, selectedDestination != nil {
@@ -1016,6 +1013,28 @@ final class RouterModel {
     /// Allocations recorded on the IO thread. Surfaced in diagnostics because
     /// the number is only meaningful if someone looks at it.
     var allocationViolations: UInt64 { RoutingEngine.allocationViolations }
+
+    /// Whether the allocator hook is installed.
+    ///
+    /// Off by default, and it used to be on from launch so the diagnostics page
+    /// could show a real number. That was the wrong trade by a long way: the
+    /// hook is process-wide and has no way to be installed selectively, so
+    /// every allocation in SwiftUI, AppKit and CoreAudio was paying for a page
+    /// almost nobody opens. It is a measurement to switch on.
+    var watchesIOAllocations = false {
+        didSet {
+            guard oldValue != watchesIOAllocations else { return }
+            if watchesIOAllocations {
+                RoutingEngine.enableAllocationTripwire()
+            } else {
+                RoutingEngine.disableAllocationTripwire()
+            }
+        }
+    }
+
+    /// True in an unoptimised build, where the count is Swift's own checking
+    /// machinery rather than anything about the code that ships.
+    var isDebugBuild: Bool { RoutingEngine.isDebugBuild }
 
     /// IO cycles completed. Only used by the flow check, which needs to know
     /// whether audio survived a change rather than merely whether the model

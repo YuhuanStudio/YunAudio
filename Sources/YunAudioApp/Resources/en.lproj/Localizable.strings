@@ -136,3 +136,14 @@
 "idle" = "idle";
 "locked · %.6f" = "locked · %.6f";
 "Crystal error" = "Crystal error";
+"Devices" = "Devices";
+"In" = "In";
+"Out" = "Out";
+"REC" = "REC";
+"Working" = "Working";
+"%d IO allocations" = "%d IO allocations";
+"%llu dropped" = "%llu dropped";
+"no driver" = "no driver";
+"Watch the IO thread for allocations" = "Watch the IO thread for allocations";
+"The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running." = "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running.";
+"This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships." = "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships.";

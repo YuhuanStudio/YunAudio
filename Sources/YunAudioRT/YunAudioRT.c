@@ -327,6 +327,10 @@ void yun_rt_tripwire_enable(void) {
     malloc_logger = TripwireLogger;
 }
 
+void yun_rt_tripwire_disable(void) {
+    malloc_logger = NULL;
+}
+
 void yun_rt_tripwire_mark_realtime(bool isRealtime) {
     atomic_store_explicit(
         &gRealtimeThread,
