@@ -62,6 +62,12 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     /// preferences call it; it has only ever been a high-pass.
     case equaliser
     case compressor
+    /// Pitch shift with the speed left alone, which is what a voice changer is.
+    case pitch
+    /// A room around the voice. The thing a karaoke box sells.
+    case reverb
+    /// Repeats. The other half of that same box.
+    case echo
     case limiter
 
     public var id: String { rawValue }
@@ -72,6 +78,9 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .gate: "Noise gate"
         case .equaliser: "High-pass"
         case .compressor: "Compressor"
+        case .pitch: "Pitch"
+        case .reverb: "Reverb"
+        case .echo: "Echo"
         case .limiter: "Limiter"
         }
     }
@@ -84,6 +93,12 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                 + "isolation and it leaves speech untouched."
         case .equaliser: "Removes rumble below the voice. It has never been more than this."
         case .compressor: "Evens out level. Useful before a limiter, not instead of one."
+        case .pitch:
+            "Moves the voice up or down without changing its speed. Costs latency, "
+                + "and enough of a shift stops sounding like a person."
+        case .reverb:
+            "Puts the voice in a room. Small amounts flatter it; large amounts hide it."
+        case .echo: "Repeats. Musical in small doses, unusable on a call in large ones."
         case .limiter: "Stops the signal exceeding full scale. Cheap insurance."
         }
     }
@@ -124,6 +139,36 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                     id: "headroom", title: "Headroom", minimum: 0.1, maximum: 20,
                     unit: "dB", defaultValue: 5, isLogarithmic: false),
             ]
+        case .pitch:
+            [
+                // Cents rather than semitones, because a convincing shift is
+                // rarely a whole number of them — a couple of semitones down is
+                // a different person, twelve is a cartoon.
+                EffectParameter(
+                    id: "cents", title: "Shift", minimum: -1200, maximum: 1200,
+                    unit: "cents", defaultValue: 0, isLogarithmic: false)
+            ]
+        case .reverb:
+            [
+                EffectParameter(
+                    id: "mix", title: "Amount", minimum: 0, maximum: 100,
+                    unit: "%", defaultValue: 18, isLogarithmic: false),
+                EffectParameter(
+                    id: "decay", title: "Size", minimum: 0.1, maximum: 8,
+                    unit: "s", defaultValue: 1.2, isLogarithmic: true),
+            ]
+        case .echo:
+            [
+                EffectParameter(
+                    id: "mix", title: "Amount", minimum: 0, maximum: 100,
+                    unit: "%", defaultValue: 20, isLogarithmic: false),
+                EffectParameter(
+                    id: "time", title: "Time", minimum: 10, maximum: 800,
+                    unit: "ms", defaultValue: 180, isLogarithmic: true),
+                EffectParameter(
+                    id: "feedback", title: "Repeats", minimum: 0, maximum: 80,
+                    unit: "%", defaultValue: 25, isLogarithmic: false),
+            ]
         case .limiter:
             [
                 EffectParameter(
@@ -133,12 +178,28 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         }
     }
 
+    /// Not every one of these is an effect as CoreAudio classifies them.
+    ///
+    /// `NewTimePitch` is a format converter, because changing pitch without
+    /// changing duration is formally a rate conversion. Looking for it under
+    /// `kAudioUnitType_Effect` finds nothing at all, and the stage would
+    /// silently not appear in the chain.
+    var componentType: OSType {
+        switch self {
+        case .pitch: kAudioUnitType_FormatConverter
+        default: kAudioUnitType_Effect
+        }
+    }
+
     var subType: OSType {
         switch self {
         case .voiceIsolation: SoundIsolation.componentSubType
         case .gate: kAudioUnitSubType_DynamicsProcessor
         case .equaliser: kAudioUnitSubType_NBandEQ
         case .compressor: kAudioUnitSubType_DynamicsProcessor
+        case .pitch: kAudioUnitSubType_NewTimePitch
+        case .reverb: kAudioUnitSubType_Reverb2
+        case .echo: kAudioUnitSubType_Delay
         case .limiter: kAudioUnitSubType_PeakLimiter
         }
     }
@@ -155,8 +216,17 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         // noise nobody can hear.
         case .equaliser: 1
         case .gate: 2
-        case .compressor: 3
-        case .limiter: 4
+        // After the gate: shifting first would move the noise floor along with
+        // the voice and give the gate a moving target.
+        case .pitch: 3
+        case .compressor: 4
+        // The room goes on after the level has been evened out, or the reverb
+        // tail gets compressed along with the voice and breathes.
+        case .echo: 5
+        case .reverb: 6
+        // Always last. Anything after a limiter can put the signal back over
+        // full scale, which is the one thing it was there to prevent.
+        case .limiter: 7
         }
     }
 }
@@ -206,7 +276,7 @@ final class EffectChain {
 
         for kind in stages {
             var description = AudioComponentDescription(
-                componentType: kAudioUnitType_Effect,
+                componentType: kind.componentType,
                 componentSubType: kind.subType,
                 componentManufacturer: kAudioUnitManufacturer_Apple,
                 componentFlags: 0, componentFlagsMask: 0)
@@ -371,6 +441,55 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, 0.15,
                     0)
+            case .pitch:
+                // Unshifted by default. Switching the stage on has to be
+                // inaudible until somebody moves the control — a voice changer
+                // that changes the voice the moment it is enabled gives no way
+                // to hear what it cost in latency alone.
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kNewTimePitchParam_Pitch),
+                    kAudioUnitScope_Global, 0, 0, 0)
+                // Rate is left at one throughout: this is a pitch shifter, not
+                // a speed control, and anything other than one would put the
+                // output out of step with the clock the whole router is locked
+                // to.
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kNewTimePitchParam_Rate),
+                    kAudioUnitScope_Global, 0, 1, 0)
+            case .reverb:
+                // Small and short. The unit's own default is a concert hall,
+                // which on a voice call sounds like a fault rather than an
+                // effect.
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_DryWetMix),
+                    kAudioUnitScope_Global, 0, 18, 0)
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_DecayTimeAt0Hz),
+                    kAudioUnitScope_Global, 0, 1.2, 0)
+                // The top decays faster than the bottom in every real room, and
+                // a tail that stays bright is the single thing that makes a
+                // reverb sound artificial.
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_DecayTimeAtNyquist),
+                    kAudioUnitScope_Global, 0, 0.6, 0)
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_MinDelayTime),
+                    kAudioUnitScope_Global, 0, 0.008, 0)
+                AudioUnitSetParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_MaxDelayTime),
+                    kAudioUnitScope_Global, 0, 0.05, 0)
+            case .echo:
+                AudioUnitSetParameter(
+                    unit, kDelayParam_WetDryMix, kAudioUnitScope_Global, 0, 20, 0)
+                AudioUnitSetParameter(
+                    unit, kDelayParam_DelayTime, kAudioUnitScope_Global, 0, 0.18, 0)
+                AudioUnitSetParameter(
+                    unit, kDelayParam_Feedback, kAudioUnitScope_Global, 0, 25, 0)
+                // Repeats get duller each time, as they do off a real wall.
+                // Without this the tail stays as bright as the source and reads
+                // as a fault.
+                AudioUnitSetParameter(
+                    unit, kDelayParam_LopassCutoff, kAudioUnitScope_Global, 0, 6000, 0)
             case .limiter:
                 // Just below full scale, so nothing downstream ever sees a
                 // sample it has to clip.
@@ -384,12 +503,74 @@ final class EffectChain {
         }
     }
 
+    /// True when this stage knows what to do with that knob.
+    ///
+    /// The setter is deliberately silent about pairs it does not recognise, so
+    /// that a preferences file naming a knob that no longer exists loads rather
+    /// than crashes. That silence also means a control the interface offers and
+    /// the chain forgot to wire would move and do nothing, with no way to tell
+    /// from either side — which is what this exists to catch.
+    func recognises(_ parameter: String, of kind: EffectKind) -> Bool {
+        Self.knownParameters.contains(Pair(kind: kind, parameter: parameter))
+    }
+
+    private struct Pair: Hashable {
+        let kind: EffectKind
+        let parameter: String
+    }
+
+    private static let knownParameters: Set<Pair> = [
+        Pair(kind: .voiceIsolation, parameter: "mix"),
+        Pair(kind: .gate, parameter: "threshold"),
+        Pair(kind: .gate, parameter: "ratio"),
+        Pair(kind: .gate, parameter: "release"),
+        Pair(kind: .equaliser, parameter: "frequency"),
+        Pair(kind: .compressor, parameter: "threshold"),
+        Pair(kind: .compressor, parameter: "headroom"),
+        Pair(kind: .pitch, parameter: "cents"),
+        Pair(kind: .reverb, parameter: "mix"),
+        Pair(kind: .reverb, parameter: "decay"),
+        Pair(kind: .echo, parameter: "mix"),
+        Pair(kind: .echo, parameter: "time"),
+        Pair(kind: .echo, parameter: "feedback"),
+        Pair(kind: .limiter, parameter: "gain"),
+    ]
+
     /// Applies a knob to the live unit. Audio Unit parameter changes are
     /// realtime-safe by design, so this needs no queue of its own.
     func set(_ parameter: String, of kind: EffectKind, to value: Float) {
         guard let index = stages.firstIndex(of: kind), index < units.count else { return }
         let unit = units[index]
         switch (kind, parameter) {
+        case (.pitch, "cents"):
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kNewTimePitchParam_Pitch),
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.reverb, "mix"):
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kReverb2Param_DryWetMix),
+                kAudioUnitScope_Global, 0, value, 0)
+        case (.reverb, "decay"):
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kReverb2Param_DecayTimeAt0Hz),
+                kAudioUnitScope_Global, 0, value, 0)
+            // The top always decays faster, in the same proportion, so the
+            // control stays one knob rather than two that have to be kept in
+            // step by hand.
+            AudioUnitSetParameter(
+                unit, AudioUnitParameterID(kReverb2Param_DecayTimeAtNyquist),
+                kAudioUnitScope_Global, 0, value * 0.5, 0)
+        case (.echo, "mix"):
+            AudioUnitSetParameter(
+                unit, kDelayParam_WetDryMix, kAudioUnitScope_Global, 0, value, 0)
+        case (.echo, "time"):
+            // The knob is in milliseconds because that is how anybody thinks
+            // about an echo; the unit wants seconds.
+            AudioUnitSetParameter(
+                unit, kDelayParam_DelayTime, kAudioUnitScope_Global, 0, value / 1000, 0)
+        case (.echo, "feedback"):
+            AudioUnitSetParameter(
+                unit, kDelayParam_Feedback, kAudioUnitScope_Global, 0, value, 0)
         case (.voiceIsolation, "mix"):
             AudioUnitSetParameter(
                 unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),

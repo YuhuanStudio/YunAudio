@@ -74,6 +74,31 @@ struct RTGraph {
     /// because the worst case is one frame of a meter being stale.
     var peaks: UnsafeMutablePointer<Float>
 
+    /// Smoothed RMS per route, alongside the peaks.
+    ///
+    /// Peak says whether something will clip; RMS is much closer to how loud it
+    /// sounds, and for balancing two people against each other it is the only
+    /// one of the two worth using — a plosive and a shout have similar peaks
+    /// and nothing like the same level.
+    var rms: UnsafeMutablePointer<Float>
+
+    // MARK: Calibration
+
+    /// Non-zero while a calibration pass is accumulating.
+    var calibrating: Int32
+    /// Sum of squares per route since the pass started, and how many frames
+    /// went into it. Double because a ten-second pass at 48 kHz is half a
+    /// million samples and float would start losing the quiet ones.
+    var calibrationEnergy: UnsafeMutablePointer<Double>
+    var calibrationFrames: UnsafeMutablePointer<UInt64>
+    /// Block RMS below which a cycle is not counted.
+    ///
+    /// Without this the measurement would be the average of somebody's voice
+    /// *and* their silences, so whoever spoke least would be measured quietest
+    /// and get the most gain — the exact opposite of what is wanted. It is the
+    /// same reasoning as the loudness standard's gate, applied per source.
+    var calibrationGate: Float
+
     /// Incremented once per IO cycle. The control thread watches this to know
     /// the realtime thread has moved past a graph it is about to free, and it
     /// doubles as the sequence number guarding the clock anchor below.
@@ -316,6 +341,12 @@ struct RTGraph {
 
         let peakStorage = UnsafeMutablePointer<Float>.allocate(capacity: count)
         peakStorage.initialize(repeating: 0, count: count)
+        let rmsStorage = UnsafeMutablePointer<Float>.allocate(capacity: count)
+        rmsStorage.initialize(repeating: 0, count: count)
+        let energyStorage = UnsafeMutablePointer<Double>.allocate(capacity: count)
+        energyStorage.initialize(repeating: 0, count: count)
+        let framesStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: count)
+        framesStorage.initialize(repeating: 0, count: count)
 
         let counterStorage =
             sharedClock?.cycleCounter
@@ -364,6 +395,12 @@ struct RTGraph {
                 routes: routeStorage,
                 routeCount: Int32(routeList.count),
                 peaks: peakStorage,
+                rms: rmsStorage,
+                calibrating: 0,
+                calibrationEnergy: energyStorage,
+                calibrationFrames: framesStorage,
+                // −60 dBFS. Below this nobody is talking into anything.
+                calibrationGate: 0.001,
                 cycleCounter: counterStorage,
                 peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
                 clockSampleTime: clockSampleStorage,
@@ -416,6 +453,12 @@ struct RTGraph {
         graph.pointee.routes.deallocate()
         graph.pointee.peaks.deinitialize(count: count)
         graph.pointee.peaks.deallocate()
+        graph.pointee.rms.deinitialize(count: count)
+        graph.pointee.rms.deallocate()
+        graph.pointee.calibrationEnergy.deinitialize(count: count)
+        graph.pointee.calibrationEnergy.deallocate()
+        graph.pointee.calibrationFrames.deinitialize(count: count)
+        graph.pointee.calibrationFrames.deallocate()
         if graph.pointee.ownsClockStorage != 0 {
             graph.pointee.cycleCounter.deinitialize(count: 1)
             graph.pointee.cycleCounter.deallocate()
@@ -630,6 +673,8 @@ func yunAudioIOProc(
     let routeCount = Int(graph.pointee.routeCount)
     let routes = graph.pointee.routes
     let peaks = graph.pointee.peaks
+    let rms = graph.pointee.rms
+    let calibrating = graph.pointee.calibrating != 0
     var micPeak: Float = 0
 
     for index in 0..<routeCount {
@@ -698,6 +743,12 @@ func yunAudioIOProc(
         let gain = route.muted != 0 ? 0 : route.gain * trim * duck
 
         var peak: Float = 0
+        // Accumulated unconditionally rather than behind a branch on whether
+        // anybody is calibrating: it is one fused multiply-add per sample in a
+        // loop that already does a multiply and an add, and having RMS for
+        // every route all the time is worth more than the fraction of a percent
+        // it costs.
+        var energy: Float = 0
         for frame in 0..<frames {
             let sample = source[frame * sourceStride + sourceChannel]
             destination[frame * destinationStride + destinationChannel] += sample * gain
@@ -706,6 +757,18 @@ func yunAudioIOProc(
             // probe, which is how the loopback verification works.
             let magnitude = abs(sample)
             if magnitude > peak { peak = magnitude }
+            energy += sample * sample
+        }
+
+        let blockRMS = frames > 0 ? (energy / Float(frames)).squareRoot() : 0
+        rms[index] = max(blockRMS, rms[index] * graph.pointee.peakDecay)
+
+        // Only cycles with something in them count towards a calibration.
+        // Averaging somebody's voice together with their silences would measure
+        // whoever spoke least as the quietest, and hand them the most gain.
+        if calibrating, blockRMS > graph.pointee.calibrationGate {
+            graph.pointee.calibrationEnergy[index] += Double(energy)
+            graph.pointee.calibrationFrames[index] += UInt64(frames)
         }
 
         // The microphone's own level, for next cycle's duck trigger. Taken

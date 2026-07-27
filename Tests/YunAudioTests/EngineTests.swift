@@ -320,7 +320,14 @@ struct EffectParameterTests {
     @Test("stages carry a signal order independent of when they were enabled")
     func chainOrder() {
         let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
-        #expect(ordered == [.voiceIsolation, .equaliser, .gate, .compressor, .limiter])
+        #expect(
+            ordered == [
+                .voiceIsolation, .equaliser, .gate, .pitch, .compressor, .echo, .reverb,
+                .limiter,
+            ])
+        // Every stage has a distinct position, or the sort is not deterministic
+        // and the same set of switches can build two different chains.
+        #expect(Set(EffectKind.allCases.map(\.chainOrder)).count == EffectKind.allCases.count)
     }
 }
 
@@ -2204,5 +2211,318 @@ struct IdleCostTests {
             0, &now, UnsafePointer(list.unsafeMutablePointer), &time,
             outList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
         #expect(yun_rt_ring_written(ring) == 64)
+    }
+}
+
+// MARK: - The new stages
+
+/// A stage that cannot be instantiated is a switch in the interface that does
+/// nothing, and the failure is silent — `AudioComponentFindNext` returns nil
+/// and the chain simply carries on without it. These build every stage against
+/// the real component list.
+@Suite("Effect stages")
+struct EffectStageTests {
+
+    /// Every stage has to actually exist on this system.
+    ///
+    /// `NewTimePitch` is the reason this test is here: it is a format
+    /// converter, not an effect, so looking for it under
+    /// `kAudioUnitType_Effect` finds nothing and the pitch stage would vanish
+    /// from the chain without a word.
+    @Test("every stage resolves to a real audio unit")
+    func componentsExist() {
+        for kind in EffectKind.allCases {
+            var description = AudioComponentDescription(
+                componentType: kind.componentType,
+                componentSubType: kind.subType,
+                componentManufacturer: kAudioUnitManufacturer_Apple,
+                componentFlags: 0, componentFlagsMask: 0)
+            #expect(
+                AudioComponentFindNext(nil, &description) != nil,
+                "\(kind.rawValue) has no component")
+        }
+    }
+
+    /// And has to build, initialise and render inside a chain.
+    @Test("every stage builds a working chain on its own")
+    func buildsAlone() throws {
+        for kind in EffectKind.allCases {
+            let chain = try #require(
+                EffectChain(kinds: [kind], sampleRate: 48000, maximumFrames: 512),
+                "\(kind.rawValue) did not build")
+            #expect(chain.stages == [kind])
+            // A stage that reports negative latency would corrupt the delay
+            // compensation arithmetic downstream.
+            #expect(chain.latencyFrames >= 0)
+        }
+    }
+
+    /// All of them together, in the order the chain imposes rather than the
+    /// order they were named.
+    @Test("the whole set builds in signal order")
+    func buildsTogether() throws {
+        let chain = try #require(
+            EffectChain(
+                kinds: EffectKind.allCases.reversed(), sampleRate: 48000,
+                maximumFrames: 512))
+        #expect(chain.stages.count == EffectKind.allCases.count)
+        // Sorted by chain order, whatever order they arrived in.
+        for (first, second) in zip(chain.stages, chain.stages.dropFirst()) {
+            #expect(first.chainOrder < second.chainOrder)
+        }
+    }
+
+    /// The limiter is the only stage whose position is not a matter of taste:
+    /// anything after it can put the signal back over full scale, which is the
+    /// one thing it exists to prevent.
+    @Test("the limiter is always last")
+    func limiterIsLast() throws {
+        let chain = try #require(
+            EffectChain(kinds: EffectKind.allCases, sampleRate: 48000, maximumFrames: 512))
+        #expect(chain.stages.last == .limiter)
+    }
+
+    /// Voice isolation is a model and has to see the signal before anything
+    /// else has shaped it.
+    @Test("voice isolation is always first")
+    func isolationIsFirst() throws {
+        let chain = try #require(
+            EffectChain(kinds: EffectKind.allCases, sampleRate: 48000, maximumFrames: 512))
+        #expect(chain.stages.first == .voiceIsolation)
+    }
+
+    /// Pitch shifting is not free, and the interface has to be able to say what
+    /// it costs rather than discovering it on a call.
+    @Test("pitch shifting reports the latency it adds")
+    func pitchCostsLatency() throws {
+        let plain = try #require(
+            EffectChain(kinds: [.limiter], sampleRate: 48000, maximumFrames: 512))
+        let shifted = try #require(
+            EffectChain(kinds: [.pitch], sampleRate: 48000, maximumFrames: 512))
+        #expect(shifted.latencyFrames > plain.latencyFrames)
+    }
+
+    /// Every knob the interface offers has to be one the chain recognises.
+    /// A mismatch between the two is a control that moves and does nothing.
+    @Test("every advertised knob reaches its unit")
+    func knobsAreWired() throws {
+        for kind in EffectKind.allCases {
+            let chain = try #require(
+                EffectChain(kinds: [kind], sampleRate: 48000, maximumFrames: 512))
+            for parameter in kind.parameters {
+                // The setter is silent on an unknown pair by design, so this
+                // checks the mapping exists rather than the return value: a
+                // parameter that fell through would leave the unit at its
+                // default and nothing would say so.
+                chain.set(parameter.id, of: kind, to: parameter.defaultValue)
+                #expect(chain.recognises(parameter.id, of: kind))
+            }
+        }
+    }
+
+    /// The stored form has to stay put across renames, or a preferences file
+    /// written today stops loading tomorrow.
+    @Test("the new stages have stable stored names")
+    func storedNames() {
+        #expect(EffectKind.pitch.rawValue == "pitch")
+        #expect(EffectKind.reverb.rawValue == "reverb")
+        #expect(EffectKind.echo.rawValue == "echo")
+        #expect(EffectKind(rawValue: "pitch") == .pitch)
+    }
+}
+
+// MARK: - Balancing sources against each other
+
+/// The arithmetic behind the calibration button. It has to be right in the
+/// cases nobody tests by hand: somebody who barely spoke, somebody who did not
+/// speak at all, and a source that is so far out that the answer is not a
+/// balance problem.
+@Suite("Level calibration")
+struct LevelCalibrationTests {
+
+    private func measurement(
+        _ id: Int, _ role: LevelCalibration.Role, _ decibels: Double,
+        seconds: Double = 4, gain: Double = 0
+    ) -> LevelCalibration.Measurement {
+        LevelCalibration.Measurement(
+            id: id, role: role, decibels: decibels, seconds: seconds, currentGain: gain)
+    }
+
+    /// Two voices at different levels end up at the same one.
+    @Test("two voices are brought to the same level")
+    func balancesVoices() {
+        let proposals = LevelCalibration.propose(from: [
+            measurement(0, .voice, -30),
+            measurement(1, .voice, -14),
+        ])
+        #expect(proposals.count == 2)
+        // Each is moved to the target, so applying both leaves them equal.
+        let first = proposals.first { $0.id == 0 }!
+        let second = proposals.first { $0.id == 1 }!
+        #expect(abs((-30 + first.change) - (-14 + second.change)) < 0.001)
+        #expect(abs((-30 + first.change) - LevelCalibration.voiceTarget) < 0.001)
+    }
+
+    /// And the music ends up underneath them by the fixed offset rather than
+    /// beside them.
+    @Test("background sits below the voices")
+    func backgroundGoesUnder() {
+        let proposals = LevelCalibration.propose(from: [
+            measurement(0, .voice, -30),
+            measurement(1, .background, -30),
+        ])
+        let voice = proposals.first { $0.id == 0 }!
+        let music = proposals.first { $0.id == 1 }!
+        let separation = (-30 + voice.change) - (-30 + music.change)
+        #expect(abs(separation - -LevelCalibration.backgroundOffset) < 0.001)
+        #expect(separation > 0)
+    }
+
+    /// The measurement is taken after the fader, so a source already turned up
+    /// must not be turned up again by the same amount.
+    @Test("the fader's own contribution is not counted twice")
+    func accountsForCurrentGain() {
+        let atUnity = LevelCalibration.propose(from: [measurement(0, .voice, -30, gain: 0)])
+        let turnedUp = LevelCalibration.propose(from: [
+            measurement(0, .voice, -30, gain: 6)
+        ])
+        // Both are 10 dB from the target, so both move by 10 — but they end at
+        // different absolute gains, six apart.
+        #expect(abs(atUnity[0].change - turnedUp[0].change) < 0.001)
+        #expect(abs((turnedUp[0].gain - atUnity[0].gain) - 6) < 0.001)
+    }
+
+    /// A source that never produced anything gets no proposal at all. Guessing
+    /// at a level for something that was silent is worse than saying nothing.
+    @Test("a silent source is left alone")
+    func silentSourceIgnored() {
+        let proposals = LevelCalibration.propose(from: [
+            measurement(0, .voice, -30),
+            measurement(1, .voice, -.infinity, seconds: 0),
+        ])
+        #expect(proposals.count == 1)
+        #expect(proposals[0].id == 0)
+    }
+
+    /// Nor does a source that only produced a fraction of a second — that is
+    /// somebody clearing their throat, not a measurement.
+    @Test("too little material is not enough to act on")
+    func tooLittleMaterial() {
+        let proposals = LevelCalibration.propose(from: [
+            measurement(0, .voice, -30, seconds: 0.4)
+        ])
+        #expect(proposals.isEmpty)
+    }
+
+    /// Something already at the target is not proposed at all, so the list
+    /// shows what will change rather than everything.
+    @Test("a source already on target is not proposed")
+    func alreadyBalanced() {
+        let proposals = LevelCalibration.propose(from: [
+            measurement(0, .voice, LevelCalibration.voiceTarget)
+        ])
+        #expect(proposals.isEmpty)
+    }
+
+    /// A proposal beyond the limit is not a balance problem — it is a
+    /// microphone pointed the wrong way — and quietly applying it would hide
+    /// that rather than fix it.
+    @Test("an absurd correction is capped rather than applied")
+    func capped() {
+        let proposals = LevelCalibration.propose(from: [measurement(0, .voice, -70)])
+        #expect(proposals[0].change == LevelCalibration.maximumChange)
+    }
+
+    @Test("a source far too loud is capped downwards too")
+    func cappedDownwards() {
+        let proposals = LevelCalibration.propose(from: [measurement(0, .voice, -1)])
+        #expect(proposals[0].change == -LevelCalibration.maximumChange)
+    }
+
+    /// The failure report has to name the source that stayed silent, because
+    /// "it did not work" is not something anybody can act on.
+    @Test("silent sources are named rather than merely counted")
+    func namesSilentSources() {
+        let problem = LevelCalibration.problem(with: [
+            measurement(0, .voice, -30),
+            measurement(1, .voice, -.infinity, seconds: 0),
+            measurement(2, .background, -.infinity, seconds: 0),
+        ])
+        #expect(problem == .silentSources([1, 2]))
+    }
+
+    @Test("a pass where nobody spoke is reported as such")
+    func nothingHeard() {
+        let problem = LevelCalibration.problem(with: [
+            measurement(0, .voice, -.infinity, seconds: 0)
+        ])
+        #expect(problem == .nothingHeard)
+    }
+
+    @Test("a clean pass reports no problem")
+    func noProblem() {
+        #expect(LevelCalibration.problem(with: [measurement(0, .voice, -30)]) == nil)
+    }
+
+    /// Applying the proposals has to actually land everything where it said,
+    /// which is the property all the others are really about.
+    @Test("applying every proposal lands the whole mix where it said")
+    func endToEnd() {
+        // All within the correction limit on purpose: the cap has its own two
+        // tests, and mixing the two questions would make a capped source look
+        // like arithmetic that missed.
+        let sources: [(LevelCalibration.Role, Double)] = [
+            (.voice, -34), (.voice, -21), (.background, -18), (.voice, -27),
+        ]
+        let measurements = sources.enumerated().map {
+            measurement($0.offset, $0.element.0, $0.element.1)
+        }
+        let proposals = LevelCalibration.propose(from: measurements)
+
+        for measurement in measurements {
+            let change = proposals.first { $0.id == measurement.id }?.change ?? 0
+            let final = measurement.decibels + change
+            let expected =
+                measurement.role == .voice
+                ? LevelCalibration.voiceTarget
+                : LevelCalibration.voiceTarget + LevelCalibration.backgroundOffset
+            #expect(abs(final - expected) < 0.001)
+        }
+    }
+}
+
+// MARK: - Which applications are voices
+
+@Suite("Source roles")
+struct SourceRoleTests {
+    /// Getting this wrong puts a voice call underneath the music, which is the
+    /// one arrangement nobody wants.
+    @Test("conferencing applications default to voice")
+    func commsAreVoices() {
+        for bundle in [
+            "com.hnc.Discord", "us.zoom.xos", "com.microsoft.teams2",
+            "com.apple.FaceTime", "com.tinyspeck.slackmacgap",
+        ] {
+            #expect(LevelCalibration.Role.default(forBundleID: bundle) == .voice, "\(bundle)")
+        }
+    }
+
+    @Test("music and games default to background")
+    func othersAreBackground() {
+        for bundle in [
+            "com.spotify.client", "com.apple.Music", "com.valvesoftware.steam",
+            "com.google.Chrome",
+        ] {
+            #expect(
+                LevelCalibration.Role.default(forBundleID: bundle) == .background,
+                "\(bundle)")
+        }
+    }
+
+    /// An application with no identifier at all must not be treated as a voice,
+    /// or an unknown source ends up as loud as the person talking.
+    @Test("an unidentified source is background rather than voice")
+    func unknownIsBackground() {
+        #expect(LevelCalibration.Role.default(forBundleID: nil) == .background)
     }
 }

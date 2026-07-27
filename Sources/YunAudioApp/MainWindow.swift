@@ -463,6 +463,9 @@ struct MainWindow: View {
                 }
 
                 sectionHeading(loc("Mixer"))
+                if model.isRunning {
+                    YunCard { CalibrationPanel(model: model) }
+                }
 
                 if model.activeRoutes.isEmpty {
                     YunCard {

@@ -53,6 +53,8 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Application audio steps out of the way while somebody is talking.
     var isDucking: Bool?
     var duckDecibels: Float?
+    /// What each source is for, keyed by device UID or bundle identifier.
+    var sourceRoles: [String: String]?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -82,7 +84,8 @@ struct Preferences: Codable, Equatable, Sendable {
         monitorDecibels: -6,
         isAutoLevelling: false,
         isDucking: false,
-        duckDecibels: -14)
+        duckDecibels: -14,
+        sourceRoles: [:])
 }
 
 @MainActor

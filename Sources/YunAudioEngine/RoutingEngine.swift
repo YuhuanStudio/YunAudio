@@ -1084,6 +1084,50 @@ public final class RoutingEngine: @unchecked Sendable {
         graph?.pointee.outputClipped = 0
     }
 
+    // MARK: Calibration
+
+    /// Starts accumulating per-source energy. Clears whatever was there.
+    public func beginCalibration() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let graph else { return }
+        let count = max(Int(graph.pointee.routeCount), 1)
+        for index in 0..<count {
+            graph.pointee.calibrationEnergy[index] = 0
+            graph.pointee.calibrationFrames[index] = 0
+        }
+        graph.pointee.calibrating = 1
+    }
+
+    public func endCalibration() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        graph?.pointee.calibrating = 0
+    }
+
+    /// Gated RMS in dBFS and the seconds behind it, per route.
+    public func calibrationLevels(sampleRate: Double) -> [(decibels: Double, seconds: Double)] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let graph, sampleRate > 0 else { return [] }
+        let count = Int(graph.pointee.routeCount)
+        return (0..<count).map { index in
+            let frames = graph.pointee.calibrationFrames[index]
+            guard frames > 0 else { return (-Double.infinity, 0) }
+            let mean = graph.pointee.calibrationEnergy[index] / Double(frames)
+            let decibels = mean > 0 ? 10 * log10(mean) : -.infinity
+            return (decibels, Double(frames) / sampleRate)
+        }
+    }
+
+    /// Smoothed RMS per route. Closer to how loud something sounds than the
+    /// peak beside it.
+    public var routeRMS: [Float] {
+        guard let graph else { return [] }
+        let count = Int(graph.pointee.routeCount)
+        return (0..<count).map { graph.pointee.rms[$0] }
+    }
+
     /// Peak magnitude of each active route since the last read.
     public var routePeaks: [Float] {
         guard let graph else { return [] }

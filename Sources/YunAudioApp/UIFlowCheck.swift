@@ -431,6 +431,62 @@ enum UIFlowCheck {
         await pause(0.3)
         check("the latch can be cleared", model.outputClippedSamples == 0)
 
+        print("\nbalancing sources")
+        // The whole flow, at speed. What it cannot check on its own is whether
+        // anybody spoke — a silent room produces a failure, and that failure is
+        // itself the correct behaviour, so both outcomes are accepted and the
+        // one that happened is reported.
+        check("balancing is offered while routing", model.canCalibrate)
+        model.startCalibration()
+        check("it starts in the countdown", model.isCalibrating)
+        await waitUntil(
+            "it reaches the listening phase",
+            { if case .listening = model.calibrationPhase { true } else { false } },
+            timeout: 8)
+        await waitUntil(
+            "it finishes on its own",
+            { !model.isCalibrating },
+            timeout: Double(RouterModel.calibrationSeconds) + 6)
+
+        switch model.calibrationPhase {
+        case .proposing:
+            note(
+                "proposed "
+                    + model.calibrationProposals
+                    .map { String(format: "%+.1f dB", $0.change) }
+                    .joined(separator: ", "))
+            check(
+                "every proposal names a real route",
+                model.calibrationProposals.allSatisfy {
+                    $0.id < model.activeRoutes.count
+                })
+            // Nothing is applied without being shown first: a tool that moves
+            // somebody's faders silently is one they stop trusting the first
+            // time it is wrong.
+            let before = model.faderDecibels(forRouteAt: 0)
+            model.cancelCalibration()
+            check("discarding changes nothing", model.faderDecibels(forRouteAt: 0) == before)
+        case .failed(let message):
+            note("did not conclude: \(message)")
+            check("the failure says why", !message.isEmpty)
+            model.cancelCalibration()
+        default:
+            check("it ended in a state that says something", false)
+        }
+        check("it is back to idle", model.calibrationPhase == .idle)
+
+        print("\nper-application taps")
+        // One tap per application rather than one for all of them, which is
+        // what makes Discord and Spotify separable at all.
+        if model.capturedAppBundleIDs.count > 1 {
+            let owners = Set(
+                model.activeRoutes.compactMap { model.application(of: $0)?.bundleID })
+            check("each captured application has its own source", owners.count > 1)
+            note("\(owners.count) application sources")
+        } else {
+            note("fewer than two applications captured — separation not exercised")
+        }
+
         print("\nducking")
         // The rule that matters more than any other: it must never touch the
         // microphone. A ducker that reached the voice would be a gate keyed off
@@ -928,11 +984,19 @@ enum UIFlowCheck {
         displayed += RoutePreset.builtIn.map(\.name)
         displayed += RoutePreset.builtIn.map { loc($0.note) }
         displayed += HotkeyManager.Action.allCases.map(\.title)
+        displayed += LevelCalibration.Role.allCases.map { loc($0.title) }
+        displayed += LoudnessTarget.allCases.map(\.title)
+        displayed += LightingMode.allCases.map(\.title)
 
         // In Chinese, anything still made of Latin letters and spaces never
         // reached the table — a translated string would not be.
+        // Names that are the same in every language are exempt: a platform is
+        // called Discord in Chinese too, and "translating" it would be worse
+        // than leaving it. The list is explicit rather than a heuristic,
+        // because a heuristic here would quietly excuse a real omission.
+        let properNouns: Set<String> = ["EBU R128", "YouTube", "Discord", "Spotify"]
         let stillEnglish = displayed.filter { text in
-            text.count > 3 && text.allSatisfy { $0.isASCII }
+            text.count > 3 && text.allSatisfy { $0.isASCII } && !properNouns.contains(text)
         }
         check("every enum-built label is translated", stillEnglish.isEmpty)
         for text in stillEnglish.prefix(4) { note("not in the table: \(text)") }
