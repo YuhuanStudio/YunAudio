@@ -336,10 +336,16 @@ final class RouterModel {
 
     private func installHotkeys() {
         for action in HotkeyManager.Action.allCases {
-            let handler: () -> Void
+            let handler: @Sendable () -> Void
             switch action {
-            case .toggleRouting: handler = { [weak self] in self?.toggle() }
-            case .toggleMute: handler = { [weak self] in self?.toggleMute() }
+            case .toggleRouting:
+                handler = { [weak self] in
+                    MainActor.assumeIsolated { self?.toggle() }
+                }
+            case .toggleMute:
+                handler = { [weak self] in
+                    MainActor.assumeIsolated { self?.toggleMute() }
+                }
             }
             if !hotkeys.register(action, shortcut: action.defaultShortcut, handler: handler) {
                 // Another application owns the combination. Say so — a shortcut

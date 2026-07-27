@@ -119,14 +119,17 @@ final class HotkeyManager {
     }
 
     private var registrations: [Action: EventHotKeyRef] = [:]
-    private var handlers: [Action: () -> Void] = [:]
+    private var handlers: [Action: @Sendable () -> Void] = [:]
     private var eventHandler: EventHandlerRef?
     private static let signature: OSType = 0x7975_6E61  // 'yuna'
 
     /// The single dispatch table the Carbon callback reads. Carbon hands back a
     /// numeric id rather than context, so the mapping has to live somewhere the
     /// C callback can reach.
-    nonisolated(unsafe) private static var dispatch: [UInt32: () -> Void] = [:]
+    /// Handlers are `@Sendable` because a Carbon callback delivers them from
+    /// the event thread and they are then hopped to the main actor. Without the
+    /// annotation the hop is a data race the compiler cannot see through.
+    nonisolated(unsafe) private static var dispatch: [UInt32: @Sendable () -> Void] = [:]
 
     init() { installHandler() }
 
@@ -157,7 +160,7 @@ final class HotkeyManager {
                     MemoryLayout<EventHotKeyID>.size, nil, &identifier)
                 guard status == noErr else { return status }
                 if let action = HotkeyManager.dispatch[identifier.id] {
-                    DispatchQueue.main.async(execute: action)
+                    DispatchQueue.main.async { action() }
                 }
                 return noErr
             },
@@ -168,7 +171,9 @@ final class HotkeyManager {
     /// owns the combination, which is reported rather than swallowed — a
     /// shortcut that silently does nothing is worse than no shortcut.
     @discardableResult
-    func register(_ action: Action, shortcut: Shortcut, handler: @escaping () -> Void) -> Bool {
+    func register(
+        _ action: Action, shortcut: Shortcut, handler: @escaping @Sendable () -> Void
+    ) -> Bool {
         unregister(action)
 
         let identifier = UInt32(Action.allCases.firstIndex(of: action) ?? 0) + 1
