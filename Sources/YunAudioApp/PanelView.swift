@@ -64,7 +64,7 @@ struct PanelView: View {
 
     private var header: some View {
         HStack {
-            Text("YunAudio")
+            Text(L("YunAudio"))
                 .font(Yun.Text.title)
                 .foregroundStyle(Yun.Palette.textPrimary)
             Spacer()
@@ -83,7 +83,7 @@ struct PanelView: View {
                 Button {
                     model.apply(preset)
                 } label: {
-                    Text(preset.name)
+                    Text(L(preset.name))
                 }
                 .buttonStyle(YunButtonStyle(isActive ? .primary : .secondary, small: true))
                 .help(preset.note)
@@ -112,7 +112,7 @@ struct PanelView: View {
 
     private var devicePickers: some View {
         YunDisclosure(
-            "Devices",
+            L("Devices"),
             subtitle: model.selectedSource.map {
                 "\($0.name) → \(model.selectedDestination?.name ?? "none")"
             },
@@ -160,19 +160,19 @@ struct PanelView: View {
     private func channelModeControl(source: AudioDevice) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.sm) {
             HStack {
-                Text("Channels")
+                Text(L("Channels"))
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
                     .frame(width: Self.labelColumn, alignment: .leading)
 
                 YunSegmented(
                     selection: $model.channelMode,
-                    options: SourceChannelMode.allCases.map { ($0, $0.title) })
+                    options: SourceChannelMode.allCases.map { ($0, L($0.title)) })
             }
 
             if model.channelMode == .mono {
                 HStack {
-                    Text("Source")
+                    Text(L("Source"))
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.textTertiary)
                         .frame(width: Self.labelColumn, alignment: .leading)
@@ -204,16 +204,16 @@ struct PanelView: View {
                             ? "bit-exact"
                             : (quality.hasProcessing ? "processed" : "resampled"),
                         tone: quality.isBitExact ? .success : .warning)
-                    YunDetailRow("Rate", value: "\(Int(quality.sampleRate)) Hz")
+                    YunDetailRow(L("Rate"), value: "\(Int(quality.sampleRate)) Hz")
                     YunDetailRow(
-                        "Buffer",
+                        L("Buffer"),
                         value: String(
                             format: "%d frames · %.2f ms",
                             quality.bufferFrames, quality.bufferLatencyMilliseconds))
                 }
                 if model.isClockLocked {
                     YunDetailRow(
-                        "Clock",
+                        L("Clock"),
                         value: String(format: "locked · %.6f", model.measuredRateRatio),
                         tone: .success)
                 }
@@ -241,7 +241,7 @@ struct PanelView: View {
     private var driverMissing: some View {
         YunCard {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Text("The YunAudio device is not installed")
+                Text(L("The YunAudio device is not installed"))
                     .font(Yun.Text.label)
                     .foregroundStyle(Yun.Palette.textPrimary)
                 Text(
@@ -258,7 +258,7 @@ struct PanelView: View {
                         .buttonStyle(YunButtonStyle(.primary, small: true))
                         .disabled(model.isInstallingDriver)
                     }
-                    Button("Check again") { model.refreshDevices() }
+                    Button(L("Check again")) { model.refreshDevices() }
                         .buttonStyle(YunButtonStyle(.secondary, small: true))
                 }
                 if !model.canInstallDriver {
@@ -283,23 +283,23 @@ struct PanelView: View {
 
     private var appSources: some View {
         YunDisclosure(
-            "Application audio",
+            L("Application audio"),
             subtitle: model.capturedAppBundleIDs.isEmpty
                 ? "none captured" : "\(model.capturedAppBundleIDs.count) captured",
             isExpanded: $showsApps
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
                 HStack {
-                    Text("Pick the applications to mix in")
+                    Text(L("Pick the applications to mix in"))
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.textTertiary)
                     Spacer()
-                    Button("Refresh") { model.refreshApps() }
+                    Button(L("Refresh")) { model.refreshApps() }
                         .buttonStyle(YunButtonStyle(.ghost, small: true))
                 }
 
                 if model.availableApps.isEmpty {
-                    Text("No applications are producing audio right now.")
+                    Text(L("No applications are producing audio right now."))
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.textTertiary)
                 } else {
@@ -311,13 +311,13 @@ struct PanelView: View {
                 if !model.capturedAppBundleIDs.isEmpty {
                     YunDivider()
                     HStack {
-                        Text("While routed")
+                        Text(L("While routed"))
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.textTertiary)
                             .frame(width: Self.labelColumn, alignment: .leading)
                         YunSegmented(
                             selection: $model.tapMuteBehavior,
-                            options: TapMuteBehavior.allCases.map { ($0, $0.title) })
+                            options: TapMuteBehavior.allCases.map { ($0, L($0.title)) })
                     }
                 }
             }
@@ -361,7 +361,7 @@ struct PanelView: View {
     private var mixer: some View {
         YunCard {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
-                Text("Mixer")
+                Text(L("Mixer"))
                     .font(Yun.Text.label)
                     .foregroundStyle(Yun.Palette.textPrimary)
                 ForEach(Array(model.activeRoutes.enumerated()), id: \.offset) { index, route in
@@ -414,12 +414,12 @@ struct PanelView: View {
 
     private var voiceIsolation: some View {
         YunDisclosure(
-            "Processing",
+            L("Processing"),
             subtitle: model.voiceIsolationEnabled ? "voice isolation on" : "bypass",
             isExpanded: $showsProcessing
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Toggle("Voice isolation", isOn: $model.voiceIsolationEnabled)
+                Toggle(L("Voice isolation"), isOn: $model.voiceIsolationEnabled)
                     .toggleStyle(YunToggleStyle())
 
                 if model.voiceIsolationEnabled {
@@ -453,23 +453,23 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack(spacing: Yun.Space.sm) {
-            Button(model.isBusy ? "…" : (model.isRunning ? "Stop" : "Start")) {
+            Button(model.isBusy ? "…" : L(model.isRunning ? "Stop" : "Start")) {
                 model.toggle()
             }
             .buttonStyle(YunButtonStyle(.primary))
             .disabled(model.isBusy)
 
-            Button("Open YunAudio") { openWindow(id: "main") }
+            Button(L("Open YunAudio")) { openWindow(id: "main") }
                 .buttonStyle(YunButtonStyle(.secondary, small: true))
 
             Spacer()
 
             SettingsLink {
-                Text("Settings")
+                Text(L("Settings"))
             }
             .buttonStyle(YunButtonStyle(.ghost, small: true))
 
-            Button("Quit") { NSApplication.shared.terminate(nil) }
+            Button(L("Quit")) { NSApplication.shared.terminate(nil) }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
         }
     }

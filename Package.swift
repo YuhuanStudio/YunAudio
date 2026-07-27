@@ -3,6 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "YunAudioKit",
+    defaultLocalization: "en",
     platforms: [.macOS("26.0")],
     products: [
         .library(name: "YunAudioHAL", targets: ["YunAudioHAL"]),
@@ -25,7 +26,8 @@ let package = Package(
 
         .executableTarget(
             name: "YunAudioApp",
-            dependencies: ["YunAudioHAL", "YunAudioEngine", "YunDesign"]),
+            dependencies: ["YunAudioHAL", "YunAudioEngine", "YunDesign"],
+            resources: [.process("Resources")]),
 
         .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
 

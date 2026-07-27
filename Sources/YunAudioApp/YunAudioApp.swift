@@ -22,6 +22,9 @@ struct YunAudioApp: App {
     @NSApplicationDelegateAdaptor(TerminationObserver.self) private var termination
 
     init() {
+        // The .lproj folders ship with this module, not with the main bundle.
+        YunStrings.bundle = Bundle.module
+
         // Design verification path. A menu bar popover cannot be opened without
         // accessibility permission, so the panel is rendered offscreen instead —
         // in both appearances, which is the only way to catch a colour that
@@ -61,25 +64,39 @@ struct YunAudioApp: App {
 
 /// The status item glyph.
 ///
-/// Idle is a plain waveform. While routing, the bars move with the signal —
-/// enough to confirm at a glance that audio is flowing without opening the
-/// panel, which is the one question a menu bar utility should answer for free.
+/// The mark is always present, because it is the only place this application is
+/// visible: an accessory app has no Dock icon and no window of its own until one
+/// is opened. Level bars appear beside it while routing, which answers the one
+/// question a menu bar utility should answer without being clicked — is audio
+/// actually flowing.
 struct MenuBarIcon: View {
     let level: Float?
 
-    private static let barHeights: [CGFloat] = [0.35, 0.7, 1.0, 0.6, 0.45]
+    private static let barHeights: [CGFloat] = [0.45, 0.85, 0.6]
 
     var body: some View {
-        if level != nil {
-            HStack(spacing: 1.5) {
-                ForEach(Array(Self.barHeights.enumerated()), id: \.offset) { index, weight in
-                    Capsule()
-                        .frame(width: 1.5, height: barHeight(weight: weight, index: index))
-                }
+        HStack(spacing: 3) {
+            if let mark = NSImage(named: "Icon") ?? Bundle.module.image(forResource: "Icon") {
+                Image(nsImage: mark)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 15, height: 15)
+            } else {
+                // The icon is a resource, and a resource can be missing.
+                Image(systemName: "waveform")
             }
-            .frame(height: 14)
-        } else {
-            Image(systemName: "waveform")
+
+            if level != nil {
+                HStack(spacing: 1.5) {
+                    ForEach(Array(Self.barHeights.enumerated()), id: \.offset) {
+                        index, weight in
+                        Capsule()
+                            .frame(width: 1.5, height: barHeight(weight: weight, index: index))
+                    }
+                }
+                .frame(height: 13)
+            }
         }
     }
 
