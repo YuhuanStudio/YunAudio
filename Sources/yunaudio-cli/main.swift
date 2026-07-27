@@ -339,6 +339,63 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+// Sends one application's audio to a device of its own, the way SoundSource
+// does — and silences the copy the application would otherwise play itself.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
+    let appMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Discord"
+    let deviceMatch = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "MacBook"
+    let all = (try? AudioDevices.all()) ?? []
+    guard let clock = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let target = all.first(where: { $0.name.contains(deviceMatch) && $0.hasOutput })
+    else {
+        print("need an input to act as clock master and an output to send to")
+        exit(1)
+    }
+    let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? []).filter {
+        $0.name.localizedCaseInsensitiveContains(appMatch)
+            || ($0.bundleID?.localizedCaseInsensitiveContains(appMatch) ?? false)
+    }
+    guard !processes.isEmpty else {
+        print("no process matching \"\(appMatch)\"")
+        exit(1)
+    }
+
+    // mutedWhenTapped is what makes this a redirection rather than a duplication:
+    // the application stops playing to its own output for as long as the tap is
+    // being read.
+    let tap = try ProcessTap(
+        processIDs: processes.map(\.id), muteBehavior: .mutedWhenTapped)
+    print("\(processes.count) process(es) of \(appMatch) → \(target.name)")
+    print("clock master: \(clock.name)\n")
+
+    let engine = RoutingEngine()
+    let channels = min(2, Int(tap.format?.mChannelsPerFrame ?? 2), target.outputChannels)
+    let routes = (0..<channels).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: tap.uid, channel: channel),
+            destination: ChannelRef(deviceUID: target.uid, channel: channel))
+    }
+    try engine.start(
+        sourceDeviceUID: clock.uid,
+        destinationDeviceUID: target.uid,
+        routes: routes,
+        taps: [tap])
+
+    print("redirecting for 6s — play something in \(appMatch)\n")
+    for _ in 0..<18 {
+        Thread.sleep(forTimeInterval: 0.33)
+        let bars = engine.routePeaks.map { peak -> String in
+            let db = peak > 0 ? 20 * log10(peak) : -120
+            let filled = max(0, min(20, Int((db + 60) / 3)))
+            return String(repeating: "█", count: filled)
+                + String(repeating: "·", count: 20 - filled)
+        }
+        print("  \(bars.joined(separator: "  "))")
+    }
+    engine.stop()
+    exit(0)
+}
+
 // Records the routed signal to a file.
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "record" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5

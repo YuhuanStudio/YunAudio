@@ -176,6 +176,7 @@ public final class RoutingEngine: @unchecked Sendable {
         destinationDeviceUID: String,
         routes: [Route],
         taps: [ProcessTap] = [],
+        additionalDestinationUIDs: [String] = [],
         effects: [EffectKind] = [],
         preferredSampleRate: Double? = nil,
         bufferFrames: UInt32 = 128,
@@ -199,7 +200,14 @@ public final class RoutingEngine: @unchecked Sendable {
         // The caller's preferred rate wins when both devices support it. Falling
         // back to the highest common rate would quietly put a voice chat at
         // 96 kHz, which only buys a resample back to 48 kHz at the far end.
-        let members = [source, destination]
+        // Extra destinations let a tapped application be sent somewhere other
+        // than the microphone's destination — one app to the headphones while
+        // the rest of the mix goes to the virtual device.
+        let extras =
+            additionalDestinationUIDs
+            .filter { $0 != sourceDeviceUID && $0 != destinationDeviceUID }
+            .compactMap { try? AudioDevices.device(uid: $0) }
+        let members = [source, destination] + extras
         let shared = Set(source.availableSampleRates)
             .intersection(destination.availableSampleRates)
         let rate: Double
@@ -244,7 +252,7 @@ public final class RoutingEngine: @unchecked Sendable {
             subDevices: [
                 .init(uid: sourceDeviceUID, driftCompensation: false),
                 .init(uid: destinationDeviceUID, driftCompensation: !clockLockAvailable),
-            ],
+            ] + extras.map { .init(uid: $0.uid, driftCompensation: true) },
             clockMasterUID: sourceDeviceUID,
             taps: taps)
         self.aggregate = aggregate
