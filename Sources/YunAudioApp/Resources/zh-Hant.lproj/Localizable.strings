@@ -361,3 +361,5 @@
 "Nasal" = "鼻音";
 "Presence" = "臨場";
 "Air" = "空氣感";
+"The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "已安裝的驅動比這個 app 內附的舊。之後新增的東西都不存在，而且看起來會像是這裡出了問題。";
+"Update the driver" = "更新驅動";

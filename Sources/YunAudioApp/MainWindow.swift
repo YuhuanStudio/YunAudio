@@ -73,6 +73,10 @@ struct MainWindow: View {
                 DriverOnboarding(model: model, isCompact: true)
                     .padding(.horizontal, Yun.Space.xl)
                     .padding(.bottom, Yun.Space.md)
+            } else if model.driverIsOutOfDate {
+                staleDriverBanner
+                    .padding(.horizontal, Yun.Space.xl)
+                    .padding(.bottom, Yun.Space.md)
             } else if let next = model.nextStep {
                 nextStepBanner(next)
                     .padding(.horizontal, Yun.Space.xl)
@@ -106,6 +110,37 @@ struct MainWindow: View {
         // window nobody has open is work for nothing.
         .onAppear { model.isAnalysisVisible = true }
         .onDisappear { model.isAnalysisVisible = false }
+    }
+
+    /// The installed driver is not the one this app ships.
+    ///
+    /// Loud rather than quiet, because an older driver is missing whatever the
+    /// newer one added and every symptom of that looks like a bug in the
+    /// application. It cost an hour once: the virtual device published no
+    /// volume control, the driver source implemented it perfectly, and the
+    /// installed copy simply predated the commit.
+    private var staleDriverBanner: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Image(systemName: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
+                .font(.system(size: 11))
+                .foregroundStyle(Yun.Palette.warning)
+            Text(
+                loc(
+                    "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button(loc("Update the driver")) { model.installDriver() }
+                .buttonStyle(YunButtonStyle(.primary, small: true))
+                .disabled(model.isInstallingDriver)
+        }
+        .padding(.horizontal, Yun.Space.md)
+        .padding(.vertical, Yun.Space.sm)
+        .background(
+            Yun.Palette.warning.opacity(0.10), in: .rect(cornerRadius: Yun.Radius.button))
     }
 
     /// The last step, which happens in another application.

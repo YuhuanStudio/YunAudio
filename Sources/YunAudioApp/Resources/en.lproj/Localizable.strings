@@ -361,3 +361,5 @@
 "Nasal" = "Nasal";
 "Presence" = "Presence";
 "Air" = "Air";
+"The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here.";
+"Update the driver" = "Update the driver";

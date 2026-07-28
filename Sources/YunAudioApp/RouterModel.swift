@@ -743,6 +743,12 @@ final class RouterModel {
     /// it — running from a build directory, usually.
     var canInstallDriver: Bool { DriverInstaller.bundledDriverURL != nil }
 
+    /// True when the installed driver is not the one this app ships.
+    ///
+    /// Worth saying out loud: an older driver is missing whatever the newer one
+    /// added, silently, and every symptom looks like a bug in the application.
+    var driverIsOutOfDate: Bool { DriverInstaller.installedIsOutOfDate }
+
     func installDriver() {
         isInstallingDriver = true
         driverMessage = nil

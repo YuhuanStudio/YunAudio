@@ -292,6 +292,53 @@ enum UIFlowCheck {
             note("this input publishes no settable gain of its own")
         }
 
+        print("\ndriver freshness")
+        // An older installed driver is missing whatever the newer one added,
+        // silently, and every symptom looks like a bug in the application. It
+        // cost an hour: the virtual device published no volume control, the
+        // driver source implemented it perfectly, and the installed copy simply
+        // predated the commit.
+        if model.isDriverInstalled {
+            note(
+                model.driverIsOutOfDate
+                    ? "the installed driver is NOT the one this app ships"
+                    : "the installed driver matches this app")
+            check(
+                "the app can tell whether the driver is current",
+                DriverInstaller.bundledDriverURL != nil)
+        } else {
+            note("no driver installed")
+        }
+
+        print("\nour own device's controls")
+        // Volume on an aggregate or virtual device is a well-known gap —
+        // `proxy-audio-device` has a thousand stars for a driver that does only
+        // this, and BlackHole's top-voted discussion is the same request. We
+        // ship a virtual device, so the question is whether ours answers.
+        if let ours = model.outputDevices.first(where: {
+            $0.name.localizedCaseInsensitiveContains("YunAudio")
+        }) {
+            let volume = ours.hardwareGain(scope: kAudioObjectPropertyScopeOutput)
+            // Only meaningful against the driver this app ships. An older one
+            // will not have it, and saying so beats failing.
+            if model.driverIsOutOfDate {
+                note("skipped — the installed driver predates the volume controls")
+            } else {
+                check("our device publishes a volume control", volume != nil)
+                check("and it is settable", volume?.isSettable == true)
+            }
+            if let volume {
+                note(
+                    String(
+                        format: "output volume %.2f%@", volume.scalar,
+                        volume.decibelRange.map {
+                            String(format: " (%.0f…%.0f dB)", $0.lowerBound, $0.upperBound)
+                        } ?? ""))
+            }
+        } else {
+            note("our virtual device is not installed — its controls not exercised")
+        }
+
         print("\ndevice profiles")
         // Loaded from documents beside the application rather than compiled in,
         // which is the only reason supporting somebody else's microphone is a

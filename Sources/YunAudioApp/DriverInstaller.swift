@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 
 /// Installs and removes the virtual audio device.
@@ -38,6 +39,31 @@ enum DriverInstaller {
 
     static var isInstalled: Bool {
         FileManager.default.fileExists(atPath: installPath)
+    }
+
+    /// True when what is installed is not what this app ships.
+    ///
+    /// This exists because of a real hour spent on the wrong thing. The virtual
+    /// device published no volume control, which is a well-known gap in this
+    /// category and looked like a genuine defect — and the driver source had
+    /// implemented it perfectly. The installed copy simply predated the commit
+    /// that added it, and nothing anywhere said so.
+    ///
+    /// Compared by hashing the binaries rather than by version string, because
+    /// both copies claimed 0.1.0 and a version string only helps somebody who
+    /// remembered to bump it. A hash cannot be forgotten.
+    static var installedIsOutOfDate: Bool {
+        guard isInstalled, let bundled = bundledDriverURL else { return false }
+        guard let installedHash = binaryHash(ofDriverAt: URL(fileURLWithPath: installPath)),
+            let bundledHash = binaryHash(ofDriverAt: bundled)
+        else { return false }
+        return installedHash != bundledHash
+    }
+
+    private static func binaryHash(ofDriverAt url: URL) -> String? {
+        let binary = url.appendingPathComponent("Contents/MacOS/YunAudioDriver")
+        guard let data = try? Data(contentsOf: binary) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     static func install() -> Outcome {
