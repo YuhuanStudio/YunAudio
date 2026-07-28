@@ -80,6 +80,13 @@ public struct PathQuality: Sendable, Hashable {
     public let measuredRateRatio: Double
     /// Sub-devices the HAL is drift-correcting, and therefore resampling.
     public let driftCorrectedDeviceUIDs: [String]
+    /// True when the two ends of the route share no sample rate at all, so a
+    /// converter is running rather than merely a drift correction.
+    ///
+    /// Worth telling apart from ordinary resampling in the interface: this one
+    /// is a property of the two devices somebody owns, not of how they set
+    /// anything up, and there is nothing they can do about it.
+    public let hasSampleRateMismatch: Bool
     public let bufferFrames: Int
     public let sampleRate: Double
 
@@ -146,6 +153,10 @@ public final class RoutingEngine: @unchecked Sendable {
     /// True when drift correction was switched off on the strength of the
     /// driver's clock locking, so the path is only clean while the lock holds.
     private var requiresClockLock = false
+    /// True when the two ends could not agree a rate and the HAL is reconciling
+    /// them. Reported rather than hidden: it is the difference between a path
+    /// that is merely not bit-exact and one where a converter is running.
+    public private(set) var sampleRateMismatch = false
     /// Sample rates as they were before routing touched them.
     private var originalSampleRates: [String: Double] = [:]
     /// Enough of the last start() to bring the route back up unaided.
@@ -325,17 +336,36 @@ public final class RoutingEngine: @unchecked Sendable {
         let shared = Set(source.availableSampleRates)
             .intersection(destination.availableSampleRates)
         let rate: Double
+        var mismatched = false
         if let preferred = preferredSampleRate, shared.contains(preferred) {
             rate = preferred
         } else if let highest = shared.max() {
             rate = highest
+        } else if let best = source.availableSampleRates.max() {
+            // No rate both ends can present. This used to be refused outright,
+            // and refusing is wrong: a Razer Barracuda does 44.1 kHz out and
+            // 16 kHz in, a Seiren V3 Pro does 48 and 96, and a person who owns
+            // both is not doing anything unusual. The path cannot be bit-exact
+            // across that gap whatever happens, so the question is only who
+            // resamples — and the HAL does it well and reports that it did.
+            //
+            // The clock master's rate wins because the master is the one thing
+            // that cannot be resampled; every other member keeps whatever it
+            // can do and the aggregate reconciles them.
+            rate = best
+            mismatched = true
         } else {
             throw RoutingError.noCommonSampleRate
         }
+        sampleRateMismatch = mismatched
         // Remembered so the devices go back the way they were found. Merged
         // rather than replaced: a restart must not forget what the first start
         // changed.
-        let changed = try AggregateDevice.alignSampleRate(rate, across: alignedDevices)
+        // Only devices that can actually present it. Asking a 44.1 kHz headset
+        // for 48 throws, and the throw would be the whole route rather than the
+        // one device that could not oblige.
+        let changed = try AggregateDevice.alignSampleRate(
+            rate, across: alignedDevices.filter { $0.availableSampleRates.contains(rate) })
         for (uid, previous) in changed where originalSampleRates[uid] == nil {
             originalSampleRates[uid] = previous
         }
@@ -837,7 +867,9 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   device is not in this route, which is the ordinary case of a headphone
     ///   profile left selected after the headphones were unplugged.
     @discardableResult
-    public func setHeadphoneCorrection(_ curve: ParametricEQ?, forDeviceUID deviceUID: String?)
+    public func setHeadphoneCorrection(
+        _ curve: ParametricEQ?, forDeviceUID deviceUID: String?
+    )
         -> Bool
     {
         stateLock.lock()
@@ -1573,6 +1605,7 @@ public final class RoutingEngine: @unchecked Sendable {
             isClockLocked: isClockLocked,
             measuredRateRatio: measuredRateRatio,
             driftCorrectedDeviceUIDs: drifted,
+            hasSampleRateMismatch: sampleRateMismatch,
             bufferFrames: Int(device.currentBufferFrameSize ?? 0),
             sampleRate: device.currentSampleRate ?? 0)
     }

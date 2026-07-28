@@ -430,7 +430,8 @@ enum UIFlowCheck {
             // unwinds, and `start()` returns immediately while it is set — so
             // calling it straight away does nothing at all and the retry looks
             // like a second failure.
-            await waitUntil("the failed start finished unwinding", { !model.isBusy }, timeout: 20)
+            await waitUntil(
+                "the failed start finished unwinding", { !model.isBusy }, timeout: 20)
             model.selectedDestinationUID = fallback
             model.start()
             await waitUntil("it came up on the system output", { model.isRunning }, timeout: 15)
@@ -1438,6 +1439,44 @@ enum UIFlowCheck {
             check("still running after the removal", model.isRunning)
         } else {
             note("could not build a decoy device — skipped")
+        }
+
+        print("\ndevices that share no sample rate")
+        // A Razer Barracuda does 44.1 kHz out and 16 kHz in; a Seiren V3 Pro
+        // does 48 and 96. Somebody who owns both is not doing anything unusual,
+        // and this used to be refused outright with "the selected devices share
+        // no sample rate" — which is the router declining to do the one thing
+        // it exists for. The path cannot be bit-exact across that gap whatever
+        // happens, so the only question is who resamples.
+        if let awkward = model.outputDevices.first(where: { candidate in
+            guard let source = model.selectedSource else { return false }
+            return Set(candidate.availableSampleRates)
+                .intersection(source.availableSampleRates).isEmpty
+                && candidate.uid != model.selectedDestinationUID
+        }) {
+            let previous = model.selectedDestinationUID
+            model.selectedDestinationUID = awkward.uid
+            await waitUntil("the failed start unwound", { !model.isBusy }, timeout: 20)
+            model.start()
+            await waitUntil("it routed anyway", { model.isRunning }, timeout: 15)
+            check("no error was reported", model.lastError == nil)
+            if let quality = model.pathQuality {
+                note(
+                    "\(awkward.name): \(quality.integrityKey) at "
+                        + "\(Int(quality.sampleRate)) Hz, mismatch "
+                        + "\(quality.hasSampleRateMismatch)")
+                // And it says so. A router that quietly converts and calls the
+                // path clean would be lying about the one thing this project
+                // is built on.
+                check("it does not claim to be bit-exact", !quality.isBitExact)
+                check("and it names the mismatch", quality.hasSampleRateMismatch)
+            }
+            await pause(1.0)
+            check("audio is flowing", model.cycleCountForDiagnostics > 0)
+            model.selectedDestinationUID = previous
+            await waitUntil("and it went back", { model.isRunning }, timeout: 15)
+        } else {
+            note("every output shares a rate with the source — not exercised")
         }
 
         print("\noutput-only aggregate members")

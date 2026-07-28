@@ -3,3 +3,6 @@ build/
 .swiftpm/
 *.xcodeproj
 .DS_Store
+
+# Agent worktrees live here and are not part of the project.
+.claude/worktrees/

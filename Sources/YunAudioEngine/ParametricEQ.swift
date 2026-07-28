@@ -229,7 +229,7 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
                 .squareRoot()
             let denominator =
                 (denominatorReal * denominatorReal
-                    + denominatorImaginary * denominatorImaginary).squareRoot()
+                + denominatorImaginary * denominatorImaginary).squareRoot()
             guard denominator > 0 else { continue }
             magnitude *= numerator / denominator
         }
