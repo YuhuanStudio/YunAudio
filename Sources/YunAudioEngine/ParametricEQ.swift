@@ -130,6 +130,43 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
         return ParametricEQ(name: name, preampDecibels: preamp, filters: filters)
     }
 
+    // MARK: A graphic equaliser
+
+    /// The ten band centres a graphic equaliser uses here.
+    ///
+    /// 30 Hz to 16 kHz in octaves, which is not an arbitrary choice: it is
+    /// exactly what Razer's own Synapse publishes for its headsets, and
+    /// matching it means somebody moving from Windows can copy their settings
+    /// across band for band instead of guessing. Those controls are host-side
+    /// on Windows and have no macOS counterpart at all, which is why they are
+    /// worth having here.
+    public static let graphicBands: [Float] = [
+        30, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000,
+    ]
+
+    /// The range each band moves over, matching the same source.
+    public static let graphicRange: ClosedRange<Float> = -5...5
+
+    /// Builds a curve from ten slider positions in decibels.
+    ///
+    /// Q is 1.41 — one octave between the −3 dB points, which is the spacing of
+    /// the bands themselves. Narrower and the bands leave gaps between them;
+    /// wider and moving one moves its neighbours, so the control lies about
+    /// what it does.
+    public static func graphic(_ decibels: [Float], name: String = "Graphic") -> ParametricEQ {
+        let filters = zip(graphicBands, decibels).compactMap { hertz, gain -> Filter? in
+            // A band at zero is not a filter. Leaving it out keeps the cascade
+            // as short as what somebody actually asked for, which matters when
+            // the realtime path runs one section per filter.
+            guard abs(gain) > 0.05 else { return nil }
+            return Filter(
+                kind: .peaking, hertz: hertz,
+                decibels: max(graphicRange.lowerBound, min(graphicRange.upperBound, gain)),
+                q: 1.41)
+        }
+        return ParametricEQ(name: name, filters: filters)
+    }
+
     // MARK: Coefficients
 
     /// Five numbers per section — b0, b1, b2, a1, a2 — normalised by a0.

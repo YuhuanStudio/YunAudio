@@ -4213,6 +4213,56 @@ struct ParametricEQTests {
         return peak
     }
 
+    /// The band centres are Razer's own, so somebody moving from Windows can
+    /// copy their settings across band for band. Asserted because a table of
+    /// ten numbers is exactly the kind of thing that gets "tidied" later.
+    @Test("the graphic bands are the ones Synapse publishes")
+    func graphicBands() {
+        #expect(
+            ParametricEQ.graphicBands == [30, 60, 120, 250, 500, 1000, 2000, 4000, 8000, 16000])
+        #expect(ParametricEQ.graphicRange == -5...5)
+    }
+
+    /// Moving one slider has to move its own band and leave its neighbours
+    /// alone. A Q chosen too wide makes every control a bass control.
+    @Test("a graphic band moves its own frequency and not its neighbours")
+    func graphicIsLocal() {
+        var positions = [Float](repeating: 0, count: 10)
+        positions[5] = 5  // 1 kHz
+        let curve = ParametricEQ.graphic(positions)
+        #expect(curve.filters.count == 1)
+        #expect(abs(curve.response(atHertz: 1000, sampleRate: 48000) - 5) < 0.2)
+        // The neighbouring centres are an octave away in each direction.
+        #expect(curve.response(atHertz: 500, sampleRate: 48000) < 2)
+        #expect(curve.response(atHertz: 2000, sampleRate: 48000) < 2)
+        // And two octaves out it is over.
+        #expect(abs(curve.response(atHertz: 250, sampleRate: 48000)) < 0.6)
+    }
+
+    @Test("a band at zero is not a filter at all")
+    func graphicSkipsFlatBands() {
+        #expect(ParametricEQ.graphic([Float](repeating: 0, count: 10)).filters.isEmpty)
+        #expect(ParametricEQ.graphic([0, 0, 3, 0, 0, 0, 0, 0, 0, 0]).filters.count == 1)
+    }
+
+    /// Ten bands all the way up is the worst case the realtime path will see,
+    /// and it must still be ten sections rather than something unbounded.
+    @Test("all ten bands is ten sections")
+    func graphicFull() {
+        let curve = ParametricEQ.graphic([Float](repeating: 4, count: 10))
+        #expect(curve.filters.count == 10)
+        #expect(curve.filters.count <= ParametricEQ.maximumFilters)
+        // Adjacent bands overlap, so the whole curve lifts by more than any
+        // single band asked for — which is why the preamp exists.
+        #expect(curve.peakBoostDecibels(sampleRate: 48000) > 4)
+    }
+
+    @Test("a slider beyond the range is clamped rather than obeyed")
+    func graphicClamps() {
+        let curve = ParametricEQ.graphic([99, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        #expect(curve.filters.first?.decibels == 5)
+    }
+
     @Test("every section is normalised so it can be run as it stands")
     func normalised() {
         let curve = ParametricEQ(
