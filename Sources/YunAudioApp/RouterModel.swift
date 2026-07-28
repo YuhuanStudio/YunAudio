@@ -955,11 +955,15 @@ final class RouterModel {
     private(set) var availablePlugins: [AudioUnitPlugin] = []
 
     /// The ones in the chain, in order.
+    /// Swapped live like the built-in stages rather than restarting the route.
+    /// A third-party unit goes into the same chain the built-in ones do, so
+    /// there was never a reason for adding one to cost seconds of silence when
+    /// switching on a compressor does not.
     var enabledPlugins: [AudioUnitPlugin] = [] {
         didSet {
             guard oldValue != enabledPlugins else { return }
             persist()
-            restartIfRunning()
+            if !swapChainIfPossible() { restartIfRunning() }
         }
     }
 
@@ -1017,8 +1021,20 @@ final class RouterModel {
             }
         }
     }
+    /// How much of the isolated signal to use, 0…100.
+    ///
+    /// Written straight into whatever is rendering rather than restarting the
+    /// route. An Audio Unit parameter write is realtime-safe, so dragging this
+    /// slider used to tear the graph down and build it again for every value
+    /// the drag passed through — seconds of silence to move a knob, on the one
+    /// control somebody would want to move *while listening* to decide where it
+    /// belongs.
     var voiceIsolationMix: Float = 100 {
-        didSet { if oldValue != voiceIsolationMix { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != voiceIsolationMix else { return }
+            persist()
+            engine.setEffectParameter("mix", of: .voiceIsolation, to: voiceIsolationMix)
+        }
     }
 
     /// IO cycle size, in frames.
@@ -2920,7 +2936,10 @@ final class RouterModel {
                 .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
                 ?? outputDevices.first { $0.transport.isVirtual && $0.inputChannels > 0 }?.uid
         }
-        applyChannelDefaults()
+        // Only when there is nothing saved to overwrite. Anybody who has run
+        // this before has a channel choice on disk, and it wins.
+        applyChannelDefaults(
+            evenWhileRestoring: !PreferencesStore.hasStoredPreferences)
     }
 
     /// Picks a sensible channel mode for the selected source.
@@ -2929,23 +2948,42 @@ final class RouterModel {
     /// a stereo pair — the Seiren V3 Pro reports three input channels where only
     /// the first carries the capsule, and routing 1→1, 2→2 would send silence
     /// down one side of every call.
-    private func applyChannelDefaults() {
-        // Restoring must not overwrite what the user chose last time.
-        guard !isRestoring, let source = selectedSource else { return }
+    private func applyChannelDefaults(evenWhileRestoring: Bool = false) {
+        // Restoring must not overwrite what the user chose last time — unless
+        // there was no last time. `selectDefaults()` runs inside `restore()`,
+        // which holds `isRestoring` for its whole body, so this was unreachable
+        // from the one path that exists to choose sensible values on a first
+        // launch: a fresh install got mono on channel 0 whatever the device
+        // was, and a stereo interface routed one side of everything into
+        // silence until somebody found the control.
+        guard evenWhileRestoring || !isRestoring, let source = selectedSource else {
+            return
+        }
+        let choice = Self.defaultChannelChoice(
+            inputChannels: source.inputChannels, names: sourceChannelNames)
+        channelMode = choice.mode
+        monoChannel = choice.channel
+    }
+
+    /// The rule itself, with nothing around it.
+    ///
+    /// Pure so it can be asserted: which channel a device's topology points at
+    /// is the sort of thing that is obviously right until somebody plugs in a
+    /// four-channel interface.
+    static func defaultChannelChoice(
+        inputChannels: Int, names: [DeviceChannelNames.Channel]?
+    ) -> (mode: SourceChannelMode, channel: Int) {
         // A device whose topology is known says which channel is the one
         // anybody wants, which is better than the first one by position: on the
         // Seiren the first is right, but that is luck rather than a rule.
-        if let names = sourceChannelNames,
-            let preferred = names.firstIndex(where: \.isDefault)
-        {
-            channelMode = .mono
-            monoChannel = preferred
-            return
+        if let names, let preferred = names.firstIndex(where: \.isDefault) {
+            return (.mono, preferred)
         }
-        channelMode =
-            source.inputChannels % 2 == 0 && source.inputChannels >= 2
-            ? .stereo : .mono
-        monoChannel = 0
+        // An odd count is a strong hint the device is not presenting a stereo
+        // pair, and routing 1→1, 2→2 across one would send silence down one
+        // side of every call.
+        let stereo = inputChannels % 2 == 0 && inputChannels >= 2
+        return (stereo ? .stereo : .mono, 0)
     }
 
     /// True when routing stopped because hardware went away, rather than

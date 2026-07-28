@@ -1327,3 +1327,78 @@ struct PreferencesRoundTripTests {
         #expect(decoded.midiBindings == nil)
     }
 }
+
+/// Which channel of a source the application starts on.
+///
+/// This existed as four lines inside a private method that could not run. The
+/// method is called from exactly one place that matters — the first launch,
+/// before anybody has chosen anything — and that call sat inside `restore()`,
+/// which holds `isRestoring` for its whole body, and the first line of the
+/// method was `guard !isRestoring`. So on a fresh install the rule never ran:
+/// every device got mono on channel 0, and a two-channel interface sent one
+/// side of every call into silence until somebody found the control.
+///
+/// It went unnoticed because the machine it was written on has a Seiren V3
+/// Pro, whose right answer *is* mono on channel 0.
+@MainActor
+@Suite("Which channel to start on")
+struct ChannelDefaultTests {
+
+    @Test("an odd channel count is never treated as a stereo pair")
+    func oddCountsAreMono() {
+        for count in [1, 3, 5, 7] {
+            let choice = RouterModel.defaultChannelChoice(inputChannels: count, names: nil)
+            #expect(choice.mode == SourceChannelMode.mono, "\(count) channels")
+            #expect(choice.channel == 0)
+        }
+    }
+
+    @Test("an even count of two or more is a stereo pair")
+    func evenCountsAreStereo() {
+        for count in [2, 4, 6, 8] {
+            let choice = RouterModel.defaultChannelChoice(inputChannels: count, names: nil)
+            #expect(choice.mode == SourceChannelMode.stereo, "\(count) channels")
+        }
+    }
+
+    /// Zero and the nonsense below it: a device with no inputs cannot be a
+    /// stereo pair, and the arithmetic says even.
+    @Test("nothing to route is mono rather than stereo")
+    func zeroIsMono() {
+        #expect(RouterModel.defaultChannelChoice(inputChannels: 0, names: nil).mode == SourceChannelMode.mono)
+    }
+
+    /// A device that publishes its own topology overrules the count, and it is
+    /// the reason this is worth a rule at all: the Seiren V3 Pro reports three
+    /// inputs and says which one is the capsule.
+    @Test("a device that names its channels decides for itself")
+    func namesWin() {
+        let names = [
+            DeviceChannelNames.Channel(name: "Dry", detail: "", isDefault: false),
+            DeviceChannelNames.Channel(name: "Processed", detail: "", isDefault: true),
+            DeviceChannelNames.Channel(name: "Post-expander", detail: "", isDefault: false),
+        ]
+        let choice = RouterModel.defaultChannelChoice(inputChannels: 3, names: names)
+        #expect(choice.mode == SourceChannelMode.mono)
+        #expect(choice.channel == 1)
+        // And it wins over an even count, which would otherwise say stereo.
+        let pair = [
+            DeviceChannelNames.Channel(name: "A", detail: "", isDefault: false),
+            DeviceChannelNames.Channel(name: "B", detail: "", isDefault: true),
+        ]
+        let paired = RouterModel.defaultChannelChoice(inputChannels: 2, names: pair)
+        #expect(paired.mode == SourceChannelMode.mono)
+        #expect(paired.channel == 1)
+    }
+
+    /// Names with nothing marked fall back to the count rather than to channel
+    /// zero, which is the case a device with a plain list of names produces.
+    @Test("names with no default fall back to the count")
+    func namesWithoutADefault() {
+        let names = (0..<2).map {
+            DeviceChannelNames.Channel(name: "In \($0)", detail: "", isDefault: false)
+        }
+        #expect(
+            RouterModel.defaultChannelChoice(inputChannels: 2, names: names).mode == SourceChannelMode.stereo)
+    }
+}

@@ -510,10 +510,14 @@ public final class RoutingEngine: @unchecked Sendable {
         // more than one thing at a time.
         //
         // The dedicated unit still handles isolation alone, because it carries
-        // the mix and quality settings the chain has no way to express.
-        let isolationOnly = effects == [.voiceIsolation]
+        // the mix and quality settings the chain has no way to express — and
+        // only when nothing else is in the path, plugins included. A third-party
+        // unit dropped onto an empty chain used to be the same defect one level
+        // out: the plugin loaded, the interface listed it, and no chain was
+        // built to run it in.
+        let isolationOnly = effects == [.voiceIsolation] && plugins.isEmpty
         var isolatedSource: ChannelRef?
-        if !effects.isEmpty, !isolationOnly, let first = routes.first {
+        if !effects.isEmpty || !plugins.isEmpty, !isolationOnly, let first = routes.first {
             isolatedSource = first.source
             let built = timed("build the effect chain") {
                 EffectChain(
@@ -844,11 +848,23 @@ public final class RoutingEngine: @unchecked Sendable {
         onClockLockFailure?()
     }
 
-    /// Applies a processing parameter to the running chain.
+    /// Applies a processing parameter to whatever is actually rendering.
+    ///
+    /// Two things can be: the chain, and — when isolation is the only stage
+    /// switched on — the dedicated isolation unit, which is built instead of a
+    /// chain because it carries the model choice the chain cannot express.
+    /// Writing only to the chain therefore meant the mix slider moved and the
+    /// sound did not, in the one configuration where isolation is the whole
+    /// point. Everything else the chain offers has no unit to reach in that
+    /// case and is correctly a no-op.
     public func setEffectParameter(_ parameter: String, of kind: EffectKind, to value: Float) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        effectChain?.set(parameter, of: kind, to: value)
+        if let effectChain {
+            effectChain.set(parameter, of: kind, to: value)
+        } else if kind == .voiceIsolation, parameter == "mix" {
+            isolationUnit?.setMix(value)
+        }
     }
 
     /// What the running unit is actually holding for that knob.
@@ -862,7 +878,9 @@ public final class RoutingEngine: @unchecked Sendable {
     public func effectParameter(_ parameter: String, of kind: EffectKind) -> Float? {
         stateLock.lock()
         defer { stateLock.unlock() }
-        return effectChain?.value(parameter, of: kind)
+        if let effectChain { return effectChain.value(parameter, of: kind) }
+        if kind == .voiceIsolation, parameter == "mix" { return isolationUnit?.mix }
+        return nil
     }
 
     // MARK: Recording
@@ -1434,10 +1452,10 @@ public final class RoutingEngine: @unchecked Sendable {
 
         // The same split `start` makes: a chain for everything except the one
         // case the dedicated isolation unit exists for.
-        let isolationOnly = kinds == [.voiceIsolation]
+        let isolationOnly = kinds == [.voiceIsolation] && plugins.isEmpty
         var chain: EffectChain?
         var unit: VoiceIsolationUnit?
-        if !kinds.isEmpty, !isolationOnly {
+        if !kinds.isEmpty || !plugins.isEmpty, !isolationOnly {
             chain = EffectChain(
                 kinds: kinds, plugins: plugins, sampleRate: rate, maximumFrames: frames)
             if chain == nil { lastIsolationError = "the processing chain could not be built" }

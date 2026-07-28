@@ -2414,6 +2414,30 @@ struct EffectStageTests {
         }
     }
 
+    /// The one stage whose latency is large enough to hear, asserted as a
+    /// number rather than as `>= 0`.
+    ///
+    /// This exists because the question "is the chain's latency zero or 56 ms?"
+    /// was open for a while, and the two sides of the argument were both
+    /// reading a real measurement — the probe reports 56.35 ms and a reading of
+    /// the chain reported nothing. Only one of them can be true of the same
+    /// build, so it is asserted here: whatever `AUSoundIsolation` says about
+    /// itself is what the chain must carry, because that is the number the tap
+    /// alignment delays by. A future macOS reporting zero is then a test
+    /// failure with the delay line to fix, rather than lyrics drifting a
+    /// twentieth of a second out of time with nobody able to say when it began.
+    @Test("the chain carries the isolation latency the unit reports")
+    func isolationLatencyReachesTheChain() throws {
+        let report = SoundIsolation.probe(sampleRate: 48000, blockFrames: 512, iterations: 40)
+        try #require(report.isAvailable, "AUSoundIsolation is not on this machine")
+        let chain = try #require(
+            EffectChain(kinds: [.voiceIsolation], sampleRate: 48000, maximumFrames: 512))
+        #expect(chain.latencyFrames == Int(report.latencySeconds * 48000))
+        // And it is a real delay rather than a rounding of nothing: the model
+        // works in blocks and cannot be free.
+        #expect(chain.latencyFrames > 0)
+    }
+
     /// All of them together, in the order the chain imposes rather than the
     /// order they were named.
     @Test("the whole set builds in signal order")
@@ -2457,6 +2481,59 @@ struct EffectStageTests {
         let shifted = try #require(
             EffectChain(kinds: [.pitch], sampleRate: 48000, maximumFrames: 512))
         #expect(shifted.latencyFrames > plain.latencyFrames)
+    }
+
+
+    /// The mix control on voice isolation, when isolation is the whole chain.
+    ///
+    /// Reported as doing nothing, which is exactly the shape of defect this
+    /// project keeps finding: the parameter is recognised, the setter runs, the
+    /// unit accepts the value and the sound does not change. `recognises` and
+    /// `set` both pass on a control that is wired to nothing, so neither is
+    /// evidence. The signal is.
+    ///
+    /// Fully wet against fully dry, on noise the model has every reason to
+    /// remove — if the two come back the same the control is decorative.
+    @Test("the isolation mix control changes the sound on its own")
+    func isolationMixIsAudible() throws {
+        func render(mix: Float) throws -> [Float] {
+            let chain = try #require(
+                EffectChain(kinds: [.voiceIsolation], sampleRate: 48000, maximumFrames: 1024))
+            chain.set("mix", of: .voiceIsolation, to: mix)
+            var tail: [Float] = []
+            var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+            // Well past the model's 56 ms of latency, so what is compared is
+            // processed signal rather than the silence it emits while filling.
+            for block in 0..<200 {
+                for index in 0..<1024 {
+                    state = state &* 6_364_136_223_846_793_005 &+ 1
+                    let value =
+                        Float(Int32(bitPattern: UInt32(truncatingIfNeeded: state >> 32)))
+                        / Float(Int32.max)
+                    chain.inputBuffer[index] = value * 0.2
+                }
+                guard chain.render(frames: 1024, sampleTime: Float64(block * 1024)) else {
+                    Issue.record("render failed")
+                    return []
+                }
+                if block >= 190 {
+                    for index in 0..<1024 { tail.append(chain.outputBuffer[index]) }
+                }
+            }
+            return tail
+        }
+
+        let wet = try render(mix: 100)
+        let dry = try render(mix: 0)
+        try #require(wet.count == dry.count, "one of the renders produced nothing")
+        func level(_ samples: [Float]) -> Float {
+            samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count)
+        }
+        let wetPower = level(wet)
+        let dryPower = level(dry)
+        // Noise is what the model exists to remove, so fully wet must be
+        // quieter than fully dry by a margin no rounding could produce.
+        #expect(dryPower > wetPower * 4, "wet \(wetPower) dry \(dryPower)")
     }
 
     /// Every knob the interface offers has to be one the chain recognises.

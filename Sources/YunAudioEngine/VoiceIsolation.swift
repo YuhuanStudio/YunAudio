@@ -134,6 +134,21 @@ final class VoiceIsolationUnit {
             kAudioUnitScope_Global, 0, percent, 0)
     }
 
+    /// What the unit is holding, rather than what it was last told.
+    ///
+    /// The distinction matters: a unit rebuilt on a route edit comes up at its
+    /// own default, and nothing but asking it can tell that apart from the
+    /// value somebody chose.
+    var mix: Float {
+        var value: AudioUnitParameterValue = 0
+        guard
+            AudioUnitGetParameter(
+                unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
+                kAudioUnitScope_Global, 0, &value) == noErr
+        else { return 0 }
+        return value
+    }
+
     /// Chooses the model. High quality is macOS 15+.
     func setHighQuality(_ isHighQuality: Bool) {
         AudioUnitSetParameter(

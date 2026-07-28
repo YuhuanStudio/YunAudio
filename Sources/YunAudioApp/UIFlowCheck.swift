@@ -1763,6 +1763,47 @@ enum UIFlowCheck {
             await settle(model, timeout: 12)
         }
 
+        // Isolation on its own, which the loop above skips and which is the one
+        // configuration that does not build a chain at all: a dedicated unit is
+        // used instead, because it carries the model choice a chain cannot
+        // express. The mix slider wrote only to the chain, so in the single
+        // arrangement where isolation is the entire point, moving it did
+        // nothing and the interface showed the new number.
+        if let mix = EffectKind.voiceIsolation.parameters.first(where: { $0.id == "mix" }) {
+            model.enabledEffects = [.voiceIsolation]
+            await settle(model, timeout: 14)
+            model.voiceIsolationMix = 62
+            await settle(model, timeout: 14)
+            let reached = model.renderedValue(of: mix, in: .voiceIsolation)
+            note(String(format: "isolation mix on its own: %.1f%%", reached ?? .nan))
+            check(
+                "the isolation mix reached the unit with no chain around it",
+                reached != nil && abs((reached ?? 0) - 62) < 0.5)
+
+            // And it got there without rebuilding anything, which is what makes
+            // it a knob somebody can move while listening rather than one that
+            // costs a second of silence per value the drag passes through.
+            //
+            // Sampled rather than compared once. A single reading afterwards
+            // proves nothing either way: the write is synchronous, so no time
+            // has passed and the counter has not moved, and a route that *did*
+            // restart would climb past the old value a moment later anyway.
+            // What only a restart can produce is the counter going backwards,
+            // because the cell it lives in is freed and made again.
+            var counts: [UInt64] = [model.cycleCountForDiagnostics]
+            for value in [70, 80, 90] as [Float] {
+                model.voiceIsolationMix = value
+                try? await Task.sleep(for: .milliseconds(120))
+                counts.append(model.cycleCountForDiagnostics)
+            }
+            let neverBackwards = zip(counts, counts.dropFirst()).allSatisfy { $0 <= $1 }
+            check("and did it without restarting the route", neverBackwards)
+            // And audio was actually flowing throughout, or "never went
+            // backwards" would be satisfied by a route that had stopped.
+            check("with audio flowing the whole time", counts.last! > counts.first!)
+            model.voiceIsolationMix = 100
+        }
+
         // Handed back exactly as it was found, since everything below this runs
         // against whatever chain is left in place.
         model.enabledEffects = chainBefore

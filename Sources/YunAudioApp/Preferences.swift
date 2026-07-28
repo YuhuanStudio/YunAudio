@@ -186,6 +186,16 @@ extension TapMuteBehavior {
 enum PreferencesStore {
     private static let key = "com.yuhuanstudio.yunaudio.preferences"
 
+    /// Whether anything has ever been saved.
+    ///
+    /// `load()` answers with defaults either way, which is right for reading a
+    /// setting and wrong for deciding whether somebody has made a choice at
+    /// all: a first launch and a launch where every value happens to equal its
+    /// default are indistinguishable from the outside.
+    static var hasStoredPreferences: Bool {
+        UserDefaults.standard.data(forKey: key) != nil
+    }
+
     static func load() -> Preferences {
         guard let data = UserDefaults.standard.data(forKey: key),
             let decoded = try? JSONDecoder().decode(Preferences.self, from: data)
