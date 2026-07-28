@@ -1489,7 +1489,7 @@ enum UIFlowCheck {
         check("routing survived every preset", model.isRunning)
         await pause(1.0)
 
-        print("\nwhat a scene actually changes")
+        section("what a scene actually changes")
         // The defect this section exists for. The four scenes carried a sample
         // rate, a buffer and one isolation flag, and deliberately left the
         // processing chain alone — so pressing "Noisy room" instead of "Voice
@@ -2578,7 +2578,7 @@ enum UIFlowCheck {
     /// happened to have something. A view cannot be asked what it is showing;
     /// the list it is built from can.
     private static func checkStatusPills(model: RouterModel) {
-        print("\nstatus pills")
+        section("status pills")
         let pills = StatusPills.pills(for: model)
         note(pills.map(\.id).joined(separator: " "))
         check("every pill carries a label", pills.allSatisfy { !$0.label.isEmpty })
