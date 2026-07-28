@@ -26,7 +26,7 @@ public enum SourceChannelMode: String, CaseIterable, Identifiable, Sendable {
 
 @Observable
 @MainActor
-final class RouterModel {
+final class RouterModel: ScriptTarget {
     // MARK: Devices
 
     private(set) var inputDevices: [AudioDevice] = []
@@ -3799,6 +3799,59 @@ final class RouterModel {
 
     func toggle() { isRunning ? stop() : start() }
 
+    // MARK: Scripting
+
+    /// What a script can read.
+    ///
+    /// One dictionary rather than a property each: a script that asks three
+    /// questions should get one consistent moment, not three moments a few
+    /// milliseconds apart. Plain values only — a script has to keep working
+    /// across versions, and handing it a model object would make every internal
+    /// rename somebody else's breaking change.
+    var scriptStatus: [String: Any] {
+        var status: [String: Any] = [
+            "running": isRunning,
+            "busy": isBusy,
+            "muted": isInputMuted,
+            "outputMuted": isOutputMuted,
+            "recording": isRecording,
+            "transcribing": isTranscribing,
+            "inputDecibels": Double(inputDecibels),
+            "outputDecibels": Double(outputDecibels),
+            "effects": enabledEffects.map(\.rawValue).sorted(),
+            "routes": activeRoutes.count,
+        ]
+        if let source = selectedSource {
+            status["source"] = source.name
+            status["sourceUID"] = source.uid
+        }
+        if let destination = selectedDestination {
+            status["destination"] = destination.name
+            status["destinationUID"] = destination.uid
+        }
+        if let quality = pathQuality {
+            status["sampleRate"] = quality.sampleRate
+            status["bufferFrames"] = Int(quality.bufferFrames)
+        }
+        if isRunning {
+            status["peak"] = Double(peakLevel)
+            status["loudness"] = analysis.shortTerm.isFinite ? analysis.shortTerm : -70
+        }
+        return status
+    }
+
+    var scriptPresetNames: [String] { allPresets.map { loc($0.name) } }
+    var scriptConfigNames: [String] { quickConfigs.map(\.name) }
+
+    /// Runs a script against this model.
+    ///
+    /// The host is made per run rather than kept: it holds nothing between
+    /// runs by design — one script must not be able to leave a global behind
+    /// that changes what the next one means — so there is nothing to keep.
+    func runScript(_ source: String) -> ScriptHost.Result {
+        ScriptHost(target: self).run(source)
+    }
+
     /// Carries out something another program asked for.
     ///
     /// - Returns: What happened, in a sentence, or nil when the command named
@@ -3838,6 +3891,14 @@ final class RouterModel {
                 ? configuration.name
                 : configuration.name + " — " + loc("missing") + " "
                     + describeMissing(outcome.missing)
+        case .script(let source):
+            // Reported the same way a scene is: what happened, in a sentence.
+            // A script that failed has to say so out loud — a button wired to
+            // one that has since broken must not look like it worked.
+            let result = runScript(source)
+            if let error = result.error { return loc("Script error:") + " " + error }
+            let said = result.log.joined(separator: " · ")
+            return said.isEmpty ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
         case .preset(let name):
             // Matched without case, because a URL somebody typed will not have
             // the capitals right and refusing over that is pedantry.

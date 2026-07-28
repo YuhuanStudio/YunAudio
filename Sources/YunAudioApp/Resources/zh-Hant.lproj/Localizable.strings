@@ -507,3 +507,8 @@
 "headset in call quality" = "耳機掉到通話音質";
 "something has its microphone open" = "有東西開著它的麥克風";
 "%@ is on Bluetooth and has dropped to telephone quality because %@. Bluetooth carries good sound one way or poor sound both ways, and nothing on macOS can change that. Keep the headset for listening and take the microphone from another device." = "%@ 走藍牙，而且因為 %@，已經掉到電話音質。藍牙要嘛單向好聲音、要嘛雙向爛聲音，macOS 沒有任何辦法改變這件事。把耳機留著聽，麥克風改用別的裝置。";
+"Run a script" = "執行腳本";
+"Script error:" = "腳本錯誤：";
+"Script ran." = "腳本執行完畢。";
+"The interpreter could not be started." = "直譯器無法啟動。";
+"The application is no longer there." = "應用程式已經不在了。";

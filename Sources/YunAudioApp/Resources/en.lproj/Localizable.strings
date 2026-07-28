@@ -507,3 +507,8 @@
 "headset in call quality" = "headset in call quality";
 "something has its microphone open" = "something has its microphone open";
 "%@ is on Bluetooth and has dropped to telephone quality because %@. Bluetooth carries good sound one way or poor sound both ways, and nothing on macOS can change that. Keep the headset for listening and take the microphone from another device." = "%@ is on Bluetooth and has dropped to telephone quality because %@. Bluetooth carries good sound one way or poor sound both ways, and nothing on macOS can change that. Keep the headset for listening and take the microphone from another device.";
+"Run a script" = "Run a script";
+"Script error:" = "Script error:";
+"Script ran." = "Script ran.";
+"The interpreter could not be started." = "The interpreter could not be started.";
+"The application is no longer there." = "The application is no longer there.";

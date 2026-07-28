@@ -1812,3 +1812,216 @@ struct RecordingApplicationTests {
         #expect(apps.first?.isRecording == false)
     }
 }
+
+/// The scripting interface.
+///
+/// Audio Hijack's JavaScript API is the feature every review of it singles out,
+/// and the open goal is that Loopback has no scripting, no AppleScript and no
+/// Shortcuts at all. JavaScriptCore ships with macOS, so the interpreter is
+/// free and the work is entirely the object model — which is a promise about
+/// compatibility, and a promise only ever checked by hand is not one.
+///
+/// Every case here runs real JavaScript through a real `JSContext` against a
+/// stub, so what is asserted is what somebody's script will actually meet.
+@MainActor
+@Suite("The scripting interface")
+struct ScriptingTests {
+
+    /// Records what was asked for, so a script can be checked by what it did
+    /// rather than by what it returned.
+    final class Target: ScriptTarget {
+        var performed: [RemoteCommand] = []
+        var known: Set<String> = ["Voice chat"]
+        var status: [String: Any] = ["running": false, "muted": false]
+
+        func perform(_ command: RemoteCommand) -> String? {
+            performed.append(command)
+            switch command {
+            case .preset(let name), .config(let name):
+                // Nil is how the model says "no such thing", and the script
+                // layer has to turn that into an error rather than a shrug.
+                return known.contains(name) ? "applied \(name)" : nil
+            default:
+                return "done"
+            }
+        }
+        var scriptStatus: [String: Any] { status }
+        var scriptPresetNames: [String] { ["Voice chat", "Recording"] }
+        var scriptConfigNames: [String] { ["Streaming"] }
+    }
+
+    private func host() -> (ScriptHost, Target) {
+        let target = Target()
+        return (ScriptHost(target: target), target)
+    }
+
+    @Test("a command reaches the application")
+    func commandsArrive() {
+        let (host, target) = self.host()
+        let result = host.run("yun.routing(true); yun.mute(false);")
+        #expect(result.isSuccess, "\(result.error ?? "")")
+        #expect(target.performed == [.routing(true), .mute(false)])
+    }
+
+    /// The three states the URL scheme has, for the same reason: a button with
+    /// no light has to be able to ask for a toggle.
+    @Test("no argument means toggle")
+    func absentArgumentToggles() {
+        let (host, target) = self.host()
+        _ = host.run("yun.mute(); yun.record(); yun.transcribe();")
+        #expect(target.performed == [.mute(nil), .record(nil), .transcribe(nil)])
+    }
+
+    /// A scene renamed since somebody wrote the script must stop the script,
+    /// not be skipped. Carrying on would leave the rest of it running against
+    /// an arrangement nobody chose.
+    @Test("a name the application does not have is an error, not a shrug")
+    func unknownNameThrows() {
+        let (host, target) = self.host()
+        let result = host.run("yun.preset('Gone'); yun.routing(true);")
+        #expect(!result.isSuccess)
+        #expect(result.error?.contains("Gone") == true)
+        // And nothing after it ran.
+        #expect(target.performed == [.preset("Gone")])
+    }
+
+    @Test("a name it does have comes back with what happened")
+    func knownNameSucceeds() {
+        // The target is bound rather than discarded: the host holds it weakly,
+        // so a test that lets it go is testing a host with nothing behind it.
+        let (host, target) = self.host()
+        _ = target
+        let result = host.run("yun.preset('Voice chat')")
+        #expect(result.isSuccess, "\(result.error ?? "")")
+        #expect(result.value == "applied Voice chat")
+    }
+
+    @Test("state is readable, and readable as one moment")
+    func statusIsReadable() {
+        let (host, target) = self.host()
+        target.status = ["running": true, "muted": false, "sampleRate": 48000]
+        let result = host.run("var s = yun.status(); s.running && s.sampleRate === 48000")
+        #expect(result.isSuccess, "\(result.error ?? "")")
+        #expect(result.value == "true")
+    }
+
+    @Test("the lists say what names exist rather than leaving them to be guessed")
+    func listsAreReadable() {
+        let (host, target) = self.host()
+        _ = target
+        let result = host.run("yun.presets().join(',') + '|' + yun.configs().join(',')")
+        #expect(result.value == "Voice chat,Recording|Streaming")
+    }
+
+    @Test("a script can say something, by either spelling")
+    func loggingWorks() {
+        let (host, target) = self.host()
+        _ = target
+        let result = host.run("yun.log('one'); console.log('two');")
+        #expect(result.log == ["one", "two"])
+    }
+
+    /// Syntax errors are a message, not a crash. A script is untrusted text and
+    /// the only correct answer to a bad one is a sentence.
+    @Test("a broken script comes back with a message")
+    func syntaxErrorIsReported() {
+        let (host, target) = self.host()
+        _ = target
+        let result = host.run("this is not javascript {{{")
+        #expect(!result.isSuccess)
+        #expect(result.error?.isEmpty == false)
+    }
+
+    @Test("a script that throws comes back with its own message")
+    func thrownErrorIsReported() {
+        let (host, target) = self.host()
+        _ = target
+        let result = host.run("throw new Error('nope')")
+        #expect(result.error?.contains("nope") == true)
+    }
+
+    /// The one that decides whether this feature can ship at all. The model
+    /// lives on the main actor, so a script with an endless loop would take the
+    /// interface with it — and nothing in JavaScriptCore's public Swift surface
+    /// can interrupt a loop that makes no function calls. The time limit is
+    /// declared by hand in YunAudioRT.h for exactly this, and this is the check
+    /// that says it is still there: if a future macOS drops it, this fails here
+    /// rather than hanging on somebody's machine.
+    @Test("an endless loop is stopped rather than hanging the application")
+    func runawayScriptIsStopped() {
+        let (host, target) = self.host()
+        _ = target
+        let began = Date()
+        let result = host.run("while (true) {}")
+        let elapsed = Date().timeIntervalSince(began)
+        #expect(!result.isSuccess, "an endless loop reported success")
+        // Generously bounded: the limit is two seconds and the check is that it
+        // returns at all, not that it returns punctually.
+        #expect(elapsed < 20, "took \(elapsed)s")
+    }
+
+    /// What a script cannot do is as much of the design as what it can. The
+    /// context starts empty — there is nothing to escape from rather than a
+    /// sandbox somebody has to maintain — and this says so in the four ways
+    /// anybody would try.
+    @Test("there is no filesystem, no network, no timers and no require")
+    func nothingElseIsReachable() {
+        let (host, target) = self.host()
+        _ = target
+        for global in ["require", "fetch", "XMLHttpRequest", "setTimeout", "process"] {
+            let result = host.run("typeof \(global)")
+            #expect(result.value == "undefined", "\(global) is reachable")
+        }
+    }
+
+    /// A run leaves nothing behind for the next one, or one script could set a
+    /// global that changes what the next one means.
+    @Test("one run cannot reach into the next")
+    func runsAreIsolated() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.run("var leftBehind = 42")
+        let result = host.run("typeof leftBehind")
+        #expect(result.value == "undefined")
+    }
+}
+
+/// A script as a URL, which is how anything outside this application sends one.
+///
+/// The round trip is the compatibility promise: somebody wires a Stream Deck
+/// key to a URL once, and it has to still mean the same script a year later.
+@Suite("Sending a script from outside")
+struct ScriptURLTests {
+
+    @Test("a script survives the round trip through a URL")
+    func roundTrip() throws {
+        let sources = [
+            "yun.mute(true)",
+            "yun.preset('Voice chat'); yun.routing(true)",
+            "var s = yun.status(); yun.log(s.running ? 'on' : 'off')",
+            // The characters a URL would otherwise read as structure.
+            "yun.log('a?b#c&d=e')",
+            "if (yun.status().peak > 0.5) { yun.mute(true); }",
+        ]
+        for source in sources {
+            let url = try #require(URL(string: RemoteCommand.script(source).url.absoluteString))
+            #expect(RemoteCommand.parse(url) == .script(source), "\(source)")
+        }
+    }
+
+    /// An empty script is not a command. Answering "ran nothing successfully"
+    /// to a malformed URL is how a typo becomes a silent no-op.
+    @Test("an empty script is not a command")
+    func emptyIsRejected() {
+        #expect(RemoteCommand.parse(URL(string: "yunaudio://script/")!) == nil)
+        #expect(RemoteCommand.parse(URL(string: "yunaudio://script")!) == nil)
+    }
+
+    @Test("both spellings of the noun are accepted")
+    func bothNouns() {
+        let one = RemoteCommand.parse(URL(string: "yunaudio://script/yun.mute()")!)
+        let other = RemoteCommand.parse(URL(string: "yunaudio://run/yun.mute()")!)
+        #expect(one == .script("yun.mute()"))
+        #expect(other == .script("yun.mute()"))
+    }
+}

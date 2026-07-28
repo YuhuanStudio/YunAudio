@@ -232,3 +232,28 @@ uint64_t yun_rt_tripwire_violations(void);
 #endif
 
 #endif /* YUN_AUDIO_RT_H */
+
+// MARK: - JavaScriptCore's execution time limit
+
+// Declared here because JavaScriptCore does not export these to Swift. They
+// live in `JSContextRefPrivate.h`, which is not in the public module, and the
+// symbols are in the shipping dylib — so the declaration is all that is
+// missing.
+//
+// It is worth the awkwardness because there is no other way to stop a script.
+// A scripting interface without a time limit is one `while (true)` away from
+// an application that has to be force-quit, and the model this talks to lives
+// on the main actor. Nothing else in JavaScriptCore's public surface can
+// interrupt a loop that makes no function calls.
+//
+// Asserted rather than assumed: there is a test that runs an endless loop and
+// requires it to come back. If a future macOS drops these, that test fails
+// here rather than the interface hanging on somebody's machine.
+
+#include <JavaScriptCore/JavaScriptCore.h>
+
+typedef bool (*YunJSShouldTerminate)(JSContextRef ctx, void *context);
+
+extern void JSContextGroupSetExecutionTimeLimit(
+    JSContextGroupRef group, double limit, YunJSShouldTerminate callback, void *context);
+extern void JSContextGroupClearExecutionTimeLimit(JSContextGroupRef group);

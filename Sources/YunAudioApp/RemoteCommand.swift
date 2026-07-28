@@ -25,6 +25,10 @@ enum RemoteCommand: Equatable, Sendable {
     case preset(String)
     /// A saved whole-machine arrangement, likewise.
     case config(String)
+    /// A script, as source. The one command that is not a fixed verb, and the
+    /// reason the vocabulary can stay small: anything a script can express does
+    /// not need its own noun here.
+    case script(String)
 
     /// The scheme this application answers to.
     static let scheme = "yunaudio"
@@ -57,6 +61,11 @@ enum RemoteCommand: Equatable, Sendable {
         case "config", "setup":
             let name = rest.joined(separator: "/")
             return name.isEmpty ? nil : .config(name)
+        case "script", "run":
+            // Percent-decoded by `URL` already; what arrives is the source.
+            let source = url.path.hasPrefix("/") ? String(url.path.dropFirst()) : url.path
+            guard !source.isEmpty else { return nil }
+            return .script(source)
         case "preset", "scene":
             // Percent-decoded and joined, because a scene can be called
             // "Voice call" and a URL cannot carry the space raw.
@@ -80,6 +89,7 @@ enum RemoteCommand: Equatable, Sendable {
         case .transcribe(let state): Self.url("transcribe", state)
         case .config(let name): Self.url("config", name)
         case .preset(let name): Self.url("preset", name)
+        case .script(let source): Self.url("script", source)
         }
     }
 
@@ -105,6 +115,7 @@ enum RemoteCommand: Equatable, Sendable {
         case .transcribe: loc("Transcribe")
         case .config(let name): name
         case .preset(let name): loc(name)
+        case .script: loc("Run a script")
         }
     }
 

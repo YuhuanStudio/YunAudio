@@ -31,7 +31,13 @@ let package = Package(
 
         .executableTarget(
             name: "YunAudioApp",
-            dependencies: ["YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer"],
+            dependencies: [
+                "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
+                // For JavaScriptCore's execution time limit, which is declared
+                // in YunAudioRT.h because JavaScriptCore does not export it to
+                // Swift. See the note there.
+                "YunAudioRT",
+            ],
             resources: [.process("Resources")]),
 
         .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),

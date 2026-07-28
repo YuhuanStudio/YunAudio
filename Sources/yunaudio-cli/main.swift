@@ -1758,6 +1758,27 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
     exit(0)
 }
 
+/// Builds the URL for a script, so somebody can see what to send without
+/// having to work out the percent-encoding by hand.
+///
+/// Printed rather than opened: `open` would hand it to the running application,
+/// and a command that changes somebody's audio setup should be one they typed
+/// on purpose.
+if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "script" {
+    let source = CommandLine.arguments[2]
+    var allowed = CharacterSet.urlPathAllowed
+    allowed.remove(charactersIn: "?#")
+    let encoded = source.addingPercentEncoding(withAllowedCharacters: allowed) ?? source
+    let url = "yunaudio://script/" + encoded
+    print(url)
+    print("")
+    // Single-quoted for the shell, with any single quote in the source escaped
+    // the way `sh` requires — a script that uses `'` for its strings is the
+    // ordinary case, and a line somebody copies has to work when they paste it.
+    print("  open '" + url.replacingOccurrences(of: "'", with: "'\\''") + "'")
+    exit(0)
+}
+
 /// Who has the microphone open, and whether a Bluetooth output has paid for it.
 ///
 /// Read-only. Answers the question macOS shows an orange dot for and never
