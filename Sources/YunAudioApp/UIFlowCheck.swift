@@ -2641,8 +2641,338 @@ enum UIFlowCheck {
                 && model.bufferFrames == originalBuffer)
 
         await checkMIDI(model: model)
+        await checkScoring(model: model)
 
         summarise()
+    }
+
+    /// Scoring the singing, and the key of music that is genuinely playing.
+    ///
+    /// Two things only this can show. The first is that the melody file, the
+    /// per-source pitch trackers and the scorer are joined up — the scorer is a
+    /// pure function and is asserted to death in the unit tests, but "the file
+    /// was found and the tap reached it" is not something a unit test can say.
+    ///
+    /// The second is the one this project had written down as unfinished: the
+    /// key detector had only ever been exercised against synthesised chromas,
+    /// because the last time anybody ran the check Spotify was paused. So this
+    /// makes its own music — a chord progression it built, in a key it chose —
+    /// plays it through a real process, captures that process through the
+    /// application's own tap, and asks what key it is in. Nothing is assumed
+    /// about what happens to be installed or playing.
+    private static func checkScoring(model: RouterModel) async {
+        section("scoring the singing")
+
+        // The file half first, because it needs no devices. A hand-built MIDI
+        // file so the assertion is against bytes rather than against something
+        // downloaded — a bass line under a melody, so the reduction has to
+        // choose.
+        guard let directory = RouterModel.lyricsDirectory else {
+            note("no application support directory — skipped")
+            return
+        }
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        let words = directory.appendingPathComponent("Flow Check - Scoring.lrc")
+        let tune = directory.appendingPathComponent("Flow Check - Scoring.mid")
+        try? "[00:00.00]first\n[00:01.00]second".write(
+            to: words, atomically: true, encoding: .utf8)
+        try? melodyFile().write(to: tune)
+        defer {
+            try? FileManager.default.removeItem(at: words)
+            try? FileManager.default.removeItem(at: tune)
+        }
+
+        let track = NowPlaying.Track(
+            application: "Test", title: "Scoring", artist: "Flow Check", album: "",
+            position: 0, duration: 100, isPlaying: true)
+        let melody = RouterModel.findMelody(for: track)
+        check("the tune was found beside the words", melody != nil)
+        if let melody {
+            note(
+                "\(melody.notes.count) notes, \(melody.melody.count) in the line, "
+                    + String(format: "%.1f s", melody.duration))
+            // The bass note is in the file and must not be in the tune.
+            check(
+                "the accompaniment is not the tune", melody.melody.allSatisfy { $0.midi > 48 })
+            check("and the tune is monophonic", melody.melody.count == 4)
+            let reference = melody.samples(every: KaraokeScore.referenceInterval)
+            check("it samples into a reference series", reference.count > 30)
+            // Sung exactly, against the real reference: a hundred, or the
+            // arithmetic and the file disagree about time.
+            let perfect = reference.map {
+                PitchSample(time: $0.time, midi: $0.midi)
+            }
+            let score = KaraokeScore.score(sung: perfect, reference: reference)
+            note(
+                String(
+                    format: "singing the file back at itself scores %.0f%%", score.percentage))
+            check("singing it exactly is a hundred", score.percentage > 99.9)
+            check("and there is enough of it to judge", score.isMeaningful)
+        }
+
+        // Now the live half. Routing has to be up for the per-source rings to
+        // exist at all.
+        if !model.isRunning {
+            model.start()
+            await waitUntil("routing came back up", { model.isRunning }, timeout: 10)
+        }
+        guard model.isRunning else {
+            note("routing would not start — the live half was not exercised")
+            return
+        }
+
+        model.isSingingVisible = true
+        model.isScoringSinging = true
+        await pause(1.0)
+        check("scoring started", model.isScoringSinging)
+        if let problem = model.singingError { note(problem) }
+        check("one singer per source", model.singers.count == model.sourceGroups.count)
+        note(
+            "singers: "
+                + model.singers.map(\.name).joined(separator: ", ")
+                + " on \(model.engineTranscriptTaps) tap(s)")
+        // The structural claim: two microphones is two answers, not one
+        // averaged. With one source it cannot be shown, and saying so is the
+        // honest result.
+        if model.singers.count > 1 {
+            check(
+                "each singer is a different source",
+                Set(model.singers.map(\.id)).count == model.singers.count)
+        } else {
+            note("only one source on this machine — a duet was not exercised")
+        }
+
+        // One set of rings, two consumers. Transcription and scoring both want
+        // this source's audio on its own, and a ring is single-consumer: two
+        // drains would each get half of it and neither would say so.
+        if model.transcriptionUnavailableReason == nil {
+            model.startTranscribing()
+            await pause(1.0)
+            check(
+                "transcribing alongside it did not take the taps away", model.isScoringSinging)
+            check(
+                "and there is still one tap per source",
+                model.engineTranscriptTaps == model.sourceGroups.count)
+            check("the singers survived", model.singers.count == model.sourceGroups.count)
+            model.stopTranscribing()
+            await pause(0.5)
+            check("stopping the transcript left the scoring listening", model.isScoringSinging)
+            check("and its taps open", model.engineTranscriptTaps > 0)
+        } else {
+            note("transcription unavailable here — sharing the taps was not exercised")
+        }
+
+        // A tune it has never seen cannot be scored, and that is a different
+        // fact from nought per cent.
+        check(
+            "with no tune loaded nothing is claimed",
+            model.melody != nil || model.singers.allSatisfy { !$0.score.isMeaningful })
+
+        model.isScoringSinging = false
+        await pause(0.3)
+        check("switching it off clears the singers", model.singers.isEmpty)
+
+        // The key of real music. This is the part the project had written down
+        // as unverified.
+        section("the key of music that is actually playing")
+        let tonic = 5  // F, chosen so an always-C answer is caught
+        let wave = URL(fileURLWithPath: "/tmp/yunaudio-key-check.wav")
+        guard (try? progressionWave(tonic: tonic).write(to: wave)) != nil else {
+            note("could not write the test audio — skipped")
+            model.isSingingVisible = false
+            return
+        }
+        defer { try? FileManager.default.removeItem(at: wave) }
+
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = [wave.path]
+        guard (try? player.run()) != nil else {
+            note("afplay would not start — skipped")
+            model.isSingingVisible = false
+            return
+        }
+        defer { if player.isRunning { player.terminate() } }
+        await pause(1.0)
+
+        // Captured through the application's own process tap, which is the
+        // path a person's music takes. Nothing acoustic: a microphone hearing
+        // the speakers would be measuring the room.
+        model.refreshApps()
+        let captured = model.availableApps.first {
+            $0.name.localizedCaseInsensitiveContains("afplay")
+        }
+        guard let captured else {
+            note("afplay did not appear as a tappable process — skipped")
+            model.isSingingVisible = false
+            return
+        }
+        let alreadyCaptured = model.capturedAppBundleIDs
+        model.capturedAppBundleIDs.insert(captured.bundleID)
+        await waitUntil(
+            "the player was captured", { model.isRunning && !model.isBusy }, timeout: 10)
+        note("capturing \(captured.name) — \(model.activeRoutes.count) route(s)")
+
+        // Started over, so the chroma is of the music and not of whatever was
+        // in the room a moment ago.
+        model.isSingingVisible = false
+        model.isSingingVisible = true
+        await pause(8.0)
+
+        if let key = model.songKey {
+            note(
+                String(
+                    format: "played F major, heard %@ at %.0f%% confidence", key.name,
+                    key.confidence * 100))
+            check(
+                "the key of real playing music is the key it was built in",
+                key.pitchClass == tonic && !key.isMinor)
+            check("and it is not reported as a guess", key.confidence > 0.15)
+            // The suggested transpose needs a singer as well as a song, and
+            // there is nobody here — but it must be a number or nothing, never
+            // nonsense.
+            if let shift = model.suggestedShift {
+                note("suggested shift \(shift) semitones")
+                check("no suggestion moves it more than half an octave", abs(shift) <= 6)
+            } else {
+                note("nobody sang, so there is nothing to move it towards")
+            }
+        } else {
+            check("real playing music produced a key at all", false)
+            note("the analysis tap saw nothing musical — check the capture reached the bus")
+        }
+
+        // Two sources are on the bus now — the microphone and the player — so
+        // this is where the duet's mechanism can be exercised. Not two people:
+        // there is one microphone on this machine and no way to conjure a
+        // second. What is checked is the part that was actually built, which is
+        // that each source gets its own pitch track keyed on its own ring
+        // rather than one tracker over the mix.
+        if model.sourceGroups.count > 1 {
+            model.isScoringSinging = true
+            await pause(1.5)
+            check("a second source is a second singer", model.singers.count > 1)
+            check(
+                "and they are different sources",
+                Set(model.singers.map(\.id)).count == model.singers.count)
+            note(
+                "singers: "
+                    + model.singers.map { "\($0.name) \($0.note ?? "—")" }
+                    .joined(separator: ", "))
+            model.isScoringSinging = false
+        } else {
+            note("the capture did not become a second source — the duet was not exercised")
+        }
+
+        model.capturedAppBundleIDs = alreadyCaptured
+        model.isSingingVisible = false
+        if player.isRunning { player.terminate() }
+        await waitUntil("the capture was released", { !model.isBusy }, timeout: 10)
+    }
+
+    /// A bass line under a four-note melody, as a Standard MIDI File.
+    ///
+    /// Built here rather than shipped as a fixture so that what the parser is
+    /// asserted against is bytes somebody can read in this file.
+    private static func melodyFile() -> Data {
+        func variableLength(_ value: Int) -> [UInt8] {
+            var buffer = [UInt8(value & 0x7F)]
+            var rest = value >> 7
+            while rest > 0 {
+                buffer.insert(UInt8(rest & 0x7F | 0x80), at: 0)
+                rest >>= 7
+            }
+            return buffer
+        }
+        func big32(_ value: Int) -> [UInt8] {
+            [
+                UInt8(value >> 24 & 0xFF), UInt8(value >> 16 & 0xFF),
+                UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF),
+            ]
+        }
+        func big16(_ value: Int) -> [UInt8] {
+            [UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
+        }
+        func chunk(_ events: [(Int, [UInt8])]) -> [UInt8] {
+            var body: [UInt8] = []
+            for (delta, bytes) in events { body += variableLength(delta) + bytes }
+            body += [0x00, 0xFF, 0x2F, 0x00]
+            return Array("MTrk".utf8) + big32(body.count) + body
+        }
+        // 480 ticks a quarter at the default 120 bpm: half a second a note.
+        let bass = chunk([
+            (0, [0x90, 36, 100]), (1920, [0x80, 36, 0]),
+        ])
+        let line = chunk(
+            [
+                (0, [0x90, 67, 100]), (480, [0x80, 67, 0]),
+                (0, [0x90, 69, 100]), (480, [0x80, 69, 0]),
+                (0, [0x90, 71, 100]), (480, [0x80, 71, 0]),
+                (0, [0x90, 72, 100]), (480, [0x80, 72, 0]),
+            ])
+        var bytes = Array("MThd".utf8) + big32(6) + big16(1) + big16(2) + big16(480)
+        bytes += bass + line
+        return Data(bytes)
+    }
+
+    /// I – IV – V – I in a chosen key, as a 16-bit WAV somebody can play.
+    ///
+    /// Pure tones voiced from MIDI 72 upwards. The union of those three chords
+    /// is the whole diatonic scale and the tonic triad appears twice, which is
+    /// the shape the key profiles are built to find. Voiced up there rather
+    /// than in a bass singer's range because a 2048-point transform at 48 kHz
+    /// is 23.4 Hz a bin and a semitone at 130 Hz is 7.8 — three notes to a bin,
+    /// and the answer would be about the resolution rather than about the key.
+    private static func progressionWave(tonic: Int, repeats: Int = 6) -> Data {
+        let rate = 44100.0
+        var samples: [Int16] = []
+        let chords = [0, 5, 7, 0].map { degree in
+            [degree, degree + 4, degree + 7, degree + 12].map { 72 + tonic + $0 }
+        }
+        var frame = 0
+        for _ in 0..<repeats {
+            for chord in chords {
+                for _ in 0..<Int(rate) {
+                    let time = Double(frame) / rate
+                    var value = 0.0
+                    for note in chord {
+                        value += sin(2 * .pi * 440 * pow(2, (Double(note) - 69) / 12) * time)
+                    }
+                    samples.append(Int16(value / Double(chord.count) * 12000))
+                    frame += 1
+                }
+            }
+        }
+
+        var bytes: [UInt8] = []
+        func little32(_ value: Int) {
+            bytes += [
+                UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF), UInt8(value >> 16 & 0xFF),
+                UInt8(value >> 24 & 0xFF),
+            ]
+        }
+        func little16(_ value: Int) {
+            bytes += [UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF)]
+        }
+        let dataBytes = samples.count * 2
+        bytes += Array("RIFF".utf8)
+        little32(36 + dataBytes)
+        bytes += Array("WAVEfmt ".utf8)
+        little32(16)
+        little16(1)  // PCM
+        little16(1)  // mono
+        little32(Int(rate))
+        little32(Int(rate) * 2)
+        little16(2)
+        little16(16)
+        bytes += Array("data".utf8)
+        little32(dataBytes)
+        for sample in samples {
+            let raw = UInt16(bitPattern: sample)
+            bytes += [UInt8(raw & 0xFF), UInt8(raw >> 8)]
+        }
+        return Data(bytes)
     }
 
     /// MIDI learn, both halves.

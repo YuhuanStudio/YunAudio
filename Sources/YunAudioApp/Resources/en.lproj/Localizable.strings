@@ -481,3 +481,9 @@
 "a guess" = "a guess";
 "Move it %+d" = "Move it %+d";
 "Sing for a moment and it will work out how far to move it." = "Sing for a moment and it will work out how far to move it.";
+"Score the singing" = "Score the singing";
+"Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name.";
+"No tune for this one, so there is nothing to score against — the note below is still live." = "No tune for this one, so there is nothing to score against — the note below is still live.";
+"A little flat — about %.0f cents under." = "A little flat — about %.0f cents under.";
+"A little sharp — about %.0f cents over." = "A little sharp — about %.0f cents over.";
+"Start routing before it can score you." = "Start routing before it can score you.";

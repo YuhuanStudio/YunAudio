@@ -481,3 +481,9 @@
 "a guess" = "推測";
 "Move it %+d" = "移調 %+d";
 "Sing for a moment and it will work out how far to move it." = "先唱一下，它會算出要移多少。";
+"Score the singing" = "幫唱的打分數";
+"Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "每支麥克風分開聽，所以兩個人唱就是兩份分數，不是一份。旋律來自放在 .lrc 旁邊、同名的 .mid。";
+"No tune for this one, so there is nothing to score against — the note below is still live." = "這首沒有旋律檔，所以沒有東西可以對照著打分 —— 下面的音高還是即時的。";
+"A little flat — about %.0f cents under." = "有點低 —— 大約低了 %.0f 音分。";
+"A little sharp — about %.0f cents over." = "有點高 —— 大約高了 %.0f 音分。";
+"Start routing before it can score you." = "要先開始路由才能幫你打分數。";
