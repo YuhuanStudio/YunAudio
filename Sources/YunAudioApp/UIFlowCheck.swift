@@ -1518,6 +1518,103 @@ enum UIFlowCheck {
         }
         check("routing survived the whole chain", model.isRunning)
 
+        section("processing chain swapped live")
+        // The claim being tested is that changing the chain no longer restarts
+        // the route. Measured before it was made true: one stage cost about
+        // 880 ms inside the engine, 645 of it in `AudioDeviceStart`, and
+        // seconds end to end — seconds of silence for one switch.
+        //
+        // "Still running" is not enough to show it, because a restart also ends
+        // with the route running. The witness is the IO cycle counter: it lives
+        // in the RCU cell, which a live swap keeps and a restart frees and
+        // makes again. So a restart shows up as the counter going backwards,
+        // and audio actually flowing through the new graph shows up as it going
+        // forwards. Both are asserted for every one of the eleven stages, on
+        // and off.
+        let chainBefore = model.enabledEffects
+        model.enabledEffects = []
+        await waitUntil("the chain is empty to start from", { !model.isBusy }, timeout: 12)
+
+        var restartedOn: [String] = []
+        var stalledOn: [String] = []
+        var missingFrom: [String] = []
+        var stoppedOn: [String] = []
+        let swapsBegan = Date()
+        for kind in EffectKind.allCases {
+            for wanted in [true, false] {
+                let cyclesBefore = model.cycleCountForDiagnostics
+                model.setEffect(kind, enabled: wanted)
+                await settle(model, timeout: 12)
+                let cyclesAfter = model.cycleCountForDiagnostics
+                let label = "\(kind.rawValue) \(wanted ? "on" : "off")"
+                if !model.isRunning { stoppedOn.append(label) }
+                // Fewer cycles than before the change means the counter started
+                // again, which means the cell did, which means a restart.
+                if cyclesAfter < cyclesBefore { restartedOn.append(label) }
+                // And the same count means nothing is pulling audio at all.
+                if cyclesAfter <= cyclesBefore { stalledOn.append(label) }
+                if wanted, !model.activeEffectStages.contains(kind) {
+                    missingFrom.append(label)
+                }
+                if !wanted, model.activeEffectStages.contains(kind) {
+                    missingFrom.append(label)
+                }
+            }
+        }
+        let swapSeconds = Date().timeIntervalSince(swapsBegan)
+        note(
+            String(
+                format: "%.2fs to switch all %d stages on and off again",
+                swapSeconds, EffectKind.allCases.count))
+        check("the route never stopped", stoppedOn.isEmpty)
+        check(
+            "and never restarted: the cycle counter never went backwards", restartedOn.isEmpty)
+        check("audio kept flowing across every change", stalledOn.isEmpty)
+        check("the chain that ran was the one asked for", missingFrom.isEmpty)
+        if !restartedOn.isEmpty { note("restarted on: " + restartedOn.joined(separator: ", ")) }
+        if !missingFrom.isEmpty {
+            note("wrong chain on: " + missingFrom.joined(separator: ", "))
+        }
+
+        // A knob moved off its default, so that what is asserted afterwards is
+        // the stored position surviving the swap rather than the default
+        // happening to match it. Read back off the unit rather than off the
+        // model: the model's copy survives either way, which is precisely why
+        // knobs reverting on every rebuild went unnoticed for so long.
+        if let threshold = EffectKind.gate.parameters.first(where: { $0.id == "threshold" }) {
+            model.setEffect(.gate, enabled: true)
+            await settle(model, timeout: 12)
+            model.setValue(-38, of: threshold, in: .gate)
+            let set = model.renderedValue(of: threshold, in: .gate)
+            check(
+                "the gate's threshold reached the unit",
+                set != nil && abs((set ?? 0) + 38) < 0.5)
+
+            // Another stage beside it rebuilds the whole chain, so the gate is
+            // a new unit at its own default of −45 dB unless the stored value
+            // was pushed back in.
+            model.setEffect(.compressor, enabled: true)
+            await settle(model, timeout: 12)
+            let kept = model.renderedValue(of: threshold, in: .gate)
+            note(
+                String(
+                    format: "gate threshold across the swap: %.1f dB, default %.1f dB",
+                    kept ?? .nan, threshold.defaultValue))
+            check(
+                "the knob position survived the swap",
+                kept != nil && abs((kept ?? 0) + 38) < 0.5)
+            model.setValue(threshold.defaultValue, of: threshold, in: .gate)
+            model.setEffect(.compressor, enabled: false)
+            model.setEffect(.gate, enabled: false)
+            await settle(model, timeout: 12)
+        }
+
+        // Handed back exactly as it was found, since everything below this runs
+        // against whatever chain is left in place.
+        model.enabledEffects = chainBefore
+        await waitUntil("the chain came back", { !model.isBusy }, timeout: 14)
+        check("routing survived every swap", model.isRunning)
+
         section("patching")
         let sourcePorts = model.canvasSources
         let destinationPorts = model.canvasDestinations
@@ -2458,6 +2555,20 @@ enum UIFlowCheck {
             await pause(0.05)
         }
         check(description, condition())
+    }
+
+    /// Waits for engine work to unwind, asserting nothing.
+    ///
+    /// `waitUntil` records a check, which is right when the waiting is itself
+    /// the claim. Inside a loop that switches twenty-two things it would be
+    /// twenty-two lines of noise around the four assertions that matter — and
+    /// it is also the timing loop, so it polls tightly enough not to be most of
+    /// what a fast change appears to cost.
+    private static func settle(_ model: RouterModel, timeout: TimeInterval) async {
+        let deadline = Date().addingTimeInterval(inWantedSection ? timeout : min(timeout, 6))
+        while Date() < deadline, model.isBusy {
+            await pause(0.01)
+        }
     }
 
     /// The application list, checked against the HAL rather than against
