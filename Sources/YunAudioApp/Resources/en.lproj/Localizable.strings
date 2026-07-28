@@ -446,3 +446,8 @@
 "Flat. These are the band centres Razer's own software uses." = "Flat. These are the band centres Razer's own software uses.";
 "%d band(s) moved." = "%d band(s) moved.";
 "Flatten" = "Flatten";
+"Sing" = "Sing";
+"Play something in Music or Spotify." = "Play something in Music or Spotify.";
+"Neither Music nor Spotify is installed." = "Neither Music nor Spotify is installed.";
+"No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
+"You are singing" = "You are singing";

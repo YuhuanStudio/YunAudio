@@ -230,6 +230,106 @@ final class RouterModel {
         return one == other
     }
 
+    // MARK: Singing
+
+    /// What a music player is playing right now, when the panel is open.
+    private(set) var nowPlaying: NowPlaying.Track?
+    /// Lyrics for it, when a file was found.
+    private(set) var lyrics: Lyrics?
+    /// Which line is being sung, and how far through it.
+    private(set) var lyricLine: Int?
+    private(set) var lyricProgress: Double = 0
+    /// Set while somebody is looking at the lyrics, so nothing is asked of the
+    /// music players when nobody is.
+    var isSingingVisible = false {
+        didSet {
+            guard oldValue != isSingingVisible else { return }
+            if isSingingVisible { refreshNowPlaying() } else { clearSinging() }
+        }
+    }
+
+    /// The note the microphone is hearing, or nil when there is no pitch to
+    /// find. The tracker has been here since it was written; this is the first
+    /// thing that gave it a reason to be looked at.
+    var heardNote: String? { PitchTracker.noteName(analysis.pitchHertz) }
+
+    private func clearSinging() {
+        nowPlaying = nil
+        lyrics = nil
+        lyricLine = nil
+        lyricProgress = 0
+    }
+
+    /// Where lyrics are read from.
+    static var lyricsDirectory: URL? {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("YunAudio/Lyrics", isDirectory: true)
+    }
+
+    /// Asks the players what is playing, and finds words for it.
+    ///
+    /// Cheap enough to do on the interface's own timer only because the panel
+    /// has to be open: an Apple event is a process hop each way, and doing it
+    /// while nobody is looking would be paying for a feature nobody asked for.
+    func refreshNowPlaying() {
+        guard isSingingVisible else { return }
+        let track = NowPlaying.current()
+        if track?.title != nowPlaying?.title || track?.artist != nowPlaying?.artist {
+            lyrics = track.flatMap(Self.findLyrics)
+        }
+        nowPlaying = track
+
+        guard let track, let lyrics else {
+            lyricLine = nil
+            lyricProgress = 0
+            return
+        }
+        lyricLine = lyrics.index(at: track.position)
+        lyricProgress = lyrics.progress(at: track.position)
+    }
+
+    /// Finds an `.lrc` for a track by name.
+    ///
+    /// Matched loosely on purpose. A file somebody downloaded is called
+    /// whatever the person who made it called it — "Artist - Title.lrc",
+    /// "Title.lrc", with or without accents — and refusing to find it because
+    /// of a hyphen would make the feature useless in exactly the case it exists
+    /// for.
+    static func findLyrics(for track: NowPlaying.Track) -> Lyrics? {
+        guard let directory = lyricsDirectory,
+            let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else { return nil }
+        let wanted = normalised(track.searchKey)
+        let title = normalised(track.title)
+
+        let candidates = names.filter { $0.lowercased().hasSuffix(".lrc") }
+        // Both names present is a better match than the title alone, so it is
+        // preferred rather than taking whatever the directory listed first.
+        let best =
+            candidates.first { normalised($0).contains(wanted) }
+            ?? candidates.first {
+                let file = normalised($0)
+                return file.contains(title) && file.contains(normalised(track.artist))
+            }
+            ?? candidates.first { normalised($0).contains(title) }
+        guard let best,
+            let text = try? String(
+                contentsOf: directory.appendingPathComponent(best), encoding: .utf8)
+        else { return nil }
+        return Lyrics.parse(text)
+    }
+
+    /// Lower case, no accents, letters and digits only — so "Björk – Jóga.lrc"
+    /// matches "Bjork Joga".
+    static func normalised(_ text: String) -> String {
+        text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+            .unicodeScalars
+            .filter { CharacterSet.alphanumerics.contains($0) }
+            .map(String.init)
+            .joined()
+    }
+
     // MARK: Buses
 
     /// One of the mixes a source can be sent to.
@@ -2846,6 +2946,7 @@ final class RouterModel {
             analysis = analyser.reading()
         }
         if isTranscribing { pumpTranscription() }
+        if isSingingVisible { refreshNowPlaying() }
         refreshGainReduction()
         refreshDucking()
         if isAutoLevelling { stepAutoLevel() }
@@ -3442,6 +3543,10 @@ final class RouterModel {
         if isAnalysisVisible {
             wanted.formUnion([.loudness, .spectrum, .classification, .pitch])
         }
+        // Singing needs the pitch and nothing else — no FFT, no sound model.
+        // The lazy needs are the reason a lyrics panel does not cost what the
+        // analysis panel costs.
+        if isSingingVisible { wanted.formUnion([.pitch]) }
         if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
         if isDucking { wanted.formUnion([.classification]) }
 

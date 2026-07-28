@@ -4313,3 +4313,108 @@ struct ParametricEQTests {
         #expect(packed.allSatisfy { $0.isFinite })
     }
 }
+
+// MARK: - Lyrics
+
+/// The `.lrc` format is loose in practice and the looseness is the work. Every
+/// case here came from a real file: three-digit fractions, one line carrying
+/// several stamps, tags mixed in with timings, and files with no timings at all.
+@Suite("Lyrics")
+struct LyricsTests {
+
+    private let sample = """
+        [ti:Test Song]
+        [ar:Somebody]
+        [offset:-500]
+        [00:12.50]The first line
+        [00:17.20][01:05.44]A line that repeats
+        [01:30.125]With three digits
+        Not a lyric line at all
+        """
+
+    @Test("it reads the tags and the timings")
+    func parses() throws {
+        let lyrics = try #require(Lyrics.parse(sample))
+        #expect(lyrics.title == "Test Song")
+        #expect(lyrics.artist == "Somebody")
+        // Milliseconds in the file, seconds in the structure.
+        #expect(abs(lyrics.offset + 0.5) < 0.0001)
+        // Four entries from three lines: the repeated line carries two stamps,
+        // which is how a chorus is written without repeating the words.
+        #expect(lyrics.lines.count == 4)
+        #expect(lyrics.lines[0].text == "The first line")
+        #expect(abs(lyrics.lines[0].time - 12.5) < 0.001)
+    }
+
+    /// Two digits or three is a factor of ten, so it has to be read as written
+    /// rather than assumed.
+    @Test("a three-digit fraction is milliseconds, not hundredths")
+    func fractions() throws {
+        let lyrics = try #require(Lyrics.parse(sample))
+        let late = try #require(lyrics.lines.last)
+        #expect(abs(late.time - 90.125) < 0.001)
+    }
+
+    @Test("the lines come out in time order however they were written")
+    func ordered() throws {
+        let lyrics = try #require(
+            Lyrics.parse("[01:00.00]second\n[00:30.00]first"))
+        #expect(lyrics.lines.map(\.text) == ["first", "second"])
+    }
+
+    @Test("words with no timings are not lyrics")
+    func refusesPlainText() {
+        #expect(Lyrics.parse("just some words\nand some more") == nil)
+        #expect(Lyrics.parse("") == nil)
+        // Tags alone are not lyrics either.
+        #expect(Lyrics.parse("[ti:Song]\n[ar:Nobody]") == nil)
+    }
+
+    @Test("a bracket that is not a time and not a tag is left alone")
+    func strangeBrackets() throws {
+        let lyrics = try #require(Lyrics.parse("[00:05.00][x] words"))
+        #expect(lyrics.lines.first?.text == "[x] words")
+    }
+
+    /// Which line is being sung, which is the whole point.
+    @Test("it finds the line being sung")
+    func following() throws {
+        let lyrics = try #require(
+            Lyrics.parse("[00:10.00]one\n[00:20.00]two\n[00:30.00]three"))
+        #expect(lyrics.index(at: 0) == nil)
+        #expect(lyrics.index(at: 9.9) == nil)
+        #expect(lyrics.index(at: 10) == 0)
+        #expect(lyrics.index(at: 19.9) == 0)
+        #expect(lyrics.index(at: 20) == 1)
+        // Past the end it stays on the last line rather than going blank.
+        #expect(lyrics.index(at: 600) == 2)
+    }
+
+    /// The offset is not decoration: a file that is half a second out is a file
+    /// that is useless for singing to.
+    @Test("the offset moves what is being sung")
+    func offsetApplies() throws {
+        let early = try #require(Lyrics.parse("[offset:-1000]\n[00:10.00]one"))
+        // A negative offset means the words are early, so at 9.5 seconds the
+        // line has not started.
+        #expect(early.index(at: 9.5) == nil)
+        let late = try #require(Lyrics.parse("[offset:1000]\n[00:10.00]one"))
+        #expect(late.index(at: 9.5) == 0)
+    }
+
+    /// A highlight that sweeps rather than jumps is the reason anybody wants
+    /// synchronised lyrics instead of a printed sheet.
+    @Test("progress through a line runs from nothing to all of it")
+    func progress() throws {
+        let lyrics = try #require(Lyrics.parse("[00:10.00]one\n[00:20.00]two"))
+        #expect(abs(lyrics.progress(at: 10)) < 0.001)
+        #expect(abs(lyrics.progress(at: 15) - 0.5) < 0.001)
+        #expect(lyrics.progress(at: 19.99) > 0.99)
+        // Before the first line there is nothing to be part-way through.
+        #expect(lyrics.progress(at: 0) == 0)
+        // The last line has no successor, so it is given a sung phrase's worth
+        // rather than running to infinity or snapping to one.
+        #expect(lyrics.progress(at: 22) > 0.4)
+        #expect(lyrics.progress(at: 22) < 0.6)
+    }
+}

@@ -36,6 +36,11 @@
 
 	<key>NSHumanReadableCopyright</key>
 	<string>Yuhuan Studio</string>
+	<!-- Reading what Music or Spotify is playing, for the lyrics panel. macOS
+	     will not deliver the Apple event without this string, and refuses
+	     silently: the panel would simply never find a track. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>YunAudio asks Music and Spotify what is playing, so it can show the words in time with it.</string>
 	<!-- Remote control. A URL is understood by Shortcuts, Stream Deck,
 	     AppleScript and `open` from a terminal, none of which need this
 	     application to have been built by Xcode. -->

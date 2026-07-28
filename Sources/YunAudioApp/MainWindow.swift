@@ -912,6 +912,7 @@ struct MainWindow: View {
     enum Inspector: String, CaseIterable, Identifiable {
         case sound
         case plugins
+        case singing
         case recording
         case hardware
 
@@ -921,6 +922,7 @@ struct MainWindow: View {
             switch self {
             case .sound: loc("Sound")
             case .plugins: loc("Plugins")
+            case .singing: loc("Sing")
             case .recording: loc("Record")
             case .hardware: loc("Device")
             }
@@ -937,6 +939,7 @@ struct MainWindow: View {
                 switch inspectorTab {
                 case .sound: soundTab
                 case .plugins: pluginsTab
+                case .singing: singingTab
                 case .recording: recordingTab
                 case .hardware: hardwareTab
                 }
@@ -1165,7 +1168,144 @@ struct MainWindow: View {
         }
     }
 
+    /// Singing to a backing track, with the words and whether you are on the
+    /// note.
+    ///
+    /// Everything this needs already existed and none of it was joined up. The
+    /// pitch tracker has been in the analysis panel since it was written; the
+    /// music players publish what they are playing through a scripting
+    /// dictionary that has not changed in twenty years; the microphone is
+    /// already routed. What was missing was the words, and those are a file.
     @ViewBuilder
+    private var singingTab: some View {
+        Group {
+            sectionHeading(loc("Sing"))
+            YunCard { singing }
+        }
+        .onAppear { model.isSingingVisible = true }
+        .onDisappear { model.isSingingVisible = false }
+    }
+
+    @ViewBuilder
+    private var singing: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            if let track = model.nowPlaying {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(track.title)
+                        .font(Yun.Text.title)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .lineLimit(1)
+                    HStack(spacing: Yun.Space.sm) {
+                        Text(track.artist)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .lineLimit(1)
+                        Spacer()
+                        Text(Self.clock(track.position) + " / " + Self.clock(track.duration))
+                            .font(Yun.Text.mono)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .monospacedDigit()
+                        YunBadge(track.application)
+                    }
+                }
+            } else {
+                Text(
+                    NowPlaying.hasAPlayer
+                        ? loc("Play something in Music or Spotify.")
+                        : loc("Neither Music nor Spotify is installed.")
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            YunDivider()
+
+            if let lyrics = model.lyrics {
+                lyricView(lyrics)
+            } else if model.nowPlaying != nil {
+                Text(
+                    loc(
+                        "No words for this one. Drop an .lrc into the folder below and it will be found by name."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // Whether you are on the note. The tracker was already here; what
+            // it lacked was a reason to be looked at.
+            HStack(spacing: Yun.Space.sm) {
+                Text(loc("You are singing"))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                Spacer()
+                Text(model.heardNote ?? "—")
+                    .font(Yun.Text.title)
+                    .foregroundStyle(
+                        model.heardNote == nil ? Yun.Palette.textMuted : Yun.Palette.accent
+                    )
+                    .monospacedDigit()
+            }
+
+            Button(loc("Open the folder")) {
+                guard let directory = RouterModel.lyricsDirectory else { return }
+                try? FileManager.default.createDirectory(
+                    at: directory, withIntermediateDirectories: true)
+                NSWorkspace.shared.open(directory)
+            }
+            .buttonStyle(YunButtonStyle(.ghost, small: true))
+        }
+    }
+
+    /// Three lines: what was just sung, what is being sung, what comes next.
+    ///
+    /// Three rather than a scrolling sheet, because the one being sung has to
+    /// be findable without reading — that is the difference between lyrics you
+    /// can sing to and lyrics you have to search.
+    private func lyricView(_ lyrics: Lyrics) -> some View {
+        let current = model.lyricLine
+        return VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            ForEach(-1...1, id: \.self) { offset in
+                let index = (current ?? -1) + offset
+                let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
+                if offset == 0 {
+                    ZStack(alignment: .leading) {
+                        Text(text.isEmpty ? " " : text)
+                            .font(Yun.Text.title)
+                            .foregroundStyle(Yun.Palette.textMuted)
+                        // The sweep is the point: a line that lights up all at
+                        // once tells you which line, and a line that fills
+                        // tells you where in it.
+                        Text(text.isEmpty ? " " : text)
+                            .font(Yun.Text.title)
+                            .foregroundStyle(Yun.Palette.accent)
+                            .mask(alignment: .leading) {
+                                GeometryReader { proxy in
+                                    Rectangle()
+                                        .frame(width: proxy.size.width * model.lyricProgress)
+                                }
+                            }
+                    }
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(text)
+                        .font(Yun.Text.body)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(.linear(duration: 0.1), value: model.lyricProgress)
+    }
+
+    private static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+
     private var recordingTab: some View {
         Group {
             sectionHeading(loc("Recording"))

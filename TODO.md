@@ -268,11 +268,26 @@ FineTune's single highest-reacted issue is *"Add Homebrew Cask support"*, filed
 two days after launch [V]. Blocked on the same thing distribution is blocked on:
 the driver is ad-hoc signed and a cask wants something notarised.
 
-### 9. KTV, further [proposal]
+### 9. KTV, further [proposal] — **the first half is done**
 
-The singing side is started and not finished. What is missing: a connection to
-Apple Music and to Spotify, and lyrics — the two obvious ones, and both are
-their own frameworks rather than audio work.
+Music and Spotify are read through their scripting dictionaries, and lyrics
+come from `.lrc` files in `~/Library/Application Support/YunAudio/Lyrics`. Not
+`MediaRemote`, which is what every now-playing utility on this platform reaches
+for and is private and has already been restricted once; and not a lyrics
+service, because neither Apple's nor Spotify's may be used by a third party.
+
+What is left, in the order it is worth doing:
+
+- **Key detection and transposition.** The pitch tracker already knows what note
+  somebody is singing. Knowing what key the backing track is in — and being able
+  to shift it — is the thing every karaoke box has and nothing on macOS does.
+  The pitch stage exists; what is missing is measuring the track's key.
+- **A score.** How much of the time the sung note matched the melody. The melody
+  would have to come from somewhere: an `.lrc` carries words and times, not
+  pitches, so this needs either a MIDI melody file beside it or measuring the
+  vocal in the original, which is what the voice isolation stage is for.
+- **A duet mode** — two microphones, two colours, two scores. Every source is
+  already separate.
 
 ### 10. Publish the bit-exactness result — **done**
 

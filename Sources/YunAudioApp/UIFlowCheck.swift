@@ -1811,6 +1811,52 @@ enum UIFlowCheck {
             note("no device with both directions — skipped")
         }
 
+        section("singing")
+        // Everything this needs already existed and none of it was joined up:
+        // the pitch tracker, the music players' scripting dictionaries, and a
+        // routed microphone. What was missing was the words, and those are a
+        // file.
+        model.isSingingVisible = true
+        await pause(0.6)
+        if let track = model.nowPlaying {
+            note(
+                "\(track.application): \(track.artist) — \(track.title) at \(Int(track.position))s"
+            )
+            check("a playing track has a duration", track.duration > 0)
+        } else {
+            note(
+                NowPlaying.hasAPlayer
+                    ? "nothing is playing — the live half was not exercised"
+                    : "no music player installed — skipped")
+        }
+        // The matching is the part that decides whether the feature is usable,
+        // because a file somebody downloaded is called whatever its author
+        // called it.
+        if let directory = RouterModel.lyricsDirectory {
+            try? FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("Flow Check - Björk – Jóga.lrc")
+            try? "[00:01.00]first\n[00:05.00]second".write(
+                to: file, atomically: true, encoding: .utf8)
+            let found = RouterModel.findLyrics(
+                for: .init(
+                    application: "Test", title: "Joga", artist: "Bjork", album: "",
+                    position: 0, duration: 100, isPlaying: true))
+            check("accents and punctuation do not stop a match", found != nil)
+            check("and the words came with it", found?.lines.count == 2)
+            let missing = RouterModel.findLyrics(
+                for: .init(
+                    application: "Test", title: "Nothing Like This", artist: "Nobody",
+                    album: "", position: 0, duration: 100, isPlaying: true))
+            check("a song with no file finds nothing", missing == nil)
+            try? FileManager.default.removeItem(at: file)
+        }
+        // Pitch is switched on only while somebody is looking, which is what
+        // makes a lyrics panel cheaper than the analysis panel.
+        check("looking at it asks for the pitch", !model.analysisIsIdle)
+        model.isSingingVisible = false
+        check("and looking away clears the track", model.nowPlaying == nil)
+
         section("output tone")
         // Ten bands at Razer's own centres, which is a real claim: somebody
         // moving from Windows can copy their settings across band for band.
