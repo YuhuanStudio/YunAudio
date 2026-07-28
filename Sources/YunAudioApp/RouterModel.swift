@@ -3052,6 +3052,23 @@ final class RouterModel {
     /// then plugging in headphones started routing that nobody had asked for.
     private var wasInterruptedByDeviceLoss = false
 
+    /// True when the route is down because a start would not come up, rather
+    /// than because anybody asked for it.
+    ///
+    /// Deliberately not the same flag as the one above, and deliberately not
+    /// `lastError != nil`. `wasInterruptedByDeviceLoss` arms the resume on
+    /// *every* device change, which is right for a device that went away and
+    /// wrong for a start that failed: a failing start fails again, and each
+    /// attempt builds and tears down an aggregate — which itself publishes a
+    /// device change, so the retry would feed itself.
+    ///
+    /// This one is read at exactly one place: the moment a device the route
+    /// names is confirmed gone *and* a present one has been put in its place.
+    /// That is the one event that gives any reason to think the start would go
+    /// differently now, and it is the moment the router tells somebody it is
+    /// carrying on with another device — which has to be true.
+    @ObservationIgnored private var startFailed = false
+
     private func handleDeviceChange() {
         refreshDevices()
 
@@ -3161,6 +3178,30 @@ final class RouterModel {
             stop()
             wasInterruptedByDeviceLoss = true
             lastError = loc("A device in the route was unplugged.")
+        } else if !isRunning, !stillGone, !isBusy, wasInterruptedByDeviceLoss || startFailed {
+            // Both ends are present again — the substitution above saw to that —
+            // and yet the route is down. Either the rebuild the substitution
+            // kicked off found the old device already gone, or the route had
+            // never come up on that device in the first place; both leave a live
+            // model pointing at a dead engine, and the message just set promises
+            // the opposite.
+            //
+            // Nothing else will put it back. `restartIfRunning` restarts a
+            // *running* route and there is none, and the resume at the top of
+            // `handleDeviceChange` waits for a device change that may never
+            // arrive — this is the last thing an unplug runs.
+            //
+            // Left armed when the queue is busy rather than started blindly: a
+            // start would be refused there and the flag spent for nothing. The
+            // resume above picks it up on the next notification instead, and
+            // route work produces plenty of those.
+            //
+            // The "carrying on with another" message set above is left standing;
+            // a start that succeeds clears it, exactly as on the ordinary
+            // fall-back, and one that fails replaces it with something truer.
+            wasInterruptedByDeviceLoss = false
+            startFailed = false
+            start()
         }
     }
 
@@ -3244,6 +3285,7 @@ final class RouterModel {
     func start(selftest: Bool) {
         guard !isBusy else { return }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
+            startFailed = true
             lastError = loc("Pick an input and an output first.")
             return
         }
@@ -3255,10 +3297,12 @@ final class RouterModel {
         // "output channel 1 is not part of the aggregate", which is true and
         // tells nobody anything.
         guard !isSamePhysicalDevice(source, destination) else {
+            startFailed = true
             lastError = loc("The input and the output cannot be the same device.")
             return
         }
         guard source != destination else {
+            startFailed = true
             lastError = loc("The input and the output cannot be the same device.")
             return
         }
@@ -3375,7 +3419,19 @@ final class RouterModel {
         }
 
         guard !routeList.isEmpty else {
-            lastError = loc("Those two devices share no usable channels.")
+            // Two very different reasons for having nothing to route, reported
+            // until now as one. Either the two devices genuinely share no
+            // channels — a configuration to tell somebody about — or an end of
+            // the route is simply not in the device list any more, because it
+            // went away between this rebuild's teardown and its start. Telling
+            // somebody their microphone and their speakers have no channels in
+            // common, when what happened is that one of them was unplugged, is
+            // an invitation to go looking for a fault that is not there.
+            startFailed = true
+            lastError =
+                selectedSource == nil || selectedDestination == nil
+                ? loc("A device in the route was unplugged.")
+                : loc("Those two devices share no usable channels.")
             return
         }
 
@@ -3439,6 +3495,7 @@ final class RouterModel {
                 if let failure {
                     self.isRunning = false
                     self.lastError = failure
+                    self.startFailed = true
                     self.restartIsPending = false
                     // Nothing came up, so a stop that was refused while this was
                     // in flight has already got what it wanted. Left set it
@@ -3448,6 +3505,7 @@ final class RouterModel {
                 }
                 self.isRunning = true
                 self.lastError = nil
+                self.startFailed = false
                 // The detector needs the device's input to be running, which it
                 // now is. Started here rather than at selection for that reason
                 // — asked of an idle device it answers "no voice" forever.
@@ -3495,6 +3553,11 @@ final class RouterModel {
 
     func stop() {
         wasInterruptedByDeviceLoss = false
+        // Somebody asking for the route to come down outranks any reason it was
+        // already down. Left set, a failed start followed by Stop followed by an
+        // unplug would start audio that the last person to touch the thing had
+        // just put away.
+        startFailed = false
         stop(then: nil)
     }
 
