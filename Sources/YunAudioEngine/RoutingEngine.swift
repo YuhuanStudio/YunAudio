@@ -837,7 +837,9 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   device is not in this route, which is the ordinary case of a headphone
     ///   profile left selected after the headphones were unplugged.
     @discardableResult
-    public func setHeadphoneCorrection(_ curve: ParametricEQ?, forDeviceUID deviceUID: String?)
+    public func setHeadphoneCorrection(
+        _ curve: ParametricEQ?, forDeviceUID deviceUID: String?
+    )
         -> Bool
     {
         stateLock.lock()

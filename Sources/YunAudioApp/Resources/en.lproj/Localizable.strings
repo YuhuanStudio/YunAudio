@@ -403,3 +403,18 @@
 "%d filters, %.1f dB of headroom taken." = "%d filters, %.1f dB of headroom taken.";
 "Nothing is being corrected until routing starts." = "Nothing is being corrected until routing starts.";
 "Open the folder" = "Open the folder";
+
+/* The three regions of the Sound tab: what a stage is for, rather than where
+   it sits in the signal. */
+"Clean up" = "Clean up";
+"Takes out what should not be there. None of it is meant to be audible as an effect." = "Takes out what should not be there. None of it is meant to be audible as an effect.";
+"Change the voice" = "Change the voice";
+"Sound like somebody else. Both halves move together, and both cost latency." = "Sound like somebody else. Both halves move together, and both cost latency.";
+"Tone and space" = "Tone and space";
+"Shapes the voice and puts it somewhere. All of this is meant to be heard." = "Shapes the voice and puts it somewhere. All of this is meant to be heard.";
+
+/* What each scene preset is a starting point for. */
+"Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible." = "Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible.";
+"Removes the speakers from the microphone, then gates and compresses harder because the room is in it." = "Removes the speakers from the microphone, then gates and compresses harder because the room is in it.";
+"Isolation at full, a high gate and the high-pass moved up. Costs 56 ms and the path is no longer bit-exact." = "Isolation at full, a high gate and the high-pass moved up. Costs 56 ms and the path is no longer bit-exact.";
+"96 kHz and a limiter as insurance. Nothing else touches the signal, and the target is −23 LUFS." = "96 kHz and a limiter as insurance. Nothing else touches the signal, and the target is −23 LUFS.";

@@ -40,7 +40,8 @@ struct EQCurveView: View {
                         // spaced and how every correction is published.
                         let hertz = 20 * pow(1000, fraction)
                         let decibels = curve.response(atHertz: hertz, sampleRate: sampleRate)
-                        let y = height / 2 - CGFloat(max(-span, min(span, decibels)) / span)
+                        let y =
+                            height / 2 - CGFloat(max(-span, min(span, decibels)) / span)
                             * height / 2
                         let point = CGPoint(x: CGFloat(fraction) * width, y: y)
                         if step == 0 { path.move(to: point) } else { path.addLine(to: point) }

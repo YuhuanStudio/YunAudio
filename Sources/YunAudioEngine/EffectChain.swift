@@ -73,6 +73,43 @@ public struct EffectParameter: Identifiable, Hashable, Sendable {
     }
 }
 
+/// What a stage is *for*, as opposed to where it sits in the signal.
+///
+/// Not an ordering: the chain is one series and `chainOrder` decides it,
+/// whatever the interface does. This is the decision being made. Taking out
+/// what should not be there, sounding like somebody else, and shaping what is
+/// left are three unrelated intentions, and presenting them as one column of
+/// eleven switches made the reader work out which was which every time.
+public enum EffectGroup: String, CaseIterable, Sendable, Identifiable {
+    /// None of it meant to be heard as an effect.
+    case cleanUp
+    /// The voice changer, both halves of it.
+    case voice
+    /// Everything that is meant to be heard.
+    case colour
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .cleanUp: "Clean up"
+        case .voice: "Change the voice"
+        case .colour: "Tone and space"
+        }
+    }
+
+    public var detail: String {
+        switch self {
+        case .cleanUp:
+            "Takes out what should not be there. None of it is meant to be audible as an effect."
+        case .voice:
+            "Sound like somebody else. Both halves move together, and both cost latency."
+        case .colour:
+            "Shapes the voice and puts it somewhere. All of this is meant to be heard."
+        }
+    }
+}
+
 /// One stage of the processing chain.
 public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     case voiceIsolation
@@ -160,6 +197,28 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .echo: "Repeats. Musical in small doses, unusable on a call in large ones."
         case .limiter: "Stops the signal exceeding full scale. Cheap insurance."
         }
+    }
+
+    /// Which of the three jobs this stage is doing.
+    ///
+    /// Exhaustive rather than defaulted, so a stage added later has to be
+    /// placed rather than quietly landing in whichever group the `default`
+    /// happened to name.
+    public var group: EffectGroup {
+        switch self {
+        case .voiceIsolation, .equaliser, .gate, .compressor, .limiter: .cleanUp
+        case .pitch, .formant, .character: .voice
+        case .tone, .reverb, .echo: .colour
+        }
+    }
+
+    /// The stages of one group, in the order the signal meets them.
+    ///
+    /// Signal order rather than declaration order even inside a group, because
+    /// the reader is looking at a chain: a compressor listed above the gate
+    /// that feeds it would describe something the engine never builds.
+    public static func stages(in group: EffectGroup) -> [EffectKind] {
+        allCases.filter { $0.group == group }.sorted { $0.chainOrder < $1.chainOrder }
     }
 
     /// The voices the character stage can put on.
