@@ -967,8 +967,8 @@ final class RouterModel {
         }
     }
 
-    /// Ones that were asked for and would not load.
-    private(set) var failedPlugins: [String] = []
+    /// Ones that were asked for and would not load, with why.
+    private(set) var failedPlugins: [AudioUnitLoadFailure] = []
 
     func refreshPlugins() {
         availablePlugins = AudioUnitPlugins.installed()

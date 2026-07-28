@@ -303,7 +303,12 @@
 "Add an Audio Unit" = "加入 Audio Unit";
 "Remove" = "移除";
 "%d installed." = "已安裝 %d 個。";
-"%@ could not be loaded." = "%@ 無法載入。";
+"%1$@ could not be loaded. %2$@ (%3$d)" = "%1$@ 無法載入。%2$@（%3$d）";
+"It is no longer installed." = "它已經不在這台機器上了。";
+"It would not start." = "它無法建立實例。";
+"It will not take this chain's mono format." = "它不接受這條鏈的單聲道格式。";
+"It took the format and then would not start." = "格式它收了，但接著就是起不來。";
+"It is running, and it publishes nothing a host can set. Its controls are all in its own window, which this does not open." = "它有在跑，只是沒有對外公開任何主端可以調的參數。它的控制項全都在它自己的視窗裡，而這裡不會開那個視窗。";
 "This one runs in its own process, so every block makes a round trip. Expect it to cost latency." = "這個外掛在自己的處理程序中執行，每個區塊都要跨程序往返一次，預期會增加延遲。";
 "Voice" = "人聲";
 "None" = "不變聲";

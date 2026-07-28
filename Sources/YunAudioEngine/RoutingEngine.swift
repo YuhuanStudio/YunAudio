@@ -187,8 +187,9 @@ public final class RoutingEngine: @unchecked Sendable {
     public var onClockLockFailure: (@Sendable () -> Void)?
 
     public private(set) var lastIsolationError: String?
-    /// Third-party units that were asked for and would not load, by name.
-    public private(set) var failedPlugins: [String] = []
+    /// Third-party units that were asked for and would not load, each with the
+    /// step that refused and the status it returned.
+    public private(set) var failedPlugins: [AudioUnitLoadFailure] = []
     /// The stages actually rendering, which is not the same as the stages that
     /// were asked for: one that will not instantiate is dropped.
     public var activeEffectStages: [EffectKind] {
@@ -528,7 +529,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 effectChain = chain
                 // Named rather than silently dropped: a chain that quietly
                 // lost a stage sounds different and says nothing about why.
-                failedPlugins = chain.failedPlugins
+                failedPlugins = chain.pluginFailures
                 effectLatencyFrames = chain.latencyFrames
                 voiceIsolationLatencyFrames =
                     effects.contains(.voiceIsolation) ? chain.latencyFrames : 0
@@ -1625,7 +1626,7 @@ public final class RoutingEngine: @unchecked Sendable {
         isolationFailureCounter = failures
         // Named rather than silently dropped, as at start: a chain that quietly
         // lost a stage sounds different and says nothing about why.
-        failedPlugins = chain?.failedPlugins ?? []
+        failedPlugins = chain?.pluginFailures ?? []
         effectLatencyFrames = chain?.latencyFrames ?? 0
         if let chain {
             voiceIsolationLatencyFrames =

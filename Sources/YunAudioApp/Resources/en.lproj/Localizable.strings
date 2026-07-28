@@ -303,7 +303,12 @@
 "Add an Audio Unit" = "Add an Audio Unit";
 "Remove" = "Remove";
 "%d installed." = "%d installed.";
-"%@ could not be loaded." = "%@ could not be loaded.";
+"%1$@ could not be loaded. %2$@ (%3$d)" = "%1$@ could not be loaded. %2$@ (%3$d)";
+"It is no longer installed." = "It is no longer installed.";
+"It would not start." = "It would not start.";
+"It will not take this chain's mono format." = "It will not take this chain's mono format.";
+"It took the format and then would not start." = "It took the format and then would not start.";
+"It is running, and it publishes nothing a host can set. Its controls are all in its own window, which this does not open." = "It is running, and it publishes nothing a host can set. Its controls are all in its own window, which this does not open.";
 "This one runs in its own process, so every block makes a round trip. Expect it to cost latency." = "This one runs in its own process, so every block makes a round trip. Expect it to cost latency.";
 "Voice" = "Voice";
 "None" = "None";

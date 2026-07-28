@@ -481,8 +481,11 @@ final class EffectChain {
     private(set) var plugins: [AudioUnitPlugin] = []
     /// Which of `units` each plugin is, so its parameters can be reached.
     private var pluginUnits: [String: AudioComponentInstance] = [:]
-    /// Plugins that would not load, named so the interface can say which.
-    private(set) var failedPlugins: [String] = []
+    /// Plugins that would not load, each with the step that refused and the
+    /// status it returned, so the interface can say why rather than only that.
+    private(set) var pluginFailures: [AudioUnitLoadFailure] = []
+    /// The same list by name alone.
+    var failedPlugins: [String] { pluginFailures.map(\.name) }
 
     convenience init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
         self.init(
@@ -566,28 +569,65 @@ final class EffectChain {
             for plugin in plugins {
                 var description = plugin.componentDescription
                 guard let component = AudioComponentFindNext(nil, &description) else {
-                    failedPlugins.append(plugin.name)
+                    pluginFailures.append(
+                        .init(name: plugin.name, reason: .notInstalled, status: noErr))
                     continue
                 }
                 var instance: AudioComponentInstance?
-                guard
-                    AudioComponentInstanceNew(component, &instance) == noErr,
-                    let unit = instance
-                else {
-                    failedPlugins.append(plugin.name)
+                let created = AudioComponentInstanceNew(component, &instance)
+                guard created == noErr, let unit = instance else {
+                    pluginFailures.append(
+                        .init(
+                            name: plugin.name, reason: .couldNotInstantiate, status: created))
                     continue
                 }
-                AudioUnitSetProperty(
+
+                // Somebody else's unit is vetted here rather than trusted to
+                // the common initialise below, and the reason is not tidiness.
+                // The chain is mono, and a stereo-only unit answers
+                // kAudioUnitErr_FormatNotSupported to both of these and then
+                // refuses to initialise — at which point the common loop tears
+                // the whole chain down. One rejected plugin took the gate, the
+                // equaliser, the compressor and the limiter with it, and named
+                // none of them. AUAudioMix is the measurable case: -10868 to
+                // each format, -10875 to initialise.
+                let inputFormat = AudioUnitSetProperty(
                     unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
                     &format, formatSize)
-                AudioUnitSetProperty(
+                let outputFormat = AudioUnitSetProperty(
                     unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
                     &format, formatSize)
+                guard inputFormat == noErr, outputFormat == noErr else {
+                    pluginFailures.append(
+                        .init(
+                            name: plugin.name, reason: .formatRejected,
+                            status: inputFormat == noErr ? outputFormat : inputFormat))
+                    AudioComponentInstanceDispose(unit)
+                    continue
+                }
+                // Before initialising, never after: a unit reads this when it
+                // sizes its internal buffers, and setting it afterwards is
+                // either refused or ignored depending on whose unit it is.
                 var frames = UInt32(maximumFrames)
                 AudioUnitSetProperty(
                     unit, kAudioUnitProperty_MaximumFramesPerSlice,
                     kAudioUnitScope_Global, 0, &frames,
                     UInt32(MemoryLayout<UInt32>.size))
+
+                // A dry run, undone immediately. Initialising here proves the
+                // unit can start on its own terms; the common loop below then
+                // starts it for real once it is connected, which is the state
+                // it will render in.
+                let started = AudioUnitInitialize(unit)
+                guard started == noErr else {
+                    pluginFailures.append(
+                        .init(
+                            name: plugin.name, reason: .wouldNotInitialise, status: started))
+                    AudioComponentInstanceDispose(unit)
+                    continue
+                }
+                AudioUnitUninitialize(unit)
+
                 built.append(unit)
                 pluginUnits[plugin.id] = unit
             }
@@ -603,12 +643,15 @@ final class EffectChain {
 
         // A chain of nothing but the native stage is legitimate: somebody who
         // wants only a formant shift should get one.
-        guard !units.isEmpty || native != nil else {
-            inputBuffer.deallocate()
-            outputBuffer.deallocate()
-            free(bufferList.unsafeMutablePointer)
-            return nil
-        }
+        //
+        // Nothing is freed on the way out of a failed init, here or below.
+        // Swift runs `deinit` on a class whose failable init returns nil once
+        // every stored property has a value, so cleaning up here as well freed
+        // the same three allocations twice and libmalloc aborted the process:
+        // POINTER_BEING_FREED_WAS_NOT_ALLOCATED, inside EffectChain.deinit,
+        // reached from EffectChain.init. It was not a plugin failing to load —
+        // it was the application dying on the spot.
+        guard !units.isEmpty || native != nil else { return nil }
 
         if native != nil {
             let buffer = UnsafeMutablePointer<Float>.allocate(capacity: maximumFrames)
@@ -670,10 +713,10 @@ final class EffectChain {
         for unit in units where AudioUnitInitialize(unit) != noErr {
             // A stage that will not initialise is worse than no chain: the
             // signal would silently skip it while the UI claimed it was on.
+            // Only this application's own stages can reach here now — a
+            // third-party unit that cannot start was rejected and named above,
+            // rather than taking every other stage down with it.
             teardown()
-            inputBuffer.deallocate()
-            outputBuffer.deallocate()
-            free(bufferList.unsafeMutablePointer)
             return nil
         }
 
