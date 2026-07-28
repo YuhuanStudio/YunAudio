@@ -21,6 +21,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var preferredSampleRate: Double
     /// Bundle identifiers of applications captured as routing sources.
     var capturedAppBundleIDs: [String]
+    /// Applications this router will never tap, whatever is selected.
+    var excludedAppBundleIDs: [String]?
     /// Raw values of the enabled processing stages.
     var enabledEffects: [String]
     /// Knob positions, keyed by "<stage>.<parameter>".
@@ -89,6 +91,7 @@ struct Preferences: Codable, Equatable, Sendable {
         voiceIsolationMix: 100,
         preferredSampleRate: 48000,
         capturedAppBundleIDs: [],
+        excludedAppBundleIDs: [],
         enabledEffects: [],
         effectValues: [:],
         cancelsEcho: false,

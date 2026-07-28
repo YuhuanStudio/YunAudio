@@ -66,6 +66,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             keyEquivalent: ""
         ).target = self
         menu.addItem(.separator())
+        // Whole-machine arrangements. This is the one place they belong: the
+        // moment somebody wants them is when the work changes, and at that
+        // moment the application is not on screen — it is a menu bar icon and a
+        // half-finished thought about a call starting in a minute.
+        configItem = menu.addItem(
+            withTitle: loc("Setups"), action: nil, keyEquivalent: "")
+        configItem?.submenu = NSMenu()
+        menu.addItem(.separator())
         menu.addItem(
             withTitle: loc("Open YunAudio"), action: #selector(openWindow), keyEquivalent: ""
         ).target = self
@@ -88,12 +96,58 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private var rightClickMenu: NSMenu?
     private var muteItem: NSMenuItem?
+    private var configItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
 
     private func refreshImage() {
         item.button?.image = Self.statusImage(
             level: model.isRunning ? model.peakLevel : nil, isMuted: model.isMuted)
         muteItem?.title = model.isMuted ? loc("Unmute") : loc("Mute")
+        refreshConfigs()
+    }
+
+    /// Rebuilt rather than kept in step, because the list is short and the
+    /// alternative is a second copy of it that can disagree with the first.
+    private func refreshConfigs() {
+        guard let submenu = configItem?.submenu else { return }
+        let names = model.quickConfigs.map(\.name)
+        guard names != listedConfigs else { return }
+        listedConfigs = names
+        submenu.removeAllItems()
+        if names.isEmpty {
+            let empty = submenu.addItem(
+                withTitle: loc("Nothing saved yet"), action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+        }
+        for name in names {
+            let entry = submenu.addItem(
+                withTitle: name, action: #selector(applyConfig(_:)), keyEquivalent: "")
+            entry.target = self
+            entry.representedObject = name
+        }
+        submenu.addItem(.separator())
+        submenu.addItem(
+            withTitle: loc("Save the current setup"), action: #selector(saveConfig),
+            keyEquivalent: ""
+        ).target = self
+    }
+
+    private var listedConfigs: [String]?
+
+    @objc private func applyConfig(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String,
+            let configuration = model.quickConfigs.first(where: { $0.name == name })
+        else { return }
+        model.apply(configuration)
+    }
+
+    /// Named after what it captures rather than asked for, because a menu is
+    /// not a place to type and the moment this is used is a hurried one. The
+    /// name can be changed in the window.
+    @objc private func saveConfig() {
+        let stamp = DateFormatter()
+        stamp.dateFormat = "HH:mm"
+        model.saveQuickConfig(named: loc("Setup") + " " + stamp.string(from: Date()))
     }
 
     @objc private func toggleMute() { model.toggleMute() }

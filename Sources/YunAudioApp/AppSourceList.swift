@@ -89,7 +89,9 @@ private struct AppSourceRow: View {
 
     var body: some View {
         let isCaptured = model.capturedAppBundleIDs.contains(application.bundleID)
+        let isExcluded = model.isExcluded(application.bundleID)
         Button {
+            guard !isExcluded else { return }
             if isCaptured {
                 model.capturedAppBundleIDs.remove(application.bundleID)
             } else {
@@ -98,20 +100,29 @@ private struct AppSourceRow: View {
         } label: {
             YunHoverRow {
                 HStack(spacing: Yun.Space.sm) {
-                    Image(systemName: isCaptured ? "checkmark.circle.fill" : "circle")
-                        .font(.system(size: 11))
-                        .foregroundStyle(
-                            isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted)
+                    Image(
+                        systemName: isExcluded
+                            ? "nosign"
+                            : (isCaptured ? "checkmark.circle.fill" : "circle")
+                    )
+                    .font(.system(size: 11))
+                    .foregroundStyle(
+                        isExcluded
+                            ? Yun.Palette.textMuted
+                            : (isCaptured ? Yun.Palette.accent : Yun.Palette.textMuted))
 
                     AppIconView(url: application.bundleURL)
 
                     Text(application.name)
                         .font(Yun.Text.body)
-                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .foregroundStyle(
+                            isExcluded ? Yun.Palette.textMuted : Yun.Palette.textPrimary
+                        )
                         .lineLimit(1)
                         .truncationMode(.middle)
 
-                    if application.isPlaying { YunBadge(loc("playing")) }
+                    if application.isPlaying, !isExcluded { YunBadge(loc("playing")) }
+                    if isExcluded { YunBadge(loc("never")) }
 
                     Spacer(minLength: 4)
 
@@ -129,6 +140,15 @@ private struct AppSourceRow: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .help(application.bundleID)
+        // A right-click rather than a control on every row. Excluding something
+        // is a thing somebody does once, for a reason they already have — a DAW
+        // they lost a take in — and a permanent control for it would put a
+        // second decision on a list whose whole job is one easy decision.
+        .contextMenu {
+            Button(isExcluded ? loc("Allow capturing this") : loc("Never capture this")) {
+                model.setExcluded(!isExcluded, bundleID: application.bundleID)
+            }
+        }
         .accessibilityLabel(Text(application.name))
         .accessibilityAddTraits(isCaptured ? [.isSelected] : [])
     }

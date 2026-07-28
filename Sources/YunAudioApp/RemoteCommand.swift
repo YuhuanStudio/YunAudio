@@ -22,6 +22,8 @@ enum RemoteCommand: Equatable, Sendable {
     case transcribe(Bool?)
     /// A saved scene, by the name it was saved under.
     case preset(String)
+    /// A saved whole-machine arrangement, likewise.
+    case config(String)
 
     /// The scheme this application answers to.
     static let scheme = "yunaudio"
@@ -51,6 +53,9 @@ enum RemoteCommand: Equatable, Sendable {
             return state(verb).map(RemoteCommand.record)
         case "transcribe", "transcript":
             return state(verb).map(RemoteCommand.transcribe)
+        case "config", "setup":
+            let name = rest.joined(separator: "/")
+            return name.isEmpty ? nil : .config(name)
         case "preset", "scene":
             // Percent-decoded and joined, because a scene can be called
             // "Voice call" and a URL cannot carry the space raw.

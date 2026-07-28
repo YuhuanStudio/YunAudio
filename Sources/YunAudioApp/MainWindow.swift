@@ -21,6 +21,9 @@ struct MainWindow: View {
         self.isRendering = isRendering
     }
 
+    @State private var setupName = ""
+    @State private var isNamingSetup = false
+    @State private var setupOutcome: String?
     @State private var isNamingPreset = false
     @State private var presetName = ""
     /// Skips the scroll views. `ImageRenderer` gives a ScrollView no height, so
@@ -937,6 +940,9 @@ struct MainWindow: View {
     @ViewBuilder
     private var hardwareTab: some View {
         Group {
+            sectionHeading(loc("Setups"))
+            YunCard { setups }
+
             sectionHeading(loc("Output alignment"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
@@ -1163,6 +1169,93 @@ struct MainWindow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Whole-machine arrangements: which devices everything is pointed at.
+    ///
+    /// Kept apart from the scene tabs at the top of the window on purpose. A
+    /// scene says how to process and leaves devices alone; this says what
+    /// everything is plugged into. Putting them in one list would mean somebody
+    /// choosing "podcast" could not know whether they had just changed a
+    /// compressor or unplugged their headphones.
+    @ViewBuilder
+    private var setups: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            Text(
+                loc(
+                    "A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            ForEach(model.quickConfigs) { configuration in
+                HStack(spacing: Yun.Space.sm) {
+                    Button(configuration.name) {
+                        let outcome = model.apply(configuration)
+                        setupOutcome =
+                            outcome.isComplete
+                            ? nil
+                            : loc("missing") + " "
+                                + model.describeMissing(outcome.missing)
+                    }
+                    .buttonStyle(YunButtonStyle(.secondary, small: true))
+                    Spacer()
+                    Button(loc("Delete")) { model.deleteQuickConfig(named: configuration.name) }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                }
+            }
+
+            if let setupOutcome {
+                Text(setupOutcome)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // The name is asked for in a popover rather than in a field sitting
+            // in the card, and not only for tidiness: a `TextField` renders as
+            // a yellow bar with a prohibitory sign in the offscreen design
+            // capture, so a field here would blind that check for this whole
+            // section. The popover is not in the rendered tree, and it is the
+            // pattern the scene presets already use.
+            Button(loc("Save the current setup")) {
+                isNamingSetup = true
+                setupName = ""
+            }
+            .buttonStyle(YunButtonStyle(.primary, small: true))
+            .popover(isPresented: $isNamingSetup, arrowEdge: .bottom) {
+                saveSetup
+            }
+        }
+    }
+
+    private var saveSetup: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            Text(loc("Name this setup"))
+                .font(Yun.Text.label)
+                .foregroundStyle(Yun.Palette.textSecondary)
+            TextField("", text: $setupName)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 220)
+                .onSubmit { commitSetup() }
+            HStack {
+                Spacer()
+                Button(loc("Cancel")) { isNamingSetup = false }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                Button(loc("Save")) { commitSetup() }
+                    .buttonStyle(YunButtonStyle(.primary, small: true))
+                    .disabled(setupName.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(Yun.Space.lg)
+    }
+
+    private func commitSetup() {
+        model.saveQuickConfig(named: setupName)
+        setupName = ""
+        isNamingSetup = false
+    }
+
     /// One output's delay, in milliseconds.
     ///
     /// Milliseconds rather than frames, even though frames is what the system
@@ -1171,12 +1264,29 @@ struct MainWindow: View {
     /// covers about 34 cm in a millisecond — so the two readings together let
     /// somebody dial it in by measuring the room rather than by ear.
     private func outputDelayRow(_ device: AudioDevice) -> some View {
-        HStack(spacing: Yun.Space.sm) {
-            Text(device.name)
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textSecondary)
-                .lineLimit(1)
-                .frame(width: 150, alignment: .leading)
+        // Two lines rather than one. A device name, a slider and two units of
+        // readout do not fit across an inspector column: laid out in a row the
+        // slider came out a few points wide, which is a control nobody can use,
+        // and the offscreen capture showed it plainly.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: Yun.Space.sm) {
+                Text(device.name)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: Yun.Space.sm)
+                Text(
+                    model.outputDelay(of: device.uid) < 0.05
+                        ? "—"
+                        : String(
+                            format: "%.0f ms · %.0f cm", model.outputDelay(of: device.uid),
+                            model.outputDelay(of: device.uid) * 34.3)
+                )
+                .font(Yun.Text.mono)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .monospacedDigit()
+            }
             YunSlider(
                 fraction: Binding(
                     get: { model.outputDelay(of: device.uid) / RouterModel.maximumOutputDelay },
@@ -1184,17 +1294,6 @@ struct MainWindow: View {
                         model.setOutputDelay(
                             $0 * RouterModel.maximumOutputDelay, for: device.uid)
                     }))
-            Text(
-                model.outputDelay(of: device.uid) < 0.05
-                    ? "—"
-                    : String(
-                        format: "%.0f ms · %.0f cm", model.outputDelay(of: device.uid),
-                        model.outputDelay(of: device.uid) * 34.3)
-            )
-            .font(Yun.Text.mono)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .monospacedDigit()
-            .frame(width: 108, alignment: .trailing)
         }
     }
 

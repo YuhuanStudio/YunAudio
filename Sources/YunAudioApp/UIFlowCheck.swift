@@ -559,7 +559,14 @@ enum UIFlowCheck {
         // The master is applied before the fold, so turning it down has to move
         // the reading. This is what catches the tap being taken from the wrong
         // side of the gain stage.
-        if model.analysis.shortTerm.isFinite {
+        //
+        // Only when there is a signal to move. A finite reading is not enough:
+        // a room at −60 LUFS is the meter's own floor, and cutting 20 dB off
+        // silence moves it by whatever the floor happens to be that second.
+        // This check failed once for exactly that reason and passed on the next
+        // run, which is worse than not running at all — a check that is
+        // sometimes right teaches people to re-run rather than to look.
+        if model.analysis.shortTerm.isFinite, model.analysis.shortTerm > -45 {
             let beforeCut = model.analysis.shortTerm
             model.outputDecibels = -20
             await pause(3.5)
@@ -572,7 +579,10 @@ enum UIFlowCheck {
                 model.analysis.shortTerm < beforeCut - 10)
             model.outputDecibels = 0
         } else {
-            note("the room is silent — the master's effect on loudness not exercised")
+            note(
+                String(
+                    format: "the room is at %.1f LUFS — too quiet to measure a cut against",
+                    model.analysis.shortTerm))
         }
 
         model.resetLoudness()
@@ -1402,6 +1412,83 @@ enum UIFlowCheck {
             note("could not build a decoy device — skipped")
         }
 
+        print("\nsetups")
+        // A setup captures devices; a scene captures processing. Confusing the
+        // two would mean somebody choosing "podcast" could not know whether
+        // they had changed a compressor or unplugged their headphones.
+        let sourceBefore = model.selectedSourceUID
+        model.saveQuickConfig(named: "Flow check setup")
+        check(
+            "it was saved", model.quickConfigs.contains { $0.name == "Flow check setup" })
+        if let saved = model.quickConfigs.first(where: { $0.name == "Flow check setup" }) {
+            check("it captured the router's devices", saved.sourceUID == sourceBefore)
+            // The system's own defaults are half of what setting up for a call
+            // means, and forgetting that step is why the first minute of every
+            // call is spent on "you are on mute".
+            check("and the system's own defaults", saved.systemOutputUID != nil)
+
+            // Move somewhere else, then come back.
+            if let elsewhere = model.inputDevices.map(\.uid).first(where: { $0 != sourceBefore }
+            ) {
+                model.selectedSourceUID = elsewhere
+                let outcome = model.apply(saved)
+                check("applying put the source back", model.selectedSourceUID == sourceBefore)
+                check("and nothing was missing", outcome.isComplete)
+                note("restored \(outcome.restored) thing(s)")
+            } else {
+                note("only one input on this machine — the round trip was not exercised")
+            }
+
+            // A device that is not here is the ordinary case of restoring a
+            // setup away from the desk, not an error.
+            var absent = saved
+            absent.destinationUID = "no such device"
+            let partial = model.apply(absent)
+            check("a missing device is reported rather than thrown", !partial.isComplete)
+            check(
+                "and it is named, not printed as a UID",
+                !model.describeMissing(
+                    partial.missing
+                ).isEmpty)
+            _ = model.apply(saved)
+        }
+        model.deleteQuickConfig(named: "Flow check setup")
+        check(
+            "it was deleted",
+            !model.quickConfigs.contains { $0.name == "Flow check setup" })
+        await waitUntil("and routing is still up", { model.isRunning }, timeout: 10)
+
+        print("\nexcluded applications")
+        // Every product in this category added an exclusion list *after* the
+        // breakage reports. A tap changes how an application's audio leaves the
+        // machine, and a DAW that finds its output redirected mid-session is a
+        // lost take — by somebody with no reason to suspect a menu bar utility
+        // they set up weeks ago.
+        if let victim = model.availableApps.first {
+            model.capturedAppBundleIDs.insert(victim.bundleID)
+            check("it was captured", model.capturedAppBundleIDs.contains(victim.bundleID))
+            model.setExcluded(true, bundleID: victim.bundleID)
+            check("excluding it is remembered", model.isExcluded(victim.bundleID))
+            // The exclusion has to take effect at once. Leaving it captured
+            // until some later restart would make the setting look ignored.
+            check(
+                "and it stopped being captured",
+                !model.capturedAppBundleIDs.contains(victim.bundleID))
+            // Stronger than "not selected": selecting is a click and a click can
+            // be an accident, so the rule has to survive one.
+            model.capturedAppBundleIDs.insert(victim.bundleID)
+            check(
+                "selecting it again does not take",
+                !model.capturedAppBundleIDs.contains(victim.bundleID))
+            model.setExcluded(false, bundleID: victim.bundleID)
+            check("and it can be allowed again", !model.isExcluded(victim.bundleID))
+            model.capturedAppBundleIDs.insert(victim.bundleID)
+            check("then it captures", model.capturedAppBundleIDs.contains(victim.bundleID))
+            model.capturedAppBundleIDs.remove(victim.bundleID)
+        } else {
+            note("no applications to exclude — skipped")
+        }
+
         print("\nvolume keys")
         // The research said we almost certainly had the aggregate-volume bug,
         // because we ship an aggregate. We do not: ours is created private and
@@ -1439,7 +1526,11 @@ enum UIFlowCheck {
             check("it reads back", abs(model.outputDelay(of: output.uid) - 12) < 0.001)
             await waitUntil("the route came back up", { model.isRunning }, timeout: 10)
             check("no error was reported", model.lastError == nil)
-            check("audio is still flowing", model.cycleCountForDiagnostics > 0)
+            // Waited for rather than read: the counter starts again with the
+            // new aggregate, so reading it the instant the route reports itself
+            // up is reading it before the first cycle has run.
+            await waitUntil(
+                "audio is flowing again", { model.cycleCountForDiagnostics > 0 }, timeout: 5)
             // Nothing beyond half a second is alignment any more, and a value
             // set by accident must not be able to make the app look broken.
             model.setOutputDelay(99_999, for: output.uid)
@@ -1504,6 +1595,13 @@ enum UIFlowCheck {
         check(
             "a scene that does not exist says so",
             model.perform(.preset("no such scene")) == nil)
+        check(
+            "a setup URL is understood",
+            RemoteCommand.parse(URL(string: "yunaudio://config/Podcast")!) == .config("Podcast")
+        )
+        check(
+            "and a setup that does not exist says so",
+            model.perform(.config("no such setup")) == nil)
         if let scene = model.allPresets.first {
             check("and one that does is applied", model.perform(.preset(scene.name)) != nil)
         }

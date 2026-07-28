@@ -363,6 +363,23 @@ public enum AudioDevices {
         let id = try AudioObjectID.system.value(of: .defaultOutputDevice)
         return id == kAudioObjectUnknown ? nil : try AudioDevice(id: id)
     }
+
+    /// Points the whole system at a device, the way the Sound pane does.
+    ///
+    /// By UID and not by ID: the numeric ID is reassigned when a device is
+    /// replugged or the machine reboots, so a stored one eventually names
+    /// somebody else's hardware. A device that is not here is not an error —
+    /// it is the ordinary case of restoring a setup somewhere the interface is
+    /// not plugged in — so it is reported rather than thrown.
+    ///
+    /// - Returns: True when the system moved.
+    @discardableResult
+    public static func setDefault(_ uid: String, forInput: Bool) throws -> Bool {
+        guard let device = try device(uid: uid) else { return false }
+        try AudioObjectID.system.setValue(
+            device.id, for: forInput ? .defaultInputDevice : .defaultOutputDevice)
+        return true
+    }
 }
 
 // MARK: - Clock relationship

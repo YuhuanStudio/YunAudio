@@ -333,6 +333,14 @@ final class RouterModel {
     var activePresetName: String?
 
     /// Presets somebody saved themselves.
+    /// Whole-machine arrangements, remembered under a name. See `QuickConfig`.
+    var quickConfigs: [QuickConfig] = [] {
+        didSet {
+            guard oldValue != quickConfigs else { return }
+            QuickConfigStore.save(quickConfigs)
+        }
+    }
+
     var userPresets: [RoutePreset] = [] {
         didSet {
             guard oldValue != userPresets else { return }
@@ -364,11 +372,58 @@ final class RouterModel {
 
     var hiddenAppCount: Int { availableApps.count - visibleApps.count }
 
+    /// Applications this router will not touch, whatever anybody clicks.
+    ///
+    /// Every product in this category added one of these *after* the breakage
+    /// reports rather than before — Steam games, DAWs, Krisp, Roon, Bitwig. A
+    /// process tap changes how an application's audio leaves the machine, and
+    /// some of them notice: a DAW that finds its output redirected mid-session
+    /// is a lost take, and the person it happens to has no reason to suspect a
+    /// menu bar utility they set up weeks ago.
+    ///
+    /// Deliberately stronger than "not selected". Selecting is a click, and a
+    /// click can be an accident; this survives one, survives a preset, and
+    /// survives the "capture everything audible" path.
+    var excludedAppBundleIDs: Set<String> = [] {
+        didSet {
+            guard oldValue != excludedAppBundleIDs else { return }
+            // Anything newly excluded stops being captured at once. Leaving it
+            // running until the next restart would make the exclusion look like
+            // it had not worked.
+            let released = capturedAppBundleIDs.intersection(excludedAppBundleIDs)
+            if !released.isEmpty { capturedAppBundleIDs.subtract(released) }
+            persist()
+        }
+    }
+
+    func isExcluded(_ bundleID: String) -> Bool { excludedAppBundleIDs.contains(bundleID) }
+
+    func setExcluded(_ excluded: Bool, bundleID: String) {
+        if excluded {
+            excludedAppBundleIDs.insert(bundleID)
+        } else {
+            excludedAppBundleIDs.remove(bundleID)
+        }
+    }
+
     /// Bundle identifiers of the applications being captured alongside the
     /// microphone. Stored by bundle id rather than pid so the choice survives
     /// the app being quit and relaunched.
     var capturedAppBundleIDs: Set<String> = [] {
-        didSet { if oldValue != capturedAppBundleIDs { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != capturedAppBundleIDs else { return }
+            // The exclusion wins over the selection, here rather than at every
+            // place that reads the set: a rule enforced in one place cannot be
+            // forgotten by the next thing that writes to it — a preset, a URL,
+            // or a restore from a file written before the exclusion existed.
+            let forbidden = capturedAppBundleIDs.intersection(excludedAppBundleIDs)
+            if !forbidden.isEmpty {
+                capturedAppBundleIDs.subtract(forbidden)
+                return
+            }
+            persist()
+            restartIfRunning()
+        }
     }
 
     var tapMuteBehavior: TapMuteBehavior = .unmuted {
@@ -1503,6 +1558,7 @@ final class RouterModel {
         // uninstalled is dropped rather than failing to load on every start.
         refreshPlugins()
         userPresets = UserPresets.load()
+        quickConfigs = QuickConfigStore.load()
         restore()
 
         engine.onClockLockFailure = { [weak self] in
@@ -1647,6 +1703,7 @@ final class RouterModel {
 
         let saved = PreferencesStore.load()
         autoStart = saved.autoStart
+        excludedAppBundleIDs = Set(saved.excludedAppBundleIDs ?? [])
         capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
         enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
         effectValues = saved.effectValues
@@ -1720,6 +1777,7 @@ final class RouterModel {
                 voiceIsolationMix: voiceIsolationMix,
                 preferredSampleRate: preferredSampleRate,
                 capturedAppBundleIDs: Array(capturedAppBundleIDs),
+                excludedAppBundleIDs: Array(excludedAppBundleIDs),
                 enabledEffects: enabledEffects.map(\.rawValue),
                 effectValues: effectValues,
                 cancelsEcho: cancelsEcho,
@@ -2111,7 +2169,15 @@ final class RouterModel {
         // the point of the reference is to know what came out of the speaker,
         // and asking someone to name that twice would be asking them to do the
         // app's job.
-        let echo = echoSettings(fallbackProcessIDs: capturedApps.flatMap(\.processIDs))
+        // The exclusion reaches this too. A reference tap only listens — it
+        // does not redirect anything — but somebody who said "never touch
+        // Logic" did not mean "except when guessing what the speakers are
+        // playing", and the difference is not one they should have to know.
+        let echo = echoSettings(
+            fallbackProcessIDs:
+                availableApps
+                .filter { $0.isPlaying && !excludedAppBundleIDs.contains($0.bundleID) }
+                .flatMap(\.processIDs))
         let monitor = monitorDeviceUID
         let trim = outputLatencyFrames
         // Copied so the queue closure and the main actor are not reading and
@@ -2244,6 +2310,17 @@ final class RouterModel {
                 stopTranscribing()
             }
             return isTranscribing ? loc("Transcribing.") : loc("Transcription stopped.")
+        case .config(let name):
+            guard
+                let configuration = quickConfigs.first(where: {
+                    $0.name.compare(name, options: .caseInsensitive) == .orderedSame
+                })
+            else { return nil }
+            let outcome = apply(configuration)
+            return outcome.isComplete
+                ? configuration.name
+                : configuration.name + " — " + loc("missing") + " "
+                    + describeMissing(outcome.missing)
         case .preset(let name):
             // Matched without case, because a URL somebody typed will not have
             // the capitals right and refusing over that is pedantry.

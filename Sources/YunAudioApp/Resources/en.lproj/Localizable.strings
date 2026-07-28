@@ -388,3 +388,13 @@
 "Output alignment" = "Output alignment";
 "Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing." = "Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing.";
 "This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works." = "This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works.";
+"never" = "never";
+"Never capture this" = "Never capture this";
+"Allow capturing this" = "Allow capturing this";
+"missing" = "missing";
+"Setups" = "Setups";
+"Setup" = "Setup";
+"Nothing saved yet" = "Nothing saved yet";
+"Save the current setup" = "Save the current setup";
+"A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured." = "A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured.";
+"Name this setup" = "Name this setup";

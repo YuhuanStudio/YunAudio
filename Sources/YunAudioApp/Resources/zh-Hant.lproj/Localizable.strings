@@ -388,3 +388,13 @@
 "Output alignment" = "輸出對齊";
 "Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing." = "同一個週期送出的兩個輸出不會同時抵達。把早到的那個延遲到對齊為止 —— 這是由系統套用的，不花任何運算。";
 "This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works." = "這個輸出裝置沒有提供音量控制，所以鍵盤上的音量鍵對它沒有作用。下面這個推桿仍然有效。";
+"never" = "永不";
+"Never capture this" = "永不擷取這個";
+"Allow capturing this" = "允許擷取這個";
+"missing" = "缺少";
+"Setups" = "設定組";
+"Setup" = "設定組";
+"Nothing saved yet" = "還沒有儲存任何設定";
+"Save the current setup" = "儲存目前的設定組";
+"A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured." = "設定組會記住所有東西各自指向哪裡 —— 系統本身的輸入與輸出、這個路由器用的裝置，以及正在擷取什麼。";
+"Name this setup" = "為這個設定組命名";
