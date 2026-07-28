@@ -173,6 +173,25 @@ final class RouterModel {
         return !destination.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
     }
 
+    /// True when two device UIDs are two faces of one piece of hardware.
+    ///
+    /// Compared by name rather than by UID, because the UIDs are deliberately
+    /// different — that is how a headset publishes its microphone and its
+    /// speakers separately — while the name is the one thing that says they are
+    /// the same object in the world. A `:input`/`:output` pair on a shared
+    /// prefix is the other tell, and both are cheap to check.
+    func isSamePhysicalDevice(_ first: String, _ second: String) -> Bool {
+        if first == second { return true }
+        let stem = { (uid: String) in uid.split(separator: ":").first.map(String.init) ?? uid }
+        if stem(first) == stem(second), first != stem(first) || second != stem(second) {
+            return true
+        }
+        guard let one = deviceNames[first], let other = deviceNames[second] else {
+            return false
+        }
+        return one == other
+    }
+
     /// Outputs currently in the path, which are the only ones worth aligning.
     ///
     /// Aligning something that is not being written to is a control that
@@ -2039,10 +2058,17 @@ final class RouterModel {
                 ?? inputDevices.first?.uid
         }
         // Whatever the source ended up as, it must not also be the destination.
-        if selectedSourceUID != nil, selectedSourceUID == selectedDestinationUID {
+        // Two faces of one headset count as the same device here too, or the
+        // default selection quietly picks a Bluetooth headset's microphone and
+        // its own speakers and the route cannot be built at all.
+        if let source = selectedSourceUID, let destination = selectedDestinationUID,
+            isSamePhysicalDevice(source, destination)
+        {
             selectedSourceUID =
-                inputDevices.first { !$0.transport.isVirtual }?.uid
-                ?? inputDevices.first { $0.uid != selectedDestinationUID }?.uid
+                inputDevices.first {
+                    !$0.transport.isVirtual && !isSamePhysicalDevice($0.uid, destination)
+                }?.uid
+                ?? inputDevices.first { !isSamePhysicalDevice($0.uid, destination) }?.uid
         }
         if selectedDestinationUID == nil {
             // Our own device first, then any other loopback endpoint. Never a
@@ -2285,6 +2311,17 @@ final class RouterModel {
         guard !isBusy else { return }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
             lastError = loc("Pick an input and an output first.")
+            return
+        }
+        // Not merely a different UID. A wireless headset presents as two
+        // separate CoreAudio devices — the Razer Barracuda is
+        // "44-…-69:input" and "44-…-69:output", same name, same model — and
+        // routing one to the other is routing a headset into itself. It passes
+        // every UID comparison and then fails deep inside the aggregate with
+        // "output channel 1 is not part of the aggregate", which is true and
+        // tells nobody anything.
+        guard !isSamePhysicalDevice(source, destination) else {
+            lastError = loc("The input and the output cannot be the same device.")
             return
         }
         guard source != destination else {

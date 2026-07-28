@@ -502,10 +502,12 @@ public final class RoutingEngine: @unchecked Sendable {
         var isolatedSource: ChannelRef?
         if !effects.isEmpty, !isolationOnly, let first = routes.first {
             isolatedSource = first.source
-            if let chain = EffectChain(
-                kinds: effects, plugins: plugins, sampleRate: rate,
-                maximumFrames: Int(bufferFrames))
-            {
+            let built = timed("build the effect chain") {
+                EffectChain(
+                    kinds: effects, plugins: plugins, sampleRate: rate,
+                    maximumFrames: Int(bufferFrames))
+            }
+            if let chain = built {
                 effectChain = chain
                 // Named rather than silently dropped: a chain that quietly
                 // lost a stage sounds different and says nothing about why.

@@ -72,6 +72,16 @@ same as "not here".
 
 ### Changing one effect restarts the whole route [V, measured here]
 
+Still true, and still worth fixing — but it is no longer what makes the flow
+check slow. A live chain swap was tried and reverted: it cannot help the case
+that dominates, which is going from no chain to one stage and back, because
+that changes which source the routes read from and is a different graph rather
+than a different block. Doing it properly means rebuilding the graph in place
+the way `updateRoutes` already does, keeping the aggregate and the IOProc — not
+swapping a pointer. The other thing that attempt got wrong: it took the
+engine's state lock synchronously from the model's `didSet` on the main actor.
+
+
 Enabling or disabling a single stage tears the aggregate down and builds it
 back. Measured end to end it costs about **five seconds**, of which the engine
 is only 0.8: aligning sample rates 56 ms, creating the aggregate 33 ms,

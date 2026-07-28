@@ -154,6 +154,18 @@ enum UIFlowCheck {
             }
         }
         check("an output is preselected", model.selectedDestinationUID != nil)
+        // Not merely a different UID: a wireless headset publishes its
+        // microphone and its speakers as two devices with the same name, and
+        // routing one into the other passes every UID comparison and then fails
+        // deep inside the aggregate. Every failure in one whole run today was
+        // this, and the first line said only "Razer Barracuda (BT) → Razer
+        // Barracuda (BT)", which reads like a sensible default.
+        if let source = model.selectedSourceUID, let destination = model.selectedDestinationUID
+        {
+            check(
+                "the two ends are not one headset",
+                !model.isSamePhysicalDevice(source, destination))
+        }
         check(
             "the source is not the destination",
             model.selectedSourceUID != model.selectedDestinationUID)
