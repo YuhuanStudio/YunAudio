@@ -2251,23 +2251,56 @@ enum UIFlowCheck {
         // is the same notification an unplug produces. What is being checked is
         // that the watcher is actually wired and that a change to devices the
         // route does not use leaves the route alone.
+        //
+        // Built over a device the route is *not* using, which it was not: the
+        // decoy took the route's own destination as its sub-device, so it was
+        // not an unrelated device at all — it enrolled the destination in a
+        // second aggregate, the route rebuilt, and the check called that "audio
+        // stopped". Measured, twice in three runs: the cycle counter went to 0
+        // and the audio was flowing perfectly well a moment later.
         let cyclesBeforeChange = model.cycleCountForDiagnostics
         let deviceCountBefore = model.outputDevices.count
-        if let destination = model.selectedDestination,
+        let inUse = Set(
+            [model.selectedDestinationUID, model.selectedSourceUID, model.monitorDeviceUID]
+                .compactMap { $0 })
+        let spare = model.outputDevices.first {
+            !inUse.contains($0.uid) && !$0.transport.isVirtual && $0.outputChannels > 0
+        }
+        if let over = spare ?? model.outputDevices.first(where: { !inUse.contains($0.uid) }),
             let decoy = try? AggregateDevice(
                 name: "YunAudio Flow Check",
-                subDevices: [.init(uid: destination.uid, driftCompensation: true)],
-                clockMasterUID: destination.uid)
+                subDevices: [.init(uid: over.uid, driftCompensation: true)],
+                clockMasterUID: over.uid)
         {
-            await pause(1.0)
-            check(
+            note("decoy built over \(over.name), which this route does not use")
+            await waitUntil(
                 "the device list picked up the new device",
-                model.outputDevices.count > deviceCountBefore)
+                { model.outputDevices.count > deviceCountBefore }, timeout: 6)
             check("an unrelated device did not stop the route", model.isRunning)
             if let error = model.lastError { note("error was: \(error)") }
-            check(
-                "audio kept flowing across the change",
-                model.cycleCountForDiagnostics > cyclesBeforeChange)
+            // Two different questions, and comparing one number to one taken
+            // before the change answers neither. The IO cycle counter lives in
+            // the RCU cell, and a rebuild frees that cell and makes another —
+            // so the counter restarting from zero means "it rebuilt", not "the
+            // audio stopped", and the old check read the first as the second.
+            //
+            // So: audio flowing is measured over a window *after* the change,
+            // and whether anything rebuilt is reported separately. Only the
+            // first is a failure. Whether an unrelated aggregate over the same
+            // destination ought to perturb this route is a real question, and
+            // it is not answered by a check that cannot tell the two apart.
+            let afterChange = model.cycleCountForDiagnostics
+            await pause(0.5)
+            let flowing = model.cycleCountForDiagnostics
+            note(
+                "cycles \(cyclesBeforeChange) before the change, \(afterChange) after, "
+                    + "\(flowing) half a second later")
+            check("audio kept flowing across the change", flowing > afterChange)
+            if afterChange < cyclesBeforeChange {
+                note(
+                    "the counter restarted, so the route was rebuilt by the new device "
+                        + "appearing — worth knowing, and not the same as audio stopping")
+            }
             check("no error was reported", model.lastError == nil)
 
             // Stopping on purpose must clear the interruption flag, or the
