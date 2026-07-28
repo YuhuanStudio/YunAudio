@@ -66,6 +66,14 @@ struct Preferences: Codable, Equatable, Sendable {
     var recordsStems: Bool?
     /// How much of each source goes to the monitor, by source UID.
     var monitorSends: [String: Float]?
+    /// Devices chosen before, most recent first.
+    ///
+    /// Not a preference somebody sets — a record of what they have actually
+    /// used, which is the only ranking that needs no interface and is right
+    /// more often than one that does. It decides what to fall back to when the
+    /// device in the route is unplugged.
+    var recentSourceUIDs: [String]?
+    var recentDestinationUIDs: [String]?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -102,7 +110,9 @@ struct Preferences: Codable, Equatable, Sendable {
         pluginValues: [:],
         voicePreset: VoicePreset.none.rawValue,
         recordsStems: false,
-        monitorSends: [:])
+        monitorSends: [:],
+        recentSourceUIDs: [],
+        recentDestinationUIDs: [])
 }
 
 @MainActor

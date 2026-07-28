@@ -35,6 +35,15 @@ final class RouterModel {
     var selectedSourceUID: String? {
         didSet {
             guard oldValue != selectedSourceUID else { return }
+            recentSourceUIDs = Self.remember(selectedSourceUID, in: recentSourceUIDs)
+            // Choosing a microphone by hand ends any claim on the one that was
+            // unplugged. Putting somebody back on a device they have since
+            // moved off would be overriding a decision rather than undoing an
+            // accident.
+            if !isSubstitutingDevice {
+                displacedSourceUID = nil
+                displacedSourceName = nil
+            }
             applyChannelDefaults()
             persist()
             restartIfRunning()
@@ -43,9 +52,45 @@ final class RouterModel {
     var selectedDestinationUID: String? {
         didSet {
             guard oldValue != selectedDestinationUID else { return }
+            recentDestinationUIDs = Self.remember(
+                selectedDestinationUID, in: recentDestinationUIDs)
+            if !isSubstitutingDevice {
+                displacedDestinationUID = nil
+                displacedDestinationName = nil
+            }
             persist()
             restartIfRunning()
         }
+    }
+
+    /// Devices chosen before, most recent first. See `Preferences`.
+    private(set) var recentSourceUIDs: [String] = []
+    private(set) var recentDestinationUIDs: [String] = []
+
+    /// The device the route was forced off, so it can be taken back when it
+    /// returns.
+    ///
+    /// Only set when the substitution was not somebody's choice. Picking a
+    /// different microphone by hand clears it, because switching back later
+    /// would then be overriding a decision rather than undoing an accident.
+    private(set) var displacedSourceUID: String?
+    private(set) var displacedDestinationUID: String?
+    /// The name of the device the route is waiting to go back to, if any.
+    ///
+    /// A name rather than a UID, and it survives the device being absent: the
+    /// whole point is that it is not in the list any more, so it has to be
+    /// remembered rather than looked up.
+    private(set) var displacedSourceName: String?
+    private(set) var displacedDestinationName: String?
+
+    /// True only while the model itself is moving the route, so the setter can
+    /// tell an accident from a choice.
+    @ObservationIgnored private var isSubstitutingDevice = false
+
+    private func substituting(_ change: () -> Void) {
+        isSubstitutingDevice = true
+        change()
+        isSubstitutingDevice = false
     }
     var channelMode: SourceChannelMode = .mono {
         didSet {
@@ -1556,6 +1601,8 @@ final class RouterModel {
         isOutputMuted = saved.isOutputMuted ?? false
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
+        recentSourceUIDs = saved.recentSourceUIDs ?? []
+        recentDestinationUIDs = saved.recentDestinationUIDs ?? []
         monitorDecibels = saved.monitorDecibels ?? -6
         isAutoLevelling = saved.isAutoLevelling ?? false
         duckDecibels = saved.duckDecibels ?? -14
@@ -1634,7 +1681,9 @@ final class RouterModel {
                 pluginValues: pluginValues,
                 voicePreset: voicePreset.rawValue,
                 recordsStems: recordsStems,
-                monitorSends: monitorSends))
+                monitorSends: monitorSends,
+                recentSourceUIDs: recentSourceUIDs,
+                recentDestinationUIDs: recentDestinationUIDs))
     }
 
     // MARK: Devices
@@ -1723,6 +1772,12 @@ final class RouterModel {
 
     private func handleDeviceChange() {
         refreshDevices()
+
+        // Taking a device back has to happen before noticing one is missing,
+        // or unplugging the fallback while the original is already home again
+        // would fall back a second time from a device nobody is using.
+        restoreDisplacedDevices()
+
         let sourceGone =
             selectedSourceUID.map { uid in
                 !inputDevices.contains { $0.uid == uid }
@@ -1732,7 +1787,41 @@ final class RouterModel {
                 !outputDevices.contains { $0.uid == uid }
             } ?? false
 
-        if isRunning, sourceGone || destinationGone {
+        // Unplugging the microphone used to stop everything and wait. That is
+        // the right answer only when there is nowhere else to go: somebody on a
+        // call whose USB microphone falls out wants the call to carry on
+        // through the built-in one, and wants their own microphone back the
+        // moment it is plugged in again — not a stopped router and an error.
+        if sourceGone, let lost = selectedSourceUID,
+            let replacement = Self.replacement(
+                for: lost, recent: recentSourceUIDs, available: inputDevices.map(\.uid))
+        {
+            let name = inputDevices.first { $0.uid == lost }?.name
+            substituting {
+                displacedSourceUID = lost
+                displacedSourceName = name ?? lost
+                selectedSourceUID = replacement
+            }
+            lastError = loc("The microphone was unplugged; carrying on with another.")
+        }
+        if destinationGone, let lost = selectedDestinationUID,
+            let replacement = Self.replacement(
+                for: lost, recent: recentDestinationUIDs,
+                available: outputDevices.map(\.uid))
+        {
+            let name = outputDevices.first { $0.uid == lost }?.name
+            substituting {
+                displacedDestinationUID = lost
+                displacedDestinationName = name ?? lost
+                selectedDestinationUID = replacement
+            }
+            lastError = loc("The output was unplugged; carrying on with another.")
+        }
+
+        let stillGone =
+            (sourceGone && displacedSourceUID == nil)
+            || (destinationGone && displacedDestinationUID == nil)
+        if isRunning, stillGone {
             stop()
             wasInterruptedByDeviceLoss = true
             lastError = loc("A device in the route was unplugged.")
@@ -1742,6 +1831,50 @@ final class RouterModel {
             lastError = nil
             start()
         }
+    }
+
+    private func restoreDisplacedDevices() {
+        if let wanted = displacedSourceUID, inputDevices.contains(where: { $0.uid == wanted }) {
+            substituting {
+                displacedSourceUID = nil
+                displacedSourceName = nil
+                selectedSourceUID = wanted
+            }
+            lastError = nil
+        }
+        if let wanted = displacedDestinationUID,
+            outputDevices.contains(where: { $0.uid == wanted })
+        {
+            substituting {
+                displacedDestinationUID = nil
+                displacedDestinationName = nil
+                selectedDestinationUID = wanted
+            }
+            lastError = nil
+        }
+    }
+
+    /// Puts a device at the front of the list of ones used before.
+    static func remember(_ uid: String?, in recent: [String], limit: Int = 8) -> [String] {
+        guard let uid else { return recent }
+        return Array(([uid] + recent.filter { $0 != uid }).prefix(limit))
+    }
+
+    /// What the route should use instead of a device that has gone.
+    ///
+    /// The most recently used one that is actually present, because that is
+    /// almost always where somebody wants to land — the microphone they were on
+    /// yesterday rather than whatever the system enumerates first. Falls back
+    /// to any present device rather than to nothing: carrying on through the
+    /// wrong microphone is recoverable, and a stopped call is not.
+    ///
+    /// - Returns: Nil when there is nothing left to move to, which is the one
+    ///   case where stopping is right.
+    static func replacement(for lost: String, recent: [String], available: [String]) -> String?
+    {
+        let usable = available.filter { $0 != lost }
+        guard !usable.isEmpty else { return nil }
+        return recent.first { usable.contains($0) } ?? usable.first
     }
 
     // MARK: Routing
@@ -2016,6 +2149,48 @@ final class RouterModel {
     }
 
     func toggle() { isRunning ? stop() : start() }
+
+    /// Carries out something another program asked for.
+    ///
+    /// - Returns: What happened, in a sentence, or nil when the command named
+    ///   something this application does not have. The caller says it out loud
+    ///   rather than swallowing it: a scene renamed since somebody wired a
+    ///   button to it should not fail silently.
+    @discardableResult
+    func perform(_ command: RemoteCommand) -> String? {
+        switch command {
+        case .routing(let wanted):
+            let target = wanted ?? !isRunning
+            if target != isRunning { target ? start() : stop() }
+            return target ? loc("Routing started.") : loc("Routing stopped.")
+        case .mute(let wanted):
+            isInputMuted = wanted ?? !isInputMuted
+            return isInputMuted ? loc("Microphone muted.") : loc("Microphone unmuted.")
+        case .record(let wanted):
+            let target = wanted ?? !isRecording
+            if target != isRecording { toggleRecording() }
+            return isRecording ? loc("Recording.") : loc("Recording stopped.")
+        case .transcribe(let wanted):
+            let target = wanted ?? !isTranscribing
+            if target, !isTranscribing {
+                startTranscribing()
+            } else if !target, isTranscribing {
+                stopTranscribing()
+            }
+            return isTranscribing ? loc("Transcribing.") : loc("Transcription stopped.")
+        case .preset(let name):
+            // Matched without case, because a URL somebody typed will not have
+            // the capitals right and refusing over that is pedantry.
+            guard
+                let preset = allPresets.first(where: {
+                    loc($0.name).compare(name, options: .caseInsensitive) == .orderedSame
+                        || $0.name.compare(name, options: .caseInsensitive) == .orderedSame
+                })
+            else { return nil }
+            apply(preset)
+            return loc(preset.name)
+        }
+    }
 
     /// Tears everything down synchronously.
     ///

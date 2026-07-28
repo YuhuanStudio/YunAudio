@@ -374,3 +374,14 @@
 "No transcription model is installed." = "No transcription model is installed.";
 "No model for" = "No model for";
 "Live transcription needs macOS 27." = "Live transcription needs macOS 27.";
+"The microphone was unplugged; carrying on with another." = "The microphone was unplugged; carrying on with another.";
+"The output was unplugged; carrying on with another." = "The output was unplugged; carrying on with another.";
+"Standing in for %@ until it is back." = "Standing in for %@ until it is back.";
+"Routing started." = "Routing started.";
+"Routing stopped." = "Routing stopped.";
+"Microphone muted." = "Microphone muted.";
+"Microphone unmuted." = "Microphone unmuted.";
+"Recording." = "Recording.";
+"Recording stopped." = "Recording stopped.";
+"Transcribing." = "Transcribing.";
+"Transcription stopped." = "Transcription stopped.";

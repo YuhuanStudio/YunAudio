@@ -314,6 +314,9 @@ struct MainWindow: View {
                                         detail: "\($0.inputChannels)ch")
                                 })
                         }
+                        if let waiting = model.displacedSourceName {
+                            fallbackNotice(waiting)
+                        }
                         // Hardware gain first, because it is first in the
                         // signal: it happens before the converter, so it is the
                         // one that costs nothing.
@@ -353,6 +356,9 @@ struct MainWindow: View {
                                         value: $0.uid as String?, title: $0.name,
                                         detail: "\($0.outputChannels)ch")
                                 })
+                        }
+                        if let waiting = model.displacedDestinationName {
+                            fallbackNotice(waiting)
                         }
                         LevelRow(
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
@@ -1123,6 +1129,25 @@ struct MainWindow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Says which device the route is waiting to go back to.
+    ///
+    /// Not an error, and deliberately not styled as one: nothing went wrong
+    /// that anybody has to act on, the call carried on, and the only thing
+    /// worth saying is that this is temporary. Without it the microphone
+    /// silently changes underneath somebody and the only clue is a name in a
+    /// picker they were not looking at.
+    private func fallbackNotice(_ name: String) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Image(systemName: "arrow.uturn.backward.circle")
+                .font(.system(size: 11))
+                .foregroundStyle(Yun.Palette.accent)
+            Text(String(format: loc("Standing in for %@ until it is back."), name))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// A reduction meter, drawn right to left.

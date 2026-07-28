@@ -36,5 +36,19 @@
 
 	<key>NSHumanReadableCopyright</key>
 	<string>Yuhuan Studio</string>
+	<!-- Remote control. A URL is understood by Shortcuts, Stream Deck,
+	     AppleScript and `open` from a terminal, none of which need this
+	     application to have been built by Xcode. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.yuhuanstudio.yunaudio.command</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>yunaudio</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

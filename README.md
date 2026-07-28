@@ -194,6 +194,13 @@ room noise before anything can clip. The picker names all three and says what
 each is for. That mapping came out of the device's own module dumping its
 internal topology, and nothing else on macOS will tell you.
 
+**It carries on when a device is unplugged.** A USB microphone that falls out
+mid-call used to stop the router and wait. It now moves to the most recently
+used microphone that is actually present, says which device it is standing in
+for, and takes the original back the moment it is plugged in again — unless you
+picked something else in the meantime, which ends the claim, because switching
+you back then would be overriding a decision rather than undoing an accident.
+
 **Application audio with no extra driver.** Capture any app through
 `AudioHardwareCreateProcessTap`, optionally silencing its normal output. Loopback
 and its peers need their own plug-in for this; here it is a documented API.
@@ -340,6 +347,31 @@ The string check fails on any user-facing literal that never went through
 `loc()` — a wrapped literal looks exactly like an unwrapped one, so nothing but
 a scanner finds them, and four survived every other check including the whole
 preferences sidebar sitting in English beside Chinese content.
+
+## Remote control
+
+Anything that can open a URL can drive this: Shortcuts, Stream Deck, Keyboard
+Maestro, AppleScript, `open` from a terminal.
+
+```bash
+open "yunaudio://routing/start"     # also /stop and /toggle
+open "yunaudio://mute/on"           # also /off, and bare for toggle
+open "yunaudio://record/toggle"
+open "yunaudio://transcript/start"
+open "yunaudio://preset/Voice%20call"
+```
+
+A bare noun toggles, because that is what a physical button wants; anything
+driven by a script should prefer the definite form, which is idempotent —
+`mute/on` twice is muted, not unmuted. An unrecognised verb is refused rather
+than guessed at, since the failure mode being avoided is a mistyped mute that
+turns into a stop.
+
+Not App Intents, and not for want of trying: the entries in a Shortcuts library
+are discovered from metadata Xcode's own build phase extracts, and an
+application assembled by a shell script around a SwiftPM binary produces none.
+They would have compiled, run, and never appeared anywhere anybody could use
+them.
 
 ## Razer hardware control
 

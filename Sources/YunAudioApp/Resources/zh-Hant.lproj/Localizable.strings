@@ -374,3 +374,14 @@
 "No transcription model is installed." = "此系統尚未安裝轉錄模型。";
 "No model for" = "沒有對應的模型：";
 "Live transcription needs macOS 27." = "即時轉錄需要 macOS 27。";
+"The microphone was unplugged; carrying on with another." = "麥克風被拔掉了，先用另一個繼續。";
+"The output was unplugged; carrying on with another." = "輸出裝置被拔掉了，先用另一個繼續。";
+"Standing in for %@ until it is back." = "先頂替 %@，等它回來就換回去。";
+"Routing started." = "已開始路由。";
+"Routing stopped." = "已停止路由。";
+"Microphone muted." = "麥克風已靜音。";
+"Microphone unmuted." = "麥克風已解除靜音。";
+"Recording." = "錄音中。";
+"Recording stopped." = "已停止錄音。";
+"Transcribing." = "轉錄中。";
+"Transcription stopped." = "已停止轉錄。";

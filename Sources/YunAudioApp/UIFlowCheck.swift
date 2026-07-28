@@ -1402,6 +1402,142 @@ enum UIFlowCheck {
             note("could not build a decoy device — skipped")
         }
 
+        print("\nremote control")
+        // Somebody wiring a Stream Deck key to this has no way to see what
+        // happened, so the parse has to be exact rather than forgiving. The
+        // failure mode being guarded against is a mistyped URL that means
+        // something — a mute that turns into a stop.
+        check(
+            "the definite forms are definite",
+            RemoteCommand.parse(URL(string: "yunaudio://mute/on")!) == .mute(true)
+                && RemoteCommand.parse(URL(string: "yunaudio://mute/off")!) == .mute(false))
+        check(
+            "a bare noun toggles",
+            RemoteCommand.parse(URL(string: "yunaudio://mute")!) == .mute(nil))
+        check(
+            "start and stop read as on and off",
+            RemoteCommand.parse(URL(string: "yunaudio://routing/start")!) == .routing(true)
+                && RemoteCommand.parse(URL(string: "yunaudio://record/stop")!)
+                    == .record(false)
+        )
+        check(
+            "a scene comes through with its spaces",
+            RemoteCommand.parse(URL(string: "yunaudio://preset/Voice%20call")!)
+                == .preset("Voice call"))
+        check(
+            "an unknown verb is refused rather than guessed",
+            RemoteCommand.parse(URL(string: "yunaudio://mute/sometimes")!) == nil)
+        check(
+            "an unknown noun is refused",
+            RemoteCommand.parse(URL(string: "yunaudio://explode")!) == nil)
+        check(
+            "somebody else's scheme is not ours",
+            RemoteCommand.parse(URL(string: "http://mute/on")!) == nil)
+
+        // Parsing correctly is worth nothing if the system never hands us the
+        // URL. The scheme lives in Info.plist, which is copied by a shell
+        // script — exactly the kind of thing that goes missing without the code
+        // noticing, because every test of the parser still passes.
+        let schemes =
+            (Bundle.main.infoDictionary?["CFBundleURLTypes"] as? [[String: Any]] ?? [])
+            .flatMap { $0["CFBundleURLSchemes"] as? [String] ?? [] }
+        check("the bundle claims the scheme", schemes.contains(RemoteCommand.scheme))
+
+        // And the commands actually do what they say, against the real model.
+        let wasMuted = model.isInputMuted
+        model.perform(.mute(true))
+        check("mute on mutes", model.isInputMuted)
+        model.perform(.mute(true))
+        check("and doing it twice is still muted", model.isInputMuted)
+        model.perform(.mute(nil))
+        check("the toggle toggles", !model.isInputMuted)
+        model.isInputMuted = wasMuted
+        check(
+            "a scene that does not exist says so",
+            model.perform(.preset("no such scene")) == nil)
+        if let scene = model.allPresets.first {
+            check("and one that does is applied", model.perform(.preset(scene.name)) != nil)
+        }
+
+        print("\nfalling back when a device disappears")
+        // Unplugging the microphone used to stop everything and wait. That is
+        // right only when there is nowhere else to go: somebody on a call whose
+        // USB microphone falls out wants the call to carry on, and wants their
+        // own microphone back the moment it is plugged in again.
+        //
+        // The ranking is checked as arithmetic first, because the real half can
+        // only ever exercise one path — a destroyed aggregate cannot be brought
+        // back with the same UID, so nothing on this machine can make the
+        // return journey happen on demand.
+        check(
+            "the most recently used present device wins",
+            RouterModel.replacement(
+                for: "gone", recent: ["gone", "second", "third"],
+                available: ["third", "second"]) == "second")
+        check(
+            "anything present beats nothing",
+            RouterModel.replacement(for: "gone", recent: [], available: ["only"]) == "only")
+        check(
+            "the device that vanished is never the answer",
+            RouterModel.replacement(
+                for: "gone", recent: ["gone"], available: ["gone"]) == nil)
+        check(
+            "with nowhere to go it says so",
+            RouterModel.replacement(for: "gone", recent: ["a"], available: []) == nil)
+        check(
+            "choosing a device moves it to the front",
+            RouterModel.remember("b", in: ["a", "b", "c"]) == ["b", "a", "c"])
+        check(
+            "and the list does not grow without bound",
+            RouterModel.remember("x", in: (0..<8).map { "d\($0)" }).count == 8)
+
+        // Now the real half: a decoy destination that is genuinely removed.
+        if let original = model.selectedDestinationUID,
+            let destination = model.selectedDestination,
+            let decoy = try? AggregateDevice(
+                name: "YunAudio Fallback Check",
+                subDevices: [.init(uid: destination.uid, driftCompensation: true)],
+                clockMasterUID: destination.uid)
+        {
+            await pause(1.0)
+            model.selectedDestinationUID = decoy.uid
+            await waitUntil(
+                "the route moved to the decoy",
+                { model.selectedDestinationUID == decoy.uid }, timeout: 3)
+            await waitUntil("and came up on it", { model.isRunning }, timeout: 8)
+
+            decoy.destroy()
+            await pause(2.0)
+            check("it did not stop", model.isRunning)
+            check("it moved to another output", model.selectedDestinationUID != decoy.uid)
+            check("and remembers what it was forced off", model.displacedDestinationUID != nil)
+            // The name has to survive the device being gone: it is not in any
+            // list to look up any more, which is the whole reason it is said.
+            check("and can still name it", model.displacedDestinationName != nil)
+            note("fell back to \(model.selectedDestinationUID ?? "nothing")")
+
+            // Choosing by hand is a decision, not an accident: it has to end
+            // the claim on the device that went away, or plugging that one back
+            // in later would move somebody off what they just picked. It has to
+            // be a different device from the one the fall-back landed on —
+            // setting the same value changes nothing and would pass whatever
+            // the code did.
+            let elsewhere = model.outputDevices.map(\.uid)
+                .first { $0 != model.selectedDestinationUID }
+            if let elsewhere {
+                model.selectedDestinationUID = elsewhere
+                check(
+                    "choosing by hand releases the claim",
+                    model.displacedDestinationUID == nil)
+            } else {
+                note("only one output on this machine — the release was not exercised")
+            }
+            model.selectedDestinationUID = original
+            await waitUntil("and it is running again", { model.isRunning }, timeout: 8)
+        } else {
+            note("could not build a decoy device — skipped")
+        }
+
         print("\nintegrity check")
         // The project's central claim, and until now it could only be made from
         // a terminal: somebody who installs the app had no way to find out
