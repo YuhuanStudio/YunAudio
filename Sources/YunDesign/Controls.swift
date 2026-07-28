@@ -662,9 +662,21 @@ public struct YunVerticalSlider: View {
                     .fill(Yun.Palette.borderStrong)
                     .frame(width: 10, height: 1)
                     .offset(y: -height / 2)
+                // Anchored at the centre rather than at the bottom, because
+                // this is a control that cuts as well as boosts. Filled from
+                // the bottom, a flat equaliser drew ten half-full bars — which
+                // reads as "these bands are set to something" when the whole
+                // point of flat is that they are not. It also fought the centre
+                // tick immediately above, which was already saying where
+                // nothing was the right answer.
+                //
+                // Now the bar is the distance from flat, on the side it was
+                // moved: at flat there is nothing to draw, a cut hangs below
+                // the tick and a boost stands above it.
                 Capsule()
                     .fill(Yun.Palette.accent)
-                    .frame(width: 4, height: max(0, height * filled))
+                    .frame(width: 4, height: Self.fill(for: filled, height: height).length)
+                    .offset(y: -Self.fill(for: filled, height: height).base)
                 Circle()
                     .fill(Yun.Palette.card)
                     .overlay { Circle().strokeBorder(Yun.Palette.borderStrong, lineWidth: 1) }
@@ -685,5 +697,21 @@ public struct YunVerticalSlider: View {
             // fader uses to return to unity.
             .onTapGesture(count: 2) { fraction = 0.5 }
         }
+    }
+
+    /// Where the bar starts and how long it is, measured up from the bottom.
+    ///
+    /// Pulled out of the view so it can be asserted. What it has to get right
+    /// is the flat case producing nothing at all, and a boost and a cut of the
+    /// same size ending up on opposite sides of the centre — neither of which a
+    /// view can be asked about.
+    public static func fill(
+        for fraction: Double, height: Double
+    ) -> (base: Double, length: Double) {
+        let clamped = max(0, min(1, fraction))
+        return (
+            base: height * min(0.5, clamped),
+            length: max(0, height * abs(clamped - 0.5))
+        )
     }
 }

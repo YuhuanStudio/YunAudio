@@ -4,6 +4,7 @@ import Testing
 
 import AppKit
 @testable import YunAudioApp
+@testable import YunDesign
 @testable import YunAudioHAL
 @testable import YunAudioRazer
 
@@ -1586,5 +1587,59 @@ struct StatusMarkChangeTests {
         let plain = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: false)
         let speaking = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: true)
         #expect(plain == speaking)
+    }
+}
+
+/// The bar on a vertical equaliser band.
+///
+/// It was filled from the bottom, like a volume control. On a control that cuts
+/// as well as boosts that means a flat equaliser draws ten half-full bars —
+/// which reads as "these bands are set to something" when the whole point of
+/// flat is that they are not, and it contradicts the centre tick drawn
+/// immediately behind it, which was already saying where nothing is the right
+/// answer. Found by rendering the window and looking at it under a caption that
+/// said, in words, 平坦.
+@Suite("The bar on an equaliser band")
+struct VerticalSliderFillTests {
+
+    private let height = 100.0
+
+    @Test("flat draws nothing at all")
+    func flatDrawsNothing() {
+        let fill = YunVerticalSlider.fill(for: 0.5, height: height)
+        #expect(fill.length == 0)
+    }
+
+    /// A boost stands above the centre and a cut hangs below it, and the two
+    /// are the same length for the same distance from flat.
+    @Test("a boost and a cut of the same size are mirror images")
+    func boostAndCutMirror() {
+        let boost = YunVerticalSlider.fill(for: 0.75, height: height)
+        let cut = YunVerticalSlider.fill(for: 0.25, height: height)
+        #expect(boost.length == cut.length)
+        #expect(boost.length == 25)
+        // The boost starts at the centre and runs up; the cut starts a quarter
+        // up and runs to the centre.
+        #expect(boost.base == 50)
+        #expect(cut.base == 25)
+        #expect(cut.base + cut.length == 50)
+    }
+
+    @Test("the extremes reach the centre and no further")
+    func extremes() {
+        let top = YunVerticalSlider.fill(for: 1, height: height)
+        #expect(top.base == 50)
+        #expect(top.length == 50)
+        let bottom = YunVerticalSlider.fill(for: 0, height: height)
+        #expect(bottom.base == 0)
+        #expect(bottom.length == 50)
+    }
+
+    /// Out of range is clamped rather than drawn off the end of the track.
+    @Test("a fraction outside 0…1 is clamped")
+    func clamped() {
+        #expect(YunVerticalSlider.fill(for: 2, height: height).length == 50)
+        #expect(YunVerticalSlider.fill(for: -1, height: height).length == 50)
+        #expect(YunVerticalSlider.fill(for: -1, height: height).base == 0)
     }
 }
