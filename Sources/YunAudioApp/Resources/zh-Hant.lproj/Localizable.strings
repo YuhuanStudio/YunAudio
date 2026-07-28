@@ -352,3 +352,12 @@
 "Record" = "錄音";
 "Device" = "裝置";
 "Reducing" = "壓制量";
+"off" = "關";
+"Equaliser" = "等化器";
+"Six bands across the voice, at the frequencies the analyser draws — so what you can see, you can reach." = "橫跨人聲的六個頻段，頻率與上方分析器畫的一致——看得見的問題就伸手可及。";
+"Chest" = "胸腔";
+"Boxiness" = "箱音";
+"Hollow" = "空洞";
+"Nasal" = "鼻音";
+"Presence" = "臨場";
+"Air" = "空氣感";

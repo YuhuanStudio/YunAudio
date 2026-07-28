@@ -85,6 +85,14 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     /// Kept as `equaliser` in the stored form because that is what shipped
     /// preferences call it; it has only ever been a high-pass.
     case equaliser
+    /// Six fixed bands across the voice.
+    ///
+    /// The most conspicuous gap in the whole application for a long time: there
+    /// was a high-pass and nothing else, so a boxy room or a harsh sibilance
+    /// had no answer at all. Fixed frequencies rather than a parametric sweep
+    /// because they line up with the bands of the analyser above — you can see
+    /// the problem and reach for the control under it.
+    case tone
     case compressor
     /// Pitch shift with the speed left alone.
     ///
@@ -116,6 +124,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .voiceIsolation: "Voice isolation"
         case .gate: "Noise gate"
         case .equaliser: "High-pass"
+        case .tone: "Equaliser"
         case .compressor: "Compressor"
         case .pitch: "Pitch"
         case .character: "Character"
@@ -133,6 +142,9 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
             "Turns the signal down when nothing is being said. Cheaper than voice "
                 + "isolation and it leaves speech untouched."
         case .equaliser: "Removes rumble below the voice. It has never been more than this."
+        case .tone:
+            "Six bands across the voice, at the frequencies the analyser draws — "
+                + "so what you can see, you can reach."
         case .compressor: "Evens out level. Useful before a limiter, not instead of one."
         case .pitch:
             "Moves the voice up or down without changing its speed. Costs latency, "
@@ -206,6 +218,12 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
                     id: "frequency", title: "Corner", minimum: 20, maximum: 500,
                     unit: "Hz", defaultValue: 80, isLogarithmic: true)
             ]
+        case .tone:
+            Self.toneBands.map { band in
+                EffectParameter(
+                    id: "b\(band.index)", title: band.title, minimum: -12, maximum: 12,
+                    unit: "dB", defaultValue: 0, isLogarithmic: false)
+            }
         case .compressor:
             [
                 EffectParameter(
@@ -300,6 +318,7 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         case .voiceIsolation: SoundIsolation.componentSubType
         case .gate: kAudioUnitSubType_DynamicsProcessor
         case .equaliser: kAudioUnitSubType_NBandEQ
+        case .tone: kAudioUnitSubType_NBandEQ
         case .compressor: kAudioUnitSubType_DynamicsProcessor
         case .pitch: kAudioUnitSubType_NewTimePitch
         // Not a hosted unit at all; the subtype is never consulted for it.
@@ -322,28 +341,46 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
         // off rumble the high-pass is about to remove, and hold it open on
         // noise nobody can hear.
         case .equaliser: 1
-        case .gate: 2
+        // After the high-pass and before the gate: shaping tone above the
+        // rumble is the point, and gating a signal that is about to be
+        // equalised would key the gate off frequencies about to be removed.
+        case .tone: 2
+        case .gate: 3
         // After the gate: shifting first would move the noise floor along with
         // the voice and give the gate a moving target.
-        case .pitch: 3
+        case .pitch: 4
         // Directly after the pitch shift and before anything else: the two are
         // one effect as far as a listener is concerned, and putting a
         // compressor between them would make the character depend on how loud
         // somebody happened to be.
-        case .formant: 4
+        case .formant: 5
         // After both, so the character is applied to the voice as it is going
         // to be heard rather than as it arrived.
-        case .character: 5
-        case .compressor: 6
+        case .character: 6
+        case .compressor: 7
         // The room goes on after the level has been evened out, or the reverb
         // tail gets compressed along with the voice and breathes.
-        case .echo: 7
-        case .reverb: 8
+        case .echo: 8
+        case .reverb: 9
         // Always last. Anything after a limiter can put the signal back over
         // full scale, which is the one thing it was there to prevent.
-        case .limiter: 9
+        case .limiter: 10
         }
     }
+
+    /// The bands the equaliser offers.
+    ///
+    /// Six, at frequencies that line up with what the analyser draws and with
+    /// what actually goes wrong in a voice: chest, boxiness, the hollow, the
+    /// nasal, presence, and air.
+    public static let toneBands: [(index: Int, hertz: Float, title: String, isShelf: Bool)] = [
+        (0, 80, "Chest", true),
+        (1, 250, "Boxiness", false),
+        (2, 600, "Hollow", false),
+        (3, 1600, "Nasal", false),
+        (4, 4000, "Presence", false),
+        (5, 10000, "Air", true),
+    ]
 }
 
 /// A series of Audio Units rendered on the IO thread.
@@ -666,6 +703,42 @@ final class EffectChain {
                 AudioUnitSetParameter(
                     unit, AudioUnitParameterID(kAUNBandEQParam_BypassBand),
                     kAudioUnitScope_Global, 0, 0, 0)
+            case .tone:
+                var bands = UInt32(EffectKind.toneBands.count)
+                AudioUnitSetProperty(
+                    unit, kAUNBandEQProperty_NumberOfBands, kAudioUnitScope_Global, 0,
+                    &bands, UInt32(MemoryLayout<UInt32>.size))
+                for band in EffectKind.toneBands {
+                    let offset = AudioUnitParameterID(band.index)
+                    AudioUnitSetParameter(
+                        unit, AudioUnitParameterID(kAUNBandEQParam_FilterType) + offset,
+                        kAudioUnitScope_Global, 0,
+                        // Shelves at the ends and bells in between, which is
+                        // what every voice equaliser has ever been: the top and
+                        // bottom bands are asked to move everything past them,
+                        // and a bell there would leave the extremes untouched.
+                        Float(
+                            band.isShelf
+                                ? (band.index == 0
+                                    ? kAUNBandEQFilterType_LowShelf
+                                    : kAUNBandEQFilterType_HighShelf)
+                                : kAUNBandEQFilterType_Parametric), 0)
+                    AudioUnitSetParameter(
+                        unit, AudioUnitParameterID(kAUNBandEQParam_Frequency) + offset,
+                        kAudioUnitScope_Global, 0, band.hertz, 0)
+                    AudioUnitSetParameter(
+                        unit, AudioUnitParameterID(kAUNBandEQParam_Gain) + offset,
+                        kAudioUnitScope_Global, 0, 0, 0)
+                    // Two thirds of an octave: wide enough not to sound like a
+                    // notch, narrow enough that two neighbouring bands do not
+                    // simply add up.
+                    AudioUnitSetParameter(
+                        unit, AudioUnitParameterID(kAUNBandEQParam_Bandwidth) + offset,
+                        kAudioUnitScope_Global, 0, 0.66, 0)
+                    AudioUnitSetParameter(
+                        unit, AudioUnitParameterID(kAUNBandEQParam_BypassBand) + offset,
+                        kAudioUnitScope_Global, 0, 0, 0)
+                }
             case .compressor:
                 // Gentle: 3:1 above -20 dBFS. A router should even out a voice,
                 // not squash it — the conferencing application will apply its
@@ -859,6 +932,12 @@ final class EffectChain {
         Pair(kind: .gate, parameter: "ratio"),
         Pair(kind: .gate, parameter: "release"),
         Pair(kind: .equaliser, parameter: "frequency"),
+        Pair(kind: .tone, parameter: "b0"),
+        Pair(kind: .tone, parameter: "b1"),
+        Pair(kind: .tone, parameter: "b2"),
+        Pair(kind: .tone, parameter: "b3"),
+        Pair(kind: .tone, parameter: "b4"),
+        Pair(kind: .tone, parameter: "b5"),
         Pair(kind: .compressor, parameter: "threshold"),
         Pair(kind: .compressor, parameter: "headroom"),
         Pair(kind: .pitch, parameter: "cents"),
@@ -945,6 +1024,14 @@ final class EffectChain {
             // how a control ends up doing something different depending on
             // which order the two were touched in.
             applyFlavour(flavours[kind] ?? .robot, amount: value, to: unit)
+        case (.tone, let name):
+            guard let index = Int(name.dropFirst()), name.hasPrefix("b"),
+                index < EffectKind.toneBands.count
+            else { break }
+            AudioUnitSetParameter(
+                unit,
+                AudioUnitParameterID(kAUNBandEQParam_Gain) + AudioUnitParameterID(index),
+                kAudioUnitScope_Global, 0, value, 0)
         case (.pitch, "cents"):
             AudioUnitSetParameter(
                 unit, AudioUnitParameterID(kNewTimePitchParam_Pitch),

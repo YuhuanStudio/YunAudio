@@ -64,6 +64,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var voicePreset: String?
     /// Write a separate file per source alongside the mix.
     var recordsStems: Bool?
+    /// How much of each source goes to the monitor, by source UID.
+    var monitorSends: [String: Float]?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -99,7 +101,8 @@ struct Preferences: Codable, Equatable, Sendable {
         plugins: [],
         pluginValues: [:],
         voicePreset: VoicePreset.none.rawValue,
-        recordsStems: false)
+        recordsStems: false,
+        monitorSends: [:])
 }
 
 @MainActor

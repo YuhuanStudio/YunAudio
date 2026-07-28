@@ -116,7 +116,35 @@ struct RouteStrip: View {
                 decibels: Binding(
                     get: { model.faderDecibels(of: group) },
                     set: { model.setFaderDecibels($0, for: group) }))
+
+            // The second mix. What you hear, separately from what the far end
+            // hears — which is the thing every tool praised for this is praised
+            // for, and cannot be expressed with one fader however many of them
+            // there are.
+            if model.monitorDeviceUID != nil, !isCompact {
+                HStack(spacing: Yun.Space.sm) {
+                    Image(systemName: "headphones")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Yun.Palette.textMuted)
+                        .frame(width: 14)
+                    YunFader(
+                        decibels: Binding(
+                            get: { model.monitorSendDecibels(of: group) },
+                            set: { model.setMonitorSend($0, for: group) }))
+                    Text(monitorReadout)
+                        .font(Yun.Text.mono)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .monospacedDigit()
+                        .frame(width: 52, alignment: .trailing)
+                }
+            }
         }
+    }
+
+    private var monitorReadout: String {
+        let decibels = model.monitorSendDecibels(of: group)
+        return decibels <= RouterModel.minimumDecibels
+            ? loc("off") : String(format: "%+.1f", decibels)
     }
 
     private var readout: String {

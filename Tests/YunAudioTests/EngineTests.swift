@@ -322,7 +322,7 @@ struct EffectParameterTests {
         let ordered = EffectKind.allCases.sorted { $0.chainOrder < $1.chainOrder }
         #expect(
             ordered == [
-                .voiceIsolation, .equaliser, .gate, .pitch, .formant, .character,
+                .voiceIsolation, .equaliser, .tone, .gate, .pitch, .formant, .character,
                 .compressor, .echo, .reverb, .limiter,
             ])
         // Every stage has a distinct position, or the sort is not deterministic
@@ -3524,5 +3524,115 @@ struct PitchLevelTests {
         // And about −56 dBFS RMS, comfortably below it.
         let below = tone(150, amplitude: 0.00225)
         #expect(tracker.track(frames: below, count: 2).allSatisfy { $0 == 0 })
+    }
+}
+
+// MARK: - The equaliser
+
+/// There was a high-pass and nothing else for a long time, so a boxy room or a
+/// harsh sibilance had no answer at all.
+@Suite("Equaliser")
+struct EqualiserTests {
+
+    /// Every band has to be reachable and distinct, or a slider moves the wrong
+    /// frequency and nothing says so.
+    @Test("every band has its own control and its own frequency")
+    func bandsAreDistinct() {
+        let bands = EffectKind.toneBands
+        #expect(bands.count == 6)
+        #expect(Set(bands.map(\.hertz)).count == bands.count)
+        #expect(Set(bands.map(\.title)).count == bands.count)
+        // Ascending, so the row of sliders reads left to right as low to high.
+        for (first, second) in zip(bands, bands.dropFirst()) {
+            #expect(first.hertz < second.hertz)
+            #expect(first.index < second.index)
+        }
+        // Shelves at the ends and bells between: the top and bottom bands are
+        // asked to move everything past them, which a bell would not.
+        #expect(bands.first!.isShelf)
+        #expect(bands.last!.isShelf)
+        #expect(bands.dropFirst().dropLast().allSatisfy { !$0.isShelf })
+    }
+
+    @Test("the parameters match the bands")
+    func parametersMatchBands() {
+        let parameters = EffectKind.tone.parameters
+        #expect(parameters.count == EffectKind.toneBands.count)
+        for (parameter, band) in zip(parameters, EffectKind.toneBands) {
+            #expect(parameter.id == "b\(band.index)")
+            #expect(parameter.title == band.title)
+            // Flat by default: switching an equaliser on must not change the
+            // sound until somebody moves something.
+            #expect(parameter.defaultValue == 0)
+            #expect(parameter.minimum == -12)
+            #expect(parameter.maximum == 12)
+        }
+    }
+
+    /// The whole set has to be wired, which is the mistake a computed
+    /// parameter list invites: the interface offers six sliders and the chain
+    /// recognises four.
+    @Test("every band reaches the unit")
+    func bandsAreWired() throws {
+        let chain = try #require(
+            EffectChain(kinds: [.tone], sampleRate: 48000, maximumFrames: 512))
+        for parameter in EffectKind.tone.parameters {
+            #expect(chain.recognises(parameter.id, of: .tone))
+            chain.set(parameter.id, of: .tone, to: 6)
+        }
+        // And it renders after being moved.
+        for index in 0..<512 { chain.inputBuffer[index] = 0.1 }
+        #expect(chain.render(frames: 512, sampleTime: 0))
+    }
+
+    /// It is an equaliser, so it has to actually change the balance — and only
+    /// where it was asked to.
+    @Test("a band moves its own frequency and leaves the others alone")
+    func bandAffectsItsOwnFrequency() throws {
+        func measure(gainOnBand band: Int?) throws -> [Float] {
+            let chain = try #require(
+                EffectChain(kinds: [.tone], sampleRate: 48000, maximumFrames: 1024))
+            if let band { chain.set("b\(band)", of: .tone, to: 12) }
+            let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+            // Broadband, so every band has something to work on.
+            var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+            for block in 0..<60 {
+                for index in 0..<1024 {
+                    state = state &* 6_364_136_223_846_793_005 &+ 1
+                    let value =
+                        Float(Int32(bitPattern: UInt32(truncatingIfNeeded: state >> 32)))
+                        / Float(Int32.max)
+                    chain.inputBuffer[index] = value * 0.2
+                }
+                guard chain.render(frames: 1024, sampleTime: Float64(block * 1024)) else {
+                    Issue.record("render failed")
+                    return []
+                }
+                var out = [Float](repeating: 0, count: 1024)
+                for index in 0..<1024 { out[index] = chain.outputBuffer[index] }
+                out.withUnsafeBufferPointer { analyser.add($0.baseAddress!, count: 1024) }
+            }
+            return (0..<SpectrumAnalyser.bandCount).map { analyser.decibels(ofBand: $0) }
+        }
+
+        let flat = try measure(gainOnBand: nil)
+        // The presence band, at 4 kHz.
+        let boosted = try measure(gainOnBand: 4)
+        try #require(!flat.isEmpty && !boosted.isEmpty)
+
+        let analyser = try #require(SpectrumAnalyser(sampleRate: 48000))
+        var nearest = 0
+        var best = Double.infinity
+        for band in 0..<SpectrumAnalyser.bandCount {
+            let distance = abs(analyser.centreFrequency(ofBand: band) - 4000)
+            if distance < best {
+                best = distance
+                nearest = band
+            }
+        }
+        #expect(boosted[nearest] > flat[nearest] + 3, "the band did not move")
+        // And the bottom of the spectrum is left alone, which is what makes it
+        // an equaliser rather than a volume control.
+        #expect(abs(boosted[2] - flat[2]) < 2)
     }
 }

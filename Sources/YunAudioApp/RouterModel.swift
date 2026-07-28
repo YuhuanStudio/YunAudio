@@ -355,9 +355,46 @@ final class RouterModel {
         return !headphoneWords.contains { name.contains($0) }
     }
 
-    /// The index of the monitor routes inside `activeRoutes`, so the gain can be
-    /// pushed without rebuilding.
-    @ObservationIgnored private var monitorRouteIndices: [Int] = []
+    /// Which routes carry each source into the monitor, so a send can be moved
+    /// without rebuilding anything.
+    @ObservationIgnored private var monitorRouteIndices: [String: [Int]] = [:]
+
+    /// How much of each source goes to the monitor, by source UID.
+    ///
+    /// Absent means the default: the microphone at whatever the monitor level
+    /// is set to, and everything else off. Somebody who turns monitoring on
+    /// wants to hear themselves; whether they also want the music in their ears
+    /// is a decision, not a default.
+    var monitorSends: [String: Float] = [:] {
+        didSet { if oldValue != monitorSends { persist() } }
+    }
+
+    func monitorSendDecibels(forSource uid: String) -> Float {
+        if let stored = monitorSends[uid] { return stored }
+        return uid == selectedSourceUID ? monitorDecibels : Self.minimumDecibels
+    }
+
+    func monitorSendDecibels(of group: SourceGroup) -> Float {
+        monitorSendDecibels(forSource: group.uid)
+    }
+
+    /// Moves a source's monitor send.
+    ///
+    /// Without a rebuild when the routes already exist; with one when they do
+    /// not, because a send coming up from silence needs routes that were never
+    /// built.
+    func setMonitorSend(_ decibels: Float, for group: SourceGroup) {
+        let wasAudible = monitorSendDecibels(of: group) > Self.minimumDecibels
+        monitorSends[group.uid] = decibels
+        guard decibels > Self.minimumDecibels, wasAudible,
+            let indices = monitorRouteIndices[group.uid]
+        else {
+            restartIfRunning()
+            return
+        }
+        let gain = Self.gain(fromDecibels: decibels)
+        for index in indices { engine.setGain(gain, forRouteAt: index) }
+    }
 
     /// The monitor fader as a 0...1 travel, matching the hardware gain slider
     /// beside it rather than the decibel rows above.
@@ -395,10 +432,13 @@ final class RouterModel {
     }
 
     private func applyMonitorGain() {
+        // The microphone's own send follows the monitor level unless somebody
+        // has moved it themselves.
+        guard let uid = selectedSourceUID, monitorSends[uid] == nil,
+            let indices = monitorRouteIndices[uid]
+        else { return }
         let gain = Self.gain(fromDecibels: monitorDecibels)
-        for index in monitorRouteIndices {
-            engine.setGain(gain, forRouteAt: index)
-        }
+        for index in indices { engine.setGain(gain, forRouteAt: index) }
     }
 
     /// Below this the fader reads as −∞ and the gain is exactly zero, so the
@@ -1508,6 +1548,7 @@ final class RouterModel {
         pluginValues = saved.pluginValues ?? [:]
         voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
         recordsStems = saved.recordsStems ?? false
+        monitorSends = saved.monitorSends ?? [:]
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -1573,7 +1614,8 @@ final class RouterModel {
                 plugins: enabledPlugins,
                 pluginValues: pluginValues,
                 voicePreset: voicePreset.rawValue,
-                recordsStems: recordsStems))
+                recordsStems: recordsStems,
+                monitorSends: monitorSends))
     }
 
     // MARK: Devices
@@ -1779,26 +1821,55 @@ final class RouterModel {
 
         // Monitoring last, so its routes sit at the end and their indices are
         // stable regardless of how many applications are being captured.
-        monitorRouteIndices = []
+        // A second mix, not a monitor for the microphone alone.
+        //
+        // Every tool people praise for this — Wave Link, RØDE Connect,
+        // VoiceMeeter — is praised for the same thing: two independent mixes,
+        // one for what the far end hears and one for what you hear, with a
+        // separate level per source on each. Music loud in your ears and quiet
+        // on the stream is the case, and it cannot be expressed with one set of
+        // faders however many of them there are.
+        //
+        // The monitor used to carry the microphone and nothing else, which is a
+        // sidetone rather than a mix.
+        monitorRouteIndices = [:]
         if let monitorUID = monitorDeviceUID,
-            let monitor = outputDevices.first(where: { $0.uid == monitorUID }),
-            let sourceDevice = selectedSource
+            let monitor = outputDevices.first(where: { $0.uid == monitorUID })
         {
             let monitorChannels = min(2, monitor.outputChannels)
-            let gain = Self.gain(fromDecibels: monitorDecibels)
-            let sourceChannel = min(monoChannel, max(0, sourceDevice.inputChannels - 1))
-            for channel in 0..<monitorChannels {
-                // Mono sources feed both ears; a stereo source keeps its sides.
-                let takenChannel =
-                    channelMode == .stereo
-                    ? min(channel, sourceDevice.inputChannels - 1) : sourceChannel
-                monitorRouteIndices.append(routeList.count)
-                routeList.append(
-                    Route(
-                        source: ChannelRef(
-                            deviceUID: sourceDevice.uid, channel: takenChannel),
-                        destination: ChannelRef(deviceUID: monitorUID, channel: channel),
-                        gain: gain))
+            // Every source already in the main mix, each at its own send.
+            // Grouped by source so a stereo source keeps its sides.
+            var bySource: [String: [Route]] = [:]
+            var order: [String] = []
+            for route in routeList {
+                let uid = route.source.deviceUID
+                if bySource[uid] == nil { order.append(uid) }
+                bySource[uid, default: []].append(route)
+            }
+
+            for uid in order {
+                let level = monitorSendDecibels(forSource: uid)
+                guard level > Self.minimumDecibels else { continue }
+                let gain = Self.gain(fromDecibels: level)
+                let members = bySource[uid] ?? []
+                var indices: [Int] = []
+                for channel in 0..<monitorChannels {
+                    // A mono source feeds both ears; a stereo one keeps its
+                    // sides.
+                    let taken = members[min(channel, members.count - 1)]
+                    indices.append(routeList.count)
+                    routeList.append(
+                        Route(
+                            source: taken.source,
+                            destination: ChannelRef(
+                                deviceUID: monitorUID, channel: channel),
+                            gain: gain,
+                            // Application audio ducks on the monitor too, or
+                            // talking over music sounds different in your ears
+                            // from how it sounds to everybody else.
+                            isDuckable: taken.isDuckable))
+                }
+                monitorRouteIndices[uid] = indices
             }
         }
 

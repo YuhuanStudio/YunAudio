@@ -777,6 +777,38 @@ enum UIFlowCheck {
                 "changing it did not interrupt audio",
                 model.cycleCountForDiagnostics > cyclesBeforeGain && !model.isBusy)
 
+            // A second mix, not a sidetone. Every source can go to it at its
+            // own level — music loud in your ears and quiet on the stream —
+            // which is what every tool praised for this is praised for.
+            let mainRoutes = model.activeRoutes.count
+            if let group = model.sourceGroups.first {
+                let before = model.monitorSendDecibels(of: group)
+                note(
+                    String(
+                        format: "%@ monitor send %.1f dB", model.sourceLabel(for: group), before
+                    ))
+                check(
+                    "the microphone is in the monitor by default",
+                    before > RouterModel.minimumDecibels)
+                let cyclesBefore = model.cycleCountForDiagnostics
+                model.setMonitorSend(-15, for: group)
+                await pause(0.4)
+                check("its send moved", model.monitorSendDecibels(of: group) == -15)
+                check(
+                    "and moving it did not interrupt audio",
+                    model.cycleCountForDiagnostics > cyclesBefore && !model.isBusy)
+                model.setMonitorSend(before, for: group)
+                await waitUntil("it settled", { !model.isBusy }, timeout: 12)
+            }
+            // Everything else starts off it, because whether the music should
+            // also be in your ears is a decision rather than a default.
+            for group in model.sourceGroups.dropFirst() {
+                check(
+                    "\(model.sourceLabel(for: group)) starts off the monitor",
+                    model.monitorSendDecibels(of: group) <= RouterModel.minimumDecibels)
+            }
+            note("\(mainRoutes) route(s) with the monitor attached")
+
             model.monitorDeviceUID = nil
             await waitUntil("monitoring came back out", { !model.isBusy }, timeout: 12)
             check("routing continues without it", model.isRunning)

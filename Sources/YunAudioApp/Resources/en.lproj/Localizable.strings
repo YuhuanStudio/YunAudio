@@ -352,3 +352,12 @@
 "Record" = "Record";
 "Device" = "Device";
 "Reducing" = "Reducing";
+"off" = "off";
+"Equaliser" = "Equaliser";
+"Six bands across the voice, at the frequencies the analyser draws — so what you can see, you can reach." = "Six bands across the voice, at the frequencies the analyser draws — so what you can see, you can reach.";
+"Chest" = "Chest";
+"Boxiness" = "Boxiness";
+"Hollow" = "Hollow";
+"Nasal" = "Nasal";
+"Presence" = "Presence";
+"Air" = "Air";
