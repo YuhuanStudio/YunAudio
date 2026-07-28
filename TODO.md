@@ -20,6 +20,23 @@
 
 ## 已知問題
 
+### 我們沒有做延遲補償 —— 這是錯的，不是缺功能 [本機實測]
+
+`EffectChain` 把每一級 AU 的延遲加總成 `latencyFrames`，`RoutingEngine` 存成
+`effectLatencyFrames` —— 而**這個值唯一的去處是 UI**（`RouterModel` 把它換算成毫秒
+顯示）。**沒有任何地方用它去延遲別的路徑。**
+
+所以麥克風經過整條效果鏈（光是人聲隔離就 56 ms），而被 tap 的應用程式音訊一級都沒
+經過。兩者在混音時就差了整條鏈的延遲。**在 KTV 的情境下這正是「人聲比伴奏晚」**，
+量級幾十毫秒 —— 唱歌的人聽得出來，而且會下意識搶拍去補。錄下來的 per-source stem
+之間也是錯開的，事後在 DAW 裡重混要手動對齊。
+
+修法便宜：在不經過鏈的那些路徑上放一條延遲線，長度就是那個我們已經算好的數字。代
+價要講明白：**要嘛對齊，要嘛早到，不能兩者都要。**
+
+**而且它可以被斷言**：送一個脈衝進麥克風路徑與一個 tap 路徑，量兩邊在目的地的到達
+幀差，斷言它是 0。修之前那個斷言會失敗，那正是它存在的證據。
+
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
 路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在
@@ -29,8 +46,16 @@ AirPods 上開麥克風會把整個裝置拖進 HFP —— 雙向 16 kHz。
 這個問題：把 AirPods 加進 aggregate、盯著輸出的取樣率與電平，而不是從程式碼的形狀
 推論。
 
-已經知道的一件事：`kAudioSubDeviceInputChannelsKey` **沒有用**（見「已定案」），
-所以「把藍牙裝置的輸入排除在 aggregate 之外」這條最明顯的路是堵死的。
+已經知道的兩件事，兩條路都堵死了：
+
+- `kAudioSubDeviceInputChannelsKey` **沒有用**（見「已定案」），所以「把藍牙裝置的
+  輸入排除在 aggregate 之外」這條最明顯的路不通。
+- **macOS 沒有 iOS 那個高品質錄音選項** [本機 SDK]。
+  `AVAudioSessionCategoryOptionBluetoothHighQualityRecording` 在 header 裡明確標
+  `API_UNAVAILABLE(macos)`，CoreAudio 也沒有對應物。
+
+所以只剩結構性的那條：**aggregate 讓 AirPods 只當輸出，由另一個裝置供應麥克風**，
+編解碼就不會降級。SoundSource 6.0 出的就是這個 [V]。
 
 ### 還有兩種改動仍會重啟路由 [本機實測]
 
@@ -91,7 +116,43 @@ VoiceMeeter 每條匯流排都有完整的參數等化器，所以直播混音�
 耳機補償已經證明了**輸出側掛 biquad 級聯是可行且零配置的**，所以「每條匯流排一條
 鏈」現在不是新機制，而是同一個機制多開幾份。值得單獨做一次設計。
 
-### 4. 腳本介面 [M]
+### 4. OBS 對接 [V] —— 競爭者全都沒有
+
+`RESEARCH.md` 主題 1 把實作的未知數全部清掉了：`obs-websocket` v5 的協定、認證、
+音訊相關的請求與事件、browser source 的設定鍵、vendor 推送路徑。
+
+三個具體的接點：
+
+- **websocket 客戶端**：音量、靜音、音軌、電平表事件雙向同步。
+- **browser overlay**：歌詞、分數、電平、響度建議做成一個本機頁面讓 OBS 疊上去。
+  **直播主在看 OBS，不是在看我們的視窗** —— 這是這條路真正的理由。
+- **`SetInputAudioSyncOffset`**：沒人在用的接點，而且跟上面「延遲補償」是同一個數
+  字。我們算得出鏈的延遲，就能直接告訴 OBS 要偏移多少。
+
+而 OBS 在 macOS 上的音訊擷取那個痛還在（形狀變了但沒消失），那正是我們虛擬裝置存
+在的理由，值得寫成一句話的賣點。
+
+### 5. CoreAudio 內建的語音活動偵測 [本機 SDK] —— 投入產出比最高
+
+`AudioHardware.h` 裡有兩個屬性，我們**一行都沒用**：
+
+```
+kAudioDevicePropertyVoiceActivityDetectionEnable   'vAd+'
+kAudioDevicePropertyVoiceActivityDetectionState    'vAdS'
+```
+
+header 逐字說：它**自帶回音消除**，而且**在 process mute 之下仍然有效**（硬體靜音
+才會失效）。
+
+三個直接用途：**「你靜音了，但你在說話」**（Zoom/Teams 裡最受歡迎的小功能之一，在
+這裡是兩個屬性 —— 沒有模型、沒有 CPU、沒有延遲）；自帶回音消除所以不會被喇叭騙到；
+以及當 AGC 與閘門的第二個證據來源，跟現有的分類器互相印證。
+
+順帶同一趟做掉 macOS 26 的 `CATapDescription.processRestoreEnabled` 與 `bundleIDs`
+—— 那正好是 OBS 開了三年的 issue #9144（「應用程式重開之後擷取就沒聲音」）的解法。
+**我們有，他們沒有。**
+
+### 6. 腳本介面 [M]
 
 Audio Hijack 的 JavaScript API 是所有評論都特別點名的功能 [M]。而空門是：
 **Loopback 完全沒有 scripting、AppleScript 或 Shortcuts** [M]。
@@ -99,12 +160,34 @@ Audio Hijack 的 JavaScript API 是所有評論都特別點名的功能 [M]。�
 `JavaScriptCore` 是 macOS 內建的，所以直譯器免費。工作在於設計一個穩定的物件模型
 與事件分派 —— 那是一個關於相容性的承諾，所以它排在比較便宜的項目後面。
 
-### 5. Homebrew cask [V]
+### 7. 散布：公證 + Homebrew cask [V] —— 唯一會讓前面全部白做的一項
+
+Audio Hijack 遷到 ARK 之後是「秒裝、不重啟、不要密碼」[M]；SoundPipe $10 而且已經
+在 cask 裡 [V]；FineTune 免費、八個月八千星 [V]；OBS 的 ScreenCaptureKit 擷取完全
+不用驅動。
+
+**散布的摩擦現在是我們最大的單一劣勢。** 正確的形狀是：一個免安裝的一級模式（tap、
+效果、錄音、轉錄、監聽全部不需要驅動），加上「裝驅動換到可證明的 bit-exact 路徑」
+這個升級。
 
 FineTune 反應數最高的 issue 就是這個，開站兩天後就有人提 [V]。卡在跟散布同一件事：
 驅動是 ad-hoc 簽章，而 cask 要的是公證過的東西。
 
 ---
+
+## 定位：不要跟他們比功能，比可驗證 [V]
+
+`RESEARCH.md` 讀完所有競爭者的 release notes 與產品頁之後最重要的一句話：
+
+**沒有任何一個競爭者提出過一個可以被別人重跑的數字。**
+
+Rogue Amoeba 那疊、Wave Link 3、eqMac、Krisp、FineTune、SoundPipe —— 全部是功能清
+單與修 bug。Krisp 唯一給的毫秒數只有行銷頁，沒有論文、沒有 benchmark、沒有可驗證的
+來源。
+
+`MEASUREMENT.md` 是這個專案唯一沒有人能在一季內抄走的東西。多混音會被抄（已經被
+Wave Link 3 免費做掉了），逐字稿會被抄，EQ 會被抄。**「這是我們的方法，你自己跑跑
+看」不會。**
 
 ## 值得先探一下的
 
@@ -136,11 +219,23 @@ Rogue Amoeba 遷到 ARK 之後，Audio Hijack 的擷取**不需要改安全性�
 VB-Audio 自家的 UDP 協定：8 進 8 出、規格公開有文件（不像 Dante），而且已經有一個
 iOS 遙控 app 在講它 [V]。如果哪天網路音訊變得有趣，這是可行的目標。
 
-### Elgato Wave Link 2.0 到底有沒有上 macOS？[未解]
+### Elgato Wave Link —— **已解，而且是壞消息** [V]
 
-整份研究裡價值最高的未解問題：它決定「雙混音」這個語彙在這個平台上是已經被佔住，
-還是一塊空地。Elgato 的網站擋掉了所有自動抓取（說明中心 403、產品頁 404），所以這
-題**需要一個人拿瀏覽器去看**。
+**Wave Link 3.0.0 在 2026-03-03 上了 macOS，免費，而且支援任何麥克風不只 Elgato
+自家的。** Wave Link 2 已 End of Life。3.2 版還做了三件跟我們直接相關的事：**離開
+App 沙箱**以降低 AU 延遲（他們遇到了跟我們一樣的 out-of-process AU 成本問題）、
+**Siri / Spotlight / Shortcuts**（他們有 App Intents，我們定案做不到）、以及**具名
+的虛擬混音輸出**（最多五個混音）。
+
+他們的介面是**橫向矩陣：來源在左、混音在右** —— 那正是 RME TotalMix 三十年的模型。
+兩個獨立產品收斂到同一個形狀，是這個形狀對的很強證據。
+
+**對我們的意義**：「多混音 + 每個 app 一條 channel + 虛擬裝置 + 免費」在 macOS 上
+已經被一個 Corsair 支持的產品佔住了，不能再假設那是空地。
+
+但他們**沒有的**（在讀過的所有頁面裡沒出現）：bit-exact 驗證、BS.1770 響度、
+per-source 逐字稿、共振峰變聲、時脈鎖定 —— 以及**任何一個數字**。他們的 release
+notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 
 ---
 
