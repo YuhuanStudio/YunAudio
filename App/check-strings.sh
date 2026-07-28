@@ -93,6 +93,47 @@ for table in sorted(pathlib.Path("Sources").glob("**/*.lproj/Localizable.strings
         else:
             seen[key] = number
 
+# Format specifiers have to survive translation.
+#
+# `String(format:)` reads the *translated* string, so a translation that drops a
+# `%@` or turns a `%.1f` into a `%d` does not produce a worse sentence — it
+# reads the wrong argument off the stack and prints rubbish, or crashes. It is
+# also invisible to every other check here, because both files are perfectly
+# well-formed.
+#
+# Positional forms are counted as equal to their plain equivalents: `%1$@` and
+# `%2$@` in the translation of a string that has two `%@` is a *correct*
+# translation reordering the arguments, which is the entire reason the syntax
+# exists. What is compared is the multiset of conversions, not the order.
+SPECIFIER = re.compile(
+    r"%(?:(\d+)\$)?[-+ #0]*[\d.*]*(?:hh|h|ll|l|q|L|z|t|j)?([@dDiuUxXoOfeEgGcCsSpaAn%])")
+
+
+def conversions(text):
+    return sorted(match.group(2) for match in SPECIFIER.finditer(text) if match.group(2) != "%")
+
+
+tables = {
+    path.parent.name.split(".")[0]: dict(
+        re.findall(r'^"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)";', path.read_text(),
+                   re.MULTILINE))
+    for path in sorted(pathlib.Path("Sources").glob("**/*.lproj/Localizable.strings"))
+}
+if "en" in tables:
+    for language, table in tables.items():
+        if language == "en":
+            continue
+        for key, english in tables["en"].items():
+            if key not in table:
+                failures.append(f"{language}: no translation for {key!r}")
+            elif conversions(english) != conversions(table[key]):
+                failures.append(
+                    f"{language}: {key!r} has {conversions(english)} in English "
+                    f"and {conversions(table[key])} translated")
+        for key in table:
+            if key not in tables["en"]:
+                failures.append(f"{language}: {key!r} is not in the English table")
+
 if failures:
     print("user-facing literals not passed through loc():\n")
     for failure in failures:

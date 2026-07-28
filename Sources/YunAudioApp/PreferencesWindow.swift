@@ -859,8 +859,23 @@ struct PreferencesWindow: View {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
                     YunDetailRow(
                         loc("Signal path"), value: loc("bit-exact"), tone: .success)
-                    YunDetailRow(loc("Round trip"), value: loc("2.67 ms at 128 frames"))
-                    YunDetailRow(loc("Processor"), value: loc("0.40% of one core"))
+                    // The numbers are arguments rather than part of the
+                    // translated sentence. Baked in, a measurement lives in two
+                    // `.strings` files and changing it means editing both — and
+                    // "0.40% of one core" as a *key* puts a bare `%` in front of
+                    // a letter, which is an octal conversion the day anybody
+                    // passes it through `String(format:)`.
+                    YunDetailRow(
+                        loc("Round trip"),
+                        value: String(
+                            format: loc("%@ at %d frames"),
+                            Format.milliseconds(Measured.roundTripMilliseconds),
+                            Measured.roundTripFrames))
+                    YunDetailRow(
+                        loc("Processor"),
+                        value: String(
+                            format: loc("%@ of one core"),
+                            Format.percent(Measured.processorShare)))
                     YunDetailRow(
                         loc("IO thread allocations"), value: "0", tone: .success)
                     Text(

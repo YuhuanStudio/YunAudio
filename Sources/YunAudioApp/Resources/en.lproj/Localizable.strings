@@ -191,8 +191,6 @@
 "Round trip" = "Round trip";
 "Processor" = "Processor";
 "Run the integrity check under Diagnostics to measure your own path rather than taking these." = "Run the integrity check under Diagnostics to measure your own path rather than taking these.";
-"2.67 ms at 128 frames" = "2.67 ms at 128 frames";
-"0.40% of one core" = "0.40% of one core";
 "Now choose %@ as the microphone in Discord, Zoom or OBS." = "Now choose %@ as the microphone in Discord, Zoom or OBS.";
 "Microphone" = "Microphone";
 "Dry" = "Dry";
@@ -502,3 +500,5 @@
 "Start routing before it can score you." = "Start routing before it can score you.";
 "muted, but talking" = "muted, but talking";
 "The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers." = "The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers.";
+"%@ at %d frames" = "%@ at %d frames";
+"%@ of one core" = "%@ of one core";

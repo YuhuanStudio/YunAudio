@@ -146,7 +146,7 @@
 "96 kHz, untouched signal. Latency matters less than keeping the capture intact." = "96 kHz，訊號不經處理。此時延遲的重要性低於保住錄音的完整。";
 "Path" = "路徑";
 "Integrity check" = "完整性檢查";
-"Sends a known sequence through the whole path and compares every sample that comes back. The only way to know whether your own path is lossless, rather than being told it is." = "送一段已知序列走完整條路徑，再逐一比對回傳的每個取樣。這是唯一能知道你自己這條路徑到底無不無損的方法，而不是聽別人說。";
+"Sends a known sequence through the whole path and compares every sample that comes back. The only way to know whether your own path is lossless, rather than being told it is." = "送一段已知序列走完整條路徑，再逐一比對回傳的每個取樣。這是唯一能知道你自己這條路徑到底是不是無損的方法，而不是聽別人說。";
 "Run the check" = "執行檢查";
 "Checking…" = "檢查中…";
 "Result" = "結果";
@@ -191,8 +191,6 @@
 "Round trip" = "來回延遲";
 "Processor" = "處理器";
 "Run the integrity check under Diagnostics to measure your own path rather than taking these." = "到「診斷」執行完整性檢查,量測你自己的路徑,而不是直接相信這些數字。";
-"2.67 ms at 128 frames" = "2.67 毫秒（128 frames）";
-"0.40% of one core" = "單核心的 0.40%";
 "Now choose %@ as the microphone in Discord, Zoom or OBS." = "接著把 Discord、Zoom 或 OBS 的麥克風設成「%@」。";
 "Microphone" = "麥克風";
 "Dry" = "乾訊號";
@@ -502,3 +500,5 @@
 "Start routing before it can score you." = "要先開始路由才能幫你打分數。";
 "muted, but talking" = "已靜音，但你在說話";
 "The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers." = "麥克風是靜音的，而系統自己的語音偵測聽得到你。它自帶回音消除，所以這是你，不是喇叭。";
+"%@ at %d frames" = "%@（%d frames）";
+"%@ of one core" = "單核心的 %@";
