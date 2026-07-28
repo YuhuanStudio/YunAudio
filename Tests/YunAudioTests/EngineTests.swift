@@ -2536,6 +2536,19 @@ struct EffectStageTests {
         #expect(dryPower > wetPower * 4, "wet \(wetPower) dry \(dryPower)")
     }
 
+    /// The recording scene's chain, at the rate and block size that scene asks
+    /// for rather than at the defaults everything else is tested with.
+    @Test("a limiter on its own builds at every rate and block a scene can ask for")
+    func limiterAloneAtSceneSettings() throws {
+        for rate in [44100, 48000, 96000] as [Double] {
+            for frames in [64, 128, 256, 512] {
+                #expect(
+                    EffectChain(kinds: [.limiter], sampleRate: rate, maximumFrames: frames)
+                        != nil, "\(rate) Hz, \(frames) frames")
+            }
+        }
+    }
+
     /// Every knob the interface offers has to be one the chain recognises.
     /// A mismatch between the two is a control that moves and does nothing.
     @Test("every advertised knob reaches its unit")
