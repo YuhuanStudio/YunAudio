@@ -2060,6 +2060,7 @@ final class RouterModel {
         }
 
         installHotkeys()
+        installMIDI()
 
         if autoStart, selectedSource != nil, selectedDestination != nil {
             start()
@@ -2166,6 +2167,21 @@ final class RouterModel {
             entries.append((preset.name, "⌘\(index + 1)", false))
         }
         return entries
+    }
+
+    // MARK: MIDI
+
+    /// Physical faders and pads. Everything it does lives in `MIDIControl.swift`;
+    /// what is here is the ownership and the two lines of persistence.
+    let midiControl = MIDIController()
+
+    /// Written down on its own rather than through `persist()`, because a
+    /// binding can be learned while a preset is being applied and `persist()`
+    /// declines to write during those.
+    func persistMIDIBindings() {
+        var saved = PreferencesStore.load()
+        saved.midiBindings = midiControl.storedBindings
+        PreferencesStore.save(saved)
     }
 
     /// What the mute hotkey does, and what the menu bar glyph reflects.
@@ -2304,7 +2320,11 @@ final class RouterModel {
                 headphoneProfileName: headphoneProfileName,
                 graphicEQ: graphicEQ,
                 recentSourceUIDs: recentSourceUIDs,
-                recentDestinationUIDs: recentDestinationUIDs))
+                recentDestinationUIDs: recentDestinationUIDs,
+                // Written on every save, not only when a binding changes: this
+                // rebuilds the whole file, so leaving it out would quietly
+                // erase somebody's controller the next time they moved a fader.
+                midiBindings: midiControl.storedBindings))
     }
 
     // MARK: Devices
@@ -2915,6 +2935,7 @@ final class RouterModel {
     /// reconfigured.
     func shutDown() {
         hotkeys.tearDown()
+        midiControl.tearDown()
         stopPolling()
         stopAnalysis()
         engine.stop()

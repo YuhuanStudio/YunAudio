@@ -1,4 +1,5 @@
 import Foundation
+import YunDesign
 
 /// Something another program can ask this one to do.
 ///
@@ -65,6 +66,57 @@ enum RemoteCommand: Equatable, Sendable {
             return nil
         }
     }
+
+    /// The URL that produces this command.
+    ///
+    /// The inverse of `parse`, and it is here so that anything wanting to
+    /// *store* a command — a MIDI binding, for one — can keep the URL rather
+    /// than a second encoding of the same list.
+    var url: URL {
+        switch self {
+        case .routing(let state): Self.url("routing", state)
+        case .mute(let state): Self.url("mute", state)
+        case .record(let state): Self.url("record", state)
+        case .transcribe(let state): Self.url("transcribe", state)
+        case .config(let name): Self.url("config", name)
+        case .preset(let name): Self.url("preset", name)
+        }
+    }
+
+    private static func url(_ noun: String, _ state: Bool?) -> URL {
+        // A bare noun is the toggle, which is what a physical button wants and
+        // is the shorter of the two forms besides.
+        guard let state else { return URL(string: "\(scheme)://\(noun)")! }
+        return URL(string: "\(scheme)://\(noun)/\(state ? "on" : "off")")!
+    }
+
+    private static func url(_ noun: String, _ name: String) -> URL {
+        let escaped =
+            name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        return URL(string: "\(scheme)://\(noun)/\(escaped)")!
+    }
+
+    /// What to call this where somebody is choosing something to automate.
+    var title: String {
+        switch self {
+        case .routing: loc("Start / stop routing")
+        case .mute: loc("Mute / unmute")
+        case .record: loc("Record")
+        case .transcribe: loc("Transcribe")
+        case .config(let name): name
+        case .preset(let name): loc(name)
+        }
+    }
+
+    /// The commands worth putting a physical button on, in the toggle form a
+    /// button without a light has to ask for.
+    ///
+    /// Scenes and setups are deliberately not here: they are named by the user
+    /// and there can be any number of them, so they belong in a list built from
+    /// what is actually saved rather than in a fixed one.
+    static let bindable: [RemoteCommand] = [
+        .routing(nil), .mute(nil), .record(nil), .transcribe(nil),
+    ]
 
     /// Turns a verb into on, off, or toggle. Double-optional: the outer level
     /// says whether the verb was understood at all, the inner one carries the

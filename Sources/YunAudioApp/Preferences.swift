@@ -84,6 +84,12 @@ struct Preferences: Codable, Equatable, Sendable {
     /// device in the route is unplugged.
     var recentSourceUIDs: [String]?
     var recentDestinationUIDs: [String]?
+    /// Which physical control drives what, as flat strings — the target's own
+    /// key against the message's. Flat rather than nested so that a file
+    /// somebody has to read by hand stays readable, and so that a target this
+    /// version has never heard of can be dropped on the way in without taking
+    /// the rest of the decode down with it.
+    var midiBindings: [String: String]?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -126,7 +132,8 @@ struct Preferences: Codable, Equatable, Sendable {
         headphoneProfileName: nil,
         graphicEQ: [Float](repeating: 0, count: 10),
         recentSourceUIDs: [],
-        recentDestinationUIDs: [])
+        recentDestinationUIDs: [],
+        midiBindings: [:])
 }
 
 @MainActor

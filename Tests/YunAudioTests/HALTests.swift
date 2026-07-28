@@ -1,6 +1,8 @@
 import CoreAudio
+import Foundation
 import Testing
 
+@testable import YunAudioApp
 @testable import YunAudioHAL
 @testable import YunAudioRazer
 
@@ -879,5 +881,387 @@ struct SubDeviceDescriptionTests {
         let entry = AggregateDevice.SubDevice(uid: "device", driftCompensation: false)
             .description
         #expect(entry[kAudioSubDeviceUIDKey] as? String == "device")
+    }
+}
+
+// MARK: - MIDI
+
+/// A knob is not a button, and the difference is the whole feature. There is no
+/// controller plugged into the machine this was written on, so everything that
+/// decides what a message *means* is a pure function and everything below drives
+/// those directly rather than waiting for hardware that is not there.
+
+@Suite("MIDI message decoding")
+struct MIDIDecodingTests {
+    @Test("a control change carries its controller, value and channel")
+    func controlChange() {
+        // Message type 2, group 0, status B, channel 0, controller 7, value 100.
+        let message = MIDIMessage.decode(0x20B0_0764)
+        #expect(message?.kind == .controlChange(7))
+        #expect(message?.value == 100)
+        #expect(message?.channel == 0)
+        #expect(message?.isOn == true)
+    }
+
+    @Test("the channel is read, not assumed")
+    func channel() {
+        #expect(MIDIMessage.decode(0x20B5_0764)?.channel == 5)
+        #expect(MIDIMessage.decode(0x209F_3C7F)?.channel == 15)
+    }
+
+    @Test("a note-on is on and a note-off is not")
+    func notes() {
+        let on = MIDIMessage.decode(0x2090_3C7F)
+        #expect(on?.kind == .note(60))
+        #expect(on?.value == 127)
+        #expect(on?.isOn == true)
+
+        let off = MIDIMessage.decode(0x2080_3C40)
+        #expect(off?.kind == .note(60))
+        #expect(off?.isOn == false)
+    }
+
+    /// Most keyboards never send status 8 at all. A pad bound to mute would
+    /// stick down for ever if the release were read as another press.
+    @Test("a note-on with velocity zero is a release")
+    func zeroVelocityRelease() {
+        #expect(MIDIMessage.decode(0x2090_3C00)?.isOn == false)
+    }
+
+    @Test("the bend wheel is fourteen bits, least significant first")
+    func pitchBend() {
+        // Centre: least significant 0, most significant 64 → 8192.
+        #expect(MIDIMessage.decode(0x20E0_0040)?.value == 8192)
+        #expect(MIDIMessage.decode(0x20E0_7F7F)?.value == 16383)
+        #expect(MIDIMessage.decode(0x20E0_0000)?.value == 0)
+        // And it scales over the wider range rather than over 127.
+        let centre = MIDIMessage.decode(0x20E0_0040)
+        #expect(abs((centre?.position ?? 0) - 0.5) < 0.001)
+    }
+
+    /// Only MIDI 1.0 channel voice messages are asked for, because the input
+    /// port is opened with that protocol and CoreMIDI translates everything
+    /// else down to it. Anything else on the wire is somebody else's business.
+    @Test("a packet that is not a channel voice message is refused")
+    func otherMessageTypes() {
+        #expect(MIDIMessage.decode(0x0000_0000) == nil)  // utility
+        #expect(MIDIMessage.decode(0x1000_00F8) == nil)  // system realtime
+        #expect(MIDIMessage.decode(0x40B0_0700) == nil)  // MIDI 2.0 channel voice
+        #expect(MIDIMessage.decode(0x20C0_0500) == nil)  // programme change
+    }
+
+    @Test("every message survives a trip through the wire format")
+    func roundTrip() {
+        let messages: [MIDIMessage] = [
+            .cc(7, 100), .cc(74, 0, channel: 9), .note(36, velocity: 127),
+            MIDIMessage(channel: 3, kind: .note(48), value: 64, isOn: false),
+            MIDIMessage(channel: 0, kind: .pitchBend, value: 8192, isOn: true),
+        ]
+        for message in messages {
+            #expect(MIDIMessage.decode(message.word) == message)
+        }
+    }
+}
+
+@Suite("MIDI levels")
+struct MIDIScaleTests {
+    /// The number that matters: a controller at a given value has to land on
+    /// the decibel the fader beside it would show, or the two disagree and one
+    /// of them is lying about the level.
+    @Test("a controller value maps to the decibel the fader would read")
+    func decibels() {
+        #expect(MIDIScale.decibels(fromPosition: MIDIMessage.cc(7, 0).position) == -40)
+        #expect(MIDIScale.decibels(fromPosition: MIDIMessage.cc(7, 127).position) == 12)
+        // 64/127 of a 52 dB range above −40 dB.
+        let middle = MIDIScale.decibels(fromPosition: MIDIMessage.cc(7, 64).position)
+        #expect(abs(middle - (-13.7953)) < 0.001)
+        // And unity is where the fader's own tick is, near enough to read as 0.
+        let unity = MIDIScale.decibels(fromPosition: MIDIMessage.cc(7, 98).position)
+        #expect(abs(unity) < 0.2)
+    }
+
+    @Test("out of range positions are clamped rather than extrapolated")
+    func clamping() {
+        #expect(MIDIScale.decibels(fromPosition: -1) == -40)
+        #expect(MIDIScale.decibels(fromPosition: 2) == 12)
+        #expect(MIDIScale.position(fromDecibels: -80) == 0)
+        #expect(MIDIScale.position(fromDecibels: 40) == 1)
+    }
+
+    @Test("decibels and positions are inverses")
+    func inverse() {
+        for value in stride(from: Float(-40), through: 12, by: 4) {
+            let round = MIDIScale.decibels(
+                fromPosition: MIDIScale.position(fromDecibels: value))
+            #expect(abs(round - value) < 0.001)
+        }
+    }
+
+    /// The scale is written out rather than taken from the model, whose copy is
+    /// main-actor isolated and cannot be a default value. Asserted equal so the
+    /// pair cannot drift apart in silence.
+    @MainActor
+    @Test("the bottom of the MIDI range is the bottom of the fader's")
+    func agreesWithTheFader() {
+        #expect(MIDIScale.decibels.lowerBound == RouterModel.minimumDecibels)
+    }
+}
+
+@Suite("MIDI soft takeover")
+struct MIDIPickupTests {
+    /// −6 dB as a controller position, which is where the software fader sits
+    /// in every case below.
+    private let software = MIDIScale.position(fromDecibels: -6)
+
+    @Test("a fader arriving at the bottom does not slam the level")
+    func doesNotJump() {
+        var pickup = MIDIPickup()
+        #expect(MIDIPickup.resolve(control: 0, software: software, state: &pickup) == nil)
+        #expect(!pickup.isEngaged)
+    }
+
+    @Test("and moving towards the value without reaching it still does nothing")
+    func stillSuppressed() {
+        var pickup = MIDIPickup()
+        for control: Float in [0, 0.2, 0.4, 0.6] {
+            #expect(
+                MIDIPickup.resolve(control: control, software: software, state: &pickup)
+                    == nil)
+        }
+        #expect(!pickup.isEngaged)
+    }
+
+    @Test("passing through the software value takes over, and then it follows")
+    func picksUp() {
+        var pickup = MIDIPickup()
+        _ = MIDIPickup.resolve(control: 0.6, software: software, state: &pickup)
+        // 0.6 is below −6 dB and 0.7 is above it, so this message swept across.
+        #expect(MIDIPickup.resolve(control: 0.7, software: software, state: &pickup) == 0.7)
+        #expect(pickup.isEngaged)
+        // From here the hardware leads, in both directions.
+        #expect(MIDIPickup.resolve(control: 0.9, software: 0.7, state: &pickup) == 0.9)
+        #expect(MIDIPickup.resolve(control: 0.1, software: 0.9, state: &pickup) == 0.1)
+    }
+
+    @Test("landing on the value takes over without having to cross it")
+    func landsOnIt() {
+        var pickup = MIDIPickup()
+        #expect(
+            MIDIPickup.resolve(control: software, software: software, state: &pickup)
+                == software)
+    }
+
+    /// A seven-bit control cannot land closer than one step to an arbitrary
+    /// software position, so "passes through" has to mean "within a step" or a
+    /// fader at −6.3 dB could never be picked up at all.
+    @Test("one controller step away is close enough")
+    func withinAStep() {
+        var pickup = MIDIPickup()
+        let nearest = (software * 127).rounded() / 127
+        #expect(
+            MIDIPickup.resolve(control: nearest, software: software, state: &pickup) != nil)
+    }
+
+    @Test("dragging the fader on screen makes the hardware catch up again")
+    func releasedByTheInterface() {
+        var pickup = MIDIPickup()
+        _ = MIDIPickup.resolve(control: 0.6, software: software, state: &pickup)
+        _ = MIDIPickup.resolve(control: 0.7, software: software, state: &pickup)
+        #expect(pickup.isEngaged)
+        // Somebody drags the on-screen fader down to 0.2. The knob is still at
+        // 0.7, so it is no longer in charge and has to cross 0.2 to get back.
+        #expect(MIDIPickup.resolve(control: 0.75, software: 0.2, state: &pickup) == nil)
+        #expect(!pickup.isEngaged)
+        #expect(MIDIPickup.resolve(control: 0.5, software: 0.2, state: &pickup) == nil)
+        #expect(MIDIPickup.resolve(control: 0.15, software: 0.2, state: &pickup) == 0.15)
+    }
+}
+
+@Suite("MIDI actions")
+struct MIDIActionTests {
+    private let button = MIDITarget.command(url: "yunaudio://mute")
+
+    @Test("a note-off does not trigger")
+    func noteOff() {
+        var pickup = MIDIPickup()
+        let release = MIDIMessage(channel: 0, kind: .note(36), value: 64, isOn: false)
+        #expect(
+            MIDIAction.decide(
+                for: release, target: button, softwarePosition: 0, pickup: &pickup)
+                == .ignore)
+    }
+
+    @Test("and neither does the note-on with velocity zero that stands in for one")
+    func zeroVelocity() {
+        var pickup = MIDIPickup()
+        #expect(
+            MIDIAction.decide(
+                for: .note(36, velocity: 0), target: button, softwarePosition: 0,
+                pickup: &pickup) == .ignore)
+    }
+
+    @Test("a note-on presses")
+    func noteOn() {
+        var pickup = MIDIPickup()
+        #expect(
+            MIDIAction.decide(
+                for: .note(36, velocity: 100), target: button, softwarePosition: 0,
+                pickup: &pickup) == .press)
+    }
+
+    /// A footswitch sends 127 on the way down and 0 on the way up. Acting on
+    /// both would make every press a press and a release, which for a toggle is
+    /// no press at all.
+    @Test("a switch on a button acts on the way down only")
+    func switchedController() {
+        var pickup = MIDIPickup()
+        #expect(
+            MIDIAction.decide(
+                for: .cc(64, 127), target: button, softwarePosition: 0, pickup: &pickup)
+                == .press)
+        #expect(
+            MIDIAction.decide(
+                for: .cc(64, 0), target: button, softwarePosition: 0, pickup: &pickup)
+                == .ignore)
+    }
+
+    @Test("a knob on a level waits for pickup and then moves it")
+    func knobOnALevel() {
+        var pickup = MIDIPickup()
+        let software = MIDIScale.position(fromDecibels: -6)
+        #expect(
+            MIDIAction.decide(
+                for: .cc(7, 0), target: .fader(.master), softwarePosition: software,
+                pickup: &pickup) == .ignore)
+        let taken = MIDIAction.decide(
+            for: .cc(7, 127), target: .fader(.master), softwarePosition: software,
+            pickup: &pickup)
+        #expect(taken == .setPosition(1))
+        // Which is the top of the fader, not merely the top of the controller.
+        if case .setPosition(let position) = taken {
+            #expect(MIDIScale.decibels(fromPosition: position) == 12)
+        }
+    }
+}
+
+@Suite("MIDI bindings")
+struct MIDIBindingTests {
+    @Test("every kind of target and address survives being written and read back")
+    func storageRoundTrip() {
+        let targets: [MIDITarget] = [
+            .fader(.master), .fader(.input), .fader(.monitor),
+            .sourceFader(uid: "AppleUSBAudioEngine:Razer:Seiren"),
+            .sourceMute(uid: "AppleUSBAudioEngine:Razer:Seiren"),
+            .command(url: "yunaudio://mute"),
+            .command(url: "yunaudio://preset/Voice%20call"),
+        ]
+        for target in targets {
+            #expect(MIDITarget(storageKey: target.storageKey) == target)
+        }
+
+        let addresses: [MIDIAddress] = [
+            MIDIAddress(channel: 0, kind: .controlChange(7)),
+            MIDIAddress(channel: 15, kind: .note(36)),
+            MIDIAddress(channel: 9, kind: .pitchBend),
+        ]
+        for address in addresses {
+            #expect(MIDIAddress(storageKey: address.storageKey) == address)
+        }
+    }
+
+    @Test("a key this version does not understand is dropped, not guessed at")
+    func refusedStorage() {
+        #expect(MIDITarget(storageKey: "fader:tilt") == nil)
+        #expect(MIDITarget(storageKey: "nonsense") == nil)
+        #expect(MIDITarget(storageKey: "command:") == nil)
+        // A command the URL scheme does not answer to would sit in the window
+        // looking bound and doing nothing.
+        #expect(MIDITarget(storageKey: "command:yunaudio://explode") == nil)
+        #expect(MIDIAddress(storageKey: "0.cc.999") == nil)
+        #expect(MIDIAddress(storageKey: "99.cc.7") == nil)
+        #expect(MIDIAddress(storageKey: "0.aftertouch.7") == nil)
+    }
+
+    /// The list of things a pad can do and the list a Stream Deck key can do
+    /// have to be one list, which means the URL a binding stores has to be a
+    /// URL the scheme actually parses.
+    @Test("every bindable command round-trips through its own URL")
+    func commandsAreURLs() {
+        for command in RemoteCommand.bindable {
+            #expect(RemoteCommand.parse(command.url) == command)
+            let target = MIDITarget.command(url: command.url.absoluteString)
+            #expect(MIDITarget(storageKey: target.storageKey) == target)
+        }
+        // Including the ones with a space in the name, which is where a URL
+        // built by hand goes wrong.
+        #expect(
+            RemoteCommand.parse(RemoteCommand.preset("Voice call").url)
+                == .preset("Voice call"))
+    }
+
+    @MainActor
+    @Test("one message cannot drive two things")
+    func exclusive() {
+        let controller = MIDIController()
+        let address = MIDIAddress(channel: 0, kind: .controlChange(7))
+        controller.bind(address, to: .fader(.master))
+        controller.bind(address, to: .fader(.input))
+        #expect(controller.binding(for: .fader(.master)) == nil)
+        #expect(controller.binding(for: .fader(.input)) == address)
+        #expect(Set(controller.bindings.values).count == controller.bindings.count)
+    }
+
+    @MainActor
+    @Test("bindings survive being written down and read back")
+    func persistence() {
+        let controller = MIDIController()
+        controller.bind(
+            MIDIAddress(channel: 0, kind: .controlChange(7)), to: .fader(.master))
+        controller.bind(
+            MIDIAddress(channel: 2, kind: .note(36)), to: .command(url: "yunaudio://mute"))
+        controller.bind(
+            MIDIAddress(channel: 0, kind: .controlChange(8)),
+            to: .sourceFader(uid: "BuiltInMicrophoneDevice"))
+        let stored = controller.storedBindings
+
+        let restored = MIDIController()
+        restored.restore(stored)
+        #expect(restored.bindings == controller.bindings)
+
+        // And through the file the application actually writes, because a
+        // dictionary that round-trips in memory and not through JSON is a
+        // binding that silently vanishes on the next launch.
+        var preferences = Preferences.default
+        preferences.midiBindings = stored
+        let data = try? JSONEncoder().encode(preferences)
+        let decoded = data.flatMap { try? JSONDecoder().decode(Preferences.self, from: $0) }
+        #expect(decoded?.midiBindings == stored)
+    }
+
+    /// A preferences file can be edited by hand, or written by a version that
+    /// allowed something this one does not. Two targets claiming one control
+    /// must not survive the trip back in.
+    @MainActor
+    @Test("a duplicate in the file is dropped on the way in")
+    func duplicatesOnRestore() {
+        let controller = MIDIController()
+        controller.restore(["fader:master": "0.cc.7", "fader:input": "0.cc.7"])
+        #expect(controller.bindings.count == 1)
+        #expect(Set(controller.bindings.values).count == 1)
+    }
+
+    @MainActor
+    @Test("a freshly learned fader is bound and does nothing yet")
+    func learnedFadersWait() {
+        let controller = MIDIController()
+        controller.learningTarget = .fader(.master)
+        controller.receive(.cc(7, 100))
+        #expect(controller.learningTarget == nil)
+        #expect(
+            controller.binding(for: .fader(.master))
+                == MIDIAddress(channel: 0, kind: .controlChange(7)))
+        // Bound, and holding back until the knob passes the level — which is
+        // the point of the whole thing.
+        #expect(!controller.isEngaged(.fader(.master)))
     }
 }

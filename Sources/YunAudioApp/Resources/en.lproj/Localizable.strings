@@ -434,6 +434,30 @@
 "Tone and space" = "Tone and space";
 "Shapes the voice and puts it somewhere. All of this is meant to be heard." = "Shapes the voice and puts it somewhere. All of this is meant to be heard.";
 
+/* MIDI control. */
+"MIDI control" = "MIDI control";
+"Controller" = "Controller";
+"Connected" = "Connected";
+"Last received" = "Last received";
+"Levels" = "Levels";
+"Buttons" = "Buttons";
+"Sources" = "Sources";
+"Master level" = "Master level";
+"Monitor level" = "Monitor level";
+"Fader" = "Fader";
+"Learn" = "Learn";
+"Listening…" = "Listening…";
+"unbound" = "unbound";
+"nothing" = "nothing";
+"nothing yet" = "nothing yet";
+"Unnamed" = "Unnamed";
+"CC %d · ch %d" = "CC %d · ch %d";
+"Note %d · ch %d" = "Note %d · ch %d";
+"Bend · ch %d" = "Bend · ch %d";
+"Could not reach CoreMIDI (%d)." = "Could not reach CoreMIDI (%d).";
+"Could not open a MIDI input (%d)." = "Could not open a MIDI input (%d).";
+"Press Learn, then move the knob or hit the pad. A fader does nothing until it passes through the level already set, so picking one up cannot slam the signal." = "Press Learn, then move the knob or hit the pad. A fader does nothing until it passes through the level already set, so picking one up cannot slam the signal.";
+
 /* What each scene preset is a starting point for. */
 "Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible." = "Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible.";
 "Removes the speakers from the microphone, then gates and compresses harder because the room is in it." = "Removes the speakers from the microphone, then gates and compresses harder because the room is in it.";

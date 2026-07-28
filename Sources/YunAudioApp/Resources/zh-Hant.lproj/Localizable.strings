@@ -434,6 +434,30 @@
 "Tone and space" = "音色與空間";
 "Shapes the voice and puts it somewhere. All of this is meant to be heard." = "修飾音色，並把聲音放進某個空間。這一區就是要讓人聽出來的。";
 
+/* MIDI control. */
+"MIDI control" = "MIDI 控制";
+"Controller" = "控制器";
+"Connected" = "已連接";
+"Last received" = "最近收到";
+"Levels" = "音量";
+"Buttons" = "按鍵";
+"Sources" = "來源";
+"Master level" = "總輸出音量";
+"Monitor level" = "監聽音量";
+"Fader" = "推桿";
+"Learn" = "學習";
+"Listening…" = "聆聽中…";
+"unbound" = "尚未指定";
+"nothing" = "沒有";
+"nothing yet" = "尚未收到";
+"Unnamed" = "未命名";
+"CC %d · ch %d" = "CC %d · 通道 %d";
+"Note %d · ch %d" = "音符 %d · 通道 %d";
+"Bend · ch %d" = "彎音 · 通道 %d";
+"Could not reach CoreMIDI (%d)." = "無法連接 CoreMIDI（%d）。";
+"Could not open a MIDI input (%d)." = "無法開啟 MIDI 輸入（%d）。";
+"Press Learn, then move the knob or hit the pad. A fader does nothing until it passes through the level already set, so picking one up cannot slam the signal." = "按下「學習」，然後轉動旋鈕或敲一下打擊墊。推桿在越過目前已設定的音量之前不會有任何作用，所以接手推桿不會讓訊號瞬間跳掉。";
+
 /* What each scene preset is a starting point for. */
 "Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible." = "48 kHz，加上人聲隔離、輕微的閘門與溫和的壓縮。這裡沒有一項是要被聽出來的。";
 "Removes the speakers from the microphone, then gates and compresses harder because the room is in it." = "從麥克風中移除喇叭的聲音，並把閘門與壓縮都調得更重，因為整個房間都進來了。";
