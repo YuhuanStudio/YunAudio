@@ -360,6 +360,21 @@ struct MainWindow: View {
                         if let waiting = model.displacedDestinationName {
                             fallbackNotice(waiting)
                         }
+                        if model.volumeKeysAreDead {
+                            HStack(spacing: Yun.Space.sm) {
+                                Image(systemName: "speaker.slash")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(Yun.Palette.textMuted)
+                                Text(
+                                    loc(
+                                        "This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works."
+                                    )
+                                )
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
                         LevelRow(
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
                             label: loc("Output level"))
@@ -922,6 +937,23 @@ struct MainWindow: View {
     @ViewBuilder
     private var hardwareTab: some View {
         Group {
+            sectionHeading(loc("Output alignment"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    Text(
+                        loc(
+                            "Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    ForEach(model.alignableOutputs, id: \.uid) { device in
+                        outputDelayRow(device)
+                    }
+                }
+            }
+
             if model.lighting.isAvailable {
                 sectionHeading(loc("Light ring"))
                 YunCard {
@@ -1129,6 +1161,41 @@ struct MainWindow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// One output's delay, in milliseconds.
+    ///
+    /// Milliseconds rather than frames, even though frames is what the system
+    /// is told: nobody knows what 240 frames sounds like, and the answer
+    /// changes with the sample rate. Distance is the other honest unit — sound
+    /// covers about 34 cm in a millisecond — so the two readings together let
+    /// somebody dial it in by measuring the room rather than by ear.
+    private func outputDelayRow(_ device: AudioDevice) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Text(device.name)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textSecondary)
+                .lineLimit(1)
+                .frame(width: 150, alignment: .leading)
+            YunSlider(
+                fraction: Binding(
+                    get: { model.outputDelay(of: device.uid) / RouterModel.maximumOutputDelay },
+                    set: {
+                        model.setOutputDelay(
+                            $0 * RouterModel.maximumOutputDelay, for: device.uid)
+                    }))
+            Text(
+                model.outputDelay(of: device.uid) < 0.05
+                    ? "—"
+                    : String(
+                        format: "%.0f ms · %.0f cm", model.outputDelay(of: device.uid),
+                        model.outputDelay(of: device.uid) * 34.3)
+            )
+            .font(Yun.Text.mono)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .monospacedDigit()
+            .frame(width: 108, alignment: .trailing)
+        }
     }
 
     /// Says which device the route is waiting to go back to.

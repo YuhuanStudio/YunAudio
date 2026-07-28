@@ -385,3 +385,6 @@
 "Recording stopped." = "Recording stopped.";
 "Transcribing." = "Transcribing.";
 "Transcription stopped." = "Transcription stopped.";
+"Output alignment" = "Output alignment";
+"Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing." = "Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing.";
+"This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works." = "This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works.";

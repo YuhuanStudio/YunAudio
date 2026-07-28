@@ -271,6 +271,9 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   - voiceIsolation: Single-stage isolation settings, or nil for none.
     ///   - echoCancellation: Speaker and far-end reference for the canceller,
     ///     or nil to leave the microphone in this aggregate.
+    ///   - outputLatencyTrim: Extra frames of delay per output device UID, for
+    ///     lining up two outputs that do not arrive together. The HAL applies
+    ///     it, so nothing on the realtime path changes.
     ///   - selftest: Installs the loopback integrity check.
     /// - Throws: `RoutingError` when a device is missing, a channel cannot be
     ///   mapped, the devices share no sample rate, or CoreAudio refuses to
@@ -288,6 +291,7 @@ public final class RoutingEngine: @unchecked Sendable {
         bufferFrames: UInt32 = 128,
         voiceIsolation: VoiceIsolationSettings? = nil,
         echoCancellation: EchoCancellationSettings? = nil,
+        outputLatencyTrim: [String: Int] = [:],
         selftest: Bool = false
     ) throws {
         stateLock.lock()
@@ -378,14 +382,37 @@ public final class RoutingEngine: @unchecked Sendable {
         if cancelsEcho { requiresClockLock = false }
 
         let members = cancelsEcho ? [destination] + extras : [source, destination] + extras
+
+        // A member the router only ever writes to does not need its input side
+        // opened, and on Bluetooth that is not a saving but a correctness
+        // matter: opening a headset's input negotiates HFP, which drags the
+        // *output* down to 16 kHz as well. The whole device degrades because
+        // one direction nobody asked for was opened.
+        //
+        // Applied to Bluetooth alone rather than to every write-only member,
+        // and the reason is the loopback: reading a destination's input back is
+        // how this project proves the path is bit-exact, and it works on our
+        // own virtual device and on the other loopbacks people already have. A
+        // Bluetooth headset has no loopback to lose, so there is nothing to
+        // trade away there — anywhere else there would be.
+        func writeOnly(_ device: AudioDevice) -> AggregateDevice.SubDevice {
+            AggregateDevice.SubDevice(
+                uid: device.uid, driftCompensation: true,
+                inputChannels: device.transport == .bluetooth ? 0 : nil,
+                extraOutputLatencyFrames: outputLatencyTrim[device.uid])
+        }
+
         let routedSubDevices: [AggregateDevice.SubDevice] =
             cancelsEcho
-            ? [.init(uid: destinationDeviceUID, driftCompensation: true)]
-                + extras.map { .init(uid: $0.uid, driftCompensation: true) }
+            ? [writeOnly(destination)] + extras.map(writeOnly)
             : [
                 .init(uid: sourceDeviceUID, driftCompensation: false),
-                .init(uid: destinationDeviceUID, driftCompensation: !clockLockAvailable),
-            ] + extras.map { .init(uid: $0.uid, driftCompensation: true) }
+                .init(
+                    uid: destinationDeviceUID,
+                    driftCompensation: !clockLockAvailable,
+                    inputChannels: destination.transport == .bluetooth ? 0 : nil,
+                    extraOutputLatencyFrames: outputLatencyTrim[destinationDeviceUID]),
+            ] + extras.map(writeOnly)
 
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying

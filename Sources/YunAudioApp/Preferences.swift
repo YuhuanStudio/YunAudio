@@ -66,6 +66,9 @@ struct Preferences: Codable, Equatable, Sendable {
     var recordsStems: Bool?
     /// How much of each source goes to the monitor, by source UID.
     var monitorSends: [String: Float]?
+    /// Extra delay per output device UID, in milliseconds, for lining up two
+    /// outputs that do not arrive together.
+    var outputDelays: [String: Double]?
     /// Devices chosen before, most recent first.
     ///
     /// Not a preference somebody sets — a record of what they have actually
@@ -111,6 +114,7 @@ struct Preferences: Codable, Equatable, Sendable {
         voicePreset: VoicePreset.none.rawValue,
         recordsStems: false,
         monitorSends: [:],
+        outputDelays: [:],
         recentSourceUIDs: [],
         recentDestinationUIDs: [])
 }

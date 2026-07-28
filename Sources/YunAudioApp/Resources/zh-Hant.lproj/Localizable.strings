@@ -385,3 +385,6 @@
 "Recording stopped." = "已停止錄音。";
 "Transcribing." = "轉錄中。";
 "Transcription stopped." = "已停止轉錄。";
+"Output alignment" = "輸出對齊";
+"Two outputs fed from one cycle do not arrive together. Delay the early one until they line up — the system applies it, so it costs nothing." = "同一個週期送出的兩個輸出不會同時抵達。把早到的那個延遲到對齊為止 —— 這是由系統套用的，不花任何運算。";
+"This output publishes no volume control, so the keyboard's volume keys do nothing on it. The fader below still works." = "這個輸出裝置沒有提供音量控制，所以鍵盤上的音量鍵對它沒有作用。下面這個推桿仍然有效。";

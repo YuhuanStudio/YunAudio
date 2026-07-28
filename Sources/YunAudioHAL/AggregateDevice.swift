@@ -19,10 +19,61 @@ public final class AggregateDevice {
         /// When true the HAL resamples this device to track the clock master.
         /// Exactly one sub-device — the master — must have this off.
         public let driftCompensation: Bool
+        /// How many of this device's input channels the aggregate should open,
+        /// or nil for all of them.
+        ///
+        /// Zero is the interesting value and it is not an optimisation. A
+        /// Bluetooth headset that has its input opened negotiates HFP, which
+        /// takes the *output* down to 16 kHz in both directions — the whole
+        /// device degrades because one direction was asked for. A member the
+        /// router only ever writes to should therefore not have its input
+        /// opened at all.
+        public let inputChannels: Int?
+        /// The same for the output side. Nil for all of them.
+        public let outputChannels: Int?
+        /// Extra frames of delay on this member's output, for lining up two
+        /// paths that do not arrive together.
+        ///
+        /// The HAL does this itself, which is worth knowing before writing a
+        /// delay line: a speaker and an interface fed from one IOProc can be
+        /// aligned without the realtime path ever seeing it.
+        public let extraOutputLatencyFrames: Int?
 
-        public init(uid: String, driftCompensation: Bool) {
+        public init(
+            uid: String, driftCompensation: Bool,
+            inputChannels: Int? = nil, outputChannels: Int? = nil,
+            extraOutputLatencyFrames: Int? = nil
+        ) {
             self.uid = uid
             self.driftCompensation = driftCompensation
+            self.inputChannels = inputChannels
+            self.outputChannels = outputChannels
+            self.extraOutputLatencyFrames = extraOutputLatencyFrames
+        }
+
+        /// This member as the HAL wants to be told about it.
+        var description: [String: Any] {
+            var entry: [String: Any] = [kAudioSubDeviceUIDKey: uid]
+            if driftCompensation {
+                entry[kAudioSubDeviceDriftCompensationKey] = 1
+                // Drift correction is the only resampling on the path, so it
+                // runs at the highest quality the HAL offers rather than the
+                // default.
+                // Int rather than the constant's own UInt32: everything else
+                // in this dictionary is an Int, and a mixed bag of numeric
+                // types is a difference that shows up only when somebody reads
+                // the dictionary back and one key does not match.
+                entry[kAudioSubDeviceDriftCompensationQualityKey] =
+                    Int(kAudioAggregateDriftCompensationMaxQuality)
+            } else {
+                entry[kAudioSubDeviceDriftCompensationKey] = 0
+            }
+            if let inputChannels { entry[kAudioSubDeviceInputChannelsKey] = inputChannels }
+            if let outputChannels { entry[kAudioSubDeviceOutputChannelsKey] = outputChannels }
+            if let extraOutputLatencyFrames {
+                entry[kAudioSubDeviceExtraOutputLatencyKey] = extraOutputLatencyFrames
+            }
+            return entry
         }
     }
 
@@ -67,20 +118,7 @@ public final class AggregateDevice {
         self.clockMasterUID = clockMasterUID
         self.taps = taps
 
-        let subDeviceDicts: [[String: Any]] = subDevices.map { subDevice in
-            var entry: [String: Any] = [kAudioSubDeviceUIDKey: subDevice.uid]
-            if subDevice.driftCompensation {
-                entry[kAudioSubDeviceDriftCompensationKey] = 1
-                // Drift correction is the only resampling on the path, so it
-                // runs at the highest quality the HAL offers rather than the
-                // default.
-                entry[kAudioSubDeviceDriftCompensationQualityKey] =
-                    kAudioAggregateDriftCompensationMaxQuality
-            } else {
-                entry[kAudioSubDeviceDriftCompensationKey] = 0
-            }
-            return entry
-        }
+        let subDeviceDicts = subDevices.map(\.description)
 
         var description: [String: Any] = [
             kAudioAggregateDeviceNameKey: name,

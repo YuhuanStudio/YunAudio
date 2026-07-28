@@ -1402,6 +1402,55 @@ enum UIFlowCheck {
             note("could not build a decoy device — skipped")
         }
 
+        print("\nvolume keys")
+        // The research said we almost certainly had the aggregate-volume bug,
+        // because we ship an aggregate. We do not: ours is created private and
+        // is never selectable as a system output, and the device somebody does
+        // select — our virtual driver — publishes a volume control that works.
+        // What is left is other people's aggregates and multi-output devices,
+        // where the keys really are dead and nothing says so.
+        for output in model.outputDevices.prefix(6) {
+            let settable = output.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+            note("\(output.name): volume keys \(settable ? "work" : "do nothing")")
+        }
+        if let driver = model.outputDevices.first(where: {
+            $0.uid == ClockAnchorPublisher.driverDeviceUID
+        }) {
+            check(
+                "our own device answers the volume keys",
+                driver.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput))
+        } else {
+            note("the driver is not installed — skipped")
+        }
+        check(
+            "and the interface only warns when they are dead",
+            model.volumeKeysAreDead
+                == !(model.selectedDestination?.hasSettableVolume(
+                    scope: kAudioObjectPropertyScopeOutput) ?? true))
+
+        print("\noutput alignment")
+        // The delay is a property of the aggregate rather than of the graph, so
+        // setting one rebuilds the route. What is being checked is that the
+        // route survives that and that the value is what the system was told.
+        check("only outputs in the path are offered", !model.alignableOutputs.isEmpty)
+        if let output = model.alignableOutputs.first {
+            let before = model.outputDelay(of: output.uid)
+            model.setOutputDelay(12, for: output.uid)
+            check("it reads back", abs(model.outputDelay(of: output.uid) - 12) < 0.001)
+            await waitUntil("the route came back up", { model.isRunning }, timeout: 10)
+            check("no error was reported", model.lastError == nil)
+            check("audio is still flowing", model.cycleCountForDiagnostics > 0)
+            // Nothing beyond half a second is alignment any more, and a value
+            // set by accident must not be able to make the app look broken.
+            model.setOutputDelay(99_999, for: output.uid)
+            check(
+                "an absurd delay is clamped",
+                model.outputDelay(of: output.uid) == RouterModel.maximumOutputDelay)
+            model.setOutputDelay(before, for: output.uid)
+            check("and zero means none at all", model.outputDelay(of: output.uid) == before)
+            await waitUntil("still running afterwards", { model.isRunning }, timeout: 10)
+        }
+
         print("\nremote control")
         // Somebody wiring a Stream Deck key to this has no way to see what
         // happened, so the parse has to be exact rather than forgiving. The

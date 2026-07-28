@@ -586,3 +586,63 @@ struct DeviceProfileTests {
         #expect(try JSONDecoder().decode(DeviceProfile.self, from: data) == original)
     }
 }
+
+// MARK: - Aggregate members
+
+/// What the HAL is told about each member is a dictionary of string keys, which
+/// is to say it is the one place in this project where a typo compiles, runs,
+/// and is silently ignored. The device still builds; it just quietly does not
+/// do the thing that was asked for.
+@Suite("Aggregate sub-devices")
+struct SubDeviceDescriptionTests {
+
+    @Test("drift compensation carries its quality with it")
+    func driftQuality() {
+        let on = AggregateDevice.SubDevice(uid: "a", driftCompensation: true).description
+        #expect(on[kAudioSubDeviceDriftCompensationKey] as? Int == 1)
+        #expect(
+            on[kAudioSubDeviceDriftCompensationQualityKey] as? Int
+                == Int(kAudioAggregateDriftCompensationMaxQuality))
+
+        let off = AggregateDevice.SubDevice(uid: "a", driftCompensation: false).description
+        #expect(off[kAudioSubDeviceDriftCompensationKey] as? Int == 0)
+    }
+
+    /// The key that stops a Bluetooth headset dropping to HFP. Zero has to
+    /// survive into the dictionary as zero — an implementation that treated it
+    /// as "nothing to say" would leave the input open and the whole device
+    /// would degrade, with the code looking right.
+    @Test("no input channels means no input channels, not no opinion")
+    func zeroInputChannels() {
+        let entry = AggregateDevice.SubDevice(
+            uid: "airpods", driftCompensation: true, inputChannels: 0
+        ).description
+        #expect(entry[kAudioSubDeviceInputChannelsKey] as? Int == 0)
+    }
+
+    /// And saying nothing has to stay silent, because the HAL's default is
+    /// "all of them" and writing a number in would cap a device that should
+    /// have been left alone.
+    @Test("saying nothing about channels writes nothing")
+    func unrestricted() {
+        let entry = AggregateDevice.SubDevice(uid: "a", driftCompensation: true).description
+        #expect(entry[kAudioSubDeviceInputChannelsKey] == nil)
+        #expect(entry[kAudioSubDeviceOutputChannelsKey] == nil)
+        #expect(entry[kAudioSubDeviceExtraOutputLatencyKey] == nil)
+    }
+
+    @Test("a latency trim is passed on in frames")
+    func latencyTrim() {
+        let entry = AggregateDevice.SubDevice(
+            uid: "speakers", driftCompensation: true, extraOutputLatencyFrames: 240
+        ).description
+        #expect(entry[kAudioSubDeviceExtraOutputLatencyKey] as? Int == 240)
+    }
+
+    @Test("the UID is always there")
+    func uid() {
+        let entry = AggregateDevice.SubDevice(uid: "device", driftCompensation: false)
+            .description
+        #expect(entry[kAudioSubDeviceUIDKey] as? String == "device")
+    }
+}

@@ -63,6 +63,68 @@ final class RouterModel {
         }
     }
 
+    // MARK: Output alignment
+
+    /// Extra delay per output device, in milliseconds.
+    ///
+    /// Two outputs fed from one IO cycle do not arrive together — a set of
+    /// speakers and an interface can be tens of milliseconds apart, which is
+    /// audible as a smear rather than as an echo, and there was no way to line
+    /// them up. The HAL applies the delay itself, so nothing on the realtime
+    /// path changes and it costs no processing at all.
+    private(set) var outputDelays: [String: Double] = [:]
+
+    /// The same, in frames, which is what the HAL is told.
+    private var outputLatencyFrames: [String: Int] {
+        let rate = pathQuality?.sampleRate ?? preferredSampleRate
+        return outputDelays.compactMapValues { milliseconds in
+            let frames = Int((milliseconds / 1000) * rate)
+            return frames > 0 ? frames : nil
+        }
+    }
+
+    /// True when the system's volume keys will not move the selected output.
+    ///
+    /// Aggregates, multi-output devices and much HDMI publish no volume control
+    /// at all, so F10–F12 do nothing and there is no indication why. This
+    /// application's master fader reaches the output regardless, so the answer
+    /// is to say so — which is worth more than the keys would have been.
+    var volumeKeysAreDead: Bool {
+        guard let destination = selectedDestination else { return false }
+        return !destination.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+    }
+
+    /// Outputs currently in the path, which are the only ones worth aligning.
+    ///
+    /// Aligning something that is not being written to is a control that
+    /// cannot do anything, and a list of every output the machine has would be
+    /// mostly that.
+    var alignableOutputs: [AudioDevice] {
+        var wanted: [String] = []
+        if let destination = selectedDestinationUID { wanted.append(destination) }
+        if let monitor = monitorDeviceUID, monitor != selectedDestinationUID {
+            wanted.append(monitor)
+        }
+        return wanted.compactMap { uid in outputDevices.first { $0.uid == uid } }
+    }
+
+    func outputDelay(of uid: String) -> Double { outputDelays[uid] ?? 0 }
+
+    func setOutputDelay(_ milliseconds: Double, for uid: String) {
+        let clamped = max(0, min(Self.maximumOutputDelay, milliseconds))
+        guard outputDelays[uid] != clamped else { return }
+        if clamped == 0 { outputDelays[uid] = nil } else { outputDelays[uid] = clamped }
+        persist()
+        // The delay is a property of the aggregate, decided when it is built,
+        // so it cannot be swapped in the way a fader can.
+        restartIfRunning()
+    }
+
+    /// Half a second. Beyond that it is not alignment any more, and a delay
+    /// somebody set by accident should not be able to make the application look
+    /// broken.
+    static let maximumOutputDelay: Double = 500
+
     /// Devices chosen before, most recent first. See `Preferences`.
     private(set) var recentSourceUIDs: [String] = []
     private(set) var recentDestinationUIDs: [String] = []
@@ -1601,6 +1663,7 @@ final class RouterModel {
         isOutputMuted = saved.isOutputMuted ?? false
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
+        outputDelays = saved.outputDelays ?? [:]
         recentSourceUIDs = saved.recentSourceUIDs ?? []
         recentDestinationUIDs = saved.recentDestinationUIDs ?? []
         monitorDecibels = saved.monitorDecibels ?? -6
@@ -1682,6 +1745,7 @@ final class RouterModel {
                 voicePreset: voicePreset.rawValue,
                 recordsStems: recordsStems,
                 monitorSends: monitorSends,
+                outputDelays: outputDelays,
                 recentSourceUIDs: recentSourceUIDs,
                 recentDestinationUIDs: recentDestinationUIDs))
     }
@@ -2049,6 +2113,7 @@ final class RouterModel {
         // app's job.
         let echo = echoSettings(fallbackProcessIDs: capturedApps.flatMap(\.processIDs))
         let monitor = monitorDeviceUID
+        let trim = outputLatencyFrames
         // Copied so the queue closure and the main actor are not reading and
         // writing the same array. Route is a value type, so this is a real copy.
         let routes = routeList
@@ -2069,6 +2134,7 @@ final class RouterModel {
                     bufferFrames: buffer,
                     voiceIsolation: isolation,
                     echoCancellation: echo,
+                    outputLatencyTrim: trim,
                     selftest: selftest)
             } catch {
                 failure = String(describing: error)

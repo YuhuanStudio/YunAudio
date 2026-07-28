@@ -231,6 +231,25 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         id.optionalValue(of: AudioProperty<Float32>.volumeScalar.scoped(to: scope))
     }
 
+    /// True when the system's own volume keys can move this device.
+    ///
+    /// macOS drives F10–F12 through the default output's volume control, and a
+    /// device that publishes none — every aggregate and multi-output device,
+    /// and a good deal of HDMI — simply ignores them. Whole projects exist for
+    /// nothing but this: `proxy-audio-device` has over a thousand stars for a
+    /// driver that does only it.
+    ///
+    /// Worth asking rather than assuming, because the answer decides what the
+    /// interface should say. This application has a master fader that reaches
+    /// the output whatever the device thinks, so the honest thing is to point
+    /// at it when the keys will not work rather than to leave somebody pressing
+    /// them.
+    public func hasSettableVolume(scope: AudioObjectPropertyScope) -> Bool {
+        let property = AudioProperty<Float32>.volumeScalar.scoped(to: scope)
+        guard id.optionalValue(of: property) != nil else { return false }
+        return id.isSettable(property)
+    }
+
     public func isMuted(scope: AudioObjectPropertyScope) -> Bool {
         (id.optionalValue(of: AudioProperty<UInt32>.mute.scoped(to: scope)) ?? 0) != 0
     }
