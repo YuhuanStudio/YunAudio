@@ -50,6 +50,45 @@ public struct AudioUnitPlugin: Sendable, Hashable, Codable, Identifiable {
     }
 }
 
+/// Why a plugin somebody asked for is not in the chain.
+///
+/// A name on its own is not enough to act on. "Stereo Widener could not be
+/// loaded" leaves somebody switching it on and off; "it will not accept the
+/// chain's mono format, -10868" tells them it is a stereo-only unit and no
+/// amount of retrying will change that.
+///
+/// The `OSStatus` is carried rather than swallowed because it is the only part
+/// of this a plugin's author can do anything with.
+public struct AudioUnitLoadFailure: Sendable, Hashable, Identifiable {
+
+    /// The step that refused, in the order the chain attempts them.
+    public enum Reason: String, Sendable, Hashable, Codable {
+        /// Nothing on this machine answers to the description any more.
+        case notInstalled
+        /// The component is there and would not produce an instance.
+        case couldNotInstantiate
+        /// It would not take mono 32-bit float at the route's rate — which is
+        /// the ordinary answer from a unit that only works in stereo.
+        case formatRejected
+        /// Both formats accepted and it still would not start.
+        case wouldNotInitialise
+    }
+
+    public let name: String
+    public let reason: Reason
+    /// The status behind the refusal, or `noErr` where the step returned no
+    /// status of its own — a component that simply is not there.
+    public let status: OSStatus
+
+    public var id: String { "\(name)-\(reason.rawValue)" }
+
+    public init(name: String, reason: Reason, status: OSStatus) {
+        self.name = name
+        self.reason = reason
+        self.status = status
+    }
+}
+
 public enum AudioUnitPlugins {
 
     /// Every effect installed on this machine, minus the ones this application

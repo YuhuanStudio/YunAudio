@@ -3209,8 +3209,87 @@ struct AudioUnitPluginTests {
                 kinds: [.limiter], plugins: [absent], sampleRate: 48000,
                 maximumFrames: 512))
         #expect(chain.failedPlugins == ["Not Installed"])
+        #expect(chain.pluginFailures.map(\.reason) == [.notInstalled])
         // And the rest of the chain still works.
         #expect(chain.stages == [.limiter])
+    }
+
+    /// The chain is mono, and a great many units are not.
+    ///
+    /// This is the one that was crashing. A unit that refuses the chain's
+    /// format reached the common initialise loop, failed there, and the loop
+    /// freed the three buffers and returned nil — but Swift runs `deinit` on a
+    /// class whose failable init returns nil, so the same three allocations
+    /// were freed twice and libmalloc aborted the process:
+    /// POINTER_BEING_FREED_WAS_NOT_ALLOCATED inside `EffectChain.deinit`,
+    /// reached from `EffectChain.init`. Adding one stereo-only plugin killed
+    /// the application. Before that it took the gate, the equaliser, the
+    /// compressor and the limiter with it, and named none of them.
+    ///
+    /// `AUAudioMix` stands in for the stereo-only third-party unit because it
+    /// is on every macOS 26 machine and its refusal is measured rather than
+    /// assumed: -10868 (`kAudioUnitErr_FormatNotSupported`) to each stream
+    /// format, and -10875 (`kAudioUnitErr_FailedInitialization`) after. A test
+    /// naming a particular third-party plugin would only run here.
+    @Test("a unit that refuses mono is dropped with a reason, not fatally")
+    func refusesTheChainFormat() throws {
+        let stubborn = AudioUnitPlugin(
+            type: kAudioUnitType_FormatConverter,
+            subType: kAudioUnitSubType_AUAudioMix,
+            manufacturer: kAudioUnitManufacturer_Apple,
+            name: "AUAudioMix", manufacturerName: "Apple", loadsInProcess: true)
+        let chain = try #require(
+            EffectChain(
+                kinds: [.equaliser, .limiter], plugins: [stubborn], sampleRate: 48000,
+                maximumFrames: 512))
+
+        // Named, with the step that refused and the number behind it.
+        let failure = try #require(chain.pluginFailures.first)
+        #expect(chain.pluginFailures.count == 1)
+        #expect(failure.name == "AUAudioMix")
+        #expect(failure.reason == .formatRejected)
+        #expect(failure.status == kAudioUnitErr_FormatNotSupported)
+
+        // And everything else the user switched on is still there and running.
+        #expect(chain.stages == [.equaliser, .limiter])
+        #expect(chain.unitCountForTesting == 2)
+        for index in 0..<512 { chain.inputBuffer[index] = 0.2 }
+        #expect(chain.render(frames: 512, sampleTime: 0))
+    }
+
+    /// The property that generalises, so this says something on any machine.
+    ///
+    /// Naming a particular plugin would pass here and fail everywhere else. The
+    /// claim worth making is the one the interface depends on: whatever is
+    /// installed, each unit either ends up rendering or ends up named with a
+    /// reason and a status — and either way the chain around it survives.
+    @Test("every installed unit either loads or is named with a decoded reason")
+    func everyInstalledUnitIsAccountedFor() throws {
+        let installed = AudioUnitPlugins.installed()
+        for plugin in installed {
+            let chain = try #require(
+                EffectChain(
+                    kinds: [.limiter], plugins: [plugin], sampleRate: 48000,
+                    maximumFrames: 512),
+                "\(plugin.name) took the whole chain down")
+            // The limiter is this application's own and must survive whatever
+            // somebody else's unit did.
+            #expect(chain.stages == [.limiter])
+
+            if let failure = chain.pluginFailures.first {
+                #expect(chain.pluginFailures.count == 1)
+                #expect(failure.name == plugin.name)
+                // A reason rather than a silent drop, and a number behind it.
+                // `notInstalled` is the one case with no status of its own:
+                // nothing answered, so nothing returned anything.
+                if failure.reason != .notInstalled { #expect(failure.status != noErr) }
+            } else {
+                // It loaded, so it renders: the plugin and the limiter.
+                #expect(chain.unitCountForTesting == 2)
+                for index in 0..<512 { chain.inputBuffer[index] = 0.2 }
+                #expect(chain.render(frames: 512, sampleTime: 0))
+            }
+        }
     }
 
     /// The limiter's guarantee is that nothing downstream sees a sample it has

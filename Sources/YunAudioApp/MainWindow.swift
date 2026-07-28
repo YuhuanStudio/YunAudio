@@ -673,18 +673,40 @@ struct MainWindow: View {
                         .fixedSize(horizontal: false, vertical: true)
                     }
                     if model.isRunning {
-                        ForEach(model.pluginParameters(plugin).prefix(6)) { parameter in
+                        let parameters = model.pluginParameters(plugin)
+                        if parameters.isEmpty {
+                            // A card with a name and nothing under it reads as a
+                            // unit that did not load. It loaded and it is
+                            // rendering; it simply publishes no parameter list —
+                            // the one installed here answers zero bytes to
+                            // kAudioUnitProperty_ParameterList and keeps all of
+                            // its controls in a window of its own.
+                            Text(
+                                loc(
+                                    "It is running, and it publishes nothing a host can set. Its controls are all in its own window, which this does not open."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        ForEach(parameters.prefix(6)) { parameter in
                             pluginParameterRow(parameter, in: plugin)
                         }
                     }
                 }
             }
 
-            if !model.failedPlugins.isEmpty {
+            // One line each, with the reason and the status behind it. A bare
+            // "could not be loaded" leaves somebody switching a stereo-only
+            // unit on and off; "it will not take the chain's mono format" is
+            // something they can act on, and the number is the only part its
+            // author can.
+            ForEach(model.failedPlugins) { failure in
                 Text(
                     String(
-                        format: loc("%@ could not be loaded."),
-                        model.failedPlugins.joined(separator: ", "))
+                        format: loc("%1$@ could not be loaded. %2$@ (%3$d)"),
+                        failure.name, failure.explanation, Int(failure.status))
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.danger)
@@ -2119,6 +2141,28 @@ private struct GainReductionRow: View {
         let _ = BodyCount.tick("GainReductionRow")
         if let reduction = model.gainReduction[kind] {
             MainWindow.gainReductionMeter(reduction)
+        }
+    }
+}
+
+extension AudioUnitLoadFailure {
+    /// The refusal in a sentence somebody can act on.
+    ///
+    /// The engine reports a case and an `OSStatus` and stops there, because it
+    /// has no localisation and should not grow one; turning that into words is
+    /// the interface's job.
+    var explanation: String {
+        switch reason {
+        case .notInstalled:
+            loc("It is no longer installed.")
+        case .couldNotInstantiate:
+            loc("It would not start.")
+        case .formatRejected:
+            // The ordinary answer from a unit that only works in stereo, and
+            // the one worth naming: nothing the user changes here will help.
+            loc("It will not take this chain's mono format.")
+        case .wouldNotInitialise:
+            loc("It took the format and then would not start.")
         }
     }
 }
