@@ -451,3 +451,4 @@
 "Neither Music nor Spotify is installed." = "這台機器沒有安裝 Music 或 Spotify。";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "這首沒有歌詞。把 .lrc 放進下面那個資料夾，會依名稱自動找到。";
 "You are singing" = "你唱的音";
+"The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "麥克風自己的零延遲監聽，在裝置內部完成。回來的是未經處理的原始訊號 —— 這個應用程式做的任何處理都不在裡面。";

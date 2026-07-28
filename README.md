@@ -184,11 +184,28 @@ trim afterwards can only amplify what the converter already decided, noise
 included. Both are here and the hardware one is first, which is the order that
 matters and the one nothing else on macOS puts in front of you.
 
-It appears only where the device publishes a settable gain, and that turned out
-to be worth checking rather than assuming: the Seiren **V2 X** publishes one
-through CoreAudio and the **V3 Pro does not**, even though its own firmware
-carries 0 to +36 dB on feature unit 7. macOS's UAC2 driver does not expose it,
-so on that device the trim is what there is.
+It appears only where the device publishes a settable gain, and finding out
+which devices those are took two goes. The first answer here — and in the
+reverse-engineering write-up, which agreed — was that the Seiren **V2 X**
+publishes one and the **V3 Pro does not**, so on the V3 Pro only the digital
+trim was left. That was wrong. CoreAudio publishes a device's controls per
+element, the master is element 0, and asking only for the master looks like it
+works because most devices answer there. The V3 Pro answers on **elements 1, 2
+and 3** — one per capsule tap — each carrying the full **0 to +36 dB** its
+firmware documents. Nobody had asked the right element.
+
+**Zero-latency monitoring, done by the microphone.** The same inventory turned
+up something nothing on macOS offers to move: the Seiren publishes a
+play-through level, which is the device feeding its own input back to its own
+headphone jack in silicon. That is what "zero-latency" on a microphone's box
+actually means — the signal never reaches the computer. This application's own
+monitoring is 2.7 ms, which is good and is not zero. Razer's software reaches
+it through a USB request on Windows; there is no Synapse here, and until now
+there was no way to move it at all.
+
+Offered rather than switched on, because what comes back is the *unprocessed*
+capsule: none of the processing here can be in it, since none of it has
+happened yet.
 
 **It knows what your microphone's channels actually are.** CoreAudio reports
 that a Seiren V3 Pro has three inputs and nothing about what is on them. They

@@ -250,6 +250,70 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         return id.isSettable(property)
     }
 
+    /// A CoreAudio four-character code as the four characters it is.
+    ///
+    /// Every class, scope and selector in the HAL is one of these, and reading
+    /// them as decimal is how somebody spends an afternoon looking up 1986884203.
+    public static func fourCharacterCode(_ value: UInt32) -> String {
+        let bytes = [
+            UInt8((value >> 24) & 0xFF), UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF), UInt8(value & 0xFF),
+        ]
+        guard bytes.allSatisfy({ $0 >= 0x20 && $0 < 0x7F }) else { return "\(value)" }
+        return String(decoding: bytes, as: UTF8.self)
+    }
+
+    /// Every control the HAL publishes for this device, as a list.
+    ///
+    /// A device is not one object: it owns controls — volume, mute,
+    /// data-source, stereo pan, jack detection — one per channel per scope,
+    /// and which of them exist is a property of the driver rather than of the
+    /// hardware. The Seiren V3 Pro carries a 0–36 dB gain in its own firmware
+    /// and macOS's UAC2 driver publishes no volume control for it at all,
+    /// while the V2 X publishes one; nothing about the two devices predicts
+    /// that, and the only way to know is to ask.
+    ///
+    /// Worth having as a list rather than as a handful of specific queries,
+    /// because the interesting answer is usually the control nobody thought to
+    /// look for.
+    public struct Control: Sendable, Hashable {
+        public let objectID: AudioObjectID
+        /// Four-character class code — `vlme`, `mute`, `dsrc`, `slvl`…
+        public let classID: UInt32
+        public let scope: UInt32
+        public let element: UInt32
+        public let isSettable: Bool
+        /// Where it currently sits, for the controls that carry a level.
+        public let scalar: Float?
+        /// The same in decibels, when the driver publishes a mapping.
+        public let decibels: Float?
+
+        public var className: String { AudioDevice.fourCharacterCode(classID) }
+        public var scopeName: String { AudioDevice.fourCharacterCode(scope) }
+    }
+
+    public func controls() -> [Control] {
+        let owned = AudioProperty<AudioObjectID>(kAudioObjectPropertyOwnedObjects)
+        return (try? id.array(of: owned))?.compactMap { object -> Control? in
+            guard
+                let classID: UInt32 = object.optionalValue(of: .init(kAudioObjectPropertyClass))
+            else { return nil }
+            // Streams own no controls and are already reported elsewhere.
+            guard classID != kAudioStreamClassID else { return nil }
+            let scope: UInt32 =
+                object.optionalValue(of: .init(kAudioControlPropertyScope)) ?? 0
+            let element: UInt32 =
+                object.optionalValue(of: .init(kAudioControlPropertyElement)) ?? 0
+            let level = AudioProperty<Float32>(kAudioLevelControlPropertyScalarValue)
+            return Control(
+                objectID: object, classID: classID, scope: scope, element: element,
+                isSettable: object.isSettable(level),
+                scalar: object.optionalValue(of: level),
+                decibels: object.optionalValue(
+                    of: AudioProperty<Float32>(kAudioLevelControlPropertyDecibelValue)))
+        } ?? []
+    }
+
     public func isMuted(scope: AudioObjectPropertyScope) -> Bool {
         (id.optionalValue(of: AudioProperty<UInt32>.mute.scoped(to: scope)) ?? 0) != 0
     }
@@ -279,26 +343,105 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         public let decibels: Float?
         public let decibelRange: ClosedRange<Float>?
         public let isSettable: Bool
+        /// Which element answered. Zero is the master; anything else is a
+        /// channel, and is worth knowing because a device that publishes only
+        /// per-channel controls looks like a device with none.
+        public let element: AudioObjectPropertyElement
     }
 
+    /// The device's own gain, and which element it turned out to live on.
+    ///
+    /// Not only the master element. The master is element 0 and a great many
+    /// devices publish there, so asking only for it looks like it works — and
+    /// this project shipped for months believing the Seiren V3 Pro had no
+    /// hardware gain at all because element 0 answers nothing on it. It has
+    /// three, on elements 1, 2 and 3, one per capsule tap, each carrying the
+    /// full 0 to +36 dB its firmware documents.
+    ///
+    /// The written-up reverse engineering said the same thing — that macOS's
+    /// UAC2 driver does not expose this device's gain and only a USB control
+    /// transfer would reach it. It does expose it. Nobody had asked the right
+    /// element.
     public func hardwareGain(scope: AudioObjectPropertyScope) -> HardwareGain? {
-        let volume = AudioProperty<Float32>.volumeScalar.scoped(to: scope)
-        guard let scalar = id.optionalValue(of: volume) else { return nil }
-        let decibels = id.optionalValue(
-            of: AudioProperty<Float32>.volumeDecibels.scoped(to: scope))
-        let range = id.optionalValue(
-            of: AudioProperty<AudioValueRange>.volumeDecibelRange.scoped(to: scope))
-        return HardwareGain(
-            scalar: scalar,
-            decibels: decibels,
-            decibelRange: range.map { Float($0.mMinimum)...Float($0.mMaximum) },
-            isSettable: id.isSettable(volume))
+        for element in gainElements(scope: scope) {
+            let volume = AudioProperty<Float32>(
+                kAudioDevicePropertyVolumeScalar, scope: scope, element: element)
+            guard let scalar = id.optionalValue(of: volume) else { continue }
+            let range = id.optionalValue(
+                of: AudioProperty<AudioValueRange>(
+                    kAudioDevicePropertyVolumeRangeDecibels, scope: scope,
+                    element: element))
+            return HardwareGain(
+                scalar: scalar,
+                decibels: id.optionalValue(
+                    of: AudioProperty<Float32>(
+                        kAudioDevicePropertyVolumeDecibels, scope: scope, element: element)),
+                decibelRange: range.map { Float($0.mMinimum)...Float($0.mMaximum) },
+                isSettable: id.isSettable(volume),
+                element: element)
+        }
+        return nil
     }
 
+    /// Every channel that carries the gain gets it, not only the one that was
+    /// found. A three-capsule microphone with one channel turned up and two
+    /// left alone is a device somebody will spend an evening on.
     public func setHardwareGain(scalar: Float, scope: AudioObjectPropertyScope) throws {
-        try id.setValue(
-            Float32(max(0, min(1, scalar))),
-            for: AudioProperty<Float32>.volumeScalar.scoped(to: scope))
+        let value = Float32(max(0, min(1, scalar)))
+        var wrote = false
+        var lastError: Error?
+        for element in gainElements(scope: scope) {
+            let volume = AudioProperty<Float32>(
+                kAudioDevicePropertyVolumeScalar, scope: scope, element: element)
+            guard id.optionalValue(of: volume) != nil, id.isSettable(volume) else { continue }
+            do {
+                try id.setValue(value, for: volume)
+                wrote = true
+            } catch {
+                lastError = error
+            }
+            // The master, when it exists, governs the rest — writing the
+            // channels afterwards would fight it.
+            if element == kAudioObjectPropertyElementMain { break }
+        }
+        if !wrote, let lastError { throw lastError }
+    }
+
+    /// Master first, then each channel. Four is generous: the widest capture
+    /// device here has three.
+    private func gainElements(
+        scope: AudioObjectPropertyScope
+    )
+        -> [AudioObjectPropertyElement]
+    {
+        [kAudioObjectPropertyElementMain, 1, 2, 3, 4]
+    }
+
+    // MARK: The device's own monitoring
+
+    /// The level at which the device feeds its own input back to its own
+    /// output, in its own silicon.
+    ///
+    /// This is what "zero-latency monitoring" on a microphone's box means, and
+    /// it is not a figure of speech: the signal never reaches the computer, so
+    /// the delay is the converter and nothing else. This application's own
+    /// monitoring is 2.7 ms, which is good and is not zero.
+    ///
+    /// CoreAudio publishes it under `kAudioDevicePropertyScopePlayThrough`, and
+    /// on the Seiren V3 Pro it is three settable controls that nothing on macOS
+    /// offers to move — Razer's own software does it through a USB request on
+    /// Windows and there is no Synapse here.
+    ///
+    /// The catch, and it is the reason this is offered rather than switched on:
+    /// what the device sends back is the *unprocessed* microphone. None of the
+    /// processing this application does can be in it, because none of it has
+    /// happened yet.
+    public func playThrough() -> HardwareGain? {
+        hardwareGain(scope: kAudioDevicePropertyScopePlayThrough)
+    }
+
+    public func setPlayThrough(scalar: Float) throws {
+        try setHardwareGain(scalar: scalar, scope: kAudioDevicePropertyScopePlayThrough)
     }
 
     /// Sets the nominal sample rate and waits for the device to actually be at

@@ -350,6 +350,33 @@ struct MainWindow: View {
                             decibels: $model.inputDecibels, muted: $model.isInputMuted,
                             label: loc("Input level"))
 
+                        // The microphone feeding itself back in its own
+                        // silicon. Offered rather than switched on, because
+                        // what comes back is the unprocessed capsule — none of
+                        // this application's processing can be in it, since
+                        // none of it has happened yet.
+                        if model.hasHardwareMonitoring {
+                            HStack(spacing: Yun.Space.sm) {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(Yun.Palette.textMuted)
+                                    .frame(width: 22, height: 22)
+                                YunSlider(
+                                    fraction: Binding(
+                                        get: { Double(model.hardwareMonitorScalar) },
+                                        set: { model.hardwareMonitorScalar = Float($0) }))
+                                Text(model.hardwareMonitorLabel)
+                                    .font(Yun.Text.mono)
+                                    .foregroundStyle(Yun.Palette.textTertiary)
+                                    .monospacedDigit()
+                                    .frame(width: 58, alignment: .trailing)
+                            }
+                            .help(
+                                loc(
+                                    "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it."
+                                ))
+                        }
+
                         YunDivider()
 
                         deviceRow(loc("Out"), symbol: "arrow.right.to.line") {

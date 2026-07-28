@@ -451,3 +451,4 @@
 "Neither Music nor Spotify is installed." = "Neither Music nor Spotify is installed.";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "You are singing" = "You are singing";
+"The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it.";

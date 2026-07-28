@@ -363,7 +363,92 @@ enum UIFlowCheck {
             note("no device with a light ring attached")
         }
 
+        section("what each device actually publishes")
+        // A device is not one object: it owns controls, one per channel per
+        // scope, and which of them exist is a property of the driver rather
+        // than of the hardware. The Seiren V3 Pro carries 0 to +36 dB of gain
+        // in its own firmware and macOS publishes no volume control for it at
+        // all, while the V2 X publishes one — nothing about the two devices
+        // predicts that, and the only way to know is to ask.
+        //
+        // Printed rather than asserted, because it is an inventory of somebody
+        // else's driver. What it is for is finding the control nobody thought
+        // to look for.
+        for device in (model.inputDevices + model.outputDevices).prefix(8) {
+            let controls = device.controls()
+            guard !controls.isEmpty else {
+                note("\(device.name): publishes no controls at all")
+                continue
+            }
+            // Every level control spelled out for the two devices this
+            // project knows intimately, because "nine volume controls" is
+            // where the interesting question starts rather than ends.
+            if device.name.contains("Seiren") {
+                for control in controls where control.className == "vlme" {
+                    note(
+                        "  \(device.name) vlme scope \(control.scopeName) "
+                            + "element \(control.element) "
+                            + (control.decibels.map { String(format: "%.1f dB", $0) }
+                                ?? control.scalar.map { String(format: "%.2f", $0) } ?? "—")
+                            + (control.isSettable ? " settable" : " read-only"))
+                }
+            }
+            let summary = Dictionary(grouping: controls, by: \.className)
+                .sorted { $0.key < $1.key }
+                .map { name, list -> String in
+                    let settable = list.filter(\.isSettable).count
+                    return "\(name)×\(list.count)"
+                        + (settable > 0 ? " (\(settable) settable)" : "")
+                }
+                .joined(separator: " ")
+            note("\(device.name): \(summary)")
+        }
+
+        section("the device's own monitoring")
+        // "Zero-latency monitoring" on a microphone's box is not a figure of
+        // speech: the signal never reaches the computer. This application's own
+        // monitoring is 2.7 ms, which is good and is not zero. CoreAudio
+        // publishes the level under the play-through scope and nothing on macOS
+        // offers to move it.
+        for device in model.inputDevices.prefix(6) {
+            guard let level = device.playThrough() else { continue }
+            note(
+                "\(device.name): play-through element \(level.element), "
+                    + (level.decibels.map { String(format: "%.1f dB", $0) } ?? "no mapping")
+                    + (level.isSettable ? ", settable" : ", read-only"))
+        }
+        if model.hasHardwareMonitoring {
+            let before = model.hardwareMonitorScalar
+            model.hardwareMonitorScalar = 0.5
+            await pause(0.3)
+            check(
+                "the device took the monitoring level",
+                abs(model.hardwareMonitorScalar - 0.5) < 0.1)
+            check("and it reads back as something", model.hardwareMonitorLabel != "—")
+            model.hardwareMonitorScalar = before
+            await pause(0.3)
+            check("and it went back", abs(model.hardwareMonitorScalar - before) < 0.1)
+        } else {
+            note("this microphone does not monitor itself")
+        }
+
         section("hardware gain")
+        // Which element it lives on, because the answer is what this project
+        // got wrong for months: only the master was asked for, the Seiren V3
+        // Pro publishes nothing there, and the written-up reverse engineering
+        // agreed that macOS could not reach its gain. It publishes three, on
+        // elements 1 to 3, each carrying the full range its firmware documents.
+        for device in model.inputDevices.prefix(6) {
+            guard let gain = device.hardwareGain(scope: kAudioObjectPropertyScopeInput)
+            else { continue }
+            note(
+                "\(device.name): element \(gain.element), "
+                    + (gain.decibelRange.map {
+                        String(format: "%.0f…%.0f dB", $0.lowerBound, $0.upperBound)
+                    }
+                        ?? "no decibel mapping")
+                    + (gain.isSettable ? ", settable" : ", read-only"))
+        }
         // The microphone's own gain sits before the converter, so raising it
         // costs no headroom, while the trim afterwards can only amplify what
         // the converter already decided. They are different controls and the

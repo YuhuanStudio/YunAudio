@@ -230,6 +230,30 @@ final class RouterModel {
         return one == other
     }
 
+    // MARK: The microphone's own monitoring
+
+    /// True when the selected microphone can feed itself back in hardware.
+    var hasHardwareMonitoring: Bool { selectedSource?.playThrough()?.isSettable ?? false }
+
+    /// Where that feedback level sits, 0 to 1.
+    ///
+    /// Read from the device every time rather than cached: it is the device's
+    /// state, not ours, and Audio MIDI Setup can move it.
+    var hardwareMonitorScalar: Float {
+        get { selectedSource?.playThrough()?.scalar ?? 0 }
+        set {
+            try? selectedSource?.setPlayThrough(scalar: max(0, min(1, newValue)))
+        }
+    }
+
+    var hardwareMonitorLabel: String {
+        guard let level = selectedSource?.playThrough() else { return "—" }
+        guard let decibels = level.decibels, decibels.isFinite else {
+            return String(format: "%.0f%%", level.scalar * 100)
+        }
+        return String(format: "%+.1f dB", decibels)
+    }
+
     // MARK: Singing
 
     /// What a music player is playing right now, when the panel is open.
