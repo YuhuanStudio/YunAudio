@@ -1101,9 +1101,53 @@ final class RouterModel {
     }
 
     /// The applications, plus anything audible whatever its activation policy
-    /// says — something making noise is worth being able to point at.
+    /// says — something making noise is worth being able to point at. A process
+    /// holding the microphone counts as audible for this purpose: it is making
+    /// no noise and it is the most consequential thing on the list.
     private var offeredApps: [AudioApplication] {
-        availableApps.filter { !$0.isBackground || $0.isPlaying }
+        availableApps.filter { !$0.isBackground || $0.isPlaying || $0.isRecording }
+    }
+
+    // MARK: A headset that has dropped to call quality
+
+    /// An output that is a Bluetooth headset currently reduced to telephone
+    /// quality, if there is one.
+    ///
+    /// The oldest complaint about audio on this platform, and the part of it
+    /// nobody is ever told: classic Bluetooth carries either good sound in one
+    /// direction (A2DP) or poor sound in both (HFP), and the radio switches the
+    /// moment anything opens the microphone. So the music turns into a
+    /// telephone call and the cause is in a different application entirely.
+    ///
+    /// There is nothing to set. The macOS 27 SDK was searched: CoreAudio
+    /// publishes no profile or codec property, and the one switch that would do
+    /// it — `AVAudioSessionCategoryOptionBluetoothHighQualityRecording` — is
+    /// marked `API_AVAILABLE(ios(26.0))` and `API_UNAVAILABLE(macos)`.
+    ///
+    /// What can be done is to say so, name what did it, and offer the way out:
+    /// leave the headset as an output and take the microphone from somewhere
+    /// else. That is what this application is for, which is why the remedy is
+    /// one line of interface rather than a feature.
+    var headsetInCallQuality: AudioDevice? {
+        let monitor = monitorDeviceUID.flatMap { uid in
+            outputDevices.first { $0.uid == uid }
+        }
+        let candidates: [AudioDevice] = [selectedDestination, monitor].compactMap { $0 }
+        // The route's own outputs first, then anything else that is in this
+        // state: a headset somebody is listening on but not routing to is still
+        // a headset that has quietly become a telephone.
+        return candidates.first(where: { $0.hasFallenToCallQuality })
+            ?? outputDevices.first(where: { $0.hasFallenToCallQuality })
+    }
+
+    /// Which applications currently have an input open, most interesting first.
+    ///
+    /// Ours is left out when it is the router itself: telling somebody that
+    /// YunAudio has the microphone open, in YunAudio, is not news.
+    var applicationsHoldingTheMicrophone: [AudioApplication] {
+        availableApps.filter {
+            $0.isRecording && $0.bundleID != Bundle.main.bundleIdentifier
+        }
     }
 
     /// The daemons: no Dock presence and silent. These are the ones the toggle

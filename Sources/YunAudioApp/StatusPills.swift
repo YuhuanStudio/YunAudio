@@ -156,6 +156,32 @@ extension StatusPills {
                             + "rather than the speakers.")))
         }
 
+        // A Bluetooth headset that has quietly become a telephone, and what
+        // did it. The cause is never where the effect is — the music turns to
+        // mush and the reason is in some other application entirely, which
+        // macOS marks with an orange dot and never names.
+        if let headset = model.headsetInCallQuality {
+            let culprits = model.applicationsHoldingTheMicrophone
+            let who =
+                culprits.isEmpty
+                ? loc("something has its microphone open")
+                : culprits.map(\.name).joined(separator: ", ")
+            pills.append(
+                Pill(
+                    id: "call-quality",
+                    label: loc("headset in call quality"),
+                    value: headset.shortName,
+                    tone: .warning, showsDot: true,
+                    help: String(
+                        format: loc(
+                            "%@ is on Bluetooth and has dropped to telephone quality "
+                                + "because %@. Bluetooth carries good sound one way or "
+                                + "poor sound both ways, and nothing on macOS can change "
+                                + "that. Keep the headset for listening and take the "
+                                + "microphone from another device."),
+                        headset.name, who)))
+        }
+
         // Only the absence is worth a pill. The bar used to print the driver's
         // name when it was installed, which is the normal state of a working
         // machine and therefore says nothing.

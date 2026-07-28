@@ -28,6 +28,13 @@ public struct AudioApplication: Sendable, Identifiable, Hashable {
     public let bundleURL: URL?
     /// True when any member process is producing audio right now.
     public let isPlaying: Bool
+    /// True when any member process has an input open right now.
+    ///
+    /// The half of "what is using my audio" that macOS shows an orange dot for
+    /// and never names. It is also the answer to why a Bluetooth headset has
+    /// dropped to telephone quality: something opened its microphone, and until
+    /// now there was no way to find out what.
+    public let isRecording: Bool
     /// Processes folded into this entry — the objects a tap is built from.
     public let processIDs: [AudioObjectID]
     /// True when the application has no Dock presence: a daemon, an agent, or
@@ -56,15 +63,19 @@ extension AudioApplications {
         public let bundleID: String?
         public let name: String
         public let isPlaying: Bool
+        /// True when the process has an input open — the microphone.
+        public let isRecording: Bool
 
         public init(
-            id: AudioObjectID, pid: pid_t, bundleID: String?, name: String, isPlaying: Bool
+            id: AudioObjectID, pid: pid_t, bundleID: String?, name: String,
+            isPlaying: Bool, isRecording: Bool = false
         ) {
             self.id = id
             self.pid = pid
             self.bundleID = bundleID
             self.name = name
             self.isPlaying = isPlaying
+            self.isRecording = isRecording
         }
     }
 
@@ -140,8 +151,12 @@ extension AudioApplications {
                 // playing, one of them listed.
                 //
                 // The silent ones are still dropped. They are a long tail
-                // nobody can name and nobody came here for.
-                guard process.isPlaying else { continue }
+                // nobody can name and nobody came here for — but "silent" has
+                // to mean using no audio at all, not merely making none.
+                // Recording counted as silent, so a process with no bundle
+                // holding the microphone was dropped from the one list that
+                // exists to say what is using the audio on this machine.
+                guard process.isPlaying || process.isRecording else { continue }
                 groups[identity(forPID: process.pid), default: []].append(process)
                 continue
             }
@@ -157,6 +172,7 @@ extension AudioApplications {
                 guard !members.isEmpty else { return nil }
                 let application = named[bundleID]
                 let isPlaying = members.contains { $0.isPlaying }
+                let isRecording = members.contains { $0.isRecording }
                 return AudioApplication(
                     bundleID: bundleID,
                     name: application?.name
@@ -164,6 +180,7 @@ extension AudioApplications {
                         ?? members[0].name,
                     bundleURL: application?.bundleURL,
                     isPlaying: isPlaying,
+                    isRecording: isRecording,
                     processIDs: members.map(\.id),
                     isBackground: foreground[bundleID] == nil)
             }
@@ -183,14 +200,19 @@ extension AudioApplications {
     /// than the rules.
     private static func entry(for process: AudioProcess) -> ProcessEntry {
         var name = process.name
-        if process.bundleID?.isEmpty ?? true, process.isPlaying,
+        // Recording counts as well as playing. It did not, and the one place
+        // that matters most is a process with no bundle holding the microphone:
+        // "PID 47482" is not a row anybody can act on, and it is exactly the
+        // row somebody needs when their headset has dropped to call quality and
+        // they are trying to find out what did it.
+        if process.bundleID?.isEmpty ?? true, process.isPlaying || process.isRecording,
             let executable = executableName(ofPID: process.pid)
         {
             name = executable
         }
         return ProcessEntry(
             id: process.id, pid: process.pid, bundleID: process.bundleID, name: name,
-            isPlaying: process.isPlaying)
+            isPlaying: process.isPlaying, isRecording: process.isRecording)
     }
 
     /// The last path component of a process's executable, which for a

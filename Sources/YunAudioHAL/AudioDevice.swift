@@ -81,6 +81,17 @@ extension AudioProperty {
 public enum AudioTransport: Sendable, Hashable {
     case builtIn, usb, thunderbolt, hdmi, displayPort, bluetooth, airPlay, virtual, aggregate
     case pci, fireWire, avb, other(UInt32), unknown
+    /// Bluetooth LE Audio, kept apart from classic Bluetooth on purpose.
+    ///
+    /// It is the one case where the answer to "why does my headset sound like a
+    /// telephone the moment anything opens its microphone" is different.
+    /// Classic Bluetooth has to leave A2DP for HFP to carry a microphone at
+    /// all, and HFP is 8 or 16 kHz mono in both directions — so opening the
+    /// microphone drags the *output* down with it. LE Audio's LC3 carries both
+    /// directions at a usable rate without switching profile. Folding the two
+    /// into one case would mean telling somebody with LE Audio hardware that
+    /// they have a problem they do not have.
+    case bluetoothLE
 
     init(rawValue: UInt32?) {
         switch rawValue {
@@ -89,8 +100,8 @@ public enum AudioTransport: Sendable, Hashable {
         case kAudioDeviceTransportTypeThunderbolt: self = .thunderbolt
         case kAudioDeviceTransportTypeHDMI: self = .hdmi
         case kAudioDeviceTransportTypeDisplayPort: self = .displayPort
-        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE:
-            self = .bluetooth
+        case kAudioDeviceTransportTypeBluetooth: self = .bluetooth
+        case kAudioDeviceTransportTypeBluetoothLE: self = .bluetoothLE
         case kAudioDeviceTransportTypeAirPlay: self = .airPlay
         case kAudioDeviceTransportTypeVirtual: self = .virtual
         case kAudioDeviceTransportTypeAggregate: self = .aggregate
@@ -111,6 +122,29 @@ public enum AudioTransport: Sendable, Hashable {
         default: false
         }
     }
+
+    /// Either flavour of Bluetooth, for the places that only care that it is
+    /// wireless and shared with a phone.
+    public var isBluetooth: Bool {
+        switch self {
+        case .bluetooth, .bluetoothLE: true
+        default: false
+        }
+    }
+
+    /// True when carrying a microphone costs this transport its output quality.
+    ///
+    /// Classic Bluetooth only. The radio does one profile at a time: A2DP is
+    /// output-only and good, HFP carries both directions and is 8 or 16 kHz
+    /// mono, so the moment anything opens the microphone the music becomes a
+    /// telephone call. It is not a macOS bug and there is nothing to set —
+    /// searched the macOS 27 SDK: CoreAudio publishes no profile or codec
+    /// property, and `AVAudioSessionCategoryOptionBluetoothHighQualityRecording`
+    /// is marked `API_AVAILABLE(ios(26.0))` and `API_UNAVAILABLE(macos)`.
+    ///
+    /// What can be done is not to open the microphone. That is what this
+    /// application is for.
+    public var losesOutputQualityToItsMicrophone: Bool { self == .bluetooth }
 }
 
 // MARK: - Device
@@ -214,6 +248,32 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 
     /// Presentation latency in frames for a scope, combining the device's own
     /// latency with the safety offset the HAL keeps ahead of the IO cycle.
+    /// True when this output is a Bluetooth headset that has already dropped to
+    /// call quality.
+    ///
+    /// The signal is the rate. A classic Bluetooth headset sits at 44.1 or
+    /// 48 kHz on A2DP, and the moment anything opens its microphone the radio
+    /// leaves A2DP for HFP and *both* directions become 8 or 16 kHz mono. The
+    /// output device's own nominal rate follows, so a Bluetooth output running
+    /// at or below 24 kHz is a headset in a phone call, whether or not the
+    /// person wearing it knows they are in one.
+    ///
+    /// Worth surfacing because the cause is never where the effect is. Music
+    /// suddenly sounds like a telephone, and the reason is that some other
+    /// application quietly opened the microphone — which is a sentence nobody
+    /// on this platform is ever shown.
+    ///
+    /// LE Audio is excluded rather than merely untested: LC3 carries both
+    /// directions without changing profile, so a low rate there means something
+    /// else and saying "your headset is in call quality" would be wrong.
+    public var hasFallenToCallQuality: Bool {
+        guard transport.losesOutputQualityToItsMicrophone, outputChannels > 0 else {
+            return false
+        }
+        guard let rate = currentSampleRate else { return false }
+        return rate <= 24000
+    }
+
     /// The name with the manufacturer's own prefix taken off.
     ///
     /// For the places that are narrow enough to truncate. A middle truncation

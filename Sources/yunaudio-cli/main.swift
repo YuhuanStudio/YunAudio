@@ -16,6 +16,9 @@ func transportLabel(_ transport: AudioTransport) -> String {
     case .hdmi: "HDMI"
     case .displayPort: "DisplayPort"
     case .bluetooth: "Bluetooth"
+    // Named apart because it is the one that does not lose its output quality
+    // to carrying a microphone.
+    case .bluetoothLE: "Bluetooth LE Audio"
     case .airPlay: "AirPlay"
     case .virtual: "virtual"
     case .aggregate: "aggregate"
@@ -1752,6 +1755,36 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
         exit(1)
     }
     print("\nno allocation on the IO thread in any case")
+    exit(0)
+}
+
+/// Who has the microphone open, and whether a Bluetooth output has paid for it.
+///
+/// Read-only. Answers the question macOS shows an orange dot for and never
+/// names: which application is holding an input right now.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "mic" {
+    // The grouped list rather than the raw one, because that is what the
+    // interface shows — and because it is the path that resolves a name for a
+    // process with no bundle. "PID 48275" is not a row anybody can act on.
+    let applications = (try? AudioApplications.grouped()) ?? []
+    let recording = applications.filter(\.isRecording)
+    print(
+        "\(applications.count) application(s), \(recording.count) with an input open")
+    for application in recording {
+        print("  \(application.name)  [\(application.bundleID)]")
+    }
+
+    let outputs = ((try? AudioDevices.all()) ?? []).filter(\.hasOutput)
+    let wireless = outputs.filter { $0.transport.isBluetooth }
+    print("\n\(wireless.count) Bluetooth output(s)")
+    for device in wireless {
+        let rate = device.currentSampleRate ?? 0
+        print(
+            "  \(device.name): \(Int(rate)) Hz — "
+                + (device.hasFallenToCallQuality
+                    ? "call quality; something has its microphone open"
+                    : "full quality"))
+    }
     exit(0)
 }
 

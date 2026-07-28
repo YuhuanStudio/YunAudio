@@ -1676,3 +1676,139 @@ struct AutoLevelRebaseTests {
         #expect(RouterModel.autoLevelBase(afterManual: -6, offset: 0) == -6)
     }
 }
+
+/// Which transports lose their output quality to carrying a microphone.
+///
+/// The oldest complaint about audio on this platform: put on a Bluetooth
+/// headset, join a call, and the music becomes a telephone. It is not a macOS
+/// bug and there is nothing to set — the macOS 27 SDK was searched for this.
+/// CoreAudio publishes no profile or codec property, only a transport type; and
+/// `AVAudioSessionCategoryOptionBluetoothHighQualityRecording`, which is exactly
+/// the switch anybody would want, is marked `API_AVAILABLE(ios(26.0))` and
+/// `API_UNAVAILABLE(macos)`.
+///
+/// Classic Bluetooth does one profile at a time: A2DP is output-only and good,
+/// HFP carries both directions at 8 or 16 kHz mono. LE Audio's LC3 does not
+/// have to choose, which is why the two are separate cases here — telling
+/// somebody with LE Audio hardware that they have this problem would be wrong.
+@Suite("Which transports pay for their own microphone")
+struct BluetoothProfileTests {
+
+    @Test("classic Bluetooth pays, LE Audio does not")
+    func onlyClassicPays() {
+        #expect(AudioTransport.bluetooth.losesOutputQualityToItsMicrophone)
+        #expect(!AudioTransport.bluetoothLE.losesOutputQualityToItsMicrophone)
+    }
+
+    /// Nothing wired does, which is the whole reason the advice this drives is
+    /// "take the microphone from somewhere else" rather than "buy a better
+    /// headset".
+    @Test("no wired transport pays")
+    func wiredNeverPays() {
+        let wired: [AudioTransport] = [
+            .builtIn, .usb, .thunderbolt, .hdmi, .displayPort, .airPlay, .virtual,
+            .aggregate, .pci, .fireWire, .avb, .unknown,
+        ]
+        for transport in wired {
+            #expect(!transport.losesOutputQualityToItsMicrophone, "\(transport)")
+        }
+    }
+
+    /// Both flavours are still Bluetooth for everything that only cares that it
+    /// is wireless.
+    @Test("both flavours read as Bluetooth")
+    func bothAreBluetooth() {
+        #expect(AudioTransport.bluetooth.isBluetooth)
+        #expect(AudioTransport.bluetoothLE.isBluetooth)
+        #expect(!AudioTransport.usb.isBluetooth)
+        #expect(!AudioTransport.builtIn.isBluetooth)
+    }
+
+    /// The two are distinct values, which is the point of splitting them and
+    /// the thing a careless `init` would undo.
+    @Test("the two are not the same case")
+    func notTheSameCase() {
+        #expect(AudioTransport.bluetooth != AudioTransport.bluetoothLE)
+    }
+}
+
+/// Which application has the microphone open.
+///
+/// The half of "what is using my audio" that macOS shows an orange dot for and
+/// never names, and the answer to the oldest complaint on this platform: a
+/// Bluetooth headset drops to telephone quality the moment anything opens its
+/// microphone, and until now there was no way to find out what.
+///
+/// `kAudioProcessPropertyIsRunningInput` has been published since macOS 14.4
+/// and nothing here asked. Measured to work before any of this was built: a
+/// process opening an input was identified by PID exactly.
+@Suite("Who has the microphone open")
+struct RecordingApplicationTests {
+
+    private func process(
+        _ id: AudioObjectID, pid: pid_t, bundle: String?, name: String,
+        playing: Bool = false, recording: Bool = false
+    ) -> AudioApplications.ProcessEntry {
+        AudioApplications.ProcessEntry(
+            id: id, pid: pid, bundleID: bundle, name: name, isPlaying: playing,
+            isRecording: recording)
+    }
+
+    /// The case that was dropped outright: something with no bundle holding the
+    /// microphone and making no sound. Silent had been taken to mean "making no
+    /// noise" rather than "using no audio", so the process was filtered away
+    /// from the one list that exists to say what is using the audio.
+    @Test("a recorder with no bundle is listed rather than dropped")
+    func bundlelessRecorderSurvives() {
+        let apps = AudioApplications.group(
+            processes: [process(1, pid: 10, bundle: nil, name: "ffmpeg", recording: true)],
+            foreground: [:],
+            named: [:])
+        #expect(apps.count == 1)
+        #expect(apps.first?.isRecording == true)
+        #expect(apps.first?.isPlaying == false)
+    }
+
+    /// And one that is neither playing nor recording is still dropped, because
+    /// that long tail is what the filter is for.
+    @Test("a process using no audio at all is still dropped")
+    func idleProcessStillDropped() {
+        let apps = AudioApplications.group(
+            processes: [process(1, pid: 10, bundle: nil, name: "somedaemon")],
+            foreground: [:],
+            named: [:])
+        #expect(apps.isEmpty)
+    }
+
+    /// Recording folds across helpers the same way playing does: a conferencing
+    /// application holds the microphone in a helper process, and the row that
+    /// has to say so is the application's.
+    @Test("a helper holding the microphone marks its application")
+    func recordingFoldsIntoTheApplication() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 10, bundle: "us.zoom.xos", name: "Zoom"),
+                process(
+                    2, pid: 11, bundle: "us.zoom.xos.helper", name: "Helper", recording: true),
+            ],
+            foreground: ["us.zoom.xos": .init(name: "Zoom")],
+            named: ["us.zoom.xos": .init(name: "Zoom")])
+        #expect(apps.count == 1)
+        #expect(apps.first?.isRecording == true)
+    }
+
+    /// The two states are independent. A player that is not recording must not
+    /// be reported as holding the microphone, or the warning this drives would
+    /// name the wrong application — which is worse than naming none.
+    @Test("playing is not recording")
+    func playingIsNotRecording() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 10, bundle: "com.spotify.client", name: "Spotify", playing: true)
+            ],
+            foreground: ["com.spotify.client": .init(name: "Spotify")],
+            named: ["com.spotify.client": .init(name: "Spotify")])
+        #expect(apps.first?.isPlaying == true)
+        #expect(apps.first?.isRecording == false)
+    }
+}

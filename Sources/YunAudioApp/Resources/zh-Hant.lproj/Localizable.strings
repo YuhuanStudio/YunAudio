@@ -502,3 +502,6 @@
 "The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers." = "麥克風是靜音的，而系統自己的語音偵測聽得到你。它自帶回音消除，所以這是你，不是喇叭。";
 "%@ at %d frames" = "%@（%d frames）";
 "%@ of one core" = "單核心的 %@";
+"headset in call quality" = "耳機掉到通話音質";
+"something has its microphone open" = "有東西開著它的麥克風";
+"%@ is on Bluetooth and has dropped to telephone quality because %@. Bluetooth carries good sound one way or poor sound both ways, and nothing on macOS can change that. Keep the headset for listening and take the microphone from another device." = "%@ 走藍牙，而且因為 %@，已經掉到電話音質。藍牙要嘛單向好聲音、要嘛雙向爛聲音，macOS 沒有任何辦法改變這件事。把耳機留著聽，麥克風改用別的裝置。";

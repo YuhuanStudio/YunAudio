@@ -15,6 +15,16 @@ extension AudioProperty {
     public static var processIsRunningOutput: AudioProperty<UInt32> {
         .init(kAudioProcessPropertyIsRunningOutput)
     }
+    /// Which process has the microphone open.
+    ///
+    /// The HAL has published this since macOS 14.4 and nothing here asked. It
+    /// is the missing half of the oldest complaint about audio on this
+    /// platform: a Bluetooth headset drops to telephone quality the moment
+    /// *anything* opens its microphone, and the person wearing it is never told
+    /// what. macOS shows an orange dot and no name.
+    public static var processIsRunningInput: AudioProperty<UInt32> {
+        .init(kAudioProcessPropertyIsRunningInput)
+    }
     public static var processDevices: AudioProperty<AudioObjectID> {
         .init(kAudioProcessPropertyDevices)
     }
@@ -34,6 +44,8 @@ public struct AudioProcess: Sendable, Identifiable, Hashable {
     public let bundleID: String?
     /// True when the process is currently producing audio.
     public let isPlaying: Bool
+    /// True when the process currently has an input open.
+    public let isRecording: Bool
     /// Display name resolved from the running application list.
     public let name: String
 
@@ -43,6 +55,7 @@ public struct AudioProcess: Sendable, Identifiable, Hashable {
         self.pid = pid
         bundleID = id.optionalString(of: .processBundleID)
         isPlaying = (id.optionalValue(of: .processIsRunningOutput) ?? 0) != 0
+        isRecording = (id.optionalValue(of: .processIsRunningInput) ?? 0) != 0
         name =
             names[pid]
             ?? bundleID?.split(separator: ".").last.map(String.init)
