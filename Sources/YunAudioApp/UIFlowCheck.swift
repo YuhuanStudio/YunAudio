@@ -1811,6 +1811,41 @@ enum UIFlowCheck {
             note("no device with both directions — skipped")
         }
 
+        section("output tone")
+        // Ten bands at Razer's own centres, which is a real claim: somebody
+        // moving from Windows can copy their settings across band for band.
+        // The arithmetic is unit-tested; what is checked here is that a slider
+        // reaches the signal and that it composes with a headphone correction
+        // rather than replacing it.
+        check("it starts flat", model.graphicEQIsFlat)
+        check("and a flat tone control runs nothing", model.headphoneCurve == nil)
+        model.setGraphicBand(4, at: 5)  // 1 kHz
+        check("moving one band ends flat", !model.graphicEQIsFlat)
+        if let curve = model.headphoneCurve {
+            note(
+                String(
+                    format: "%.1f dB at 1 kHz, %.1f dB at 250 Hz",
+                    curve.response(atHertz: 1000, sampleRate: 48000),
+                    curve.response(atHertz: 250, sampleRate: 48000)))
+            check(
+                "the band it moved is the one that moved",
+                abs(curve.response(atHertz: 1000, sampleRate: 48000) - 4) < 0.4)
+            check(
+                "and two octaves away is untouched",
+                abs(curve.response(atHertz: 250, sampleRate: 48000)) < 0.6)
+        } else {
+            check("a moved band produces a curve", false)
+        }
+        // Beyond the range is clamped rather than obeyed, or a stray gesture
+        // could ask for a boost the limiter then has to undo.
+        model.setGraphicBand(99, at: 0)
+        check("a band beyond the range is clamped", model.graphicEQ[0] == 5)
+        check("no error was reported", model.lastError == nil)
+        check("the route did not go down", model.isRunning)
+        model.resetGraphicEQ()
+        check("flattening puts it back", model.graphicEQIsFlat)
+        check("and stops running anything", model.headphoneCurve == nil)
+
         section("headphone correction")
         // Written into the folder the application reads, so what is exercised
         // is the path a person takes: download a file for your headphones, drop

@@ -88,6 +88,44 @@ final class RouterModel {
         headphoneProfiles.first { $0.name == headphoneProfileName }
     }
 
+    /// Ten slider positions in decibels, at the band centres in `ParametricEQ`.
+    ///
+    /// Kept apart from the headphone profile because they are different
+    /// intentions: a correction undoes a fault somebody measured in the
+    /// hardware, and this is taste. Somebody wants both at once without having
+    /// to choose, and cascaded biquads compose, so they run one after the
+    /// other rather than one replacing the other.
+    private(set) var graphicEQ: [Float] = [Float](repeating: 0, count: 10)
+
+    var graphicEQIsFlat: Bool { graphicEQ.allSatisfy { abs($0) < 0.05 } }
+
+    func setGraphicBand(_ decibels: Float, at index: Int) {
+        guard graphicEQ.indices.contains(index) else { return }
+        let clamped = max(
+            ParametricEQ.graphicRange.lowerBound,
+            min(ParametricEQ.graphicRange.upperBound, decibels))
+        guard abs(graphicEQ[index] - clamped) > 0.001 else { return }
+        graphicEQ[index] = clamped
+        persist()
+        applyHeadphoneCorrection()
+    }
+
+    func resetGraphicEQ() {
+        guard !graphicEQIsFlat else { return }
+        graphicEQ = [Float](repeating: 0, count: 10)
+        persist()
+        applyHeadphoneCorrection()
+    }
+
+    /// What is actually run on the output: the correction, the tone control, or
+    /// both cascaded.
+    var headphoneCurve: ParametricEQ? {
+        var curves: [ParametricEQ] = []
+        if let profile = headphoneProfile { curves.append(profile) }
+        if !graphicEQIsFlat { curves.append(ParametricEQ.graphic(graphicEQ)) }
+        return ParametricEQ.combined(curves, name: loc("Output"))
+    }
+
     /// Where corrections are read from.
     static var headphoneDirectory: URL? {
         FileManager.default
@@ -135,11 +173,11 @@ final class RouterModel {
 
     /// True when a correction is chosen but is not reaching anything.
     var headphoneCorrectionIsIdle: Bool {
-        headphoneProfile != nil && (!isRunning || correctedOutputUID == nil)
+        headphoneCurve != nil && (!isRunning || correctedOutputUID == nil)
     }
 
     func applyHeadphoneCorrection() {
-        engine.setHeadphoneCorrection(headphoneProfile, forDeviceUID: correctedOutputUID)
+        engine.setHeadphoneCorrection(headphoneCurve, forDeviceUID: correctedOutputUID)
     }
 
     // MARK: Output alignment
@@ -2000,6 +2038,7 @@ final class RouterModel {
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
         outputDelays = saved.outputDelays ?? [:]
         headphoneProfileName = saved.headphoneProfileName
+        if let bands = saved.graphicEQ, bands.count == 10 { graphicEQ = bands }
         recentSourceUIDs = saved.recentSourceUIDs ?? []
         recentDestinationUIDs = saved.recentDestinationUIDs ?? []
         monitorDecibels = saved.monitorDecibels ?? -6
@@ -2084,6 +2123,7 @@ final class RouterModel {
                 monitorSends: monitorSends,
                 outputDelays: outputDelays,
                 headphoneProfileName: headphoneProfileName,
+                graphicEQ: graphicEQ,
                 recentSourceUIDs: recentSourceUIDs,
                 recentDestinationUIDs: recentDestinationUIDs))
     }

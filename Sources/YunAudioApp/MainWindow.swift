@@ -1033,6 +1033,9 @@ struct MainWindow: View {
             sectionHeading(loc("Setups"))
             YunCard { setups }
 
+            sectionHeading(loc("Output tone"))
+            YunCard { graphicEqualiser }
+
             sectionHeading(loc("Headphone correction"))
             YunCard { headphoneCorrection }
 
@@ -1320,6 +1323,76 @@ struct MainWindow: View {
                 saveSetup
             }
         }
+    }
+
+    /// Ten bands on the output, at the centres Razer's own software publishes.
+    ///
+    /// Vertical, because that is what a graphic equaliser looks like everywhere
+    /// and the shape of the curve is the thing being read — a column of
+    /// horizontal sliders would carry the same numbers and none of the meaning.
+    ///
+    /// It sits above the headphone correction rather than inside it because
+    /// they are different intentions: the correction undoes a fault somebody
+    /// measured, this is taste. They run one after the other, so neither has to
+    /// be given up for the other.
+    @ViewBuilder
+    private var graphicEqualiser: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            HStack(alignment: .bottom, spacing: 2) {
+                ForEach(Array(ParametricEQ.graphicBands.enumerated()), id: \.offset) {
+                    index, hertz in
+                    VStack(spacing: 4) {
+                        YunVerticalSlider(
+                            fraction: Binding(
+                                get: {
+                                    let span =
+                                        ParametricEQ.graphicRange.upperBound
+                                        - ParametricEQ.graphicRange.lowerBound
+                                    return Double(
+                                        (model.graphicEQ[index]
+                                            - ParametricEQ.graphicRange.lowerBound) / span)
+                                },
+                                set: {
+                                    let span =
+                                        ParametricEQ.graphicRange.upperBound
+                                        - ParametricEQ.graphicRange.lowerBound
+                                    model.setGraphicBand(
+                                        ParametricEQ.graphicRange.lowerBound
+                                            + Float($0) * span, at: index)
+                                }))
+                        Text(Self.bandLabel(hertz))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textMuted)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .frame(height: 108)
+
+            HStack(spacing: Yun.Space.sm) {
+                Text(
+                    model.graphicEQIsFlat
+                        ? loc("Flat. These are the band centres Razer's own software uses.")
+                        : String(
+                            format: loc("%d band(s) moved."),
+                            model.graphicEQ.filter { abs($0) > 0.05 }.count)
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                if !model.graphicEQIsFlat {
+                    Button(loc("Flatten")) { model.resetGraphicEQ() }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                }
+            }
+        }
+    }
+
+    /// 30, 120, 1k, 16k — read at a glance rather than spelled out.
+    private static func bandLabel(_ hertz: Float) -> String {
+        hertz >= 1000
+            ? String(format: "%.0fk", hertz / 1000) : String(format: "%.0f", hertz)
     }
 
     /// Headphone correction, read from files somebody dropped in a folder.

@@ -74,6 +74,8 @@ struct Preferences: Codable, Equatable, Sendable {
     var outputDelays: [String: Double]?
     /// The headphone correction in use, by file name.
     var headphoneProfileName: String?
+    /// Ten slider positions for the output tone control, in decibels.
+    var graphicEQ: [Float]?
     /// Devices chosen before, most recent first.
     ///
     /// Not a preference somebody sets — a record of what they have actually
@@ -122,6 +124,7 @@ struct Preferences: Codable, Equatable, Sendable {
         monitorSends: [:],
         outputDelays: [:],
         headphoneProfileName: nil,
+        graphicEQ: [Float](repeating: 0, count: 10),
         recentSourceUIDs: [],
         recentDestinationUIDs: [])
 }

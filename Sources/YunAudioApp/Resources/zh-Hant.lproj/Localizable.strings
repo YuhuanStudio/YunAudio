@@ -442,3 +442,7 @@
 "what you hear" = "你聽到的";
 "what the far end hears" = "對方聽到的";
 "master" = "受主控";
+"Output tone" = "輸出音色";
+"Flat. These are the band centres Razer's own software uses." = "平坦。這些頻段中心與 Razer 自家軟體相同。";
+"%d band(s) moved." = "已調整 %d 個頻段。";
+"Flatten" = "拉平";

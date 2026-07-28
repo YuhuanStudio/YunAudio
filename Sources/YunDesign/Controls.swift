@@ -627,3 +627,63 @@ public struct HueStrip: View {
         }
     }
 }
+
+/// A slider that runs up the page.
+///
+/// Not a rotated `YunSlider`: a rotation puts the hit region somewhere other
+/// than where the control is drawn, which is fine until somebody tries to drag
+/// the bottom band of an equaliser and moves the one beside it. The geometry is
+/// worth writing twice.
+///
+/// It exists for the graphic equaliser, where vertical is not decoration —
+/// the shape of the row of handles *is* the curve, and a column of horizontal
+/// sliders carries the same numbers and none of the meaning.
+public struct YunVerticalSlider: View {
+    @Binding private var fraction: Double
+    @State private var isDragging = false
+
+    public init(fraction: Binding<Double>) {
+        _fraction = fraction
+    }
+
+    public var body: some View {
+        GeometryReader { proxy in
+            let height = proxy.size.height
+            let filled = max(0, min(1, fraction))
+            ZStack(alignment: .bottom) {
+                Capsule()
+                    .fill(Yun.Palette.elevated)
+                    .frame(width: 4)
+                    .frame(maxHeight: .infinity)
+                // A tick at the centre, because the position that matters on an
+                // equaliser is "not doing anything" and it should be findable
+                // without reading a number.
+                Capsule()
+                    .fill(Yun.Palette.borderStrong)
+                    .frame(width: 10, height: 1)
+                    .offset(y: -height / 2)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: 4, height: max(0, height * filled))
+                Circle()
+                    .fill(Yun.Palette.card)
+                    .overlay { Circle().strokeBorder(Yun.Palette.borderStrong, lineWidth: 1) }
+                    .frame(width: isDragging ? 13 : 11, height: isDragging ? 13 : 11)
+                    .offset(y: -(height - 11) * filled)
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(.rect)
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        isDragging = true
+                        fraction = max(0, min(1, 1 - value.location.y / height))
+                    }
+                    .onEnded { _ in isDragging = false }
+            )
+            // Double-click to flatten one band, the same gesture the horizontal
+            // fader uses to return to unity.
+            .onTapGesture(count: 2) { fraction = 0.5 }
+        }
+    }
+}

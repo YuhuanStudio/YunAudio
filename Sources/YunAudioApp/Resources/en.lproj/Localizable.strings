@@ -442,3 +442,7 @@
 "what you hear" = "what you hear";
 "what the far end hears" = "what the far end hears";
 "master" = "master";
+"Output tone" = "Output tone";
+"Flat. These are the band centres Razer's own software uses." = "Flat. These are the band centres Razer's own software uses.";
+"%d band(s) moved." = "%d band(s) moved.";
+"Flatten" = "Flatten";

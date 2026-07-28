@@ -4263,6 +4263,43 @@ struct ParametricEQTests {
         #expect(curve.filters.first?.decibels == 5)
     }
 
+    /// A correction and a tone control are different intentions and somebody
+    /// wants both. Cascaded biquads compose by concatenation, and the check
+    /// that matters is that the response really adds rather than one replacing
+    /// the other.
+    @Test("two curves run together add up")
+    func combining() throws {
+        let one = ParametricEQ(
+            name: "a", preampDecibels: -2,
+            filters: [.init(kind: .peaking, hertz: 1000, decibels: 4, q: 1)])
+        let two = ParametricEQ(
+            name: "b", preampDecibels: -3,
+            filters: [.init(kind: .peaking, hertz: 1000, decibels: 3, q: 1)])
+        let both = try #require(ParametricEQ.combined([one, two], name: "both"))
+        #expect(both.filters.count == 2)
+        #expect(both.preampDecibels == -5)
+        // 4 dB and 3 dB of boost at the same frequency, less 5 dB of preamp.
+        #expect(abs(both.response(atHertz: 1000, sampleRate: 48000) - 2) < 0.1)
+    }
+
+    @Test("combining nothing is nothing rather than an empty curve")
+    func combiningNothing() {
+        #expect(ParametricEQ.combined([], name: "x") == nil)
+        #expect(
+            ParametricEQ.combined([ParametricEQ(name: "flat", filters: [])], name: "x") == nil)
+    }
+
+    /// The coefficient block handed to the IO thread is a fixed allocation, so
+    /// a curve that could outgrow it would mean allocating on the realtime
+    /// path. Truncation is the right answer and it has to actually happen.
+    @Test("a combined curve cannot outgrow the block it is written into")
+    func combiningIsBounded() throws {
+        let ten = ParametricEQ.graphic([Float](repeating: 4, count: 10))
+        let many = try #require(
+            ParametricEQ.combined([ten, ten, ten], name: "too many"))
+        #expect(many.filters.count == ParametricEQ.maximumFilters)
+    }
+
     @Test("every section is normalised so it can be run as it stands")
     func normalised() {
         let curve = ParametricEQ(

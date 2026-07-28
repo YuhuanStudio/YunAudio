@@ -167,6 +167,26 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
         return ParametricEQ(name: name, filters: filters)
     }
 
+    /// Two curves running one after the other, as one curve.
+    ///
+    /// A headphone correction and a tone control are different intentions —
+    /// one undoes a fault in the hardware, the other is taste — and somebody
+    /// wants both at once without choosing. Cascaded biquads compose by
+    /// concatenation and their gains add, so this needs no arithmetic beyond
+    /// putting the lists together.
+    ///
+    /// Truncated at `maximumFilters` rather than allowed to grow, because the
+    /// coefficient block handed to the IO thread is a fixed allocation and a
+    /// curve that could outgrow it would mean allocating there.
+    public static func combined(_ curves: [ParametricEQ], name: String) -> ParametricEQ? {
+        let filters = Array(curves.flatMap(\.filters).prefix(maximumFilters))
+        guard !filters.isEmpty else { return nil }
+        return ParametricEQ(
+            name: name,
+            preampDecibels: curves.reduce(0) { $0 + $1.preampDecibels },
+            filters: filters)
+    }
+
     // MARK: Coefficients
 
     /// Five numbers per section — b0, b1, b2, a1, a2 — normalised by a0.
