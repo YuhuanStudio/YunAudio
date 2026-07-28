@@ -570,6 +570,100 @@ struct DeviceProfileTests {
         #expect(problems.isEmpty)
     }
 
+    /// The Seiren V2 X is the microphone that publishes a gain macOS can set —
+    /// −15 dB to +15 dB, measured on this machine, against the V3 Pro's
+    /// nothing. Somebody reading the profile has to be told which of their two
+    /// Razer microphones that is.
+    @Test("the V2 X profile names its one channel and says what it does publish")
+    func seirenV2XProfile() throws {
+        let channels = try #require(
+            DeviceChannelNames.channels(
+                modelUID: "Razer Seiren V2 X:1532:0543", name: "Razer Seiren V2 X",
+                scope: kAudioObjectPropertyScopeInput))
+        // One, not three. Matching the V3 Pro's three would be the easy mistake
+        // and would label a channel that does not exist.
+        #expect(channels.count == 1)
+        #expect(channels[0].isDefault)
+        #expect(!channels[0].detail.isEmpty)
+
+        let note = try #require(
+            DeviceChannelNames.note(
+                modelUID: "Razer Seiren V2 X:1532:0543", name: "Razer Seiren V2 X"))
+        #expect(note.contains("-15 dB to +15 dB"))
+        // The two profiles have to disagree about this, or one of them is wrong.
+        let v3 = try #require(
+            DeviceChannelNames.note(modelUID: nil, name: "Razer Seiren V3 Pro"))
+        #expect(note.contains("settable") && v3.contains("no settable"))
+    }
+
+    /// Two CoreAudio devices, one headset, and a 16 kHz input that looks like a
+    /// fault until somebody says the capsule stops at 10 kHz.
+    @Test("the Barracuda's Bluetooth profile covers both of its devices")
+    func barracudaProfile() throws {
+        // The headset is two CoreAudio devices, and they publish the same name
+        // and the same model UID — only the `:input` and `:output` suffix on
+        // the device UID differs, and the matcher never sees that. So one
+        // profile covers both, which is the intent rather than an accident.
+        let note = try #require(
+            DeviceChannelNames.note(modelUID: "2002 7e3", name: "Razer Barracuda (BT)"))
+        #expect(note.contains("16 kHz and nothing else"))
+        #expect(note.contains("hands-free"))
+        #expect(note.contains("2.4 GHz dongle"))
+
+        let channels = try #require(
+            DeviceChannelNames.channels(
+                modelUID: "2002 7e3", name: "Razer Barracuda (BT)",
+                scope: kAudioObjectPropertyScopeInput))
+        #expect(channels.count == 1)
+        // Why 16 kHz is not the insult it looks like.
+        #expect(channels[0].detail.contains("100 Hz to 10 kHz"))
+    }
+
+    /// The headset has three identities and only the Bluetooth one was measured
+    /// here. The dongle gets the general profile, which must say something
+    /// different — a note that repeated the Bluetooth measurements would be
+    /// stating one mode's numbers about another's.
+    @Test("the dongle gets the general profile, not the Bluetooth one")
+    func barracudaModesAreDistinct() throws {
+        let dongle = try #require(
+            DeviceChannelNames.note(modelUID: nil, name: "Razer Barracuda 2.4"))
+        let bluetooth = try #require(
+            DeviceChannelNames.note(modelUID: nil, name: "Razer Barracuda (BT)"))
+        #expect(dongle != bluetooth)
+        #expect(!dongle.contains("hands-free"))
+        // Razer's own ten band centres, written out so somebody arriving from
+        // Synapse can rebuild their curve here instead of guessing at it. Spelt
+        // in full because a test for "30" would pass on any prose at all.
+        #expect(dongle.contains("30, 60, 120, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz"))
+        #expect(dongle.contains("plus or minus 5 dB"))
+    }
+
+    /// A profile is matched on a substring, so a file that says too little can
+    /// quietly capture a device it knows nothing about. These four names all
+    /// belong to hardware this project has profiles for, and each must land on
+    /// its own.
+    ///
+    /// This caught exactly that: what wins is the *longest* match, not the most
+    /// specific one, and "razer barracuda" is a character longer than
+    /// "barracuda (bt)" — so the general profile took the Bluetooth device and
+    /// told its owner nothing about the 16 kHz input.
+    @Test("each Razer device gets its own profile and not a neighbour's")
+    func profilesDoNotPoachEachOther() throws {
+        let expected: [(String, String)] = [
+            ("Razer Seiren V3 Pro", "seiren v3 pro"),
+            ("Razer Seiren V2 X", "seiren v2 x"),
+            ("Razer Barracuda (BT)", "razer barracuda (bt)"),
+            ("Razer Barracuda 2.4", "razer barracuda"),
+        ]
+        let library = DeviceChannelNames.shared.library
+        for (name, match) in expected {
+            let profile = try #require(library.profile(modelUID: nil, name: name))
+            #expect(profile.match == match, "\(name) matched \(profile.match)")
+        }
+        // And nothing invented for the other Razer hardware in the world.
+        #expect(library.profile(modelUID: nil, name: "Razer Kraken") == nil)
+    }
+
     /// The round trip has to survive, or a profile written by the application
     /// cannot be read back by it.
     @Test("a profile survives being written and read")
@@ -584,6 +678,147 @@ struct DeviceProfileTests {
             note: "something worth knowing")
         let data = try JSONEncoder().encode(original)
         #expect(try JSONDecoder().decode(DeviceProfile.self, from: data) == original)
+    }
+}
+
+// MARK: - Application grouping
+
+/// What the application list offers somebody, stated as data rather than as
+/// whatever happened to be running.
+///
+/// The rules were only reachable through a live HAL before this, so the one
+/// thing nobody had checked was the case that matters most: something is
+/// audible and the list does not have it. On this machine the HAL reported two
+/// processes playing and the grouping returned one.
+@Suite("Application grouping")
+struct AudioApplicationGroupingTests {
+
+    private func process(
+        _ id: AudioObjectID, pid: pid_t, bundle: String?, name: String, playing: Bool = false
+    ) -> AudioApplications.ProcessEntry {
+        AudioApplications.ProcessEntry(
+            id: id, pid: pid, bundleID: bundle, name: name, isPlaying: playing)
+    }
+
+    /// Discord is four processes and one row.
+    @Test("helpers fold into the application that spawned them")
+    func helpersFold() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 10, bundle: "com.hnc.Discord", name: "Discord"),
+                process(2, pid: 11, bundle: "com.hnc.Discord.helper", name: "Helper"),
+                process(
+                    3, pid: 12, bundle: "com.hnc.Discord.helper.Renderer", name: "Renderer"),
+                process(4, pid: 13, bundle: "com.hnc.Discord.helper.Plugin", name: "Plugin"),
+            ],
+            foreground: ["com.hnc.Discord": .init(name: "Discord")],
+            named: ["com.hnc.Discord": .init(name: "Discord")])
+        #expect(apps.count == 1)
+        #expect(apps[0].processCount == 4)
+        #expect(apps[0].processIDs.sorted() == [1, 2, 3, 4])
+        #expect(!apps[0].isBackground)
+    }
+
+    /// The bug this file exists to keep fixed. `afplay`, mpv, ffplay and every
+    /// script anybody writes have no bundle identifier, and the list used to
+    /// drop them — including while they were the only thing making noise.
+    @Test("a playing process with no bundle identifier is still offered")
+    func bundlelessPlayingProcess() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(7, pid: 638, bundle: nil, name: "afplay", playing: true),
+                process(8, pid: 639, bundle: "", name: "empty", playing: true),
+                process(9, pid: 640, bundle: nil, name: "silent daemon"),
+            ],
+            foreground: [:], named: [:])
+        #expect(apps.count == 2)
+        // Whatever is playing sorts first, and can be captured: the identity is
+        // what the capture set keys on and the object is what the tap is built
+        // from, so both have to survive.
+        #expect(apps[0].isPlaying)
+        #expect(apps[0].bundleID == AudioApplications.identity(forPID: 638))
+        #expect(apps[0].name == "afplay")
+        #expect(apps[0].processIDs == [7])
+        #expect(apps[0].isBackground)
+        // The silent unnameable tail stays out of the list.
+        #expect(!apps.contains { $0.name == "silent daemon" })
+    }
+
+    /// The `pid:` prefix is what keeps a synthetic identity out of the prefix
+    /// matching. If one could be swallowed by a real bundle identifier, or
+    /// swallow one, a tap would end up on the wrong process.
+    @Test("a synthetic identity cannot collide with a real one")
+    func syntheticIdentityIsDistinct() {
+        let identity = AudioApplications.identity(forPID: 42)
+        #expect(identity == "pid:42")
+        #expect(identity.hasPrefix(AudioApplications.pidIdentityPrefix))
+        // No bundle identifier can produce this, and it can never be the prefix
+        // of one: the matching only ever appends a dot.
+        #expect(!identity.contains("."))
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 42, bundle: nil, name: "mpv", playing: true),
+                process(2, pid: 43, bundle: "com.apple.Safari", name: "Safari", playing: true),
+            ],
+            foreground: ["com.apple.Safari": .init(name: "Safari")],
+            named: ["com.apple.Safari": .init(name: "Safari")])
+        #expect(apps.count == 2)
+        #expect(Set(apps.map(\.bundleID)) == ["pid:42", "com.apple.Safari"])
+        #expect(apps.allSatisfy { $0.processCount == 1 })
+    }
+
+    /// Playing first, then the applications, then the daemons — because the
+    /// first row is the one somebody is looking for.
+    @Test("the order is playing, then foreground, then name")
+    func ordering() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 1, bundle: "com.apple.assistantd", name: "assistantd"),
+                process(2, pid: 2, bundle: "com.spotify.client", name: "Spotify"),
+                process(3, pid: 3, bundle: "com.apple.Safari", name: "Safari"),
+                process(
+                    4, pid: 4, bundle: "com.apple.audiomxd", name: "audiomxd", playing: true),
+            ],
+            foreground: [
+                "com.spotify.client": .init(name: "Spotify"),
+                "com.apple.Safari": .init(name: "Safari"),
+            ],
+            named: [
+                "com.spotify.client": .init(name: "Spotify"),
+                "com.apple.Safari": .init(name: "Safari"),
+            ])
+        #expect(apps.map(\.name) == ["audiomxd", "Safari", "Spotify", "assistantd"])
+        #expect(apps[0].isPlaying && apps[0].isBackground)
+    }
+
+    /// An accessory has no Dock icon and cannot head a group, which is not a
+    /// reason to show `com.apple.controlcenter` where a name would do.
+    @Test("an accessory keeps its name and stays in the background")
+    func accessoryKeepsItsName() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(1, pid: 1, bundle: "com.apple.controlcenter", name: "controlcenter")
+            ],
+            foreground: [:],
+            named: ["com.apple.controlcenter": .init(name: "控制中心")])
+        #expect(apps.count == 1)
+        #expect(apps[0].name == "控制中心")
+        #expect(apps[0].isBackground)
+    }
+
+    /// Safari's GPU process is `com.apple.WebKit.GPU`, which no running
+    /// application claims — so it folds on the "helper" rule instead.
+    @Test("a helper whose parent is not running folds on its own name")
+    func orphanHelper() {
+        let apps = AudioApplications.group(
+            processes: [
+                process(
+                    1, pid: 1, bundle: "com.apple.WebKit.helper.GPU",
+                    name: "Safari Graphics and Media")
+            ],
+            foreground: [:], named: [:])
+        #expect(apps.count == 1)
+        #expect(apps[0].bundleID == "com.apple.WebKit")
     }
 }
 

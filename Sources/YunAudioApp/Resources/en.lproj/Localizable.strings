@@ -216,6 +216,10 @@
 "The capsule as the device presents it." = "The capsule as the device presents it.";
 "The same capsule with none of the device's own processing." = "The same capsule with none of the device's own processing.";
 "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first." = "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first.";
+"The capsule, in mono. This microphone offers one channel and no dry or expanded version of it." = "The capsule, in mono. This microphone offers one channel and no dry or expanded version of it.";
+"Headset microphone" = "Headset microphone";
+"The boom microphone, in mono. Razer specify 100 Hz to 10 kHz and an omnidirectional pattern, so it is a voice microphone and not a room one." = "The boom microphone, in mono. Razer specify 100 Hz to 10 kHz and an omnidirectional pattern, so it is a voice microphone and not a room one.";
+"One channel at 16 kHz, which is what hands-free Bluetooth carries and roughly what this capsule produces: Razer specify 100 Hz to 10 kHz." = "One channel at 16 kHz, which is what hands-free Bluetooth carries and roughly what this capsule produces: Razer specify 100 Hz to 10 kHz.";
 "Noise gate" = "Noise gate";
 "High-pass" = "High-pass";
 "Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched." = "Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched.";

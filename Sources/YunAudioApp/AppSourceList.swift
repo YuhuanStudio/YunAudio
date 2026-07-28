@@ -29,25 +29,22 @@ struct AppSourceList: View {
                 }
             }
 
-            let visible = model.visibleApps
-            if visible.isEmpty {
+            let listing = model.appListing(limit: limit)
+            if listing.applications.isEmpty {
                 YunEmptyState(
                     symbol: "speaker.slash",
                     message: loc("Nothing is producing audio right now.")
                 )
                 .frame(maxWidth: .infinity)
             } else {
-                ForEach(visible.prefix(limit)) { application in
+                ForEach(listing.applications) { application in
                     AppSourceRow(model: model, application: application)
                 }
-                if visible.count > limit {
-                    Text(
-                        String(
-                            format: loc("and %d more"), visible.count - limit)
-                    )
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .padding(.leading, Yun.Space.sm)
+                if listing.overflow > 0 {
+                    Text(String(format: loc("and %d more"), listing.overflow))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .padding(.leading, Yun.Space.sm)
                 }
             }
 
@@ -79,8 +76,30 @@ struct AppSourceList: View {
                 .focusEffectDisabled()
                 .padding(.leading, Yun.Space.sm)
             }
+
+            // Shown in full, and in their own scroll region: nineteen daemons
+            // is taller than the panel, and the truncation that used to swallow
+            // them is exactly what made the toggle look broken.
+            if !listing.background.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                        ForEach(listing.background) { application in
+                            AppSourceRow(model: model, application: application)
+                        }
+                    }
+                }
+                .frame(maxHeight: Self.backgroundListHeight)
+            }
         }
+        // The list was refreshed by the Refresh button and by starting a route,
+        // and by nothing else — so the first time anybody opened this it was
+        // empty, and said so, on a machine that was playing three things.
+        .task { model.refreshAppsIfStale() }
     }
+
+    /// Enough for about eight rows. The daemons scroll rather than pushing
+    /// everything below them off the panel.
+    private static let backgroundListHeight: CGFloat = 200
 }
 
 private struct AppSourceRow: View {

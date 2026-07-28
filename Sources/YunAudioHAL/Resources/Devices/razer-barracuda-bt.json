@@ -1,0 +1,12 @@
+{
+  "match": "razer barracuda (bt)",
+  "displayName": "Razer Barracuda (Bluetooth)",
+  "note": "One headset, two CoreAudio devices: UIDs ending :input and :output, both named the same thing. Measured on this machine: the output offers 16 k and 48 k and sits at 48 k; the input offers 16 kHz and nothing else. An earlier probe of the same headset found 44.1 k out instead, so do not take the output rate as fixed — it is whatever the link negotiated. Opening that input negotiates hands-free mode and takes the output down to 16 kHz with it, which is why the router adds a Bluetooth destination with no input side at all. 16 kHz is less of a loss than it looks — Razer specify the microphone as 100 Hz to 10 kHz, so the capsule has nothing above 10 k to lose — but the headphones do lose it. Bluetooth here is AAC or SBC; for the microphone at full quality use the 2.4 GHz dongle, which appears separately as \"Razer Barracuda 2.4\".",
+  "inputChannels": [
+    {
+      "name": "Headset microphone",
+      "detail": "One channel at 16 kHz, which is what hands-free Bluetooth carries and roughly what this capsule produces: Razer specify 100 Hz to 10 kHz.",
+      "isDefault": true
+    }
+  ]
+}
