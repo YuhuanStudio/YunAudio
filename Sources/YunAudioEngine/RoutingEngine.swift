@@ -289,6 +289,28 @@ public final class RoutingEngine: @unchecked Sendable {
     /// - Throws: `RoutingError` when a device is missing, a channel cannot be
     ///   mapped, the devices share no sample rate, or CoreAudio refuses to
     ///   create or start the aggregate.
+    /// Coarse timings for the start path, printed when YUNAUDIO_TIMING is set.
+    ///
+    /// Added because a route restart turned out to cost several seconds and
+    /// nobody knew which part — and a restart is not a rare event: changing one
+    /// effect, one channel mode or one device does it, so whatever it costs is
+    /// what the application costs to use.
+    private static let reportsTiming =
+        ProcessInfo.processInfo.environment["YUNAUDIO_TIMING"] != nil
+
+    private func timed<T>(_ label: String, _ work: () throws -> T) rethrows -> T {
+        guard Self.reportsTiming else { return try work() }
+        let began = Date()
+        let result = try work()
+        FileHandle.standardError.write(
+            Data(
+                String(
+                    format: "  %6.0f ms  %@\n", Date().timeIntervalSince(began) * 1000, label
+                )
+                .utf8))
+        return result
+    }
+
     public func start(
         sourceDeviceUID: String,
         destinationDeviceUID: String,
@@ -364,8 +386,10 @@ public final class RoutingEngine: @unchecked Sendable {
         // Only devices that can actually present it. Asking a 44.1 kHz headset
         // for 48 throws, and the throw would be the whole route rather than the
         // one device that could not oblige.
-        let changed = try AggregateDevice.alignSampleRate(
-            rate, across: alignedDevices.filter { $0.availableSampleRates.contains(rate) })
+        let changed = try timed("align sample rates") {
+            try AggregateDevice.alignSampleRate(
+                rate, across: alignedDevices.filter { $0.availableSampleRates.contains(rate) })
+        }
         for (uid, previous) in changed where originalSampleRates[uid] == nil {
             originalSampleRates[uid] = previous
         }
@@ -444,11 +468,13 @@ public final class RoutingEngine: @unchecked Sendable {
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying
         // to carry intact.
-        let aggregate = try AggregateDevice(
-            name: "YunAudio Route",
-            subDevices: routedSubDevices,
-            clockMasterUID: cancelsEcho ? destinationDeviceUID : sourceDeviceUID,
-            taps: taps)
+        let aggregate = try timed("create the aggregate") {
+            try AggregateDevice(
+                name: "YunAudio Route",
+                subDevices: routedSubDevices,
+                clockMasterUID: cancelsEcho ? destinationDeviceUID : sourceDeviceUID,
+                taps: taps)
+        }
         self.aggregate = aggregate
         destinationDevice = destination
 
@@ -658,7 +684,7 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         ioProcID = procID
 
-        let startStatus = AudioDeviceStart(aggregate.id, procID)
+        let startStatus = timed("AudioDeviceStart") { AudioDeviceStart(aggregate.id, procID) }
         guard startStatus == noErr else {
             throw RoutingError.startFailed(startStatus)
         }
@@ -726,7 +752,7 @@ public final class RoutingEngine: @unchecked Sendable {
         echoBridge?.stop()
         echoBridge = nil
 
-        aggregate?.destroy()
+        timed("destroy the aggregate") { aggregate?.destroy() }
         aggregate = nil
         destinationDevice = nil
 
@@ -770,7 +796,9 @@ public final class RoutingEngine: @unchecked Sendable {
         // Restore last: the aggregate has to be gone first, or the HAL will
         // simply set the rate back to whatever the aggregate wanted.
         if !originalSampleRates.isEmpty {
-            AggregateDevice.restoreSampleRates(originalSampleRates)
+            timed("restore sample rates") {
+                AggregateDevice.restoreSampleRates(originalSampleRates)
+            }
             originalSampleRates.removeAll()
         }
     }

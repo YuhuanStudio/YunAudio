@@ -70,6 +70,24 @@ start. Worth knowing because twelve seconds of nothing looks like a hang, and
 because it is a good argument for the fall-back to treat "will not start" the
 same as "not here".
 
+### Changing one effect restarts the whole route [V, measured here]
+
+Enabling or disabling a single stage tears the aggregate down and builds it
+back. Measured end to end it costs about **five seconds**, of which the engine
+is only 0.8: aligning sample rates 56 ms, creating the aggregate 33 ms,
+`AudioDeviceStart` **639 ms**, restoring rates on the way out 87 ms. The rest
+is above the engine — the model's stop-then-start hop, `refreshApps()` at the
+top of every start, and instantiating the chain's audio units.
+
+Five seconds of dropout for one switch is a poor experience, and it is also
+what makes the interface flow check take five minutes: one section walks all
+eleven stages and costs **200 of the 298 seconds**.
+
+The fix is that a change to the effect chain should rebuild the chain, not the
+route. The graph is already published rather than mutated, so the machinery for
+swapping something in under a running IOProc exists — it is used for the routing
+matrix already.
+
 ### The interface has outgrown its own layout [proposal]
 
 Named directly: it is untidy now that there are enough features to be untidy.
