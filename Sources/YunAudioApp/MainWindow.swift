@@ -827,6 +827,9 @@ struct MainWindow: View {
                 }
 
                 sectionHeading(loc("Mixer"))
+                if !model.buses.isEmpty {
+                    YunCard { busLegend }
+                }
                 if model.isRunning {
                     YunCard { CalibrationPanel(model: model) }
                 }
@@ -846,6 +849,46 @@ struct MainWindow: View {
                 } else {
                     ForEach(model.sourceGroups) { group in
                         YunCard { RouteStrip(model: model, group: group) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// What the two mixes are and where each one goes.
+    ///
+    /// One card above the strips, because the faders underneath are meaningless
+    /// until somebody knows which mix each column belongs to. Everything here
+    /// was already true; none of it was said.
+    private var busLegend: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            ForEach(model.buses) { bus in
+                HStack(spacing: Yun.Space.sm) {
+                    Text(bus.letter)
+                        .font(Yun.Text.label)
+                        .foregroundStyle(Yun.Palette.accent)
+                        .frame(width: 14)
+                    Image(
+                        systemName: bus.kind == .monitor
+                            ? "headphones" : "dot.radiowaves.left.and.right"
+                    )
+                    .font(.system(size: 10))
+                    .foregroundStyle(Yun.Palette.textMuted)
+                    .frame(width: 16)
+                    Text(bus.deviceName)
+                        .font(Yun.Text.body)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: Yun.Space.sm)
+                    Text(
+                        bus.kind == .monitor
+                            ? loc("what you hear") : loc("what the far end hears")
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    if bus.followsMaster {
+                        YunBadge(loc("master"))
                     }
                 }
             }

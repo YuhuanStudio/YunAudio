@@ -112,19 +112,35 @@ struct RouteStrip: View {
                 peakHold: silenced ? 0 : hold,
                 segments: isCompact ? 12 : 32)
 
-            YunFader(
-                decibels: Binding(
-                    get: { model.faderDecibels(of: group) },
-                    set: { model.setFaderDecibels($0, for: group) }))
+            // Lettered only when there are two mixes to tell apart. With one
+            // bus the letter is noise: there is nothing it could be
+            // distinguishing this fader from.
+            HStack(spacing: Yun.Space.sm) {
+                if model.monitorDeviceUID != nil, !isCompact {
+                    Text(sendLetter)
+                        .font(Yun.Text.label)
+                        .foregroundStyle(Yun.Palette.textMuted)
+                        .frame(width: 14)
+                }
+                YunFader(
+                    decibels: Binding(
+                        get: { model.faderDecibels(of: group) },
+                        set: { model.setFaderDecibels($0, for: group) }))
+            }
 
             // The second mix. What you hear, separately from what the far end
             // hears — which is the thing every tool praised for this is praised
             // for, and cannot be expressed with one fader however many of them
             // there are.
+            //
+            // Lettered rather than drawn with a headphone symbol. The symbol
+            // said "this one is for headphones" and left the fader above it
+            // unexplained; the letters say there are two mixes and which is
+            // which, and they match the legend above the strips.
             if model.monitorDeviceUID != nil, !isCompact {
                 HStack(spacing: Yun.Space.sm) {
-                    Image(systemName: "headphones")
-                        .font(.system(size: 9))
+                    Text(monitorLetter)
+                        .font(Yun.Text.label)
                         .foregroundStyle(Yun.Palette.textMuted)
                         .frame(width: 14)
                     YunFader(
@@ -139,6 +155,17 @@ struct RouteStrip: View {
                 }
             }
         }
+    }
+
+    /// Which letter the monitor mix carries in the legend above.
+    private var monitorLetter: String {
+        model.buses.first { $0.kind == .monitor && $0.id == model.monitorDeviceUID }?.letter
+            ?? "A"
+    }
+
+    /// And the one the main mix carries.
+    private var sendLetter: String {
+        model.buses.first { $0.id == model.selectedDestinationUID }?.letter ?? "B"
     }
 
     private var monitorReadout: String {

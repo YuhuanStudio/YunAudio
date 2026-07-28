@@ -109,9 +109,11 @@ voice preset" and "nothing". `Record`, `off`, `High-pass` and `none captured`
 are the same shape of problem.
 
 Duplicates are now a failure in `check-strings.sh`, so no more can accumulate.
-What is left is disambiguating the six at their call sites — which means
-deciding what each one is actually naming, and that is a translation question
-rather than a code one.
+Resolved by keeping the later of each pair, which on inspection was the better
+wording in every case — 音高 for pitch rather than 變聲, 高通濾波 rather than
+高通, 不變聲 for the voice preset rather than 無. Worth knowing that this was
+luck: the rule was "keep what is running today", and it happened to agree with
+"keep what is right".
 
 ### The interface has outgrown its own layout [proposal]
 

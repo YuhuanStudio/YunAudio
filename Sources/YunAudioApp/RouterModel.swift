@@ -192,6 +192,68 @@ final class RouterModel {
         return one == other
     }
 
+    // MARK: Buses
+
+    /// One of the mixes a source can be sent to.
+    ///
+    /// The idea is VoiceMeeter's and it is the one thing everybody who is
+    /// praised for this is praised for: two independent mixes with a level per
+    /// source on each. This project has had both since monitoring became a
+    /// second mix rather than a sidetone — what it did not have was the
+    /// *vocabulary*, so the interface showed a fader and another fader with a
+    /// headphone symbol beside it, and nothing said that one of them is what
+    /// other applications capture and the other is what you hear.
+    ///
+    /// Naming them is nearly all of the work. A streamer already knows what an
+    /// A bus and a B bus are; an abstract matrix makes them work it out.
+    struct Bus: Identifiable, Equatable {
+        enum Kind: Equatable {
+            /// A physical output. What you hear.
+            case monitor
+            /// A virtual output other applications open as a microphone. What
+            /// the far end hears.
+            case send
+        }
+        let id: String
+        let letter: String
+        let kind: Kind
+        let deviceName: String
+        /// True when this bus is the one the master fader governs.
+        let followsMaster: Bool
+    }
+
+    /// The mixes currently in the path, in the order they are shown.
+    ///
+    /// The send is always there — it is the route. The monitor appears only
+    /// when somebody has chosen one, because a bus with nowhere to go is a
+    /// control that cannot do anything.
+    var buses: [Bus] {
+        var list: [Bus] = []
+        if let monitor = monitorDeviceUID,
+            let device = outputDevices.first(where: {
+                $0.uid == monitor
+            })
+        {
+            list.append(
+                Bus(
+                    id: monitor, letter: "A", kind: .monitor, deviceName: device.name,
+                    // Exempt on purpose: the master is the level going to the
+                    // far end, and pulling it down must not stop somebody
+                    // hearing their own voice.
+                    followsMaster: false))
+        }
+        if let destination = selectedDestination {
+            list.append(
+                Bus(
+                    id: destination.uid,
+                    letter: list.isEmpty ? "A" : "B",
+                    kind: destination.transport.isVirtual ? .send : .monitor,
+                    deviceName: destination.name,
+                    followsMaster: true))
+        }
+        return list
+    }
+
     /// Outputs currently in the path, which are the only ones worth aligning.
     ///
     /// Aligning something that is not being written to is a control that

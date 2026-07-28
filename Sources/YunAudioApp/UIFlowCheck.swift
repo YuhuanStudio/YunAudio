@@ -804,6 +804,43 @@ enum UIFlowCheck {
         }
         check("it is back to idle", model.calibrationPhase == .idle)
 
+        section("named buses")
+        // The two mixes have existed since monitoring became a second mix
+        // rather than a sidetone. What did not exist was the vocabulary: the
+        // interface showed a fader, and another fader with a headphone symbol,
+        // and nothing said one of them is what other applications capture.
+        let buses = model.buses
+        check("there is at least the send", !buses.isEmpty)
+        note(buses.map { "\($0.letter) \($0.deviceName)" }.joined(separator: " · "))
+        check("every bus is lettered", buses.allSatisfy { !$0.letter.isEmpty })
+        check("no two buses share a letter", Set(buses.map(\.letter)).count == buses.count)
+        // Exactly one bus follows the master, and it is the one going out. The
+        // monitor must not, or muting what the far end hears would stop
+        // somebody hearing their own voice.
+        check("exactly one bus follows the master", buses.filter(\.followsMaster).count == 1)
+        check(
+            "and it is not the monitor",
+            buses.first(where: \.followsMaster)?.id != model.monitorDeviceUID
+                || model.monitorDeviceUID == nil)
+
+        if model.monitorOptions.isEmpty {
+            note("no second output on this machine — one bus only")
+        } else if let second = model.monitorOptions.first(where: {
+            $0.uid != model.selectedDestinationUID
+        }) {
+            let previous = model.monitorDeviceUID
+            model.monitorDeviceUID = second.uid
+            await waitUntil("the monitor came up", { !model.isBusy }, timeout: 15)
+            let two = model.buses
+            check("choosing a monitor makes a second bus", two.count == 2)
+            check("they are A and B", Set(two.map(\.letter)) == ["A", "B"])
+            check(
+                "the monitor is the one you hear",
+                two.first { $0.id == second.uid }?.kind == .monitor)
+            model.monitorDeviceUID = previous
+            await waitUntil("and it went back", { !model.isBusy }, timeout: 15)
+        }
+
         section("sources rather than wires")
         // A stereo source is two routes, and it used to be two strips: two
         // faders, two mutes and two solo buttons for one microphone. Worse, the
