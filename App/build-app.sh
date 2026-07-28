@@ -15,6 +15,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# Ensures the SDK is new enough; see the script for why.
+source ./App/toolchain.sh
+
 CONFIGURATION="debug"
 LAUNCH=0
 VERIFY=0

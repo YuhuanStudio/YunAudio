@@ -18,6 +18,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Ensures the SDK is new enough; see the script for why.
+source ./App/toolchain.sh
+
 VERSION="0.1.0"
 STAGING="build/dmg"
 IMAGE="build/YunAudio-${VERSION}.dmg"

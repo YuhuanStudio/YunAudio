@@ -634,6 +634,10 @@ final class RouterModel {
     /// Samples any stem had to drop. Non-zero means a file has gaps in it.
     var engineStemDrops: UInt64 { engine.stemDroppedSamples }
 
+    /// How many sources are being listened to for transcription. One per
+    /// source is the whole mechanism, so it is worth being able to check.
+    var engineTranscriptTaps: Int { engine.transcriptTapCount }
+
     func toggleRecording() {
         if isRecording {
             isRecordingPaused = false
@@ -969,6 +973,15 @@ final class RouterModel {
             })
         else { return }
         applyPatch(activeRoutes + [Route(source: source, destination: destination)])
+    }
+
+    /// Pulls one cable, leaving everything else where it is.
+    func disconnectRoute(source: ChannelRef, destination: ChannelRef) {
+        let remaining = activeRoutes.filter {
+            !($0.source == source && $0.destination == destination)
+        }
+        guard remaining.count != activeRoutes.count else { return }
+        applyPatch(remaining)
     }
 
     /// Pulls every cable reaching a destination.
@@ -1988,6 +2001,10 @@ final class RouterModel {
         }
         stopPolling()
         stopAnalysis()
+        // Transcription goes down with the route it was listening to, but the
+        // transcript stays: it is what somebody was there for, and losing it
+        // because a device changed underneath would be the worst moment to.
+        if isTranscribing { stopTranscribing() }
         levels = []
         peakHolds = []
         clipped = []
@@ -2117,12 +2134,176 @@ final class RouterModel {
             analyser.drain(from: engine)
             analysis = analyser.reading()
         }
+        if isTranscribing { pumpTranscription() }
         refreshGainReduction()
         refreshDucking()
         if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
         lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
+    }
+
+    // MARK: Transcription
+
+    /// True while every source is being written down.
+    private(set) var isTranscribing = false
+    /// Everything said so far, from every source, in the order it was said.
+    private(set) var transcript: [Transcriber.Line] = []
+    /// Set when transcription could not start, in words somebody can act on.
+    private(set) var transcriptionError: String?
+
+    /// Nil when this system can transcribe, otherwise why it cannot.
+    ///
+    /// The interface shows the control either way — a feature that vanishes on
+    /// an older system is one nobody can find out about — and puts this
+    /// underneath it when it is there.
+    var transcriptionUnavailableReason: String? {
+        Transcriber.unsupportedReason.map(Self.describe)
+    }
+
+    @ObservationIgnored private var transcribers: [Transcriber] = []
+    /// Reused across polls. Two seconds at 48 kHz, which is more than the ring
+    /// behind it holds, so a drain is never cut short by this buffer.
+    @ObservationIgnored private var transcriptScratch = [Float](repeating: 0, count: 96_000)
+    @ObservationIgnored private var transcriptRate: Double = 48000
+
+    /// Starts writing down what every source says, each under its own name.
+    ///
+    /// One transcriber per source is the whole trick. Nothing here works out
+    /// who is speaking, because nothing ever mixed them together — the
+    /// microphone is one tap and each captured application is another, so the
+    /// name on a line is the wiring rather than a guess that is sometimes
+    /// wrong.
+    func startTranscribing() {
+        guard !isTranscribing else { return }
+        guard isRunning else {
+            transcriptionError = loc("Start routing before transcribing.")
+            return
+        }
+        if let reason = Transcriber.unsupportedReason {
+            transcriptionError = Self.describe(reason)
+            return
+        }
+
+        let groups = sourceGroups
+        let first = groups.compactMap(\.routes.first)
+        guard !first.isEmpty else {
+            transcriptionError = loc("Nothing is routed to transcribe.")
+            return
+        }
+        let opened = engine.startTranscriptTaps(routes: first)
+        guard opened > 0 else {
+            transcriptionError = loc("Could not listen to any source.")
+            return
+        }
+
+        transcriptRate = engine.pathQuality?.sampleRate ?? 48000
+        transcribers = groups.prefix(opened).map { group in
+            Transcriber(speaker: representative(of: group).map(routeTitle) ?? loc("Source"))
+        }
+        isTranscribing = true
+        transcriptionError = nil
+
+        // Started together rather than one at a time: the first model load
+        // fetches assets, and serialising that would leave the second source
+        // unheard for as long as the first one took.
+        let starting = transcribers
+        let now = Date().timeIntervalSince1970
+        Task { @MainActor in
+            for transcriber in starting {
+                do {
+                    try await transcriber.start(now: now)
+                } catch {
+                    self.transcriptionError = Self.describe(error)
+                    self.stopTranscribing()
+                    return
+                }
+            }
+        }
+    }
+
+    func stopTranscribing() {
+        guard isTranscribing else { return }
+        isTranscribing = false
+        engine.stopTranscriptTaps()
+        let finishing = transcribers
+        transcribers = []
+        // Finalised rather than dropped: the model is holding the end of the
+        // last sentence, and a transcript that stops mid-word because somebody
+        // pressed a button is not what they asked for.
+        Task { @MainActor in
+            for transcriber in finishing { await transcriber.stop() }
+            await self.collectTranscript(from: finishing)
+        }
+    }
+
+    /// Moves audio from the rings to the models, and lines back.
+    private func pumpTranscription() {
+        let rate = transcriptRate
+        for (slot, transcriber) in transcribers.enumerated() {
+            let taken = transcriptScratch.withUnsafeMutableBufferPointer { buffer in
+                engine.drainTranscript(
+                    slot, into: buffer.baseAddress!, capacity: buffer.count)
+            }
+            guard taken > 0 else { continue }
+            transcriber.add(Array(transcriptScratch[0..<taken]), sampleRate: rate)
+        }
+        let running = transcribers
+        Task { @MainActor in await self.collectTranscript(from: running) }
+    }
+
+    private func collectTranscript(from transcribers: [Transcriber]) async {
+        var merged: [Transcriber.Line] = []
+        for transcriber in transcribers { merged += await transcriber.lines }
+        // Sorted across sources, which is the point of doing it here rather
+        // than per transcriber: two people talking is one conversation, and a
+        // transcript that lists one person's half and then the other's is not
+        // a record of it.
+        merged.sort { $0.start < $1.start }
+        if merged != transcript { transcript = merged }
+    }
+
+    /// The transcript as somebody would read it, attributed and timestamped.
+    var transcriptText: String {
+        transcript.map { line in
+            String(
+                format: "[%02d:%02d] %@: %@", Int(line.start) / 60, Int(line.start) % 60,
+                line.speaker, line.text)
+        }.joined(separator: "\n")
+    }
+
+    /// Writes the transcript beside the recordings.
+    @discardableResult
+    func saveTranscript() -> URL? {
+        guard !transcript.isEmpty else { return nil }
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
+        let url = recordingDirectory.appendingPathComponent(
+            "YunAudio \(stamp.string(from: Date()).replacingOccurrences(of: ":", with: "-")).txt"
+        )
+        do {
+            try transcriptText.write(to: url, atomically: true, encoding: .utf8)
+            return url
+        } catch {
+            transcriptionError = String(describing: error)
+            return nil
+        }
+    }
+
+    private static func describe(_ error: Error) -> String {
+        guard let unavailable = error as? Transcriber.Unavailable else {
+            return String(describing: error)
+        }
+        return describe(unavailable)
+    }
+
+    private static func describe(_ unavailable: Transcriber.Unavailable) -> String {
+        switch unavailable {
+        case .needsNewerSystem: loc("Live transcription needs macOS 27.")
+        case .noModel: loc("No transcription model is installed.")
+        case .unsupportedLanguage(let identifier): loc("No model for") + " \(identifier)"
+        case .failed(let reason): reason
+        }
     }
 
     // MARK: Analysis

@@ -418,9 +418,20 @@ enum UIFlowCheck {
         check("path quality is being reported", model.pathQuality != nil)
         // The application routed audio into a virtual device and never said the
         // one thing it exists to enable: that the conferencing application has
-        // to be pointed at that device.
-        check("it says what to do next", model.nextStep != nil)
-        if let next = model.nextStep { note(next) }
+        // to be pointed at that device. Stated as the rule rather than as
+        // "there is a sentence", because which output happens to be preselected
+        // is a property of the machine: routing into a real output is
+        // monitoring and needs no further step, and a check that only ever saw
+        // one of the two branches failed on any machine that picked the other.
+        let routesToVirtual = model.selectedDestination?.transport.isVirtual ?? false
+        check(
+            "the next step is offered exactly when there is one",
+            routesToVirtual == (model.nextStep != nil))
+        if let next = model.nextStep {
+            note(next)
+        } else {
+            note("destination is a real output — monitoring, so no next step")
+        }
 
         print("\nmuting the first route")
         model.setMuted(true, forRouteAt: 0)
@@ -1061,6 +1072,99 @@ enum UIFlowCheck {
             try? FileManager.default.removeItem(at: file)
         }
 
+        print("\nstems survive a route edit")
+        // The bug this catches was live: rebuilding the graph dropped the stem
+        // assignment, so moving one cable during a recording left every file
+        // open, silent and still counting time with nothing saying so.
+        model.recordsStems = true
+        model.toggleRecording()
+        let editedStems = model.stemURLs
+        if editedStems.isEmpty {
+            note("no stems started — skipped")
+            model.toggleRecording()
+        } else {
+            await pause(1.0)
+            let before = editedStems.map { size(of: $0) }
+            // A fader or a mute is not enough — those go through the command
+            // queue. Adding a cable is what rebuilds the graph, and it is the
+            // ordinary thing somebody does mid-session.
+            // A source channel that is not routed yet, into a destination
+            // channel that already is. A stereo pair usually has both
+            // destination channels taken, so it is the source side that has
+            // room — the Seiren publishes three inputs and two are in use.
+            let existing = model.activeRoutes.first
+            let spare = existing.flatMap { route -> Route? in
+                let used = Set(
+                    model.activeRoutes.filter { $0.destination == route.destination }
+                        .map(\.source.channel))
+                guard
+                    let channel = (0..<(model.selectedSource?.inputChannels ?? 0))
+                        .first(where: { !used.contains($0) })
+                else { return nil }
+                return Route(
+                    source: ChannelRef(
+                        deviceUID: route.source.deviceUID, channel: channel),
+                    destination: route.destination)
+            }
+            let routesBefore = model.activeRoutes.count
+            if let spare {
+                model.connect(source: spare.source, destination: spare.destination)
+                check("the graph was rebuilt", model.activeRoutes.count > routesBefore)
+            } else {
+                note("no spare channel — the rebuild was not exercised")
+            }
+            await pause(1.5)
+            model.toggleRecording()
+            await pause(0.6)
+            let after = editedStems.map { size(of: $0) }
+            check(
+                "every stem kept growing across the edit",
+                zip(before, after).allSatisfy { $1 > $0 + 10_000 })
+            note("stem sizes \(before) → \(after)")
+            // Only the cable just added, put back the way it was. Disconnecting
+            // the whole destination would pull the stems' own routes with it.
+            if let spare {
+                model.disconnectRoute(source: spare.source, destination: spare.destination)
+            }
+            for url in editedStems { try? FileManager.default.removeItem(at: url) }
+            if let mix = model.recordingURL { try? FileManager.default.removeItem(at: mix) }
+        }
+        model.recordsStems = false
+
+        print("\ntranscription")
+        if let reason = model.transcriptionUnavailableReason {
+            // Not a failure. On a system without the model this is the correct
+            // behaviour, and the point of the check is that it says so rather
+            // than offering a control that does nothing.
+            note("unavailable: \(reason)")
+            model.startTranscribing()
+            check("it refuses rather than pretending", !model.isTranscribing)
+            check("and it says why", model.transcriptionError != nil)
+        } else {
+            model.startTranscribing()
+            check("it started", model.isTranscribing)
+            check("no error was reported", model.transcriptionError == nil)
+            // One per source is the whole mechanism: attribution is the wiring
+            // rather than a guess about who was speaking.
+            check(
+                "one tap per source",
+                model.engineTranscriptTaps == model.sourceGroups.count)
+            await pause(2.0)
+            check("it is still going", model.isTranscribing)
+            check("still no error", model.transcriptionError == nil)
+            model.stopTranscribing()
+            check("it stopped", !model.isTranscribing)
+            await pause(0.5)
+            check("the tap closed", model.engineTranscriptTaps == 0)
+            note("\(model.transcript.count) line(s) from silence")
+            // Starting again after stopping has to work; the rings are freed on
+            // stop and a stale index would be a use-after-free rather than a
+            // quiet nothing.
+            model.startTranscribing()
+            check("it starts again", model.isTranscribing)
+            model.stopTranscribing()
+        }
+
         print("\nswitching the echo canceller on while running")
         if model.echoSpeakerOptions.isEmpty {
             note("no hardware output to cancel against — skipped")
@@ -1347,14 +1451,14 @@ enum UIFlowCheck {
             return
         }
         let tables = ["en", "zh-Hant"].map { language -> (String, [String: String]) in
-            // SwiftPM lowercases .lproj folder names and Bundle's matching is
-            // case-sensitive, which is why this looks the folder up by hand.
-            let contents = try? FileManager.default.contentsOfDirectory(
-                atPath: bundle.bundlePath)
-            let folder = contents?.first {
-                $0.lowercased() == "\(language.lowercased()).lproj"
-            }
-            let path = folder.map { "\(bundle.bundlePath)/\($0)/Localizable.strings" }
+            // Looked up by hand rather than through Bundle, for two reasons
+            // that both bit. SwiftPM lowercases .lproj folder names and
+            // Bundle's matching is case-sensitive; and the layout of a resource
+            // bundle depends on which toolchain built it — flat under some,
+            // wrapped in Contents/Resources under others. Reading a fixed path
+            // found nothing and reported both tables missing, which looks
+            // exactly like a localisation that never shipped.
+            let path = stringsTable(in: bundle.bundlePath, language: language)
             let table = path.flatMap { NSDictionary(contentsOfFile: $0) as? [String: String] }
             return (language, table ?? [:])
         }
@@ -1417,6 +1521,25 @@ enum UIFlowCheck {
         }
         check("every enum-built label is translated", stillEnglish.isEmpty)
         for text in stillEnglish.prefix(4) { note("not in the table: \(text)") }
+    }
+
+    /// Finds a language's table wherever the bundle happens to keep it.
+    private static func stringsTable(in bundlePath: String, language: String) -> String? {
+        let wanted = "\(language.lowercased()).lproj"
+        let roots = [bundlePath, "\(bundlePath)/Contents/Resources"]
+        for root in roots {
+            let contents =
+                (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? []
+            guard let folder = contents.first(where: { $0.lowercased() == wanted })
+            else { continue }
+            let path = "\(root)/\(folder)/Localizable.strings"
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    private static func size(of url: URL) -> Int {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
     }
 
     private static func pause(_ seconds: TimeInterval) async {

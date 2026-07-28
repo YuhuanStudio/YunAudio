@@ -8,7 +8,8 @@ second. Routing the microphone into a virtual device that Discord opens instead
 makes the problem go away. Along the way it turned out macOS has several
 capabilities in this area that nothing else exposes, so the project grew.
 
-Requires macOS 26 or later.
+Requires macOS 26 or later. Live transcription needs macOS 27; on 26 it is
+shown as unavailable with the reason, and everything else works.
 
 ## What is different about it
 
@@ -130,6 +131,19 @@ learns a target speaker and resynthesises, which is a different and better thing
 of that fits inside a 2.7 ms IO deadline. Every real-time voice changer that
 ships today does what this does; this one says so.
 
+**Transcription that knows who said what, without guessing.** Every product
+that transcribes a conversation hedges publicly about diarization, because
+working out who is speaking from the sound is a guess and it is wrong often
+enough to be the thing people complain about.
+
+This application does not have that problem, and not because it solved it. The
+microphone is one source and every captured application is its own process tap,
+separated before anything reaches a model. One transcriber per source, and the
+speaker label is the wiring rather than an inference. `SpeechTranscriber` is
+macOS's own model, designed for sustained multi-hour transcription rather than
+short queries, and it runs on the device: no per-minute billing, no upload, no
+key.
+
 **Third-party Audio Units.** This is what a plugin means in audio, and it is the
 one place where loading somebody else's code is the right answer rather than an
 elaborate way to avoid a configuration file: the format exists, the system vets
@@ -210,6 +224,13 @@ App/                bundle assembly for YunAudio.app
 ```
 
 ## Building
+
+Building needs an Xcode carrying the **macOS 27 SDK**, because live
+transcription uses `AnalyzerInputConverter`. The scripts find one and select it
+themselves; a hand-run `swift build` may need `source ./App/toolchain.sh` first,
+otherwise the error is `cannot find type 'AnalyzerInputConverter' in scope`,
+which reads like a typo rather than like an SDK a year old. The application
+itself still runs on macOS 26.
 
 ```bash
 # The virtual device. Installing restarts coreaudiod, so all audio
@@ -431,6 +452,11 @@ written from scratch against `<CoreAudio/AudioServerPlugIn.h>` and shares no cod
 with it.
 
 ## Contributing
+
+**[AGENTS.md](AGENTS.md)** is the working agreement: what the invariants are,
+what needs a human, how the four interface checks differ, and which dead ends
+have already been measured and are not worth retrying. Read it before changing
+anything.
 
 ```bash
 swift build && swift test

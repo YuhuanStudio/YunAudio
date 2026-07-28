@@ -13,6 +13,11 @@ import Foundation
 /// arrives as `zh-hant.lproj` — while `Bundle`'s own matching is case-sensitive.
 /// A system set to `zh-Hant-TW` therefore finds nothing and quietly reads
 /// English. So the right table is resolved here, case-insensitively, once.
+///
+/// And where the folders sit inside the bundle is not fixed either: a resource
+/// bundle is flat under one toolchain and wrapped in `Contents/Resources`
+/// under another. Looking in one place turned the whole Chinese interface back
+/// into English, in a build that was otherwise correct and said nothing.
 public enum YunStrings {
     /// Set at launch to the bundle carrying the `.lproj` folders.
     public nonisolated(unsafe) static var bundle: Bundle = .main {
@@ -26,11 +31,17 @@ public enum YunStrings {
     private static func table() -> Bundle {
         if let resolved { return resolved }
 
-        let available =
-            (try? FileManager.default.contentsOfDirectory(
-                atPath: bundle.bundlePath))?
-            .filter { $0.hasSuffix(".lproj") }
-            .map { String($0.dropLast(6)) } ?? []
+        // Both layouts, in the order that costs least: `resourceURL` is right
+        // for a wrapped bundle and the bundle path is right for a flat one.
+        let roots = [bundle.resourceURL?.path, bundle.bundlePath].compactMap { $0 }
+        var available: [(name: String, root: String)] = []
+        for root in roots {
+            let folders =
+                (try? FileManager.default.contentsOfDirectory(atPath: root))?
+                .filter { $0.hasSuffix(".lproj") } ?? []
+            available += folders.map { (String($0.dropLast(6)), root) }
+            if !available.isEmpty { break }
+        }
 
         // Walk the user's preferences in order and take the first that matches
         // a folder, comparing without case and allowing "zh-Hant-TW" to select
@@ -38,11 +49,10 @@ public enum YunStrings {
         // English when the language is present.
         for preferred in Locale.preferredLanguages {
             let wanted = preferred.lowercased()
-            if let match = available.first(where: { $0.lowercased() == wanted })
-                ?? available.first(where: { wanted.hasPrefix($0.lowercased()) })
-                ?? available.first(where: { $0.lowercased().hasPrefix(wanted) }),
-                let path = bundle.path(forResource: match, ofType: "lproj"),
-                let localized = Bundle(path: path)
+            if let match = available.first(where: { $0.name.lowercased() == wanted })
+                ?? available.first(where: { wanted.hasPrefix($0.name.lowercased()) })
+                ?? available.first(where: { $0.name.lowercased().hasPrefix(wanted) }),
+                let localized = Bundle(path: "\(match.root)/\(match.name).lproj")
             {
                 resolved = localized
                 return localized

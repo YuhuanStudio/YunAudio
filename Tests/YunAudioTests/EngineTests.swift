@@ -1296,6 +1296,163 @@ struct IOProcTests {
         cycle(graph: graph, input: input, output: output, cycles: 5)
         #expect(graph.pointee.cycleCounter.pointee == 5)
     }
+
+    /// The transcription tap has to carry that source and only that source,
+    /// which is the entire reason attribution here is not a guess. A tap that
+    /// picked up the mix would put everybody's words under one name and the
+    /// feature would be worth nothing.
+    @Test("a transcription tap carries only its own source")
+    func transcriptTapIsPerSource() throws {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    transcriptIndex: 0),
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 0),
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let ring = try #require(yun_rt_ring_create(4096))
+        defer { yun_rt_ring_free(ring) }
+        graph.pointee.transcriptRings[0] = ring
+
+        let input = Bus(channelCounts: [2], frames: 64)
+        input.set(0, 0, to: 0.25)
+        input.set(0, 1, to: 0.9)
+        let output = Bus(channelCounts: [1], frames: 64)
+        cycle(graph: graph, input: input, output: output)
+
+        var taken = 0
+        var drained = [Float](repeating: 0, count: 128)
+        drained.withUnsafeMutableBufferPointer {
+            taken = Int(yun_rt_ring_read(ring, $0.baseAddress!, 128))
+        }
+        #expect(taken == 64)
+        // The tapped source, not the sum of the two that reached the output.
+        #expect(abs(drained[0] - 0.25) < 0.0001)
+        #expect(abs(drained[63] - 0.25) < 0.0001)
+    }
+
+    /// Pre-fader, like a stem and for the same reason: a transcript should say
+    /// what somebody said, not what the mix decided about them. A muted source
+    /// is the case that proves it — muting somebody in the mix is not asking
+    /// for their words to stop being written down.
+    @Test("a transcription tap is taken before the fader")
+    func transcriptTapIsPreFader() throws {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    gain: 0.1, muted: true, transcriptIndex: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let ring = try #require(yun_rt_ring_create(4096))
+        defer { yun_rt_ring_free(ring) }
+        graph.pointee.transcriptRings[0] = ring
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.4)
+        let output = Bus(channelCounts: [1], frames: 64)
+        cycle(graph: graph, input: input, output: output)
+
+        var drained = [Float](repeating: 0, count: 64)
+        drained.withUnsafeMutableBufferPointer {
+            _ = yun_rt_ring_read(ring, $0.baseAddress!, 64)
+        }
+        #expect(output.channel(0, 0, 0) == 0)
+        #expect(abs(drained[0] - 0.4) < 0.0001)
+    }
+
+    /// A tap nobody opened must cost nothing and must not be followed. A null
+    /// ring behind a non-negative index is the ordinary state between stopping
+    /// transcription and the next graph rebuild.
+    @Test("a transcription index with no ring behind it is ignored")
+    func transcriptTapWithoutRing() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    transcriptIndex: 0)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.3)
+        let output = Bus(channelCounts: [1], frames: 64)
+        cycle(graph: graph, input: input, output: output)
+        #expect(abs(output.channel(0, 0, 0) - 0.3) < 0.0001)
+    }
+}
+
+/// Moving one cable rebuilds the graph, and everything that belongs to the
+/// route rather than to that particular graph has to come across with it. Stem
+/// recording was being dropped here: a patchbay edit during a recording left
+/// every stem file open, silent and still counting time, with nothing saying
+/// so. The matching is the part that can be wrong, so it is the part tested.
+@Suite("Route assignments across a rebuild")
+struct CarriedRouteTests {
+
+    private func route(_ source: String, _ channel: Int, _ destination: String) -> Route {
+        Route(
+            source: ChannelRef(deviceUID: source, channel: channel),
+            destination: ChannelRef(deviceUID: destination, channel: 0))
+    }
+
+    @Test("an unchanged list maps to itself")
+    func identity() {
+        let routes = [route("Mic", 0, "Out"), route("Discord", 0, "Out")]
+        #expect(RoutingEngine.carriedPositions(from: routes, to: routes) == [0, 1])
+    }
+
+    /// The case the bug was: a rebuild reorders, and copying by index would
+    /// hand one source's audio to another's file.
+    @Test("a reordered list follows the route, not the position")
+    func reordered() {
+        let before = [route("Mic", 0, "Out"), route("Discord", 0, "Out")]
+        let after = [route("Discord", 0, "Out"), route("Mic", 0, "Out")]
+        #expect(RoutingEngine.carriedPositions(from: before, to: after) == [1, 0])
+    }
+
+    @Test("a route that did not exist before carries nothing")
+    func addedRoute() {
+        let before = [route("Mic", 0, "Out")]
+        let after = [route("Mic", 0, "Out"), route("Spotify", 0, "Out")]
+        #expect(RoutingEngine.carriedPositions(from: before, to: after) == [0, nil])
+    }
+
+    @Test("removing one leaves the rest where they belong")
+    func removedRoute() {
+        let before = [route("Mic", 0, "Out"), route("Discord", 0, "Out")]
+        let after = [route("Discord", 0, "Out")]
+        // Discord was second, and unplugging the microphone does not move it —
+        // the answer is where it was, not where it now sits.
+        #expect(RoutingEngine.carriedPositions(from: before, to: after) == [1])
+    }
+
+    /// Two cables between the same pair of channels is unusual and not an
+    /// error. Both matching the same old route would put two sources in one
+    /// file, so each old position is claimed once.
+    @Test("duplicate routes each claim their own position")
+    func duplicates() {
+        let duplicated = [route("Mic", 0, "Out"), route("Mic", 0, "Out")]
+        #expect(RoutingEngine.carriedPositions(from: duplicated, to: duplicated) == [0, 1])
+    }
+
+    /// A stereo source is two routes off two channels, and they must not be
+    /// confused with each other — swapping them would swap the channels of the
+    /// stem file.
+    @Test("channels of one source are told apart")
+    func channelsAreDistinct() {
+        let before = [route("Mic", 0, "Out"), route("Mic", 1, "Out")]
+        let after = [route("Mic", 1, "Out"), route("Mic", 0, "Out")]
+        #expect(RoutingEngine.carriedPositions(from: before, to: after) == [1, 0])
+    }
 }
 
 // MARK: - Automatic levelling
@@ -3761,5 +3918,77 @@ struct AudioMixConstraintTests {
                 &output, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)) == noErr)
 
         #expect(AudioUnitInitialize(unit) == kAudioUnitErr_FailedInitialization)
+    }
+}
+
+// MARK: - Transcription
+
+/// The claim worth testing is not that Apple's model works — it is that the
+/// attribution is free. Every product that transcribes a conversation hedges
+/// about who said what, because acoustic diarization guesses. Here the sources
+/// are separated before anything reaches a model, so the speaker is the wiring.
+@Suite("Transcription")
+struct TranscriberTests {
+
+    @Test("the framework is present on this system")
+    func supported() {
+        #expect(Transcriber.isSupported)
+        #expect(Transcriber.unsupportedReason == nil)
+    }
+
+    /// The two are one answer told twice, and an interface that showed a
+    /// disabled control with no explanation — or an enabled one with an excuse
+    /// underneath — would be the bug. macOS 26 is a supported system for
+    /// everything else in this application; there the reason is the sentence
+    /// somebody reads instead of the feature.
+    @Test("when it cannot transcribe it says why")
+    func reasonAgreesWithSupport() {
+        #expect(Transcriber.isSupported == (Transcriber.unsupportedReason == nil))
+    }
+
+    /// A transcriber is per source and carries its speaker, which is the whole
+    /// mechanism — there is nothing to infer later.
+    @Test("each transcriber knows who it is listening to")
+    func carriesItsSpeaker() {
+        let microphone = Transcriber(speaker: "Microphone")
+        let discord = Transcriber(speaker: "Discord")
+        #expect(microphone.speaker == "Microphone")
+        #expect(discord.speaker == "Discord")
+    }
+
+    /// Somewhere to start from: what can be transcribed without a download and
+    /// what needs one. An empty supported list would mean the feature cannot
+    /// work at all here.
+    @Test("it reports which languages it can do")
+    func languages() async {
+        let (installed, supported) = await Transcriber.languages()
+        #expect(!supported.isEmpty)
+        // Installed is a subset of supported by definition; a language that can
+        // be used without a download is one of the ones that can be used.
+        #expect(installed.count <= supported.count)
+    }
+
+    /// Attribution is what the transcript is for, so every line carries it and
+    /// the timestamps are readable rather than raw seconds.
+    @Test("the transcript is attributed and timestamped")
+    func transcriptFormat() async {
+        let transcriber = Transcriber(speaker: "Guest")
+        await transcriber.appendForTesting(
+            .init(speaker: "Guest", text: "hello there", start: 5, duration: 1))
+        await transcriber.appendForTesting(
+            .init(speaker: "Guest", text: "and again", start: 75.5, duration: 1))
+        let text = await transcriber.transcript()
+        #expect(text.contains("[00:05] Guest: hello there"))
+        #expect(text.contains("[01:15] Guest: and again"))
+    }
+
+    /// Feeding it before it has started must not crash or queue anything up for
+    /// later — a transcript that begins with audio from before somebody pressed
+    /// the button is not what they asked for.
+    @Test("audio before it starts is ignored")
+    func ignoresAudioBeforeStart() async {
+        let transcriber = Transcriber(speaker: "Microphone")
+        await transcriber.add([Float](repeating: 0.1, count: 4800), sampleRate: 48000)
+        #expect(await transcriber.lines.isEmpty)
     }
 }

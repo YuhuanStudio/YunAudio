@@ -13,7 +13,14 @@ import YunDesign
 /// on a machine that is not a phone.
 struct MainWindow: View {
     @Bindable var model: RouterModel
-    @State private var inspectorTab: Inspector = .sound
+    @State private var inspectorTab: Inspector
+
+    init(model: RouterModel, initialInspector: Inspector = .sound, isRendering: Bool = false) {
+        self.model = model
+        _inspectorTab = State(initialValue: initialInspector)
+        self.isRendering = isRendering
+    }
+
     @State private var isNamingPreset = false
     @State private var presetName = ""
     /// Skips the scroll views. `ImageRenderer` gives a ScrollView no height, so
@@ -1025,7 +1032,97 @@ struct MainWindow: View {
             YunCard {
                 RecordingControls(model: model)
             }
+            sectionHeading(loc("Transcript"))
+            YunCard {
+                transcription
+            }
         }
+    }
+
+    /// Live transcription, attributed by construction.
+    ///
+    /// The claim on the button is the one worth making: every source is written
+    /// down under its own name because they were never mixed, not because
+    /// anything worked out who was speaking. So the interface says "each source
+    /// separately" rather than the word diarization, which is the thing being
+    /// avoided rather than the thing being offered.
+    @ViewBuilder
+    private var transcription: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            HStack(spacing: Yun.Space.sm) {
+                Button(
+                    model.isTranscribing ? loc("Stop transcribing") : loc("Transcribe")
+                ) {
+                    if model.isTranscribing {
+                        model.stopTranscribing()
+                    } else {
+                        model.startTranscribing()
+                    }
+                }
+                .buttonStyle(YunButtonStyle(model.isTranscribing ? .danger : .primary))
+                .disabled(model.transcriptionUnavailableReason != nil)
+
+                if model.isTranscribing {
+                    YunStatusPill(loc("Listening"), tone: .success)
+                }
+                Spacer()
+                if !model.transcript.isEmpty {
+                    Button(loc("Save")) { _ = model.saveTranscript() }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                }
+            }
+
+            // Said before it is pressed rather than after: a control that is
+            // simply dead teaches nothing, and this one is dead for a reason
+            // somebody can act on.
+            if let reason = model.transcriptionUnavailableReason {
+                Text(reason)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let error = model.transcriptionError {
+                Text(error)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if model.transcript.isEmpty {
+                Text(loc("Each source is written down under its own name, on this device."))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !model.transcript.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                        ForEach(model.transcript) { line in
+                            transcriptLine(line)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(height: 180)
+            }
+        }
+    }
+
+    private func transcriptLine(_ line: Transcriber.Line) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: Yun.Space.sm) {
+                Text(line.speaker)
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.accent)
+                Text(String(format: "%02d:%02d", Int(line.start) / 60, Int(line.start) % 60))
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .monospacedDigit()
+            }
+            Text(line.text)
+                .font(Yun.Text.body)
+                .foregroundStyle(Yun.Palette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     /// A reduction meter, drawn right to left.

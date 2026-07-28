@@ -25,6 +25,17 @@ enum PanelRenderer {
         // The preferences window scrolls, and a ScrollView has no intrinsic
         // height offscreen — without an explicit size it renders as an empty
         // pane. Pinned to the window's minimum size.
+        // Every tab, not only the one that opens. Three of the four had never
+        // been looked at in either appearance — the whole point of this being
+        // a tabbed inspector is that most of it is off screen most of the
+        // time, which is exactly the condition under which a layout defect
+        // survives.
+        for tab in MainWindow.Inspector.allCases where tab != .sound {
+            render(
+                MainWindow(model: model, initialInspector: tab, isRendering: true),
+                basename: "window-\(tab.rawValue)\(suffix)", directory: directory,
+                size: CGSize(width: 1060, height: 1180))
+        }
         render(
             MainWindow(model: model, isRendering: true),
             basename: "window\(suffix)", directory: directory,

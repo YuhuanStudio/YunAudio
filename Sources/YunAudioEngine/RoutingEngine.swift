@@ -688,6 +688,7 @@ public final class RoutingEngine: @unchecked Sendable {
         graphCell = nil
         stopRecordingLocked()
         stopStemRecordingLocked()
+        stopTranscriptTapsLocked()
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
         selftestBlock = nil
 
@@ -888,6 +889,32 @@ public final class RoutingEngine: @unchecked Sendable {
         return urls
     }
 
+    /// Where each route in a new list sat in the old one, or nil for a route
+    /// that is new.
+    ///
+    /// The assignment of a route to a stem file or a transcript follows the
+    /// route rather than its position: a rebuild reorders the array, and
+    /// copying by index would hand one source's audio to another's file. What
+    /// identifies a route is what it connects, so that is what is matched.
+    ///
+    /// Separated out because the alternative is a function only reachable with
+    /// two audio devices and a running IOProc, and this is the part that can be
+    /// wrong.
+    static func carriedPositions(from old: [Route], to new: [Route]) -> [Int?] {
+        // Each old route is claimed once. Two routes can connect the same pair
+        // of channels — a duplicate cable is not an error — and letting both
+        // new ones match the same old one would put two sources in one file.
+        var available = Array(old.indices)
+        return new.map { route in
+            guard
+                let position = available.firstIndex(where: {
+                    old[$0].source == route.source && old[$0].destination == route.destination
+                })
+            else { return nil }
+            return available.remove(at: position)
+        }
+    }
+
     public func stopStemRecording() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -913,6 +940,90 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     private var stemRecorders: [Recorder] = []
+
+    // MARK: Transcription taps
+
+    /// Opens one ring per source so the app can transcribe each separately.
+    ///
+    /// This is the whole mechanism behind attributed transcripts. Every product
+    /// in this space works out who is speaking from the sound and every one of
+    /// them is sometimes wrong; here the sources were never mixed in the first
+    /// place, so the speaker is the wiring and there is nothing to infer.
+    ///
+    /// - Parameter routes: One route index per source, in the order the caller
+    ///   will ask for them back. The first channel of a source is enough — a
+    ///   speech model gains nothing from a stereo fold.
+    /// - Returns: How many taps were opened, which is fewer than asked for only
+    ///   if a route index was out of range.
+    @discardableResult
+    public func startTranscriptTaps(routes: [Int]) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard isRunning, let graph else { return 0 }
+        stopTranscriptTapsLocked()
+
+        var opened = 0
+        for (slot, route) in routes.enumerated() {
+            guard slot < Int(graph.pointee.transcriptCount),
+                route >= 0, route < Int(graph.pointee.routeCount)
+            else { continue }
+            // A second at 48 kHz. The consumer polls on the interface's own
+            // timer, so a ring that only held a buffer or two would drop audio
+            // every time a window resize got in the way of a poll.
+            guard let ring = yun_rt_ring_create(65_536) else { continue }
+            graph.pointee.transcriptRings[slot] = ring
+            graph.pointee.routes[route].transcriptIndex = Int32(slot)
+            transcriptRings.append(ring)
+            opened += 1
+        }
+        return opened
+    }
+
+    public func stopTranscriptTaps() {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        stopTranscriptTapsLocked()
+    }
+
+    private func stopTranscriptTapsLocked() {
+        guard !transcriptRings.isEmpty else { return }
+        // Detached before freed, and in that order: the IO thread must not be
+        // handed a pointer to a ring that is on its way out.
+        if let graph {
+            for slot in 0..<Int(graph.pointee.transcriptCount) {
+                graph.pointee.transcriptRings[slot] = nil
+            }
+            for route in 0..<Int(graph.pointee.routeCount) {
+                graph.pointee.routes[route].transcriptIndex = -1
+            }
+        }
+        for ring in transcriptRings { yun_rt_ring_free(ring) }
+        transcriptRings.removeAll()
+    }
+
+    /// Takes whatever one source has produced since the last call.
+    ///
+    /// An empty read means no cycle has run, not silence — the same distinction
+    /// the analysis drain makes, and it matters more here: handing a speech
+    /// model zeroes for time the signal was never absent teaches it a pause
+    /// that did not happen.
+    public func drainTranscript(
+        _ slot: Int, into destination: UnsafeMutablePointer<Float>, capacity: Int
+    ) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard slot >= 0, slot < transcriptRings.count, capacity > 0 else { return 0 }
+        return Int(yun_rt_ring_read(transcriptRings[slot], destination, UInt32(capacity)))
+    }
+
+    /// How many sources are being tapped for transcription.
+    public var transcriptTapCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return transcriptRings.count
+    }
+
+    private var transcriptRings: [OpaquePointer] = []
 
     /// True while separate files are being written.
     public var isRecordingStems: Bool {
@@ -1023,6 +1134,34 @@ public final class RoutingEngine: @unchecked Sendable {
             if let unused = next.pointee.analysisRing { yun_rt_ring_free(unused) }
             next.pointee.analysisRing = carried
             previous.pointee.analysisRing = nil
+        }
+
+        // So do the per-source rings, and for a sharper reason than the
+        // analysis one: these were being dropped. Stem recording survives a
+        // route edit only if both halves come across — the rings themselves,
+        // which belong to recorders the engine owns, and the per-route
+        // assignment that says which route feeds which. Without this, moving
+        // one cable during a recording left every stem file open, silent and
+        // still counting time, with nothing anywhere saying so.
+        let carriedSlots = min(Int(previous.pointee.stemCount), Int(next.pointee.stemCount))
+        for slot in 0..<carriedSlots {
+            next.pointee.stemRings[slot] = previous.pointee.stemRings[slot]
+            next.pointee.stemChannels[slot] = previous.pointee.stemChannels[slot]
+        }
+        let carriedTranscripts = min(
+            Int(previous.pointee.transcriptCount), Int(next.pointee.transcriptCount))
+        for slot in 0..<carriedTranscripts {
+            next.pointee.transcriptRings[slot] = previous.pointee.transcriptRings[slot]
+        }
+
+        for (index, old) in RoutingEngine.carriedPositions(from: activeRoutes, to: routes)
+            .enumerated()
+        {
+            guard let old, old < Int(previous.pointee.routeCount) else { continue }
+            next.pointee.routes[index].stemIndex = previous.pointee.routes[old].stemIndex
+            next.pointee.routes[index].stemChannel = previous.pointee.routes[old].stemChannel
+            next.pointee.routes[index].transcriptIndex =
+                previous.pointee.routes[old].transcriptIndex
         }
 
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))

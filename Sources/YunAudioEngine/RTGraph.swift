@@ -39,6 +39,14 @@ public struct RTRoute: Sendable, Equatable {
     /// Which channel of that stem this route carries.
     public var stemChannel: Int32
 
+    /// Which transcription ring this route feeds, or -1 for none.
+    ///
+    /// Set on exactly one route per source — the first channel — rather than on
+    /// all of them. A speech model does not benefit from a stereo fold, and one
+    /// route per ring means the gather below is a single contiguous write per
+    /// cycle with nothing to keep in step and nothing to scale.
+    public var transcriptIndex: Int32
+
     /// Non-zero when this route gets out of the way while somebody is talking.
     ///
     /// Set for application audio, never for the microphone: ducking is the
@@ -56,7 +64,8 @@ public struct RTRoute: Sendable, Equatable {
         appliesInputTrim: Bool = false,
         isDuckable: Bool = false,
         stemIndex: Int32 = -1,
-        stemChannel: Int32 = 0
+        stemChannel: Int32 = 0,
+        transcriptIndex: Int32 = -1
     ) {
         self.sourceBuffer = sourceBuffer
         self.sourceChannel = sourceChannel
@@ -70,6 +79,7 @@ public struct RTRoute: Sendable, Equatable {
         self.isDuckable = isDuckable ? 1 : 0
         self.stemIndex = stemIndex
         self.stemChannel = stemChannel
+        self.transcriptIndex = transcriptIndex
     }
 }
 
@@ -294,6 +304,26 @@ struct RTGraph {
     var stemFrames: Int32
     static let maxStemChannels = 2
 
+    // MARK: Transcription
+
+    /// One ring per source being transcribed, or null.
+    ///
+    /// Separate from the stems because the two are wanted separately: somebody
+    /// transcribing a call is usually not also recording one, and a transcript
+    /// that only worked while stem recording was on would be a surprising rule
+    /// to have to learn.
+    ///
+    /// Mono, at the router's rate. The framework's own converter resamples to
+    /// whatever the model wants, which is not this rate.
+    var transcriptRings: UnsafeMutablePointer<OpaquePointer?>
+    /// Gather space for one route's channel, reused by each in turn. A single
+    /// buffer is enough because the write happens immediately after the gather
+    /// — there is only ever one route per ring, so nothing has to be held
+    /// until the end of the cycle the way a stereo stem does.
+    var transcriptScratch: UnsafeMutablePointer<Float>
+    var transcriptCount: Int32
+    var transcriptCapacity: Int32
+
     /// Ring carrying a mono fold of the output bus to the analysers.
     ///
     /// Separate from `recordRing` even though both come off the same bus,
@@ -423,6 +453,14 @@ struct RTGraph {
             capacity: stemScratchCount)
         stemScratchStorage.initialize(repeating: 0, count: stemScratchCount)
 
+        let transcriptRingStorage = UnsafeMutablePointer<OpaquePointer?>.allocate(
+            capacity: count)
+        transcriptRingStorage.initialize(repeating: nil, count: count)
+        let transcriptCapacity = max(bufferFrames, 4096)
+        let transcriptScratchStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: transcriptCapacity)
+        transcriptScratchStorage.initialize(repeating: 0, count: transcriptCapacity)
+
         let analysisCapacity = max(bufferFrames, 4096)
         let analysisScratch = UnsafeMutablePointer<Float>.allocate(
             capacity: analysisCapacity)
@@ -500,6 +538,10 @@ struct RTGraph {
                 stemCount: Int32(count),
                 stemCapacity: Int32(stemCapacity),
                 stemFrames: 0,
+                transcriptRings: transcriptRingStorage,
+                transcriptScratch: transcriptScratchStorage,
+                transcriptCount: Int32(count),
+                transcriptCapacity: Int32(transcriptCapacity),
                 analysisRing: yun_rt_ring_create(131_072),
                 analysisScratch: analysisScratch,
                 analysisCapacity: Int32(analysisCapacity),
@@ -544,6 +586,11 @@ struct RTGraph {
             count * Int(graph.pointee.stemCapacity) * maxStemChannels
         graph.pointee.stemScratch.deinitialize(count: stemScratchCount)
         graph.pointee.stemScratch.deallocate()
+        graph.pointee.transcriptRings.deinitialize(count: count)
+        graph.pointee.transcriptRings.deallocate()
+        graph.pointee.transcriptScratch.deinitialize(
+            count: Int(graph.pointee.transcriptCapacity))
+        graph.pointee.transcriptScratch.deallocate()
         graph.pointee.analysisScratch.deinitialize(
             count: Int(graph.pointee.analysisCapacity))
         graph.pointee.analysisScratch.deallocate()
@@ -852,6 +899,23 @@ func yunAudioIOProc(
                     graph.pointee.stemFrames = Int32(usable)
                 }
             }
+        }
+
+        // And into the transcription ring, from the same pre-fader point and
+        // for the same reason: what a transcript should say is what somebody
+        // said, not what the mix decided about them afterwards. Gathered
+        // because the source is interleaved and a ring write wants contiguous
+        // samples; written straight away because there is one route per ring.
+        let transcript = Int(route.transcriptIndex)
+        if transcript >= 0, transcript < Int(graph.pointee.transcriptCount),
+            let ring = graph.pointee.transcriptRings[transcript]
+        {
+            let scratch = graph.pointee.transcriptScratch
+            let usable = min(frames, Int(graph.pointee.transcriptCapacity))
+            for frame in 0..<usable {
+                scratch[frame] = source[frame * sourceStride + sourceChannel]
+            }
+            _ = yun_rt_ring_write(ring, scratch, UInt32(usable))
         }
 
         let blockRMS = frames > 0 ? (energy / Float(frames)).squareRoot() : 0

@@ -363,3 +363,14 @@
 "Air" = "空氣感";
 "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "已安裝的驅動比這個 app 內附的舊。之後新增的東西都不存在，而且看起來會像是這裡出了問題。";
 "Update the driver" = "更新驅動";
+"Transcript" = "逐字稿";
+"Transcribe" = "開始轉錄";
+"Stop transcribing" = "停止轉錄";
+"Listening" = "聆聽中";
+"Each source is written down under its own name, on this device." = "每個來源都以自己的名字分開記下，全部在這台裝置上完成。";
+"Start routing before transcribing." = "請先開始路由，再開始轉錄。";
+"Nothing is routed to transcribe." = "目前沒有任何路由可以轉錄。";
+"Could not listen to any source." = "無法聆聽任何來源。";
+"No transcription model is installed." = "此系統尚未安裝轉錄模型。";
+"No model for" = "沒有對應的模型：";
+"Live transcription needs macOS 27." = "即時轉錄需要 macOS 27。";

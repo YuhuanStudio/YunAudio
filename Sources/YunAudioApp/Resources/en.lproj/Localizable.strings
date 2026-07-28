@@ -363,3 +363,14 @@
 "Air" = "Air";
 "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here.";
 "Update the driver" = "Update the driver";
+"Transcript" = "Transcript";
+"Transcribe" = "Transcribe";
+"Stop transcribing" = "Stop transcribing";
+"Listening" = "Listening";
+"Each source is written down under its own name, on this device." = "Each source is written down under its own name, on this device.";
+"Start routing before transcribing." = "Start routing before transcribing.";
+"Nothing is routed to transcribe." = "Nothing is routed to transcribe.";
+"Could not listen to any source." = "Could not listen to any source.";
+"No transcription model is installed." = "No transcription model is installed.";
+"No model for" = "No model for";
+"Live transcription needs macOS 27." = "Live transcription needs macOS 27.";
