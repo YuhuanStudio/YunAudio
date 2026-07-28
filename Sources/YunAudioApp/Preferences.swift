@@ -71,6 +71,8 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Extra delay per output device UID, in milliseconds, for lining up two
     /// outputs that do not arrive together.
     var outputDelays: [String: Double]?
+    /// The headphone correction in use, by file name.
+    var headphoneProfileName: String?
     /// Devices chosen before, most recent first.
     ///
     /// Not a preference somebody sets — a record of what they have actually
@@ -118,6 +120,7 @@ struct Preferences: Codable, Equatable, Sendable {
         recordsStems: false,
         monitorSends: [:],
         outputDelays: [:],
+        headphoneProfileName: nil,
         recentSourceUIDs: [],
         recentDestinationUIDs: [])
 }

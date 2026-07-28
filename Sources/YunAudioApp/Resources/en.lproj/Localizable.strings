@@ -398,3 +398,8 @@
 "Save the current setup" = "Save the current setup";
 "A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured." = "A setup remembers what everything is pointed at — the system's own input and output, this router's devices, and what is being captured.";
 "Name this setup" = "Name this setup";
+"Headphone correction" = "Headphone correction";
+"Drop an AutoEq ParametricEQ.txt for your headphones into the folder below. Every headphone is wrong in a way somebody has already measured." = "Drop an AutoEq ParametricEQ.txt for your headphones into the folder below. Every headphone is wrong in a way somebody has already measured.";
+"%d filters, %.1f dB of headroom taken." = "%d filters, %.1f dB of headroom taken.";
+"Nothing is being corrected until routing starts." = "Nothing is being corrected until routing starts.";
+"Open the folder" = "Open the folder";

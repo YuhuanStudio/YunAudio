@@ -63,6 +63,85 @@ final class RouterModel {
         }
     }
 
+    // MARK: Headphone correction
+
+    /// Corrections found on disk, by name.
+    ///
+    /// Documents rather than a bundled database. Every headphone has a
+    /// frequency response that is wrong in a way somebody has already measured,
+    /// and AutoEq publishes the correction for thousands of them as a
+    /// `ParametricEQ.txt` — the file people already download for their model.
+    /// Shipping a copy of all of them would be a licensing problem, an update
+    /// problem, and worse than the file for somebody's exact unit.
+    private(set) var headphoneProfiles: [ParametricEQ] = []
+
+    /// Which one is in use, by name, or nil for none.
+    var headphoneProfileName: String? {
+        didSet {
+            guard oldValue != headphoneProfileName else { return }
+            persist()
+            applyHeadphoneCorrection()
+        }
+    }
+
+    var headphoneProfile: ParametricEQ? {
+        headphoneProfiles.first { $0.name == headphoneProfileName }
+    }
+
+    /// Where corrections are read from.
+    static var headphoneDirectory: URL? {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+            .appendingPathComponent("YunAudio/Headphones", isDirectory: true)
+    }
+
+    func refreshHeadphoneProfiles() {
+        guard let directory = Self.headphoneDirectory,
+            let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
+        else {
+            headphoneProfiles = []
+            return
+        }
+        headphoneProfiles =
+            names
+            .filter { $0.lowercased().hasSuffix(".txt") }
+            .sorted()
+            .compactMap { file in
+                guard
+                    let text = try? String(
+                        contentsOf: directory.appendingPathComponent(file), encoding: .utf8)
+                else { return nil }
+                // Named after the file rather than after anything inside it:
+                // AutoEq's exports carry no name, and the file is called after
+                // the headphone because that is how somebody downloaded it.
+                return ParametricEQ.parse(
+                    text, name: (file as NSString).deletingPathExtension)
+            }
+        // A profile that has been deleted from the folder must stop being used,
+        // not silently keep running from memory.
+        if let chosen = headphoneProfileName,
+            !headphoneProfiles.contains(where: { $0.name == chosen })
+        {
+            headphoneProfileName = nil
+        }
+    }
+
+    /// Which output the correction belongs on.
+    ///
+    /// The monitor when there is one, because that is the headphone path by
+    /// definition. Otherwise the destination — somebody routing straight to
+    /// their headphones with no separate monitor is still wearing them.
+    var correctedOutputUID: String? { monitorDeviceUID ?? selectedDestinationUID }
+
+    /// True when a correction is chosen but is not reaching anything.
+    var headphoneCorrectionIsIdle: Bool {
+        headphoneProfile != nil && (!isRunning || correctedOutputUID == nil)
+    }
+
+    func applyHeadphoneCorrection() {
+        engine.setHeadphoneCorrection(headphoneProfile, forDeviceUID: correctedOutputUID)
+    }
+
     // MARK: Output alignment
 
     /// Extra delay per output device, in milliseconds.
@@ -1559,6 +1638,7 @@ final class RouterModel {
         refreshPlugins()
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
+        refreshHeadphoneProfiles()
         restore()
 
         engine.onClockLockFailure = { [weak self] in
@@ -1721,6 +1801,7 @@ final class RouterModel {
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
         outputDelays = saved.outputDelays ?? [:]
+        headphoneProfileName = saved.headphoneProfileName
         recentSourceUIDs = saved.recentSourceUIDs ?? []
         recentDestinationUIDs = saved.recentDestinationUIDs ?? []
         monitorDecibels = saved.monitorDecibels ?? -6
@@ -1804,6 +1885,7 @@ final class RouterModel {
                 recordsStems: recordsStems,
                 monitorSends: monitorSends,
                 outputDelays: outputDelays,
+                headphoneProfileName: headphoneProfileName,
                 recentSourceUIDs: recentSourceUIDs,
                 recentDestinationUIDs: recentDestinationUIDs))
     }
@@ -1814,6 +1896,7 @@ final class RouterModel {
         let all = (try? AudioDevices.all()) ?? []
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
+        for device in all { deviceNames[device.uid] = device.name }
     }
 
     private func selectDefaults() {
@@ -1900,6 +1983,60 @@ final class RouterModel {
         // would fall back a second time from a device nobody is using.
         restoreDisplacedDevices()
 
+        // A device list read once during a change is not evidence that anything
+        // was unplugged. Creating an aggregate — which this application does
+        // itself, and which the flow check does deliberately — produces a burst
+        // of notifications, and the enumeration in the middle of one can be
+        // missing a device that is perfectly well plugged in.
+        //
+        // That was harmless when the response was to stop and wait. It is not
+        // harmless now that the response is to move the route: acting on a
+        // transient would take somebody off their microphone mid-sentence and
+        // leave them on the built-in one, for no reason they could see. So a
+        // disappearance is confirmed before it is believed. Unplugging is not
+        // urgent to the millisecond.
+        // A device coming *back* needs no confirmation: starting a route
+        // requires both ends to be present, so acting on a transient can only
+        // fail harmlessly. Only a disappearance is worth waiting on.
+        if !isMissingDevice, !isRunning, wasInterruptedByDeviceLoss {
+            wasInterruptedByDeviceLoss = false
+            lastError = nil
+            start()
+            return
+        }
+
+        guard isMissingDevice else { return }
+        confirmationTask?.cancel()
+        confirmationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled, let self else { return }
+            self.refreshDevices()
+            guard self.isMissingDevice else { return }
+            self.handleConfirmedDeviceLoss()
+        }
+    }
+
+    @ObservationIgnored private var confirmationTask: Task<Void, Never>?
+
+    /// Every device name seen since launch, by UID.
+    ///
+    /// Kept because the one moment a name is wanted is after the device has
+    /// gone: "standing in for the Seiren" is a sentence, and "standing in for
+    /// AppleUSBAudioEngine:Razer:…" is not.
+    @ObservationIgnored private var deviceNames: [String: String] = [:]
+
+    /// True when either end of the route is not in the device list.
+    private var isMissingDevice: Bool {
+        let sourceGone =
+            selectedSourceUID.map { uid in !inputDevices.contains { $0.uid == uid } } ?? false
+        let destinationGone =
+            selectedDestinationUID.map { uid in
+                !outputDevices.contains { $0.uid == uid }
+            } ?? false
+        return sourceGone || destinationGone
+    }
+
+    private func handleConfirmedDeviceLoss() {
         let sourceGone =
             selectedSourceUID.map { uid in
                 !inputDevices.contains { $0.uid == uid }
@@ -1918,7 +2055,7 @@ final class RouterModel {
             let replacement = Self.replacement(
                 for: lost, recent: recentSourceUIDs, available: inputDevices.map(\.uid))
         {
-            let name = inputDevices.first { $0.uid == lost }?.name
+            let name = deviceNames[lost]
             substituting {
                 displacedSourceUID = lost
                 displacedSourceName = name ?? lost
@@ -1931,7 +2068,7 @@ final class RouterModel {
                 for: lost, recent: recentDestinationUIDs,
                 available: outputDevices.map(\.uid))
         {
-            let name = outputDevices.first { $0.uid == lost }?.name
+            let name = deviceNames[lost]
             substituting {
                 displacedDestinationUID = lost
                 displacedDestinationName = name ?? lost
@@ -1947,11 +2084,6 @@ final class RouterModel {
             stop()
             wasInterruptedByDeviceLoss = true
             lastError = loc("A device in the route was unplugged.")
-        } else if !isRunning, wasInterruptedByDeviceLoss, !sourceGone, !destinationGone {
-            // Everything is back; pick up where we left off.
-            wasInterruptedByDeviceLoss = false
-            lastError = nil
-            start()
         }
     }
 
@@ -2227,6 +2359,10 @@ final class RouterModel {
                 // coefficients and the FFT bin mapping both depend on the rate
                 // the aggregate settled on.
                 self.startAnalysis(sampleRate: self.engine.pathQuality?.sampleRate ?? 48000)
+                // After the graph exists, not before: the correction names an
+                // output buffer, and there are no buffers until the aggregate
+                // is built.
+                self.applyHeadphoneCorrection()
                 self.startPolling()
             }
         }

@@ -3992,3 +3992,237 @@ struct TranscriberTests {
         #expect(await transcriber.lines.isEmpty)
     }
 }
+
+// MARK: - Headphone correction
+
+/// The arithmetic, checked against numbers rather than against itself. A
+/// filter that lands half an octave out, or a shelf built from the wrong one of
+/// the several conventions for shelves, produces a curve that looks entirely
+/// plausible and corrects the wrong thing.
+@Suite("Parametric EQ")
+struct ParametricEQTests {
+
+    /// A real AutoEq export, abbreviated. Everything about the format that
+    /// varies between exports is in here: LSC and LS, a disabled filter, and
+    /// the preamp line.
+    private let sample = """
+        Preamp: -6.8 dB
+        Filter 1: ON PK Fc 105 Hz Gain 5.5 dB Q 0.70
+        Filter 2: ON LSC Fc 105 Hz Gain 5.5 dB Q 0.70
+        Filter 3: OFF PK Fc 1000 Hz Gain 12.0 dB Q 1.00
+        Filter 4: ON HSC Fc 10000 Hz Gain -2.0 dB Q 0.70
+        """
+
+    @Test("it reads AutoEq's own export")
+    func parsesAutoEq() throws {
+        let curve = try #require(ParametricEQ.parse(sample, name: "Test"))
+        #expect(curve.preampDecibels == -6.8)
+        // Three of four: the disabled one is written out but must not be run.
+        // Applying it would be applying a correction the file says not to.
+        #expect(curve.filters.count == 3)
+        #expect(curve.filters[0].kind == .peaking)
+        #expect(curve.filters[1].kind == .lowShelf)
+        #expect(curve.filters[2].kind == .highShelf)
+        #expect(curve.filters[0].hertz == 105)
+        #expect(curve.filters[0].decibels == 5.5)
+        #expect(abs(curve.filters[0].q - 0.7) < 0.001)
+    }
+
+    @Test("a file with nothing in it is refused rather than run empty")
+    func refusesRubbish() throws {
+        #expect(ParametricEQ.parse("hello, this is not an EQ", name: "x") == nil)
+        #expect(ParametricEQ.parse("", name: "x") == nil)
+        // A preamp with no filters is not a correction.
+        #expect(ParametricEQ.parse("Preamp: -3.0 dB", name: "x") == nil)
+    }
+
+    /// The assertion that would have caught a wrong cookbook form: a peaking
+    /// filter has to put its stated gain at its stated frequency, and nowhere
+    /// else.
+    @Test("a peaking filter boosts its own frequency by its own gain")
+    func peakingResponse() {
+        let curve = ParametricEQ(
+            name: "one",
+            filters: [.init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)])
+        #expect(abs(curve.response(atHertz: 1000, sampleRate: 48000) - 6) < 0.05)
+        // And leaves two octaves away alone. A filter that lifted everything
+        // would pass a test that only looked at its own centre.
+        #expect(abs(curve.response(atHertz: 250, sampleRate: 48000)) < 1.5)
+        #expect(abs(curve.response(atHertz: 4000, sampleRate: 48000)) < 1.5)
+    }
+
+    /// A shelf reaches its full gain well past the corner and none of it well
+    /// before — the property that tells a low shelf from a high one, and a
+    /// cookbook shelf from the several other conventions.
+    @Test("a low shelf lifts below its corner and not above it")
+    func lowShelfResponse() {
+        let curve = ParametricEQ(
+            name: "shelf",
+            filters: [.init(kind: .lowShelf, hertz: 200, decibels: 6, q: 0.7)])
+        #expect(abs(curve.response(atHertz: 30, sampleRate: 48000) - 6) < 0.5)
+        // At the corner a shelf is at half its gain, by construction.
+        #expect(abs(curve.response(atHertz: 200, sampleRate: 48000) - 3) < 0.6)
+        #expect(abs(curve.response(atHertz: 4000, sampleRate: 48000)) < 0.3)
+    }
+
+    @Test("a high shelf is the same thing the other way up")
+    func highShelfResponse() {
+        let curve = ParametricEQ(
+            name: "shelf",
+            filters: [.init(kind: .highShelf, hertz: 4000, decibels: -6, q: 0.7)])
+        #expect(abs(curve.response(atHertz: 16000, sampleRate: 48000) + 6) < 0.5)
+        #expect(abs(curve.response(atHertz: 200, sampleRate: 48000)) < 0.3)
+    }
+
+    /// The preamp is not decoration. A correction that boosts anywhere needs
+    /// headroom, and AutoEq's own exports carry a negative preamp for exactly
+    /// that reason — ignoring the line clips before the correction is heard.
+    @Test("the preamp moves the whole curve")
+    func preampApplies() {
+        let filters: [ParametricEQ.Filter] = [
+            .init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)
+        ]
+        let plain = ParametricEQ(name: "a", filters: filters)
+        let quieter = ParametricEQ(name: "b", preampDecibels: -6, filters: filters)
+        let difference =
+            plain.response(atHertz: 1000, sampleRate: 48000)
+            - quieter.response(atHertz: 1000, sampleRate: 48000)
+        #expect(abs(difference - 6) < 0.001)
+    }
+
+    /// Where the whole curve peaks decides whether it can be run without
+    /// clipping. Read off the response rather than off the filter list: two
+    /// filters that overlap sum, and the largest single gain understates it.
+    @Test("overlapping boosts are counted together")
+    func peakBoost() {
+        let stacked = ParametricEQ(
+            name: "stacked",
+            filters: [
+                .init(kind: .peaking, hertz: 1000, decibels: 4, q: 0.7),
+                .init(kind: .peaking, hertz: 1100, decibels: 4, q: 0.7),
+            ])
+        let peak = stacked.peakBoostDecibels(sampleRate: 48000)
+        #expect(peak > 6)
+        #expect(peak < 8.5)
+    }
+
+    /// A filter above Nyquist has nowhere to sit. The arithmetic returns
+    /// something that is not a filter rather than failing, so it is caught
+    /// here instead: a pass-through is the honest substitute.
+    @Test("a filter above Nyquist becomes a pass-through")
+    func aboveNyquist() {
+        let coefficients = ParametricEQ.section(
+            .init(kind: .peaking, hertz: 30000, decibels: 12, q: 1), sampleRate: 48000)
+        #expect(coefficients == [1, 0, 0, 0, 0])
+    }
+
+    /// The arithmetic being right says nothing about the realtime path running
+    /// it. This drives the actual IOProc with a sine at the filter's own
+    /// frequency and measures what comes out — the only assertion that would
+    /// catch a cascade wired to the wrong buffer, a history array shared
+    /// between channels, or coefficients written but never read.
+    @Test("the correction reaches the signal, by the stated number of decibels")
+    func correctionRunsOnTheOutput() {
+        let curve = ParametricEQ(
+            name: "test", filters: [.init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)])
+        let plain = peakThroughIOProc(curve: nil)
+        let corrected = peakThroughIOProc(curve: curve)
+        #expect(plain > 0.2)
+        let lift = 20 * log10(corrected / plain)
+        #expect(abs(lift - 6) < 0.4)
+    }
+
+    /// A correction on one output must not touch another. Sending the far end a
+    /// signal shaped for the deficiencies of somebody's headphones is worse
+    /// than not correcting at all — they would be hearing the inverse of a
+    /// fault they do not have.
+    @Test("a correction on one output leaves the other alone")
+    func correctionIsPerOutput() {
+        let curve = ParametricEQ(
+            name: "test", filters: [.init(kind: .peaking, hertz: 1000, decibels: 12, q: 1)])
+        let untouched = peakThroughIOProc(curve: curve, appliedTo: 1, measuring: 0)
+        let plain = peakThroughIOProc(curve: nil, appliedTo: 1, measuring: 0)
+        #expect(abs(20 * log10(untouched / plain)) < 0.01)
+    }
+
+    /// Runs a 1 kHz sine through a real graph and returns the peak that came
+    /// out of one buffer.
+    private func peakThroughIOProc(
+        curve: ParametricEQ?, appliedTo eqBuffer: Int = 0, measuring measured: Int = 0
+    ) -> Float {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 512, sampleRate: 48000)
+        defer { RTGraph.deallocate(graph) }
+
+        if let curve {
+            let packed = curve.coefficients(sampleRate: 48000)
+            for index in packed.indices { graph.pointee.eqCoefficients[index] = packed[index] }
+            graph.pointee.eqStages = Int32(packed.count / 5)
+            graph.pointee.eqBuffer = Int32(eqBuffer)
+        }
+
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mFlags = .sampleTimeValid
+
+        let frames = 512
+        let inputList = AudioBufferList.allocate(maximumBuffers: 1)
+        let outputList = AudioBufferList.allocate(maximumBuffers: 1)
+        let inputStorage = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        let outputStorage = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+        inputStorage.initialize(repeating: 0, count: frames)
+        outputStorage.initialize(repeating: 0, count: frames)
+        defer {
+            inputStorage.deallocate()
+            outputStorage.deallocate()
+            free(inputList.unsafeMutablePointer)
+            free(outputList.unsafeMutablePointer)
+        }
+        let bytes = UInt32(frames * MemoryLayout<Float>.size)
+        inputList[0] = AudioBuffer(
+            mNumberChannels: 1, mDataByteSize: bytes,
+            mData: UnsafeMutableRawPointer(inputStorage))
+        outputList[0] = AudioBuffer(
+            mNumberChannels: 1, mDataByteSize: bytes,
+            mData: UnsafeMutableRawPointer(outputStorage))
+
+        var phase: Float = 0
+        let step = 2 * Float.pi * 1000 / 48000
+        var peak: Float = 0
+        // Twenty cycles, measuring only the last ten: a biquad's first few
+        // milliseconds are its transient, not its gain.
+        for cycle in 0..<20 {
+            for frame in 0..<frames {
+                inputStorage[frame] = 0.25 * sin(phase)
+                phase += step
+            }
+            for frame in 0..<frames { outputStorage[frame] = 0 }
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(inputList.unsafeMutablePointer), &time,
+                outputList.unsafeMutablePointer, &time,
+                UnsafeMutableRawPointer(cell))
+            guard cycle >= 10, measured == 0 else { continue }
+            for frame in 0..<frames { peak = max(peak, abs(outputStorage[frame])) }
+        }
+        return peak
+    }
+
+    @Test("every section is normalised so it can be run as it stands")
+    func normalised() {
+        let curve = ParametricEQ(
+            name: "x",
+            filters: [
+                .init(kind: .peaking, hertz: 1000, decibels: 6, q: 1),
+                .init(kind: .lowShelf, hertz: 100, decibels: -3, q: 0.7),
+            ])
+        let packed = curve.coefficients(sampleRate: 48000)
+        #expect(packed.count == 10)
+        #expect(packed.allSatisfy { $0.isFinite })
+    }
+}

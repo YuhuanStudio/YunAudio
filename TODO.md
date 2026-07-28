@@ -47,6 +47,53 @@ fall-back and auto-restore when a device is unplugged · URL remote control.
 
 ## Known problems
 
+### Two ordinary devices cannot be used together [V, measured here]
+
+The Razer Barracuda publishes **44.1 kHz out (16 k and 44.1 k available)** and
+**16 kHz in, and nothing else**. The Seiren V3 Pro publishes **48 k and 96 k**.
+They share no sample rate, so the router refuses the pair outright: *"the
+selected devices share no sample rate"*.
+
+Refusing is wrong. The path to a Bluetooth headset is not bit-exact whatever
+happens, and the aggregate can already resample a member — that is what drift
+compensation is. The rule should be: take the best rate each end can do, let the
+HAL reconcile them, and say the path is resampled.
+
+Related, and visible in the same probe: the Barracuda's input is the system
+default at 16 kHz. That is the HFP downgrade, happening now.
+
+### A display's audio endpoint refuses to start, slowly [V, measured here]
+
+Routing to `PG32UCDM` fails with `AudioDeviceStart failed with 'stop'` after
+about twelve seconds. Nothing is wrong with the code; the endpoint will not
+start. Worth knowing because twelve seconds of nothing looks like a hang, and
+because it is a good argument for the fall-back to treat "will not start" the
+same as "not here".
+
+### The interface has outgrown its own layout [proposal]
+
+Named directly: it is untidy now that there are enough features to be untidy.
+
+- Noise reduction and the voice changer are one region and should be two.
+- The scene presets barely change anything.
+- The application list says how many are held back but cannot expand to them,
+  and is often empty when it should not be.
+- The menu bar panel has not kept up with the window at all, and shows no
+  settings.
+- The preferences window is thin — no language, no theme, no colour, while
+  YunUI has all of that to draw on.
+- The bottom status bar should be a row of pills, which is also the natural
+  place to meet Apple's liquid-glass look.
+
+### Two Razer devices are only half supported [proposal]
+
+The Seiren **V2 X** and the **Barracuda** both need what the V3 Pro already has:
+a device profile naming their channels, and whatever their own controls turn out
+to be. The V2 X publishes a settable hardware gain where the V3 Pro does not,
+which is already known and not yet used.
+
+## Known problems (from the research)
+
 Things believed to be wrong now. Each needs measuring before it needs fixing.
 
 ### The AirPods idle teardown [?] [suspected live bug]
@@ -176,7 +223,13 @@ FineTune's single highest-reacted issue is *"Add Homebrew Cask support"*, filed
 two days after launch [V]. Blocked on the same thing distribution is blocked on:
 the driver is ad-hoc signed and a cask wants something notarised.
 
-### 9. Publish the bit-exactness result [proposal-adjacent]
+### 9. KTV, further [proposal]
+
+The singing side is started and not finished. What is missing: a connection to
+Apple Music and to Spotify, and lyrics — the two obvious ones, and both are
+their own frameworks rather than audio work.
+
+### 10. Publish the bit-exactness result [proposal-adjacent]
 
 The number this project is built around is currently only visible to somebody
 who runs the self-test. Nothing else in this category on macOS measures it at

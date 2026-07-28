@@ -19,24 +19,26 @@ public final class AggregateDevice {
         /// When true the HAL resamples this device to track the clock master.
         /// Exactly one sub-device — the master — must have this off.
         public let driftCompensation: Bool
-        /// How many of this device's input channels the aggregate should open,
-        /// or nil for all of them.
+        /// How many of this device's input channels the aggregate should open.
         ///
-        /// Zero is the interesting value and it is not an optimisation. A
-        /// Bluetooth headset that has its input opened negotiates HFP, which
-        /// takes the *output* down to 16 kHz in both directions — the whole
-        /// device degrades because one direction was asked for. A member the
-        /// router only ever writes to should therefore not have its input
-        /// opened at all.
+        /// **Measured to have no effect.** The header reads like a restriction
+        /// and it is a description: a device with three inputs asked for one
+        /// still presents three, and one asked for none still presents one.
+        /// Kept because saying so where somebody would reach for it is worth
+        /// more than leaving the key to be rediscovered, and because the flow
+        /// check asserts the current behaviour — if a macOS ever honours it,
+        /// the obvious fix for the Bluetooth HFP problem becomes available and
+        /// this project finds out.
         public let inputChannels: Int?
-        /// The same for the output side. Nil for all of them.
+        /// The same for the output side, and the same caveat.
         public let outputChannels: Int?
         /// Extra frames of delay on this member's output, for lining up two
         /// paths that do not arrive together.
         ///
-        /// The HAL does this itself, which is worth knowing before writing a
-        /// delay line: a speaker and an interface fed from one IOProc can be
-        /// aligned without the realtime path ever seeing it.
+        /// Unlike the channel keys above, this one works: 480 frames asked for
+        /// is 480 frames of extra output latency on the aggregate, measured.
+        /// The HAL does the delaying, so a speaker and an interface fed from
+        /// one IOProc can be aligned without the realtime path ever seeing it.
         public let extraOutputLatencyFrames: Int?
 
         public init(

@@ -407,7 +407,34 @@ enum UIFlowCheck {
 
         print("\nstarting")
         model.start()
-        await waitUntil("the route came up", { model.isRunning }, timeout: 5)
+        // Fifteen seconds, not five. A device that cannot be started does not
+        // always say so quickly: a display's audio endpoint takes about twelve
+        // to come back with `AudioDeviceStart failed with 'stop'`, and a
+        // shorter wait reports "did not come up" with no error attached, which
+        // is the least useful thing it could say.
+        await waitUntil("the route came up", { model.isRunning }, timeout: 15)
+        // Said out loud rather than left to be inferred: when the route does not
+        // come up, every check after it fails too, and the forty lines of
+        // consequences are much louder than the one line of cause.
+        if let error = model.lastError { note("the route said: \(error)") }
+
+        // One unusable device must not turn into forty failures. If the saved
+        // destination cannot be started — a display asleep, a headset that
+        // wandered off — the rest of the flow is still worth running, so it
+        // moves to the system's own output and says that it did.
+        if !model.isRunning, let fallback = (try? AudioDevices.defaultOutput())??.uid,
+            fallback != model.selectedDestinationUID
+        {
+            note("that destination will not start; moving to the system output")
+            // Waited for: a failed start holds `isBusy` until the engine queue
+            // unwinds, and `start()` returns immediately while it is set — so
+            // calling it straight away does nothing at all and the retry looks
+            // like a second failure.
+            await waitUntil("the failed start finished unwinding", { !model.isBusy }, timeout: 20)
+            model.selectedDestinationUID = fallback
+            model.start()
+            await waitUntil("it came up on the system output", { model.isRunning }, timeout: 15)
+        }
         check("no error was reported", model.lastError == nil)
         check("routes were built", !model.activeRoutes.isEmpty)
         check(
@@ -1389,6 +1416,7 @@ enum UIFlowCheck {
                 "the device list picked up the new device",
                 model.outputDevices.count > deviceCountBefore)
             check("an unrelated device did not stop the route", model.isRunning)
+            if let error = model.lastError { note("error was: \(error)") }
             check(
                 "audio kept flowing across the change",
                 model.cycleCountForDiagnostics > cyclesBeforeChange)
@@ -1410,6 +1438,150 @@ enum UIFlowCheck {
             check("still running after the removal", model.isRunning)
         } else {
             note("could not build a decoy device — skipped")
+        }
+
+        print("\noutput-only aggregate members")
+        // The mechanism behind the Bluetooth fix, checked on hardware that is
+        // here: a member restricted to no input channels must still create,
+        // still present its outputs, and not take its inputs into the
+        // aggregate. If the HAL refused this, every Bluetooth destination would
+        // stop working and the failure would look like the headset.
+        if let withInputs = model.inputDevices.first(where: { $0.hasOutput }) {
+            let unrestricted = try? AggregateDevice(
+                name: "YunAudio Restriction Check A",
+                subDevices: [.init(uid: withInputs.uid, driftCompensation: true)],
+                clockMasterUID: withInputs.uid)
+            let restricted = try? AggregateDevice(
+                name: "YunAudio Restriction Check B",
+                subDevices: [
+                    .init(uid: withInputs.uid, driftCompensation: true, inputChannels: 0)
+                ],
+                clockMasterUID: withInputs.uid)
+            check("the HAL accepts an output-only member", restricted != nil)
+            // Does the key cap at all, or is it ignored? A device with three
+            // inputs asked for one answers that in a way zero cannot: zero
+            // could always be read as "no opinion".
+            if let many = model.inputDevices.first(where: { $0.inputChannels > 1 }),
+                let capped = try? AggregateDevice(
+                    name: "YunAudio Restriction Check C",
+                    subDevices: [
+                        .init(uid: many.uid, driftCompensation: true, inputChannels: 1)
+                    ],
+                    clockMasterUID: many.uid),
+                let device = try? AudioDevice(id: capped.id)
+            {
+                note(
+                    "\(many.name): \(many.inputChannels) inputs, capped to 1 gives "
+                        + "\(device.inputChannels)")
+                capped.destroy()
+            }
+            if let restricted, let unrestricted,
+                let plain = try? AudioDevice(id: unrestricted.id),
+                let limited = try? AudioDevice(id: restricted.id)
+            {
+                note(
+                    "\(withInputs.name): \(plain.inputChannels) in unrestricted, "
+                        + "\(limited.inputChannels) in restricted")
+                // Asserting what the HAL *does*, which is not what the header
+                // implies. kAudioSubDeviceInputChannelsKey is descriptive, not
+                // prescriptive: a device with three inputs asked for one still
+                // presents three, and one asked for none still presents one.
+                //
+                // That closes off the obvious way to stop a Bluetooth headset
+                // negotiating HFP — leaving its input out of the aggregate —
+                // and it is asserted rather than merely written down so that a
+                // future macOS honouring the key is noticed rather than never
+                // looked at again.
+                check(
+                    "the channel key is still ignored",
+                    limited.inputChannels == plain.inputChannels)
+                // And the point of the exercise: the outputs are untouched, so
+                // a headset can still be written to.
+                check(
+                    "and its outputs are untouched",
+                    limited.outputChannels == plain.outputChannels
+                        && limited.outputChannels > 0)
+            }
+            // And the neighbouring key, measured the same way rather than
+            // assumed: a latency trim that the HAL quietly ignored would be a
+            // control that moves and does nothing.
+            if let output = model.outputDevices.first,
+                let plain = try? AggregateDevice(
+                    name: "YunAudio Latency Check A",
+                    subDevices: [.init(uid: output.uid, driftCompensation: true)],
+                    clockMasterUID: output.uid),
+                let delayed = try? AggregateDevice(
+                    name: "YunAudio Latency Check B",
+                    subDevices: [
+                        .init(
+                            uid: output.uid, driftCompensation: true,
+                            extraOutputLatencyFrames: 480)
+                    ],
+                    clockMasterUID: output.uid),
+                let before = try? AudioDevice(id: plain.id),
+                let after = try? AudioDevice(id: delayed.id)
+            {
+                let moved =
+                    after.latencyFrames(scope: kAudioObjectPropertyScopeOutput)
+                    - before.latencyFrames(scope: kAudioObjectPropertyScopeOutput)
+                note("latency trim of 480 frames moved the aggregate by \(moved)")
+                check("the latency trim actually delays the output", moved >= 480)
+                plain.destroy()
+                delayed.destroy()
+            }
+
+            unrestricted?.destroy()
+            restricted?.destroy()
+        } else {
+            note("no device with both directions — skipped")
+        }
+
+        print("\nheadphone correction")
+        // Written into the folder the application reads, so what is exercised
+        // is the path a person takes: download a file for your headphones, drop
+        // it in, pick it. Parsing is unit-tested; this is the plumbing.
+        if let directory = RouterModel.headphoneDirectory {
+            try? FileManager.default.createDirectory(
+                at: directory, withIntermediateDirectories: true)
+            let file = directory.appendingPathComponent("Flow Check Headphones.txt")
+            let text = """
+                Preamp: -6.0 dB
+                Filter 1: ON PK Fc 1000 Hz Gain 6.0 dB Q 1.00
+                Filter 2: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70
+                """
+            try? text.write(to: file, atomically: true, encoding: .utf8)
+            model.refreshHeadphoneProfiles()
+            check(
+                "a dropped file is found",
+                model.headphoneProfiles.contains { $0.name == "Flow Check Headphones" })
+
+            model.headphoneProfileName = "Flow Check Headphones"
+            check("it can be chosen", model.headphoneProfile != nil)
+            check("no error was reported", model.lastError == nil)
+            check("the route did not go down", model.isRunning)
+            if let profile = model.headphoneProfile {
+                note(
+                    String(
+                        format: "%d filters, %.1f dB at 1 kHz", profile.filters.count,
+                        profile.response(atHertz: 1000, sampleRate: 48000)))
+            }
+            // It goes on the monitor when there is one, because that is the
+            // headphone path by definition — and never on the main output,
+            // which would send the far end the inverse of a fault they do not
+            // have.
+            check(
+                "it targets what the wearer hears",
+                model.correctedOutputUID
+                    == (model.monitorDeviceUID ?? model.selectedDestinationUID))
+
+            // A profile deleted from the folder must stop being used rather
+            // than keep running from memory.
+            try? FileManager.default.removeItem(at: file)
+            model.refreshHeadphoneProfiles()
+            check("deleting the file turns it off", model.headphoneProfileName == nil)
+            check("and routing survived that too", model.isRunning)
+        } else {
+            note("no application support directory — skipped")
         }
 
         print("\nsetups")

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import YunAudioEngine
 import YunAudioHAL
@@ -943,6 +944,9 @@ struct MainWindow: View {
             sectionHeading(loc("Setups"))
             YunCard { setups }
 
+            sectionHeading(loc("Headphone correction"))
+            YunCard { headphoneCorrection }
+
             sectionHeading(loc("Output alignment"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
@@ -1225,6 +1229,70 @@ struct MainWindow: View {
             .buttonStyle(YunButtonStyle(.primary, small: true))
             .popover(isPresented: $isNamingSetup, arrowEdge: .bottom) {
                 saveSetup
+            }
+        }
+    }
+
+    /// Headphone correction, read from files somebody dropped in a folder.
+    ///
+    /// The empty state does most of the work here, because the feature needs a
+    /// file that has to be fetched from somewhere else. A picker with nothing
+    /// in it and no explanation is a dead end; saying where the files come from
+    /// and offering to open the folder is the whole difference.
+    @ViewBuilder
+    private var headphoneCorrection: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            if model.headphoneProfiles.isEmpty {
+                Text(
+                    loc(
+                        "Drop an AutoEq ParametricEQ.txt for your headphones into the folder below. Every headphone is wrong in a way somebody has already measured."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else {
+                YunSelect(
+                    selection: Binding(
+                        get: { model.headphoneProfileName },
+                        set: { model.headphoneProfileName = $0 }),
+                    options: [.init(value: String?.none, title: loc("Off"))]
+                        + model.headphoneProfiles.map {
+                            .init(
+                                value: $0.name as String?, title: $0.name,
+                                detail: "\($0.filters.count)")
+                        })
+                if let profile = model.headphoneProfile {
+                    Text(
+                        String(
+                            format: loc("%d filters, %.1f dB of headroom taken."),
+                            profile.filters.count, -profile.preampDecibels)
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    // What it does, drawn from the coefficients that will
+                    // actually run rather than from the filter list — a picture
+                    // built from the definitions would stay right while the
+                    // arithmetic under it went wrong.
+                    EQCurveView(curve: profile)
+                        .frame(height: 64)
+                }
+                if model.headphoneCorrectionIsIdle {
+                    Text(loc("Nothing is being corrected until routing starts."))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                }
+            }
+            HStack(spacing: Yun.Space.sm) {
+                Button(loc("Open the folder")) {
+                    guard let directory = RouterModel.headphoneDirectory else { return }
+                    try? FileManager.default.createDirectory(
+                        at: directory, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(directory)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+                Button(loc("Refresh")) { model.refreshHeadphoneProfiles() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
         }
     }

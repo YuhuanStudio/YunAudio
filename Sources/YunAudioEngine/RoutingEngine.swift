@@ -383,22 +383,20 @@ public final class RoutingEngine: @unchecked Sendable {
 
         let members = cancelsEcho ? [destination] + extras : [source, destination] + extras
 
-        // A member the router only ever writes to does not need its input side
-        // opened, and on Bluetooth that is not a saving but a correctness
-        // matter: opening a headset's input negotiates HFP, which drags the
-        // *output* down to 16 kHz as well. The whole device degrades because
-        // one direction nobody asked for was opened.
+        // A member the router only ever writes to would ideally not have its
+        // input side opened at all — on Bluetooth that is a correctness matter
+        // rather than a saving, because opening a headset's input negotiates
+        // HFP and drags the *output* down to 16 kHz with it.
         //
-        // Applied to Bluetooth alone rather than to every write-only member,
-        // and the reason is the loopback: reading a destination's input back is
-        // how this project proves the path is bit-exact, and it works on our
-        // own virtual device and on the other loopbacks people already have. A
-        // Bluetooth headset has no loopback to lose, so there is nothing to
-        // trade away there — anywhere else there would be.
+        // `kAudioSubDeviceInputChannelsKey` looks like the way to say so and is
+        // not: measured here, a device with three inputs asked for one still
+        // presents three, and one asked for none still presents one. The key is
+        // descriptive. The flow check asserts that, so a future macOS honouring
+        // it will be noticed rather than never looked at again — and until then
+        // the Bluetooth problem has no fix at this layer.
         func writeOnly(_ device: AudioDevice) -> AggregateDevice.SubDevice {
             AggregateDevice.SubDevice(
                 uid: device.uid, driftCompensation: true,
-                inputChannels: device.transport == .bluetooth ? 0 : nil,
                 extraOutputLatencyFrames: outputLatencyTrim[device.uid])
         }
 
@@ -410,7 +408,6 @@ public final class RoutingEngine: @unchecked Sendable {
                 .init(
                     uid: destinationDeviceUID,
                     driftCompensation: !clockLockAvailable,
-                    inputChannels: destination.transport == .bluetooth ? 0 : nil,
                     extraOutputLatencyFrames: outputLatencyTrim[destinationDeviceUID]),
             ] + extras.map(writeOnly)
 
@@ -829,6 +826,61 @@ public final class RoutingEngine: @unchecked Sendable {
     ///
     /// Off by default. Nothing should be folding the output bus every cycle for
     /// a panel nobody has open.
+    /// Puts a headphone correction on one output, or takes it off.
+    ///
+    /// - Parameters:
+    ///   - curve: The correction, or nil to run none.
+    ///   - deviceUID: Which output it applies to. The correction belongs on
+    ///     what the person wearing the headphones hears and nowhere else, so
+    ///     naming the device is not optional.
+    /// - Returns: True when the correction was installed. False means the named
+    ///   device is not in this route, which is the ordinary case of a headphone
+    ///   profile left selected after the headphones were unplugged.
+    @discardableResult
+    public func setHeadphoneCorrection(_ curve: ParametricEQ?, forDeviceUID deviceUID: String?)
+        -> Bool
+    {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let graph else { return false }
+
+        // Cleared first and unconditionally: a rebuild that left the old
+        // coefficients in place while the new buffer index was being written
+        // would run one headphone's correction on another's output for a cycle.
+        graph.pointee.eqBuffer = -1
+        graph.pointee.eqStages = 0
+        graph.pointee.eqPreampGain = 1
+
+        guard let curve, let deviceUID,
+            let buffer = outputBufferIndex(forDeviceUID: deviceUID)
+        else {
+            // Silence is not a failure when there was nothing to install.
+            return curve == nil
+        }
+
+        let rate = aggregate?.device?.currentSampleRate ?? 48000
+        let packed = curve.coefficients(sampleRate: rate)
+        let stages = min(packed.count / 5, RTGraph.maximumEQStages)
+        guard stages > 0 else { return false }
+
+        for index in 0..<(stages * 5) { graph.pointee.eqCoefficients[index] = packed[index] }
+        // The history has to start from nothing. Carrying it across a change of
+        // curve puts the tail of the old filter into the first milliseconds of
+        // the new one, which is a click.
+        for index in 0..<(RTGraph.maximumEQStages * RTGraph.maximumEQChannels * 4) {
+            graph.pointee.eqState[index] = 0
+        }
+        graph.pointee.eqPreampGain = pow(10, curve.preampDecibels / 20)
+        graph.pointee.eqStages = Int32(stages)
+        graph.pointee.eqBuffer = Int32(buffer)
+        return true
+    }
+
+    /// Which output buffer carries a device, if any of them do.
+    private func outputBufferIndex(forDeviceUID uid: String) -> Int? {
+        outputMap.first { key, _ in key.deviceUID == uid }.map { Int($0.value.buffer) }
+    }
+
     public func setAnalysisEnabled(_ enabled: Bool) {
         stateLock.lock()
         defer { stateLock.unlock() }

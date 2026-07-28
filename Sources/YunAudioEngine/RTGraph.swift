@@ -304,6 +304,29 @@ struct RTGraph {
     var stemFrames: Int32
     static let maxStemChannels = 2
 
+    // MARK: Headphone correction
+
+    /// Which output buffer the correction runs on, or -1 for none.
+    ///
+    /// One buffer rather than all of them, and that is the whole design
+    /// decision: a headphone correction belongs on what *you* hear and nowhere
+    /// else. Applying it to the main output would send the far end a signal
+    /// shaped for the deficiencies of your headphones, which is worse than not
+    /// correcting at all — they would be hearing the inverse of a fault they do
+    /// not have.
+    var eqBuffer: Int32
+    var eqStages: Int32
+    var eqChannels: Int32
+    /// Five per section — b0, b1, b2, a1, a2 — already normalised by a0, so the
+    /// IO thread does no division.
+    var eqCoefficients: UnsafeMutablePointer<Float>
+    /// Four per section per channel: two inputs back, two outputs back.
+    var eqState: UnsafeMutablePointer<Float>
+    /// Headroom for the boost, applied first.
+    var eqPreampGain: Float
+    static let maximumEQStages = 24
+    static let maximumEQChannels = 8
+
     // MARK: Transcription
 
     /// One ring per source being transcribed, or null.
@@ -453,6 +476,13 @@ struct RTGraph {
             capacity: stemScratchCount)
         stemScratchStorage.initialize(repeating: 0, count: stemScratchCount)
 
+        let eqCoefficientStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: maximumEQStages * 5)
+        eqCoefficientStorage.initialize(repeating: 0, count: maximumEQStages * 5)
+        let eqStateCount = maximumEQStages * maximumEQChannels * 4
+        let eqStateStorage = UnsafeMutablePointer<Float>.allocate(capacity: eqStateCount)
+        eqStateStorage.initialize(repeating: 0, count: eqStateCount)
+
         let transcriptRingStorage = UnsafeMutablePointer<OpaquePointer?>.allocate(
             capacity: count)
         transcriptRingStorage.initialize(repeating: nil, count: count)
@@ -538,6 +568,12 @@ struct RTGraph {
                 stemCount: Int32(count),
                 stemCapacity: Int32(stemCapacity),
                 stemFrames: 0,
+                eqBuffer: -1,
+                eqStages: 0,
+                eqChannels: 0,
+                eqCoefficients: eqCoefficientStorage,
+                eqState: eqStateStorage,
+                eqPreampGain: 1,
                 transcriptRings: transcriptRingStorage,
                 transcriptScratch: transcriptScratchStorage,
                 transcriptCount: Int32(count),
@@ -586,6 +622,11 @@ struct RTGraph {
             count * Int(graph.pointee.stemCapacity) * maxStemChannels
         graph.pointee.stemScratch.deinitialize(count: stemScratchCount)
         graph.pointee.stemScratch.deallocate()
+        graph.pointee.eqCoefficients.deinitialize(count: maximumEQStages * 5)
+        graph.pointee.eqCoefficients.deallocate()
+        graph.pointee.eqState.deinitialize(
+            count: maximumEQStages * maximumEQChannels * 4)
+        graph.pointee.eqState.deallocate()
         graph.pointee.transcriptRings.deinitialize(count: count)
         graph.pointee.transcriptRings.deallocate()
         graph.pointee.transcriptScratch.deinitialize(
@@ -1109,6 +1150,51 @@ func yunAudioIOProc(
                 }
                 if usable > 0 {
                     _ = yun_rt_ring_write(ring, scratch, UInt32(usable * channels))
+                }
+            }
+        }
+    }
+
+    // Headphone correction, last of all and deliberately after the recorder
+    // and the stems have already taken their copies. A correction is a fault in
+    // somebody's headphones being undone; baking it into a file would carry
+    // that fault, inverted, to everybody who plays the file back on anything
+    // else.
+    let eqBuffer = Int(graph.pointee.eqBuffer)
+    let eqStages = Int(graph.pointee.eqStages)
+    if eqBuffer >= 0, eqBuffer < output.count, eqStages > 0 {
+        let buffer = output[eqBuffer]
+        if let data = buffer.mData {
+            let channels = min(Int(buffer.mNumberChannels), RTGraph.maximumEQChannels)
+            let stride = Int(buffer.mNumberChannels)
+            let frames = Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * stride)
+            let samples = data.assumingMemoryBound(to: Float.self)
+            let coefficients = graph.pointee.eqCoefficients
+            let state = graph.pointee.eqState
+            let preamp = graph.pointee.eqPreampGain
+
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    var value = samples[frame * stride + channel] * preamp
+                    for section in 0..<eqStages {
+                        let c = coefficients + section * 5
+                        // Direct form I: two input and two output history terms
+                        // per section per channel. Form I rather than II
+                        // because the state is per channel and interleaving the
+                        // channels through a shared accumulator is the classic
+                        // way to make a stereo filter sound like a mono one.
+                        let slot =
+                            state + (section * RTGraph.maximumEQChannels + channel) * 4
+                        let output =
+                            c[0] * value + c[1] * slot[0] + c[2] * slot[1] - c[3] * slot[2]
+                            - c[4] * slot[3]
+                        slot[1] = slot[0]
+                        slot[0] = value
+                        slot[3] = slot[2]
+                        slot[2] = output
+                        value = output
+                    }
+                    samples[frame * stride + channel] = value
                 }
             }
         }
