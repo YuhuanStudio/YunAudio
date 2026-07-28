@@ -495,3 +495,5 @@
 "A little flat — about %.0f cents under." = "A little flat — about %.0f cents under.";
 "A little sharp — about %.0f cents over." = "A little sharp — about %.0f cents over.";
 "Start routing before it can score you." = "Start routing before it can score you.";
+"muted, but talking" = "muted, but talking";
+"The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers." = "The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers.";

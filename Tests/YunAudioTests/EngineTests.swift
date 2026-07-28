@@ -5710,3 +5710,48 @@ struct KeyFromAudioTests {
         #expect(key.confidence > 0.3)
     }
 }
+
+/// The rate a spectrum analyser is built against.
+///
+/// This is the intermittent flow-check crash that two separate passes reported
+/// and neither could reproduce — about one full run in three, at a different
+/// place each time, which is what a crash on a startup race looks like from
+/// outside. The stack came from the crash report rather than from reasoning:
+/// `SpectrumAnalyser.init` → an assertion failure inside the standard library,
+/// with the message "Double value cannot be converted to Int because it is
+/// either infinite or NaN".
+///
+/// The band edges are divided by the bin width, the bin width is the rate over
+/// the window, and a route starting against a device that had not settled
+/// reported a rate of 0. The caller's `?? 48000` did not help: the value was
+/// present, it was simply zero.
+@Suite("A spectrum analyser refuses a rate it cannot use")
+struct SpectrumRateTests {
+
+    @Test("zero, negative, infinite and NaN all come back nil rather than crashing")
+    func refusesUnusableRates() {
+        for rate in [0, -1, -48000, .infinity, -.infinity, .nan] as [Double] {
+            #expect(SpectrumAnalyser(sampleRate: rate) == nil, "\(rate)")
+        }
+    }
+
+    @Test("and every real rate still builds")
+    func acceptsRealRates() {
+        for rate in [8000, 16000, 44100, 48000, 96000, 192_000] as [Double] {
+            #expect(SpectrumAnalyser(sampleRate: rate) != nil, "\(rate)")
+        }
+    }
+
+    /// The bands still have to land somewhere sensible at the extremes, or
+    /// "it did not crash" would be the whole of the guarantee.
+    @Test("the bands stay inside the spectrum at both ends of the rate range")
+    func bandsStayInRange() throws {
+        for rate in [8000, 48000, 192_000] as [Double] {
+            let analyser = try #require(SpectrumAnalyser(sampleRate: rate))
+            for band in 0..<SpectrumAnalyser.bandCount {
+                let value = analyser.decibels(ofBand: band)
+                #expect(value.isFinite || value == -.infinity, "rate \(rate) band \(band)")
+            }
+        }
+    }
+}

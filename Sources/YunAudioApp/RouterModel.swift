@@ -1252,7 +1252,60 @@ final class RouterModel {
             guard oldValue != isInputMuted else { return }
             applyInputMute()
             persist()
+            // Nothing to warn about once the microphone is live again.
+            if !isInputMuted { isSpeakingWhileMuted = false }
         }
+    }
+
+    // MARK: Speaking while muted
+
+    /// CoreAudio's own detector, watching the source device.
+    ///
+    /// Kept for the lifetime of a route rather than made on demand: switching
+    /// detection on is a write to the device, and doing that per question would
+    /// be writing to somebody's hardware twenty times a second.
+    @ObservationIgnored private var voiceWatcher: VoiceActivityWatcher?
+
+    /// True when the microphone is muted and somebody is talking into it.
+    ///
+    /// The most-asked-for small feature in every conferencing application, and
+    /// here it costs two device properties: no model, no processor time on the
+    /// audio path, no latency. The detector CoreAudio publishes has its own
+    /// echo cancellation, so the speakers playing somebody else talking does
+    /// not set it off, and — the part that makes the feature possible at all —
+    /// it keeps working under a process mute, where anything reading the routed
+    /// signal would see the silence the mute produces.
+    private(set) var isSpeakingWhileMuted = false
+
+    /// Whether the source device publishes the detector at all.
+    ///
+    /// Measured rather than assumed from the macOS version: on this machine
+    /// every input device publishes it — but on the **input** scope, and asking
+    /// on the global scope reports that not one of them does. An interface that
+    /// showed an indicator which could never light would be worse than one that
+    /// says the device cannot do it.
+    var canDetectVoiceActivity: Bool {
+        guard let source = selectedSource else { return false }
+        return VoiceActivityWatcher.isAvailable(on: source.id)
+    }
+
+    private func startVoiceActivity() {
+        guard voiceWatcher == nil, let source = selectedSource else { return }
+        voiceWatcher = VoiceActivityWatcher(device: source.id) { [weak self] speaking in
+            Task { @MainActor in
+                guard let self else { return }
+                // Only ever a warning about a mute. Publishing "somebody is
+                // talking" while unmuted would be a meter, and there is a real
+                // one two rows up that measures the signal rather than asking
+                // the system about it.
+                self.isSpeakingWhileMuted = speaking && self.isInputMuted
+            }
+        }
+    }
+
+    private func stopVoiceActivity() {
+        voiceWatcher = nil
+        isSpeakingWhileMuted = false
     }
     var outputDecibels: Float = 0 {
         didSet {
@@ -3387,6 +3440,10 @@ final class RouterModel {
                 }
                 self.isRunning = true
                 self.lastError = nil
+                // The detector needs the device's input to be running, which it
+                // now is. Started here rather than at selection for that reason
+                // — asked of an idle device it answers "no voice" forever.
+                self.startVoiceActivity()
                 // A graph built by `start` carries nothing from the one before
                 // it, so everything the user set has to be pushed in again.
                 self.appliedToGraph = []
@@ -3407,7 +3464,13 @@ final class RouterModel {
                 // The analysers are built per run, because the K-weighting
                 // coefficients and the FFT bin mapping both depend on the rate
                 // the aggregate settled on.
-                self.startAnalysis(sampleRate: self.engine.pathQuality?.sampleRate ?? 48000)
+                // `?? 48000` covers a missing quality report and not a present
+                // one carrying zero, which is what a device that has not
+                // settled reports — and zero was the rate that took the whole
+                // application down from inside the FFT setup.
+                let reported = self.engine.pathQuality?.sampleRate ?? 0
+                self.startAnalysis(
+                    sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
                 // After the graph exists, not before: a correction names an
                 // output buffer, and there are no buffers until the aggregate
                 // is built.
@@ -3443,6 +3506,7 @@ final class RouterModel {
 
     private func finishStop() {
         isRunning = false
+        stopVoiceActivity()
         // The engine tore the recorder down with the route, so the flag has to
         // follow or the button would claim a recording is still running against
         // a file nothing is writing to.

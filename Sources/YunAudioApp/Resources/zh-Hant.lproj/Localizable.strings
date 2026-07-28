@@ -495,3 +495,5 @@
 "A little flat — about %.0f cents under." = "有點低 —— 大約低了 %.0f 音分。";
 "A little sharp — about %.0f cents over." = "有點高 —— 大約高了 %.0f 音分。";
 "Start routing before it can score you." = "要先開始路由才能幫你打分數。";
+"muted, but talking" = "已靜音，但你在說話";
+"The microphone is muted and the system's own voice detector can hear you. It has echo cancellation, so this is you rather than the speakers." = "麥克風是靜音的，而系統自己的語音偵測聽得到你。它自帶回音消除，所以這是你，不是喇叭。";

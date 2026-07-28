@@ -140,6 +140,22 @@ extension StatusPills {
                     tone: .danger, showsDot: true))
         }
 
+        // The one pill anybody will ever be glad to see. It appears only in the
+        // moment it is true — muted, and talking — and goes away by itself,
+        // which is why it is worth the attention a red dot buys: a warning that
+        // is on half the time is not a warning.
+        if model.isSpeakingWhileMuted {
+            pills.append(
+                Pill(
+                    id: "muted-talking",
+                    label: loc("muted, but talking"),
+                    tone: .danger, showsDot: true,
+                    help: loc(
+                        "The microphone is muted and the system's own voice detector "
+                            + "can hear you. It has echo cancellation, so this is you "
+                            + "rather than the speakers.")))
+        }
+
         // Only the absence is worth a pill. The bar used to print the driver's
         // name when it was installed, which is the normal state of a working
         // machine and therefore says nothing.

@@ -58,6 +58,18 @@ public final class SpectrumAnalyser {
     public static let highestFrequency: Double = 16000
 
     public init?(sampleRate: Double) {
+        // A rate of zero makes the bin width zero, and the band edges are
+        // divided by it: the result is infinite, `Int(_:)` of an infinity is a
+        // fatal error, and the process dies inside the standard library several
+        // frames from anything that names this file.
+        //
+        // It is not hypothetical. This was the intermittent flow-check crash
+        // that two separate passes reported and neither could reproduce: a
+        // route starting against a device that had not settled reported a rate
+        // of 0, `?? 48000` did not catch it because the value was present
+        // rather than nil, and the whole application went down about one run in
+        // three. The initialiser was already failable; it simply never used it.
+        guard sampleRate.isFinite, sampleRate > 0 else { return nil }
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
             return nil
         }

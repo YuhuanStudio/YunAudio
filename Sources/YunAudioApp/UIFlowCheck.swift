@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
@@ -2692,6 +2693,7 @@ enum UIFlowCheck {
 
         await checkMIDI(model: model)
         await checkScoring(model: model)
+        await checkVoiceActivity(model: model)
         await checkRedrawCost(model: model)
         await checkCarriedState(model: model)
 
@@ -3350,6 +3352,61 @@ enum UIFlowCheck {
 
         model.monitorDeviceUID = monitorBefore
         await waitUntil("monitoring went back as it was", { !model.isBusy }, timeout: 15)
+    }
+
+
+    /// The system's own voice detector.
+    ///
+    /// Worth a check rather than a version test, because the first reading of
+    /// it here said that no device on this machine publishes the detector —
+    /// including the built-in microphone. The properties live on the **input**
+    /// scope; the global scope answers "absent" for every device, which is
+    /// indistinguishable from the feature not existing.
+    ///
+    /// Whether it actually *fires* is proved elsewhere, and deliberately:
+    ///
+    /// ```
+    /// yunaudio-cli vad BlackHole --prove
+    /// ```
+    ///
+    /// That plays synthesised speech into a loopback device, reads it back from
+    /// the same device's input, meters what arrived and asserts the detector
+    /// reported voice — three runs out of three. It cannot live here, and the
+    /// reason is worth writing down rather than rediscovering: with a route
+    /// already running, pointing an `AVAudioEngine` at a device the aggregate
+    /// holds makes `start()` raise from Objective-C, which `try?` does not
+    /// catch and which takes the whole application down mid-check. The first
+    /// version of this section did exactly that, silently, and every section
+    /// after it simply never ran.
+    private static func checkVoiceActivity(model: RouterModel) async {
+        section("the system's own voice detector")
+
+        let inputs = (try? AudioDevices.all())?.filter(\.hasInput) ?? []
+        let publishing = inputs.filter { VoiceActivityWatcher.isAvailable(on: $0.id) }
+        note("\(publishing.count) of \(inputs.count) input device(s) publish 'vAd+'")
+        check("the detector is published on the input scope", !publishing.isEmpty)
+
+        guard let source = model.selectedSource else { return }
+        check(
+            "including the source this route is using",
+            VoiceActivityWatcher.isAvailable(on: source.id))
+        check("and the model agrees it can be used", model.canDetectVoiceActivity)
+
+        // Switched on by the route coming up, since the header is explicit that
+        // the state reads 0 with input not running — an indicator wired to a
+        // detector nobody enabled would be permanently dark and look correct.
+        check("and the route switched it on", VoiceActivityWatcher.isEnabled(on: source.id))
+        note(
+            "reference for echo cancellation: "
+                + (VoiceActivityWatcher.suggestedReferenceDeviceUID(for: source.id)
+                    .flatMap { $0.isEmpty ? nil : $0 }
+                    ?? "none suggested — the default output"))
+
+        // The warning only ever appears while muted, or it would be a meter.
+        let wasMuted = model.isInputMuted
+        model.isInputMuted = false
+        check("nothing to warn about while the microphone is live", !model.isSpeakingWhileMuted)
+        model.isInputMuted = wasMuted
     }
 
     /// MIDI learn, both halves.

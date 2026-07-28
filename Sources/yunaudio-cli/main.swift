@@ -1763,6 +1763,244 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "dsp" {
     exit(0)
 }
 
+
+/// Whether the detector actually fires, proved without a room.
+///
+/// The awkward part of asserting anything about a voice detector is that it
+/// reads a microphone, and a check that needs somebody to speak into one is a
+/// check that never runs. A loopback device closes the loop: speech is
+/// synthesised, played into its output, and read back from its input, which is
+/// the same signal path the detector sees on real hardware minus the acoustics.
+///
+/// The header's caveat is the reason for the IOProc that does nothing — with
+/// input not running, the state reads 0 whatever is being said.
+private func proveVoiceActivity(deviceMatch: String) -> Bool {
+    guard let device = (try? AudioDevices.all())?.first(where: {
+        $0.hasInput && $0.name.localizedCaseInsensitiveContains(deviceMatch)
+    }) else {
+        print("no input device matched \(deviceMatch)")
+        return false
+    }
+    print("proving voice activity detection on \(device.name)")
+
+    final class Seen: @unchecked Sendable {
+        private let lock = NSLock()
+        private var voiced = false
+        private var changes = 0
+        func record(_ speaking: Bool) {
+            lock.lock()
+            changes += 1
+            if speaking { voiced = true }
+            lock.unlock()
+        }
+        var heardVoice: Bool { lock.lock(); defer { lock.unlock() }; return voiced }
+        var changeCount: Int { lock.lock(); defer { lock.unlock() }; return changes }
+    }
+    let seen = Seen()
+
+    // Input running, or the state is 0 by definition. The proc does nothing
+    // with what it reads: the point is that the device's input side is live.
+    // The proc also meters, because a negative result from the detector means
+    // nothing unless the signal reached its input. A loopback that carried
+    // silence and a detector that ignored speech look identical from outside.
+    final class Level: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Float = 0
+        func offer(_ peak: Float) { lock.lock(); value = max(value, peak); lock.unlock() }
+        var peak: Float { lock.lock(); defer { lock.unlock() }; return value }
+    }
+    let level = Level()
+
+    var procID: AudioDeviceIOProcID?
+    let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, nil) {
+        _, inputData, _, _, _ in
+        let buffers = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: inputData))
+        var peak: Float = 0
+        for index in 0..<buffers.count {
+            guard let data = buffers[index].mData else { continue }
+            let count = Int(buffers[index].mDataByteSize) / MemoryLayout<Float>.size
+            let samples = data.assumingMemoryBound(to: Float.self)
+            for frame in 0..<count { peak = max(peak, abs(samples[frame])) }
+        }
+        level.offer(peak)
+    }
+    guard status == noErr, let procID else {
+        print("could not open an input proc: \(fourCharDescription(status))")
+        return false
+    }
+    defer { AudioDeviceDestroyIOProcID(device.id, procID) }
+    AudioDeviceStart(device.id, procID)
+    defer { AudioDeviceStop(device.id, procID) }
+
+    guard let watcher = VoiceActivityWatcher(device: device.id, onChange: { seen.record($0) })
+    else {
+        print("this device does not publish the detector")
+        return false
+    }
+    print("  detection enabled: \(watcher.isObserving)")
+
+    // Speech rather than noise, because the detector is a voice detector: a
+    // burst of white noise at the same level is exactly what it exists not to
+    // report.
+    let engine = AVAudioEngine()
+    let output = engine.outputNode
+    var target = device.id
+    let size = UInt32(MemoryLayout<AudioDeviceID>.size)
+    AudioUnitSetProperty(
+        output.audioUnit!, kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global, 0, &target, size)
+
+    let synthesiser = AVSpeechSynthesizer()
+    let player = AVAudioPlayerNode()
+    engine.attach(player)
+    engine.connect(player, to: engine.mainMixerNode, format: nil)
+    do { try engine.start() } catch {
+        print("could not start the engine: \(error)")
+        return false
+    }
+
+    var scheduled = 0
+    let utterance = AVSpeechUtterance(
+        string: "The quick brown fox jumps over the lazy dog, and says it twice.")
+    utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+    synthesiser.write(utterance) { buffer in
+        guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else { return }
+        guard let converted = convert(pcm, to: engine.mainMixerNode.outputFormat(forBus: 0))
+        else { return }
+        player.scheduleBuffer(converted, completionHandler: nil)
+        scheduled += 1
+        if !player.isPlaying { player.play() }
+    }
+
+    // Two distinct failures, kept apart. A run where the loopback carried
+    // nothing says nothing about the detector, and reporting it as "the
+    // detector ignored speech" would be inventing a finding — one run in three
+    // lost the race between the engine starting and the window closing, and
+    // without the meter that looked exactly like a detector that does not work.
+    let deadline = Date().addingTimeInterval(20)
+    while Date() < deadline, !seen.heardVoice {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+    }
+    guard level.peak > 0.01 else {
+        print(
+            String(
+                format: "  the loopback carried nothing (peak %.3f) — inconclusive",
+                level.peak))
+        engine.stop()
+        return false
+    }
+    print(
+        String(
+            format: "  %d buffer(s) of speech played, peak at the input %.3f, %d change(s)",
+            scheduled, level.peak, seen.changeCount))
+    print(seen.heardVoice ? "  the detector reported voice" : "  the detector never reported voice")
+    engine.stop()
+    return seen.heardVoice
+}
+
+/// Resamples and rechannels one buffer, since the synthesiser's format is its
+/// own and the device's is the device's.
+private func convert(
+    _ buffer: AVAudioPCMBuffer, to format: AVAudioFormat
+) -> AVAudioPCMBuffer? {
+    // Both rates before the division: a rate of zero makes the ratio infinite,
+    // and that reaches `AVAudioFrameCount` and kills the process from inside
+    // the standard library.
+    guard buffer.format.sampleRate > 0, format.sampleRate > 0,
+        let converter = AVAudioConverter(from: buffer.format, to: format)
+    else { return nil }
+    let ratio = format.sampleRate / buffer.format.sampleRate
+    let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 1024
+    guard let out = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+        return nil
+    }
+    var done = false
+    var error: NSError?
+    converter.convert(to: out, error: &error) { _, status in
+        if done {
+            status.pointee = .endOfStream
+            return nil
+        }
+        done = true
+        status.pointee = .haveData
+        return buffer
+    }
+    return error == nil && out.frameLength > 0 ? out : nil
+}
+
+/// What CoreAudio's own voice activity detector is available on, and what it
+/// says. Read-only unless `--watch` is given, which switches detection on for
+/// one device and puts it back afterwards.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "vad" {
+    let devices = (try? AudioDevices.all())?.filter(\.hasInput) ?? []
+    print("voice activity detection — \(devices.count) input device(s)")
+    print(String(repeating: "=", count: 60))
+    for device in devices {
+        let available = VoiceActivityWatcher.isAvailable(on: device.id)
+        let enabled = VoiceActivityWatcher.isEnabled(on: device.id)
+        let state = VoiceActivityWatcher.state(of: device.id)
+        let reference = VoiceActivityWatcher.suggestedReferenceDeviceUID(for: device.id)
+        print("\n\(device.name)")
+        print("  publishes 'vAd+'   \(available ? "yes" : "no")")
+        print("  currently enabled  \(enabled ? "yes" : "no")")
+        print(
+            "  'vAdS' says        "
+                + (state.map { $0 ? "voice" : "no voice" } ?? "the property is absent"))
+        // An empty string is what the property answers with when the system
+        // has no suggestion, which is not the same as the property being
+        // absent and must not read as a device named "".
+        let referenceText =
+            (reference?.isEmpty == false)
+            ? reference! : "none suggested — the default output"
+        print("  echo reference     \(referenceText)")
+    }
+
+    if CommandLine.arguments.contains("--prove") {
+        let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "BlackHole"
+        exit(proveVoiceActivity(deviceMatch: match) ? 0 : 1)
+    }
+
+    if CommandLine.arguments.contains("--watch") {
+        let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
+        guard
+            let device = devices.first(where: {
+                match.isEmpty || $0.name.localizedCaseInsensitiveContains(match)
+            })
+        else {
+            print("\nno input device matched \(match)")
+            exit(1)
+        }
+        print("\nwatching \(device.name) for 20 s — say something")
+        // A class rather than a captured `var`: the callback arrives on the
+        // watcher's own queue, and Swift 6 will not let a closure that escapes
+        // to another thread mutate a local.
+        final class Changes: @unchecked Sendable {
+            private let lock = NSLock()
+            private var value = 0
+            func bump() { lock.lock(); value += 1; lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+        }
+        let changes = Changes()
+        guard
+            let watcher = VoiceActivityWatcher(device: device.id, onChange: { speaking in
+                changes.bump()
+                print("  \(speaking ? "voice" : "silence")")
+            })
+        else {
+            print("this device does not publish the detector")
+            exit(1)
+        }
+        // The header is explicit that the state reads 0 when input is not
+        // running, so this is only meaningful with something recording. That is
+        // the caveat rather than a fault, and it is printed rather than hidden.
+        print("  (input has to be running somewhere, or this stays silent)")
+        RunLoop.current.run(until: Date().addingTimeInterval(20))
+        print("\n\(changes.count) change(s), still observing: \(watcher.isObserving)")
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "selftest" {
     let source = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Seiren V3 Pro"
     let destination = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "YunAudio"
