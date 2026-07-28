@@ -1050,6 +1050,77 @@ final class EffectChain {
         return max(0, -value)
     }
 
+    /// Reads a knob back off the live unit, in the units the control uses.
+    ///
+    /// Nothing in the interface needs this: the model already holds what it
+    /// set. What needs it is any check that a chain came back tuned the way it
+    /// was left — because a chain rebuilt at its defaults looks entirely
+    /// correct from the model's side, which is exactly how every knob anybody
+    /// had moved used to revert silently on a restart while the interface went
+    /// on showing the number they chose. The only witness is the unit.
+    ///
+    /// Covers the knobs that are one unit parameter. The character stage is two
+    /// knobs over one unit and reads back through `characterState`; reverb's
+    /// size writes two parameters and reads back through the first.
+    ///
+    /// - Parameters:
+    ///   - parameter: The control's identifier, as `set` takes it.
+    ///   - kind: Which stage it belongs to.
+    /// - Returns: The value the unit is holding, or nil when the stage is not
+    ///   in this chain or the knob is not one this can read.
+    func value(_ parameter: String, of kind: EffectKind) -> Float? {
+        if kind == .formant {
+            guard parameter == "shift", let native else { return nil }
+            return (native.ratio - 1) * 100
+        }
+        guard let index = hostedStages.firstIndex(of: kind), index < units.count,
+            let mapping = Self.directParameter(parameter, of: kind)
+        else { return nil }
+        var value: AudioUnitParameterValue = 0
+        guard
+            AudioUnitGetParameter(
+                units[index], mapping.id, kAudioUnitScope_Global, 0, &value) == noErr
+        else { return nil }
+        return value / mapping.scale
+    }
+
+    /// The unit parameter behind a knob, and what the knob's units are worth in
+    /// the unit's own — a release control in milliseconds against a unit that
+    /// wants seconds.
+    private static func directParameter(
+        _ parameter: String, of kind: EffectKind
+    )
+        -> (id: AudioUnitParameterID, scale: Float)?
+    {
+        switch (kind, parameter) {
+        case (.tone, let name):
+            guard name.hasPrefix("b"), let band = Int(name.dropFirst()),
+                band < EffectKind.toneBands.count
+            else { return nil }
+            return (
+                AudioUnitParameterID(kAUNBandEQParam_Gain) + AudioUnitParameterID(band), 1
+            )
+        case (.pitch, "cents"): return (AudioUnitParameterID(kNewTimePitchParam_Pitch), 1)
+        case (.reverb, "mix"): return (AudioUnitParameterID(kReverb2Param_DryWetMix), 1)
+        case (.reverb, "decay"):
+            return (AudioUnitParameterID(kReverb2Param_DecayTimeAt0Hz), 1)
+        case (.echo, "mix"): return (kDelayParam_WetDryMix, 1)
+        case (.echo, "time"): return (kDelayParam_DelayTime, 0.001)
+        case (.echo, "feedback"): return (kDelayParam_Feedback, 1)
+        case (.voiceIsolation, "mix"):
+            return (AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent), 1)
+        case (.gate, "threshold"): return (kDynamicsProcessorParam_ExpansionThreshold, 1)
+        case (.gate, "ratio"): return (kDynamicsProcessorParam_ExpansionRatio, 1)
+        case (.gate, "release"): return (kDynamicsProcessorParam_ReleaseTime, 0.001)
+        case (.equaliser, "frequency"):
+            return (AudioUnitParameterID(kAUNBandEQParam_Frequency), 1)
+        case (.compressor, "threshold"): return (kDynamicsProcessorParam_Threshold, 1)
+        case (.compressor, "headroom"): return (kDynamicsProcessorParam_HeadRoom, 1)
+        case (.limiter, "gain"): return (kLimiterParam_PreGain, 1)
+        default: return nil
+        }
+    }
+
     /// How many units the chain built, for tests that care about placement.
     var unitCountForTesting: Int { units.count }
 

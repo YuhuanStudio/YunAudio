@@ -831,6 +831,20 @@ public final class RoutingEngine: @unchecked Sendable {
         effectChain?.set(parameter, of: kind, to: value)
     }
 
+    /// What the running unit is actually holding for that knob.
+    ///
+    /// The one thing that can tell a chain which came back tuned from one which
+    /// came back at its defaults: the model's own copy of the value survives
+    /// either way.
+    ///
+    /// - Returns: Nil when no chain is running, the stage is not in it, or the
+    ///   knob is one that does not map to a single unit parameter.
+    public func effectParameter(_ parameter: String, of kind: EffectKind) -> Float? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return effectChain?.value(parameter, of: kind)
+    }
+
     // MARK: Recording
 
     private var recorder: Recorder?
@@ -1313,6 +1327,269 @@ public final class RoutingEngine: @unchecked Sendable {
         // can be holding the old graph and it is safe to free anyway.
         _ = yun_rt_cell_wait_for_swap(cell, 200)
         RTGraph.deallocate(previous)
+        return true
+    }
+
+    /// Replaces the processing chain without interrupting audio.
+    ///
+    /// Changing one stage used to tear the aggregate down and build it back:
+    /// about 880 ms inside the engine, 645 of it in `AudioDeviceStart` alone,
+    /// and seconds end to end once the model's stop-then-start hop is counted.
+    /// That is seconds of silence for one switch, and it was the worst
+    /// interaction in the application.
+    ///
+    /// Swapping only the isolation block would not have helped, because the
+    /// case that dominates is going from no chain to one stage and back — and
+    /// that changes which buffer every route reads, so it is a different graph
+    /// rather than a different block. This therefore does what `updateRoutes`
+    /// does and is proven by: build the next graph, carry across everything
+    /// that belongs to the route, publish it, wait for the realtime thread to
+    /// be seen past the swap, then free what it can no longer be holding. The
+    /// aggregate, the IOProc and the devices are not touched at all.
+    ///
+    /// - Parameters:
+    ///   - kinds: The stages that should be rendering. Empty takes the chain
+    ///     out of the path entirely.
+    ///   - plugins: Third-party units, placed as `start` places them. Passed
+    ///     again rather than remembered, because a chain rebuilt without them
+    ///     would drop somebody's plugin on an unrelated toggle.
+    ///   - voiceIsolation: Settings for the dedicated isolation unit, which is
+    ///     what runs when isolation is the only stage: it carries a mix and a
+    ///     quality that the chain has no way to express.
+    /// - Returns: False when there is nothing to swap underneath — no route is
+    ///   running, or no aggregate — so the caller can fall back to a restart.
+    @discardableResult
+    public func updateEffects(
+        _ kinds: [EffectKind],
+        plugins: [AudioUnitPlugin] = [],
+        voiceIsolation: VoiceIsolationSettings? = nil
+    ) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
+        guard isRunning, let cell = graphCell, let previous = graph,
+            let device = aggregate?.device, !activeRoutes.isEmpty
+        else { return false }
+
+        // What the device settled on rather than what was asked for. A chain
+        // built for a smaller block than the IOProc delivers would process only
+        // part of every cycle and pass the rest through.
+        let rate = device.currentSampleRate ?? 48000
+        let frames = Int(device.currentBufferFrameSize ?? 128)
+
+        // Held so that assigning the new ones below does not release units the
+        // IO thread is still rendering through. They go at the end, once the
+        // swap has been seen.
+        let retiredChain = effectChain
+        let retiredUnit = isolationUnit
+        let retiredBlock = isolationBlock
+        let retiredFailures = isolationFailureCounter
+
+        // The same split `start` makes: a chain for everything except the one
+        // case the dedicated isolation unit exists for.
+        let isolationOnly = kinds == [.voiceIsolation]
+        var chain: EffectChain?
+        var unit: VoiceIsolationUnit?
+        if !kinds.isEmpty, !isolationOnly {
+            chain = EffectChain(
+                kinds: kinds, plugins: plugins, sampleRate: rate, maximumFrames: frames)
+            if chain == nil { lastIsolationError = "the processing chain could not be built" }
+        } else if isolationOnly, let settings = voiceIsolation {
+            unit = VoiceIsolationUnit(sampleRate: rate, maximumFrames: frames)
+            if let unit {
+                unit.setMix(settings.mixPercent)
+                unit.setHighQuality(settings.isHighQuality)
+            } else {
+                lastIsolationError = "AUSoundIsolation could not be instantiated"
+            }
+        }
+
+        // Both stage kinds present the IO thread with the same four things — an
+        // opaque pointer, two staging buffers and a block size. Which of the two
+        // it is travels separately, in `isolationIsChain`, because they render
+        // through different types.
+        let stage:
+            (
+                unit: UnsafeMutableRawPointer,
+                input: UnsafeMutablePointer<Float>,
+                output: UnsafeMutablePointer<Float>,
+                frames: Int,
+                isChain: Bool
+            )?
+        if let chain {
+            stage = (
+                Unmanaged.passUnretained(chain).toOpaque(), chain.inputBuffer,
+                chain.outputBuffer, chain.maximumFrames, true
+            )
+        } else if let unit {
+            stage = (
+                Unmanaged.passUnretained(unit).toOpaque(), unit.inputBuffer,
+                unit.outputBuffer, unit.maximumFrames, false
+            )
+        } else {
+            stage = nil
+        }
+
+        // Isolation is a mono stage fed from the first route's source, exactly
+        // as at start. With the canceller in front that source is not in this
+        // aggregate at all, so an absent map entry is expected there rather
+        // than fatal.
+        let microphoneUID = lastConfiguration?.source
+        let isolatedSource = activeRoutes.first?.source
+        let fromCancelled = echoBridge != nil && isolatedSource?.deviceUID == microphoneUID
+        let mapped = isolatedSource.flatMap { inputMap[$0] }
+        let point = mapped ?? (buffer: Int32(0), channel: Int32(0))
+        let isolates = stage != nil && (fromCancelled || mapped != nil)
+
+        // Copied whole rather than rebuilt from `activeRoutes`: nothing about
+        // the routes is changing, so their buffer indices, gains, mutes and —
+        // the part that would go silently wrong otherwise — their stem and
+        // transcript assignments all carry across untouched. Only which source
+        // each route reads is in question here.
+        var rtRoutes: [RTRoute] = []
+        rtRoutes.reserveCapacity(Int(previous.pointee.routeCount))
+        for index in 0..<Int(previous.pointee.routeCount) {
+            var route = previous.pointee.routes[index]
+            let source = index < activeRoutes.count ? activeRoutes[index].source : nil
+            let isIsolated = isolates && source != nil && source == isolatedSource
+            let fromMicrophone = echoBridge != nil && source?.deviceUID == microphoneUID
+            route.usesIsolatedSource = isIsolated ? 1 : 0
+            // Exclusive, as at start: the cancelled buffer is what the model
+            // consumed, not what a route reading the model's output wants.
+            route.usesCancelledSource = fromMicrophone && !isIsolated ? 1 : 0
+            rtRoutes.append(route)
+        }
+
+        // A fresh block and a fresh counter rather than the old ones rewritten:
+        // the IO thread may still be inside a cycle holding the old block, and
+        // it points at the unit that is about to be released.
+        var block: UnsafeMutablePointer<RTVoiceIsolation>?
+        var failures: UnsafeMutablePointer<UInt64>?
+        if let stage, isolates {
+            let counter = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+            counter.initialize(to: 0)
+            failures = counter
+
+            let allocated = UnsafeMutablePointer<RTVoiceIsolation>.allocate(capacity: 1)
+            allocated.initialize(
+                to: RTVoiceIsolation(
+                    enabled: 1,
+                    sourceBuffer: point.buffer,
+                    sourceChannel: point.channel,
+                    sourceIsCancelled: fromCancelled ? 1 : 0,
+                    unit: stage.unit,
+                    inputBuffer: stage.input,
+                    outputBuffer: stage.output,
+                    maximumFrames: Int32(stage.frames),
+                    renderFailures: counter))
+            block = allocated
+        }
+
+        let next = RTGraph.allocate(
+            routes: rtRoutes, bufferFrames: frames, sampleRate: rate, sharedClock: sharedClock)
+        if let block, let stage {
+            next.pointee.voiceIsolation = block
+            next.pointee.isolationIsChain = stage.isChain ? 1 : 0
+        }
+
+        // Everything `updateRoutes` carries, for the reason it carries it:
+        // whatever belongs to the route rather than to this particular graph is
+        // silently switched off otherwise.
+        next.pointee.selftest = previous.pointee.selftest
+        next.pointee.recordRing = previous.pointee.recordRing
+        next.pointee.recordChannels = previous.pointee.recordChannels
+        next.pointee.recordPaused = previous.pointee.recordPaused
+        next.pointee.cancelledRing = previous.pointee.cancelledRing
+        next.pointee.inputGain = previous.pointee.inputGain
+        next.pointee.inputMuted = previous.pointee.inputMuted
+        next.pointee.outputGain = previous.pointee.outputGain
+        next.pointee.outputMuted = previous.pointee.outputMuted
+        next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
+        next.pointee.outputClipped = previous.pointee.outputClipped
+        next.pointee.analysisEnabled = previous.pointee.analysisEnabled
+        next.pointee.duckEnabled = previous.pointee.duckEnabled
+        next.pointee.duckDepth = previous.pointee.duckDepth
+        next.pointee.duckThreshold = previous.pointee.duckThreshold
+        next.pointee.duckAllowed = previous.pointee.duckAllowed
+        next.pointee.duckGain = previous.pointee.duckGain
+        next.pointee.masterExemptBuffer = previous.pointee.masterExemptBuffer
+
+        // And the headphone correction, which `updateRoutes` does not carry
+        // because the model reinstalls it after a route edit. Nothing
+        // reinstalls it after a chain swap, so dropping it here would mean
+        // somebody's correction quietly disappearing the moment they switched
+        // on a compressor. The filter history comes across with the
+        // coefficients: it is the same filter continuing, and starting it again
+        // from nothing is a click.
+        next.pointee.eqBuffer = previous.pointee.eqBuffer
+        next.pointee.eqStages = previous.pointee.eqStages
+        next.pointee.eqChannels = previous.pointee.eqChannels
+        next.pointee.eqPreampGain = previous.pointee.eqPreampGain
+        for index in 0..<(RTGraph.maximumEQStages * 5) {
+            next.pointee.eqCoefficients[index] = previous.pointee.eqCoefficients[index]
+        }
+        for index in 0..<(RTGraph.maximumEQStages * RTGraph.maximumEQChannels * 4) {
+            next.pointee.eqState[index] = previous.pointee.eqState[index]
+        }
+
+        // Handed over rather than replaced, as in `updateRoutes`: the consumer
+        // lives outside the graph and holds a running integrated loudness, so a
+        // fresh ring would put a gap in a measurement that is meant to be
+        // continuous.
+        if let carried = previous.pointee.analysisRing {
+            if let unused = next.pointee.analysisRing { yun_rt_ring_free(unused) }
+            next.pointee.analysisRing = carried
+            previous.pointee.analysisRing = nil
+        }
+
+        let carriedSlots = min(Int(previous.pointee.stemCount), Int(next.pointee.stemCount))
+        for slot in 0..<carriedSlots {
+            next.pointee.stemRings[slot] = previous.pointee.stemRings[slot]
+            next.pointee.stemChannels[slot] = previous.pointee.stemChannels[slot]
+        }
+        let carriedTranscripts = min(
+            Int(previous.pointee.transcriptCount), Int(next.pointee.transcriptCount))
+        for slot in 0..<carriedTranscripts {
+            next.pointee.transcriptRings[slot] = previous.pointee.transcriptRings[slot]
+        }
+
+        _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
+        graph = next
+
+        effectChain = chain
+        isolationUnit = unit
+        isolationBlock = block
+        isolationFailureCounter = failures
+        // Named rather than silently dropped, as at start: a chain that quietly
+        // lost a stage sounds different and says nothing about why.
+        failedPlugins = chain?.failedPlugins ?? []
+        effectLatencyFrames = chain?.latencyFrames ?? 0
+        if let chain {
+            voiceIsolationLatencyFrames =
+                kinds.contains(.voiceIsolation) ? chain.latencyFrames : 0
+        } else {
+            voiceIsolationLatencyFrames = unit?.latencyFrames ?? 0
+        }
+
+        // A false return means the device is not producing cycles, so nothing
+        // can be holding the old graph and it is safe to free anyway.
+        _ = yun_rt_cell_wait_for_swap(cell, 200)
+        RTGraph.deallocate(previous)
+
+        // The block first, so nothing can dereference the unmanaged pointer
+        // inside it afterwards, then the counter it points at, and only then
+        // the units themselves — which is what the extended lifetime is for.
+        // Without it the optimiser is entitled to release them the moment they
+        // stop being read, which is before the swap has been seen.
+        if let retiredBlock {
+            retiredBlock.deinitialize(count: 1)
+            retiredBlock.deallocate()
+        }
+        if let retiredFailures {
+            retiredFailures.deinitialize(count: 1)
+            retiredFailures.deallocate()
+        }
+        withExtendedLifetime((retiredChain, retiredUnit)) {}
         return true
     }
 

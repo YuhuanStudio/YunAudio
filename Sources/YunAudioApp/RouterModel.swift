@@ -1772,7 +1772,52 @@ final class RouterModel {
     /// sorts them into signal order — a limiter ahead of a compressor is a
     /// configuration mistake, not a preference.
     var enabledEffects: Set<EffectKind> = [] {
-        didSet { if oldValue != enabledEffects { persist(); restartIfRunning() } }
+        didSet {
+            guard oldValue != enabledEffects else { return }
+            persist()
+            // The chain is swapped under the running IOProc when it can be, and
+            // only falls back to a restart when it cannot. A restart for one
+            // switch cost seconds of silence — the single worst interaction in
+            // the application.
+            if !swapChainIfPossible() { restartIfRunning() }
+        }
+    }
+
+    /// Puts the new chain in without stopping the route. Returns false when the
+    /// change has to go through a rebuild after all.
+    ///
+    /// The engine call is the slow part — it instantiates Audio Units — so it
+    /// goes to `engineQueue` like every other piece of engine work, and the
+    /// answer comes back through the main actor. Taking the engine's lock from
+    /// here would block the main actor for the length of the build.
+    private func swapChainIfPossible() -> Bool {
+        // A batch is about to restart anyway, and a swap in the middle of one
+        // would be work thrown away.
+        guard !isApplyingPreset, isRunning, !isBusy else { return false }
+        isBusy = true
+        let engine = engine
+        let kinds = Array(enabledEffects)
+        let pluginList = enabledPlugins
+        let isolation =
+            enabledEffects.contains(.voiceIsolation)
+            ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
+        engineQueue.async {
+            let swapped = engine.updateEffects(
+                kinds, plugins: pluginList, voiceIsolation: isolation)
+            Task { @MainActor in
+                self.isBusy = false
+                guard swapped else {
+                    self.restartIfRunning()
+                    return
+                }
+                self.failedPlugins = engine.failedPlugins
+                // A freshly built chain comes up at each stage's own defaults,
+                // so the stored knob positions have to be pushed back — the
+                // same reason a restart does it.
+                self.applyEffectValues()
+            }
+        }
+        return true
     }
 
     /// The stages actually rendering. Not the same as `enabledEffects`: one
@@ -1813,6 +1858,16 @@ final class RouterModel {
 
     func value(of parameter: EffectParameter, in kind: EffectKind) -> Float {
         effectValues["\(kind.rawValue).\(parameter.id)"] ?? parameter.defaultValue
+    }
+
+    /// What the running unit holds for that knob, rather than what this model
+    /// remembers setting. Nil when nothing is rendering that stage.
+    ///
+    /// The two agree only if the value actually reached the engine, which is
+    /// the whole point of asking: a chain rebuilt at its defaults is invisible
+    /// from the model's side.
+    func renderedValue(of parameter: EffectParameter, in kind: EffectKind) -> Float? {
+        engine.effectParameter(parameter.id, of: kind)
     }
 
     func setValue(_ value: Float, of parameter: EffectParameter, in kind: EffectKind) {
