@@ -101,7 +101,8 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func refreshImage() {
         item.button?.image = Self.statusImage(
-            level: model.isRunning ? model.peakLevel : nil, isMuted: model.isMuted)
+            level: model.isRunning ? model.peakLevel : nil, isMuted: model.isMuted,
+            isSpeakingWhileMuted: model.isSpeakingWhileMuted)
         muteItem?.title = model.isMuted ? loc("Unmute") : loc("Mute")
         refreshConfigs()
     }
@@ -159,7 +160,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// Drawn rather than composed in SwiftUI because a status item takes an
     /// `NSImage`, and rendering a view to one every half second to show a five
     /// pixel dot would be a great deal of machinery for very little.
-    private static func statusImage(level: Float?, isMuted: Bool = false) -> NSImage? {
+    /// Internal rather than private so the drawing can be asserted. Three
+    /// states that have to look different from one another is exactly the kind
+    /// of claim that is obviously true and occasionally false — a badge drawn
+    /// one point larger, at eighteen points, can be no difference at all.
+    static func statusImage(
+        level: Float?, isMuted: Bool = false, isSpeakingWhileMuted: Bool = false
+    ) -> NSImage? {
         guard let mark = YunAppIcon.image else { return nil }
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size)
@@ -172,8 +179,30 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             // is running: talking into a muted microphone is the single most
             // expensive mistake this application can let somebody make, and the
             // menu bar is the only part of it they are looking at.
+            //
+            // Which is why the mark has two muted states rather than one. The
+            // window can say "muted, but talking" all it likes; nobody is
+            // looking at the window — they are looking at the call. So when the
+            // system's own detector says somebody is speaking into a muted
+            // microphone, the badge grows and takes a ring, and that change is
+            // visible out of the corner of an eye at eighteen points. A warning
+            // nobody sees is not a warning.
+            let alarmed = isSpeakingWhileMuted
             NSColor.systemRed.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 5.5, y: 0, width: 4, height: 4)).fill()
+            let badge =
+                alarmed
+                ? NSRect(x: 4.5, y: -0.5, width: 6, height: 6)
+                : NSRect(x: 5.5, y: 0, width: 4, height: 4)
+            NSBezierPath(ovalIn: badge).fill()
+            if alarmed {
+                // A ring rather than a bigger dot alone: at this size a dot one
+                // point larger is not a difference anybody notices, and the
+                // whole value of this is being noticed without being looked at.
+                NSColor.systemRed.withAlphaComponent(0.55).setStroke()
+                let ring = NSBezierPath(ovalIn: badge.insetBy(dx: -2, dy: -2))
+                ring.lineWidth = 1
+                ring.stroke()
+            }
             // A bar across it, so it reads as muted rather than as some other
             // kind of red — the shape has to survive being four pixels wide.
             NSColor.systemRed.setStroke()

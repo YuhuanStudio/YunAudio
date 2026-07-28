@@ -2,6 +2,7 @@ import CoreAudio
 import Foundation
 import Testing
 
+import AppKit
 @testable import YunAudioApp
 @testable import YunAudioHAL
 @testable import YunAudioRazer
@@ -1400,5 +1401,54 @@ struct ChannelDefaultTests {
         }
         #expect(
             RouterModel.defaultChannelChoice(inputChannels: 2, names: names).mode == SourceChannelMode.stereo)
+    }
+}
+
+/// The menu bar mark, which is the only part of this application somebody is
+/// looking at while they are on a call.
+///
+/// It has three states and they have to be distinguishable at eighteen points:
+/// idle, muted, and muted while the system's own detector can hear somebody
+/// speaking. The third is the one worth the drawing — the window can say
+/// "muted, but talking" all it likes, and nobody is looking at the window.
+///
+/// Asserted as pixels rather than by eye. "These two look different" is exactly
+/// the kind of claim that is obviously true until a badge one point larger
+/// turns out to be no difference at all.
+@MainActor
+@Suite("The menu bar mark")
+struct StatusMarkTests {
+
+    private func pixels(_ image: NSImage?) throws -> Data {
+        let image = try #require(image)
+        return try #require(image.tiffRepresentation)
+    }
+
+    @Test("muted and muted-while-talking are not the same mark")
+    func alarmedDiffersFromMuted() throws {
+        let muted = try pixels(
+            StatusItemController.statusImage(level: nil, isMuted: true))
+        let alarmed = try pixels(
+            StatusItemController.statusImage(
+                level: nil, isMuted: true, isSpeakingWhileMuted: true))
+        #expect(muted != alarmed)
+    }
+
+    /// And the alarm only ever means something alongside a mute. Voice activity
+    /// on a live microphone is a meter, not a warning, and drawing it as one
+    /// would make the warning meaningless by being on all the time.
+    @Test("speaking on a live microphone changes nothing")
+    func speakingUnmutedIsNotAWarning() throws {
+        let plain = try pixels(StatusItemController.statusImage(level: 0.4))
+        let same = try pixels(
+            StatusItemController.statusImage(level: 0.4, isSpeakingWhileMuted: true))
+        #expect(plain == same)
+    }
+
+    @Test("and every state is drawn at all")
+    func everyStateDraws() throws {
+        #expect(StatusItemController.statusImage(level: nil) != nil)
+        #expect(StatusItemController.statusImage(level: 0.5) != nil)
+        #expect(StatusItemController.statusImage(level: nil, isMuted: true) != nil)
     }
 }
