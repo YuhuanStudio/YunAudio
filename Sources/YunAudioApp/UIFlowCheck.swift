@@ -1204,6 +1204,7 @@ enum UIFlowCheck {
             let routesBefore = model.activeRoutes.count
             model.monitorDeviceUID = monitor.uid
             await waitUntil("the monitor came up", { !model.isBusy }, timeout: 12)
+            if let error = model.lastError { note("the monitor said: \(error)") }
             check("no error was reported", model.lastError == nil)
             check("still routing", model.isRunning)
             check("monitoring added routes", model.activeRoutes.count > routesBefore)
@@ -1275,6 +1276,27 @@ enum UIFlowCheck {
             check("routing continues without it", model.isRunning)
             check(
                 "the extra routes went away", model.activeRoutes.count == routesBefore)
+
+            // Handed on the way it was received, because a monitor is the one
+            // thing this section attaches that can fail to start — a display's
+            // audio endpoint is the ordinary case, and attaching one takes the
+            // whole route down rather than only the second mix. Taking it back
+            // out does not bring the route back: `restartIfRunning` returns
+            // immediately while nothing is running, so the route stays down for
+            // every section after this one.
+            //
+            // Measured: three consecutive runs on this machine where the note
+            // above read "1 → 0 routes on PG32UCDM" — a display's audio
+            // endpoint — after which every remaining section ran against a dead
+            // route. It surfaced two minutes later as twelve failures in the
+            // echo canceller and the preset, which read like the canceller
+            // misbehaving and are nothing of the sort. The section that broke
+            // the route is the section that has to say so and put it back.
+            if !model.isRunning {
+                note("the monitor took the route down with it — starting again without one")
+                await bringRoutingBack(model)
+                check("and the route comes back without a monitor", model.isRunning)
+            }
         } else {
             note("no second output to monitor on — skipped")
         }
@@ -1617,6 +1639,19 @@ enum UIFlowCheck {
                 timeout: 12)
             check("no error on the way out", model.lastError == nil)
             check("routing continues without it", !model.activeRoutes.isEmpty)
+            // Taking the canceller out is a restart, and a restart that fails
+            // leaves the route down for good: nothing else in the run asks for
+            // it back, because every later setting goes through
+            // `restartIfRunning`, which returns immediately while nothing is
+            // running. The three checks above are the honest report of that;
+            // the four in the section below are not, and neither are the twenty
+            // sections after those. Whichever section breaks the route is the
+            // section that has to say so and put it back.
+            if !model.isRunning {
+                note("the route did not survive the canceller leaving — starting it again")
+                await bringRoutingBack(model)
+                check("and it can be started again", model.isRunning)
+            }
         }
 
         try section("applying a preset while running")
@@ -1625,10 +1660,30 @@ enum UIFlowCheck {
         // down and rebuild it three times for a single click.
         let cyclesBeforePreset = model.cycleCountForDiagnostics
         model.apply(.recording)
-        await pause(upTo: 1.5, until: { model.isRunning && !model.isBusy })
+        await pause(upTo: 8.0, until: { model.isRunning && !model.isBusy })
         check("still running after a preset", model.isRunning)
         check("no error after a preset", model.lastError == nil)
-        check("audio came back", model.cycleCountForDiagnostics > cyclesBeforePreset)
+        // Sampled after the rebuild, not before it. A preset that changes a
+        // sample rate or a buffer is a rebuild, and a rebuild frees the RCU
+        // cell the counter lives in and makes a new one — so the count starts
+        // again from zero and comparing it with the value from before the
+        // preset compares two different counters. It passed only while the
+        // route happened to have restarted moments earlier and had not yet
+        // counted past it. Measured on this machine: 101 cycles before the
+        // preset and 8 after it, reported as "audio came back" failing on a
+        // route that was running perfectly. The same mistake is written up in
+        // "switching channel mode while running".
+        //
+        // The wait is eight seconds rather than one and a half for the other
+        // half of it: a preset that moves a sample rate is a real rebuild, and
+        // one and a half seconds was not always enough for it, so the counter
+        // was sometimes read at zero while the new graph was still being built.
+        let cyclesAfterPreset = model.cycleCountForDiagnostics
+        await pause(0.4)
+        check(
+            "audio came back",
+            model.cycleCountForDiagnostics > cyclesAfterPreset)
+        note("\(cyclesBeforePreset) cycles before the preset, \(cyclesAfterPreset) after it")
         check("the preset reads as active", model.matches(.recording))
 
         // Every preset has to be distinguishable from every other, or two of
