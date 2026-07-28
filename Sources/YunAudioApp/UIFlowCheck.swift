@@ -2638,13 +2638,45 @@ enum UIFlowCheck {
             await waitUntil(
                 "the route moved to the decoy",
                 { model.selectedDestinationUID == decoy.uid }, timeout: 3)
-            await waitUntil("and came up on it", { model.isRunning }, timeout: 8)
+            // Whether the decoy can actually carry the route is a property of
+            // this machine rather than of the fall-back: an aggregate device
+            // cannot be a member of another aggregate, and this application
+            // builds one, so on a machine whose only removable device is a
+            // decoy the start fails with "output channel 0 … is not part of the
+            // aggregate" and the route is already down before anything is
+            // unplugged. Reported rather than asserted — what is being tested
+            // below is what happens when the device goes, and that is worth
+            // testing from either state.
+            //
+            // This used to be `waitUntil("and came up on it", isRunning)`, which
+            // asserted nothing at all: selecting a device restarts the route,
+            // the stop that begins the restart is queued rather than immediate,
+            // so `isRunning` was still true from the route being replaced and
+            // the wait returned about a millisecond after the assignment. It
+            // reported a route on the decoy for as long as it has existed, and
+            // there was never one.
+            await settle(model, timeout: 20)
+            let onTheDecoy =
+                model.isRunning
+                && model.activeRoutes.contains { $0.destination.deviceUID == decoy.uid }
+            note(
+                onTheDecoy
+                    ? "the route came up on the decoy"
+                    : "the decoy cannot carry a route here: "
+                        + (model.lastError ?? "no error given"))
 
             decoy.destroy()
-            // Until the router has noticed and moved, rather than two seconds
-            // whatever happens. What is asserted is where it ended up.
-            await pause(upTo: 2.0, until: { model.selectedDestinationUID != decoy.uid })
-            check("it did not stop", model.isRunning)
+            // Waited for rather than sampled at a fixed moment, and stated as
+            // what actually matters. Moving off a device that has gone means a
+            // real teardown and a real rebuild — seconds of device work — so "it
+            // is still running two seconds later" was a question only luck could
+            // answer, and it was the wrong question: the route legitimately
+            // comes down for a moment while it moves. What must not happen is
+            // that it stays down, which is exactly what did happen — the
+            // substitution re-pointed a model whose engine had stopped, and
+            // nothing started it again.
+            await waitUntil(
+                "it did not stay down", { model.isRunning && !model.isBusy }, timeout: 25)
             check("it moved to another output", model.selectedDestinationUID != decoy.uid)
             check("and remembers what it was forced off", model.displacedDestinationUID != nil)
             // The name has to survive the device being gone: it is not in any
@@ -2669,7 +2701,8 @@ enum UIFlowCheck {
                 note("only one output on this machine — the release was not exercised")
             }
             model.selectedDestinationUID = original
-            await waitUntil("and it is running again", { model.isRunning }, timeout: 8)
+            await waitUntil(
+                "and it is running again", { model.isRunning && !model.isBusy }, timeout: 20)
         } else {
             note("could not build a decoy device — skipped")
         }
@@ -2681,12 +2714,27 @@ enum UIFlowCheck {
         if !model.canCheckIntegrity {
             note("the destination has no input to read back from — skipped")
         } else {
+            // The check restores what it found: it stops the route afterwards
+            // and starts it again only if it was running to begin with, which is
+            // right — running one from an idle router should not leave audio
+            // flowing that nobody asked for. That makes "the route came back
+            // afterwards" a claim about this section only when a route was up
+            // before it, and asserting it against whatever the section above
+            // happened to leave behind made a failure here point at a fault
+            // somewhere else entirely. It did, for a while: the whole of this
+            // section's failure was the fall-back above leaving the route down.
+            await bringRoutingBack(model)
+            check("a route was up to be restored", model.isRunning)
             model.checkIntegrity()
             check("the check started", model.isCheckingIntegrity)
             await waitUntil(
                 "it finished", { !model.isCheckingIntegrity && !model.isBusy },
                 timeout: 40)
             check("a result came back", model.integrityResult != nil)
+            // The model already works out which of the two failures this was and
+            // says so in words somebody can act on; not printing it turned "a
+            // result came back ✗" into a line with no next step.
+            if let error = model.integrityError { note(error) }
             if let result = model.integrityResult {
                 note(result.summary)
                 check("samples were actually compared", result.comparedFrames > 0)
@@ -3369,18 +3417,37 @@ enum UIFlowCheck {
         }
 
         let everything = Set(RouterModel.GraphSetting.allCases)
-        check("a fresh route has everything pushed into it", model.appliedToGraph == everything)
 
-        // A route edit. `updateRoutes` carries the gains, the mutes, the
-        // recording rings and the ducking, and does not carry the headphone
-        // correction — the engine says in as many words that the model puts
-        // that back, and for a while nothing did.
+        // Set up before the question is asked rather than after it. What
+        // `appliedToGraph` records is what actually reached the graph, so the
+        // output correction is absent when no bus has a curve — which is
+        // correct, and is the ordinary state of a machine nobody has dialled a
+        // tone into. So "everything" quietly meant "the six that had something
+        // to push" while the assertion claimed seven. The section resets the
+        // curve on its way out, so every run arrived here with nothing to
+        // correct and failed on a route that was in fact complete.
         model.isDucking = true
         let profile = model.headphoneProfileName
         model.setGraphicBand(4, at: 5)
         await pause(0.3)
         check("a tone control is running", model.headphoneCurve != nil)
 
+        // And a route that really is fresh. `start` is the one publication that
+        // begins empty; dialling the band above went in through an edit, so the
+        // state has to be pushed through a stop and a start to be asking about
+        // the case this section is named for.
+        model.stop()
+        await waitUntil("the route came down to be rebuilt", { !model.isRunning }, timeout: 10)
+        await bringRoutingBack(model)
+        await waitUntil(
+            "and a fresh one came up", { model.isRunning && !model.isBusy }, timeout: 20)
+        await pause(0.4)
+        check("a fresh route has everything pushed into it", model.appliedToGraph == everything)
+
+        // A route edit. `updateRoutes` carries the gains, the mutes, the
+        // recording rings and the ducking, and does not carry the headphone
+        // correction — the engine says in as many words that the model puts
+        // that back, and for a while nothing did.
         let before = model.activeRoutes
         if let first = before.first {
             model.disconnectRoute(source: first.source, destination: first.destination)
