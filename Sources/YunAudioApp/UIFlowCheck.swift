@@ -79,7 +79,44 @@ enum UIFlowCheck {
         notes.append(text)
     }
 
+    /// Held for the whole run, so two copies cannot drive the same hardware.
+    ///
+    /// This check takes exclusive control of a real microphone and a real
+    /// output. Two of them at once do not produce two results — they produce
+    /// two wrong ones, because each takes devices the other is using. That
+    /// stayed theoretical until several agents started working on this project
+    /// in parallel, at which point a full run reported sixty-four failures,
+    /// every one of them a consequence of the very first line failing: "no
+    /// other copy is holding the devices".
+    ///
+    /// A file lock rather than a refusal. Refusing would make parallel work
+    /// impossible; waiting makes it merely serial, which is what sharing one
+    /// microphone means.
+    private static var lock: Int32 = -1
+
+    private static func takeTheHardware() async {
+        let path = "/tmp/yunaudio-flowcheck.lock"
+        lock = open(path, O_CREAT | O_RDWR, 0o666)
+        guard lock >= 0 else { return }
+        if flock(lock, LOCK_EX | LOCK_NB) == 0 { return }
+        print("waiting for another flow check to finish with the devices…")
+        // Blocking `flock` would be simpler and would block the run loop, which
+        // this process needs: the model hops through the main actor and would
+        // never make progress.
+        while flock(lock, LOCK_EX | LOCK_NB) != 0 {
+            try? await Task.sleep(for: .seconds(2))
+        }
+    }
+
+    private static func releaseTheHardware() {
+        guard lock >= 0 else { return }
+        flock(lock, LOCK_UN)
+        close(lock)
+        lock = -1
+    }
+
     static func run(model: RouterModel) async {
+        await takeTheHardware()
         section("launch state")
         // The single-instance guard is bypassed for this mode, so two copies
         // can be running at once — and when they are, they fight over the same
@@ -2109,6 +2146,7 @@ enum UIFlowCheck {
     }
 
     private static func summarise() {
+        releaseTheHardware()
         if !currentSection.isEmpty {
             sectionTimes.append((currentSection, Date().timeIntervalSince(sectionStarted)))
         }
