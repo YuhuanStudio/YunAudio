@@ -1496,3 +1496,31 @@ struct ShortDeviceNameTests {
         #expect(AudioDevice.shortName(of: "Some Device", manufacturer: "") == "Some Device")
     }
 }
+
+/// The sample rate as it is written on the screen.
+///
+/// Two places showed the same device at once and disagreed: the status bar said
+/// "44.1 kHz" and the settings window said "44 kHz", because one formatted to a
+/// decimal where there was one and the other took `Int` of the division. That
+/// is not a rounding difference — 44.1 kHz is the name of the rate, and 44 kHz
+/// is a rate nothing uses.
+@Suite("Writing a sample rate")
+struct SampleRateLabelTests {
+
+    @Test("a rate with a fraction keeps it")
+    func fractionalRates() {
+        #expect(Format.sampleRate(44100) == "44.1 kHz")
+        #expect(Format.sampleRate(88200) == "88.2 kHz")
+        #expect(Format.sampleRate(176_400) == "176.4 kHz")
+    }
+
+    /// And a whole one does not gain a ".0", which reads as a different kind of
+    /// number rather than as the same one written more carefully.
+    @Test("a whole rate stays whole")
+    func wholeRates() {
+        #expect(Format.sampleRate(48000) == "48 kHz")
+        #expect(Format.sampleRate(96000) == "96 kHz")
+        #expect(Format.sampleRate(192_000) == "192 kHz")
+        #expect(Format.sampleRate(8000) == "8 kHz")
+    }
+}

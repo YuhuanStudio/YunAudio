@@ -331,7 +331,7 @@ struct PreferencesWindow: View {
                     YunSegmented(
                         selection: $model.preferredSampleRate,
                         options: model.availableSampleRates.map {
-                            ($0, "\(Int($0 / 1000)) kHz")
+                            ($0, Format.sampleRate($0))
                         })
                     Text(
                         loc(

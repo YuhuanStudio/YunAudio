@@ -75,7 +75,7 @@ extension StatusPills {
                     id: "integrity", label: loc(quality.integrityKey),
                     tone: quality.isBitExact ? .success : .warning, showsDot: true))
             pills.append(
-                Pill(id: "rate", label: loc("Rate"), value: rate(quality.sampleRate)))
+                Pill(id: "rate", label: loc("Rate"), value: Format.sampleRate(quality.sampleRate)))
             pills.append(
                 Pill(id: "buffer", label: loc("Buffer"), value: "\(quality.bufferFrames) f"))
             pills.append(
@@ -171,13 +171,6 @@ extension StatusPills {
         return loc(model.isRunning ? "Routing" : "Idle")
     }
 
-    /// Kilohertz, with the decimal only where there is one: 44.1 needs it and
-    /// 48 reads as a different kind of number with ".0" stuck on the end.
-    private static func rate(_ hertz: Double) -> String {
-        let kilohertz = hertz / 1000
-        return String(
-            format: kilohertz == kilohertz.rounded() ? "%.0f kHz" : "%.1f kHz", kilohertz)
-    }
 
     /// How long, and how loud. The duration on its own says a file is growing;
     /// it does not say whether anything is in it.
