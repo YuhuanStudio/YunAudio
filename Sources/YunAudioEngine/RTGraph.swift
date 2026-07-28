@@ -1,3 +1,4 @@
+import Accelerate
 import CoreAudio
 import Foundation
 import YunAudioRT
@@ -907,15 +908,26 @@ func yunAudioIOProc(
         // every route all the time is worth more than the fraction of a percent
         // it costs.
         var energy: Float = 0
-        for frame in 0..<frames {
-            let sample = source[frame * sourceStride + sourceChannel]
-            destination[frame * destinationStride + destinationChannel] += sample * gain
+        // Hand-written and staying that way. The obvious rewrite is three
+        // strided Accelerate passes — vDSP_maxmgv, vDSP_svesq, vDSP_vsma — and
+        // it was tried and is slower: Accelerate's strided entry points fall
+        // back to scalar code, so all it buys is three call boundaries and
+        // three walks instead of one. Measured at 512 frames with two routes,
+        // 1501 ns a cycle against 954 for this loop. Interleaved audio is
+        // always strided, so the fast paths are never the ones taken.
+        var readAt = sourceChannel
+        var writeAt = destinationChannel
+        for _ in 0..<frames {
+            let sample = source[readAt]
+            destination[writeAt] += sample * gain
             // Metered before gain: a meter should show what arrived, not what
             // the fader did to it. It also lets a gain-0 route act as a pure
             // probe, which is how the loopback verification works.
             let magnitude = abs(sample)
             if magnitude > peak { peak = magnitude }
             energy += sample * sample
+            readAt += sourceStride
+            writeAt += destinationStride
         }
 
         // Into the stem scratch, before the fader and before the master: a
@@ -994,13 +1006,18 @@ func yunAudioIOProc(
     let master = graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain
     if master != 1 {
         let exempt = Int(graph.pointee.masterExemptBuffer)
+        var scale = master
         for index in 0..<output.count where index != exempt {
             guard let data = output[index].mData else { continue }
             let samples = Int(output[index].mDataByteSize) / MemoryLayout<Float>.size
             let pointer = data.assumingMemoryBound(to: Float.self)
-            for sample in 0..<samples {
-                pointer[sample] *= master
-            }
+            guard samples > 0 else { continue }
+            // The bus is contiguous and every channel gets the same number, so
+            // this is one vector multiply rather than a loop that happens to do
+            // the same thing one sample at a time. Same arithmetic, same
+            // result: a scale is not an accumulation, so there is no rounding
+            // order to disagree about.
+            vDSP_vsmul(pointer, 1, &scale, pointer, 1, vDSP_Length(samples))
         }
     }
 
@@ -1014,11 +1031,18 @@ func yunAudioIOProc(
         let samples = Int(output[mainIndex].mDataByteSize) / MemoryLayout<Float>.size
         let pointer = data.assumingMemoryBound(to: Float.self)
         var peak: Float = 0
+        if samples > 0 {
+            vDSP_maxmgv(pointer, 1, &peak, vDSP_Length(samples))
+        }
+        // Counting the truncated samples is a second pass, and the peak has
+        // already answered whether there is anything to count: nothing on the
+        // bus can be at or past full scale if the loudest thing on it is
+        // below. So the count runs only when something has actually gone wrong,
+        // which is the state nobody is in — and the common path stops paying a
+        // per-sample comparison for a number that is always zero.
         var clipped: UInt64 = 0
-        for index in 0..<samples {
-            let magnitude = abs(pointer[index])
-            if magnitude > peak { peak = magnitude }
-            if magnitude >= 0.999 { clipped &+= 1 }
+        if peak >= 0.999 {
+            for index in 0..<samples where abs(pointer[index]) >= 0.999 { clipped &+= 1 }
         }
         let previous = graph.pointee.outputPeak
         graph.pointee.outputPeak = max(peak, previous * graph.pointee.peakDecay)
@@ -1047,13 +1071,20 @@ func yunAudioIOProc(
             // sixteen-channel virtual device carries silence on most of them,
             // and averaging those in would read fourteen units low.
             let folded = min(stride, 2)
-            let scale = 1 / Float(folded)
-            for frame in 0..<frames {
-                var sum: Float = 0
-                for channel in 0..<folded {
-                    sum += source[frame * stride + channel]
+            var scale = 1 / Float(folded)
+            if frames > 0 {
+                if folded == 2 {
+                    // (A + B) × ½ over strided pairs, which is what the loop
+                    // that was here computed one frame at a time.
+                    vDSP_vasm(
+                        source, stride, source + 1, stride, &scale, scratch, 1,
+                        vDSP_Length(frames))
+                } else {
+                    // A mono bus folds to itself. The scale is exactly one, so
+                    // this is a strided copy and not a multiply pretending to
+                    // be one.
+                    cblas_scopy(Int32(frames), source, Int32(stride), scratch, 1)
                 }
-                scratch[frame] = sum * scale
             }
             if frames > 0 {
                 _ = yun_rt_ring_write(ring, scratch, UInt32(frames))
@@ -1173,28 +1204,108 @@ func yunAudioIOProc(
             let state = graph.pointee.eqState
             let preamp = graph.pointee.eqPreampGain
 
-            for channel in 0..<channels {
-                for frame in 0..<frames {
-                    var value = samples[frame * stride + channel] * preamp
-                    for section in 0..<eqStages {
-                        let c = coefficients + section * 5
-                        // Direct form I: two input and two output history terms
-                        // per section per channel. Form I rather than II
-                        // because the state is per channel and interleaving the
-                        // channels through a shared accumulator is the classic
-                        // way to make a stereo filter sound like a mono one.
-                        let slot =
-                            state + (section * RTGraph.maximumEQChannels + channel) * 4
-                        let output =
-                            c[0] * value + c[1] * slot[0] + c[2] * slot[1] - c[3] * slot[2]
-                            - c[4] * slot[3]
-                        slot[1] = slot[0]
-                        slot[0] = value
-                        slot[3] = slot[2]
-                        slot[2] = output
-                        value = output
+            // Section outermost and frames innermost — the transpose of the
+            // obvious nesting, and the whole reason this stage is affordable.
+            //
+            // Written the other way round, every sample of every section
+            // reloaded five coefficients and four state words from memory and
+            // wrote four back, for nine floating-point operations. Turned
+            // inside out, one section's coefficients and one channel's history
+            // stay in registers for the whole block and the only memory traffic
+            // is the block itself. A cascade is linear, so section k sees
+            // exactly the same sequence of values in exactly the same order
+            // either way; the result is identical, not merely equivalent.
+            //
+            // Two channels are run together in the same loop for the same
+            // reason a biquad is slow in the first place: each output feeds the
+            // next input, so the loop is bound by the latency of the multiply
+            // chain rather than by throughput, and a second independent chain
+            // fills the gaps for free.
+            //
+            // Measured at 128 frames on stereo, cascade only, against the same
+            // graph with the correction switched off: a ten-section curve went
+            // from 4572 ns a cycle to 3256, and a twenty-four-section one from
+            // 14894 to 7756. The long curve gains most, which is the tell that
+            // what was being paid for was the reloading and not the arithmetic.
+            for section in 0..<eqStages {
+                let c = coefficients + section * 5
+                // Direct form I: two input and two output history terms per
+                // section per channel. Form I rather than II because the state
+                // is per channel, and running the channels through a shared
+                // accumulator is the classic way to make a stereo filter sound
+                // like a mono one.
+                let b0 = c[0]
+                let b1 = c[1]
+                let b2 = c[2]
+                let a1 = c[3]
+                let a2 = c[4]
+                // The headroom for the boost belongs ahead of the first section
+                // only; every later one is handed what the previous produced.
+                let gain = section == 0 ? preamp : 1
+                let sectionState = state + section * RTGraph.maximumEQChannels * 4
+
+                var channel = 0
+                while channel + 1 < channels {
+                    let left = sectionState + channel * 4
+                    let right = left + 4
+                    var lx1 = left[0]
+                    var lx2 = left[1]
+                    var ly1 = left[2]
+                    var ly2 = left[3]
+                    var rx1 = right[0]
+                    var rx2 = right[1]
+                    var ry1 = right[2]
+                    var ry2 = right[3]
+                    var index = channel
+                    for _ in 0..<frames {
+                        let lx = samples[index] * gain
+                        let rx = samples[index + 1] * gain
+                        let ly = b0 * lx + b1 * lx1 + b2 * lx2 - a1 * ly1 - a2 * ly2
+                        let ry = b0 * rx + b1 * rx1 + b2 * rx2 - a1 * ry1 - a2 * ry2
+                        lx2 = lx1
+                        lx1 = lx
+                        ly2 = ly1
+                        ly1 = ly
+                        rx2 = rx1
+                        rx1 = rx
+                        ry2 = ry1
+                        ry1 = ry
+                        samples[index] = ly
+                        samples[index + 1] = ry
+                        index += stride
                     }
-                    samples[frame * stride + channel] = value
+                    left[0] = lx1
+                    left[1] = lx2
+                    left[2] = ly1
+                    left[3] = ly2
+                    right[0] = rx1
+                    right[1] = rx2
+                    right[2] = ry1
+                    right[3] = ry2
+                    channel += 2
+                }
+
+                if channel < channels {
+                    let slot = sectionState + channel * 4
+                    var x1 = slot[0]
+                    var x2 = slot[1]
+                    var y1 = slot[2]
+                    var y2 = slot[3]
+                    var index = channel
+                    for _ in 0..<frames {
+                        let x = samples[index] * gain
+                        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+                        x2 = x1
+                        x1 = x
+                        y2 = y1
+                        y1 = y
+                        samples[index] = y
+                        index += stride
+                    }
+                    slot[0] = x1
+                    slot[1] = x2
+                    slot[2] = y1
+                    slot[3] = y2
                 }
             }
         }
@@ -1207,4 +1318,229 @@ func yunAudioIOProc(
 
     graph.pointee.cycleCounter.pointee &+= 1
     return noErr
+}
+
+// MARK: - Measuring the callback
+
+/// Drives `yunAudioIOProc` on synthetic buffers, with no audio device involved.
+///
+/// `soak` reports the whole process at a fraction of one percent of one core.
+/// That is the right number for "is this cheap to leave running for an hour"
+/// and far too coarse to see a change inside the route loop: at 128 frames the
+/// callback runs for a few microseconds out of every 2.7 milliseconds, so
+/// halving its cost moves the soak figure by less than its run-to-run scatter.
+/// This puts the callback on a treadmill instead — one graph, one pair of buffer
+/// lists, a fixed number of cycles — and reports nanoseconds per cycle, which
+/// moves when the arithmetic does.
+///
+/// It is not a substitute for the soak. It cannot see anything that only
+/// happens against a real device: drift, the clock lock, or the cost of the
+/// rings' other end. It answers one question, which is what a change to this
+/// file did to this file.
+public enum RTBenchmark {
+
+    public struct Options: Sendable {
+        /// Frames per cycle, as the device would ask for.
+        public var frames: Int
+        /// Routes into the destination bus, round-robin across its channels.
+        public var routes: Int
+        /// Further routes into the monitor bus, which is what direct monitoring
+        /// builds and what the headphone correction runs on.
+        ///
+        /// Worth having as its own knob because without it the monitor is
+        /// silent, and a biquad cascade filtering silence is a measurement of
+        /// nothing — the checksum was identical with the EQ on and off, which is
+        /// how that was noticed.
+        public var monitorRoutes: Int
+        /// Biquad sections of headphone correction on the monitor buffer.
+        public var eqStages: Int
+        /// Whether the mono fold for the analysers runs.
+        public var analysis: Bool
+        /// Whether the destination bus is also fed to a recording ring.
+        public var record: Bool
+        /// A master other than 1 makes the whole-bus gain pass run.
+        public var master: Float
+
+        public init(
+            frames: Int = 128, routes: Int = 2, monitorRoutes: Int = 0, eqStages: Int = 0,
+            analysis: Bool = false, record: Bool = false, master: Float = 1
+        ) {
+            self.frames = frames
+            self.routes = routes
+            self.monitorRoutes = monitorRoutes
+            self.eqStages = eqStages
+            self.analysis = analysis
+            self.record = record
+            self.master = master
+        }
+    }
+
+    public struct Result: Sendable {
+        /// Wall-clock nanoseconds one call to the callback costs.
+        public var nanosecondsPerCycle: Double
+        /// What the tripwire counted while the treadmill was running. Any number
+        /// but zero in a release build is a broken invariant, not a slow one.
+        public var allocations: UInt64
+        /// A fingerprint of everything the cycle produced — the destination bus,
+        /// the monitor, and every meter.
+        ///
+        /// Here so that a faster route loop can be shown to be the *same* route
+        /// loop. A speedup that quietly stopped writing a channel would leave
+        /// the timing looking excellent and this number looking different.
+        public var checksum: Double
+    }
+
+    /// Runs `cycles` callbacks and reports what one cost.
+    public static func run(_ options: Options, cycles: Int) -> Result {
+        let frames = max(options.frames, 1)
+        let routeCount = max(options.routes, 1)
+
+        // Two output buffers, main second: the monitor being buffer zero is the
+        // ordering the callback historically got wrong, so it is the one worth
+        // benchmarking.
+        let inputChannels = 2
+        let outputChannels = [2, 2]
+        let mainIndex = 1
+
+        let inputStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: frames * inputChannels)
+        // A sine rather than zeros or a constant. Zeros are not representative:
+        // they make every peak comparison predictable and, on some paths, keep
+        // the arithmetic away from the denormal range entirely.
+        for frame in 0..<frames {
+            let value = Float(sin(Double(frame) * 0.05)) * 0.5
+            for channel in 0..<inputChannels {
+                inputStorage[frame * inputChannels + channel] =
+                    channel == 0 ? value : value * 0.7
+            }
+        }
+        let inputList = AudioBufferList.allocate(maximumBuffers: 1)
+        inputList[0] = AudioBuffer(
+            mNumberChannels: UInt32(inputChannels),
+            mDataByteSize: UInt32(frames * inputChannels * MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(inputStorage))
+
+        var outputStorage: [UnsafeMutablePointer<Float>] = []
+        let outputList = AudioBufferList.allocate(maximumBuffers: outputChannels.count)
+        for (index, channels) in outputChannels.enumerated() {
+            let pointer = UnsafeMutablePointer<Float>.allocate(capacity: frames * channels)
+            pointer.initialize(repeating: 0, count: frames * channels)
+            outputStorage.append(pointer)
+            outputList[index] = AudioBuffer(
+                mNumberChannels: UInt32(channels),
+                mDataByteSize: UInt32(frames * channels * MemoryLayout<Float>.size),
+                mData: UnsafeMutableRawPointer(pointer))
+        }
+
+        var routes: [RTRoute] = []
+        for index in 0..<routeCount {
+            routes.append(
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: Int32(index % inputChannels),
+                    destinationBuffer: Int32(mainIndex),
+                    destinationChannel: Int32(index % 2),
+                    gain: 0.8, appliesInputTrim: index == 0))
+        }
+        for index in 0..<max(options.monitorRoutes, 0) {
+            routes.append(
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: Int32(index % inputChannels),
+                    destinationBuffer: 0, destinationChannel: Int32(index % 2),
+                    gain: 0.9, appliesInputTrim: true))
+        }
+        let graph = RTGraph.allocate(routes: routes, bufferFrames: frames)
+        graph.pointee.mainOutputBuffer = Int32(mainIndex)
+        graph.pointee.masterExemptBuffer = 0
+        graph.pointee.outputGain = options.master
+        graph.pointee.analysisEnabled = options.analysis ? 1 : 0
+
+        var recordRing: OpaquePointer?
+        if options.record {
+            recordRing = yun_rt_ring_create(UInt32(max(frames * 8, 4096)))
+            graph.pointee.recordRing = recordRing
+            graph.pointee.recordChannels = 2
+        }
+
+        if options.eqStages > 0 {
+            let stages = min(options.eqStages, RTGraph.maximumEQStages)
+            // A gentle peaking section repeated. The coefficients only have to
+            // be stable — what is being timed is the cascade, not the curve.
+            for section in 0..<stages {
+                let base = graph.pointee.eqCoefficients + section * 5
+                base[0] = 1.0009
+                base[1] = -1.9781
+                base[2] = 0.9781
+                base[3] = -1.9781
+                base[4] = 0.9790
+            }
+            graph.pointee.eqStages = Int32(stages)
+            graph.pointee.eqChannels = 2
+            graph.pointee.eqBuffer = 0
+            graph.pointee.eqPreampGain = 0.9
+        }
+
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mFlags = .sampleTimeValid
+
+        /// The rings are finite and nothing is draining them here, so they fill
+        /// and then reject every write — which is not the cost the shipping app
+        /// pays. Resetting them keeps the ring writes on their real path.
+        func drainRings() {
+            if let ring = graph.pointee.analysisRing {
+                _ = yun_rt_ring_read(ring, graph.pointee.analysisScratch, UInt32(frames * 4))
+            }
+            if let ring = recordRing {
+                _ = yun_rt_ring_read(ring, graph.pointee.recordScratch, UInt32(frames * 8))
+            }
+        }
+
+        func spin(_ count: Int) {
+            for cycle in 0..<count {
+                time.mSampleTime = Double(cycle * frames)
+                _ = yunAudioIOProc(
+                    0, &now, UnsafePointer(inputList.unsafeMutablePointer), &time,
+                    outputList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+                if cycle % 8 == 7 { drainRings() }
+            }
+        }
+
+        // Warm the caches and let the biquad state settle before the clock
+        // starts; a cold first cycle is a page-fault measurement, not this one.
+        spin(min(cycles, 2000))
+
+        let violationsBefore = yun_rt_tripwire_violations()
+        let started = DispatchTime.now().uptimeNanoseconds
+        spin(cycles)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let violations = yun_rt_tripwire_violations() - violationsBefore
+
+        var checksum = 0.0
+        for (index, channels) in outputChannels.enumerated() {
+            let pointer = outputStorage[index]
+            for sample in 0..<(frames * channels) {
+                checksum += Double(pointer[sample])
+            }
+        }
+        for index in 0..<routes.count {
+            checksum += Double(graph.pointee.peaks[index])
+            checksum += Double(graph.pointee.rms[index])
+        }
+        checksum += Double(graph.pointee.outputPeak)
+
+        yun_rt_cell_free(cell)
+        if let recordRing { yun_rt_ring_free(recordRing) }
+        graph.pointee.recordRing = nil
+        RTGraph.deallocate(graph)
+        inputStorage.deallocate()
+        free(inputList.unsafeMutablePointer)
+        for pointer in outputStorage { pointer.deallocate() }
+        free(outputList.unsafeMutablePointer)
+
+        return Result(
+            nanosecondsPerCycle: Double(elapsed) / Double(max(cycles, 1)),
+            allocations: violations,
+            checksum: checksum)
+    }
 }

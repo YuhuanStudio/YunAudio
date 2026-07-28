@@ -1668,6 +1668,76 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec" {
     exit(0)
 }
 
+// Times the IO callback itself, off any device.
+//
+// `soak` says what the whole application costs and is the only thing that can;
+// it also cannot resolve a change inside the route loop, because the callback
+// occupies a few microseconds of every 2.7 milliseconds and the rest of the
+// figure is everything else. This runs the callback and nothing else, so a
+// change to the arithmetic shows up as nanoseconds rather than as noise.
+//
+// The checksum is printed on purpose: two builds that disagree about it are
+// not two speeds of the same router.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
+    let cycles =
+        CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2]) ?? 50_000 : 50_000
+
+    RoutingEngine.enableAllocationTripwire()
+
+    let cases: [(String, RTBenchmark.Options)] = [
+        ("stereo route, nothing else", .init(frames: 128, routes: 2)),
+        ("stereo route, 512 frames", .init(frames: 512, routes: 2)),
+        ("eight routes", .init(frames: 128, routes: 8)),
+        ("+ master fader", .init(frames: 128, routes: 2, master: 0.7)),
+        ("+ analysis fold", .init(frames: 128, routes: 2, analysis: true)),
+        ("+ recording", .init(frames: 128, routes: 2, record: true)),
+        ("stereo + monitor", .init(frames: 128, routes: 2, monitorRoutes: 2)),
+        ("+ 10-section EQ", .init(frames: 128, routes: 2, monitorRoutes: 2, eqStages: 10)),
+        ("+ 24-section EQ", .init(frames: 128, routes: 2, monitorRoutes: 2, eqStages: 24)),
+        (
+            "everything on",
+            .init(
+                frames: 128, routes: 8, monitorRoutes: 2, eqStages: 10,
+                analysis: true, record: true, master: 0.7)
+        ),
+    ]
+
+    print("  best of 5 runs of \(cycles) cycles each\n")
+    print("  case                          ns/cycle   ns/frame   alloc   checksum")
+    var broke = false
+    for (name, options) in cases {
+        // Best of several rather than the mean. The distribution is one-sided:
+        // nothing makes a run faster than the work takes, and everything else
+        // on the machine can make one slower. Averaging measures the other
+        // tenants; the minimum measures this code. It is also what brought the
+        // run-to-run scatter on the cheap cases down from 35% to about 2%,
+        // which is the difference between seeing a change and guessing at one.
+        var best = Double.infinity
+        var allocations: UInt64 = 0
+        var checksum = 0.0
+        for _ in 0..<5 {
+            let result = RTBenchmark.run(options, cycles: cycles)
+            best = min(best, result.nanosecondsPerCycle)
+            allocations += result.allocations
+            checksum = result.checksum
+        }
+        print(
+            String(
+                format: "  %-28s %8.1f %10.2f %7llu   %+.6e",
+                (name as NSString).utf8String!, best,
+                best / Double(options.frames), allocations, checksum))
+        if allocations > 0 { broke = true }
+    }
+
+    RoutingEngine.disableAllocationTripwire()
+    if broke {
+        print("\nsomething on the IO thread allocated — that is the invariant, not the timing")
+        exit(1)
+    }
+    print("\nno allocation on the IO thread in any case")
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "dsp" {
     for frames in [64, 128, 256, 512] {
         print(SoundIsolation.probe(sampleRate: 48000, blockFrames: frames).summary)

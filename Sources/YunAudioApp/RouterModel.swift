@@ -2723,33 +2723,128 @@ final class RouterModel {
         levelTimer = nil
     }
 
+    /// What the poll cost and how much of it nobody needed.
+    ///
+    /// Kept out of observation on purpose: a counter of invalidations that
+    /// itself invalidated every view would be a fine joke and a poor
+    /// measurement.
+    struct PollCost: Sendable {
+        var polls = 0
+        /// Wall-clock seconds spent inside `poll()`.
+        var seconds = 0.0
+        /// Observable properties the poll assigned to.
+        var writes = 0
+        /// How many of those assignments were the value already there.
+        var unchanged = 0
+    }
+
+    @ObservationIgnored private(set) var pollCost = PollCost()
+
+    /// Seconds spent in each part of the poll, while somebody is asking.
+    ///
+    /// Off by default and switched on by the flow check around its own
+    /// measurement. Left permanently on it would be eleven string hashes a poll
+    /// against a budget of about a hundred microseconds, which is a
+    /// measurement large enough to be part of what it measures.
+    @ObservationIgnored var measuresPollBreakdown = false
+    @ObservationIgnored private(set) var pollBreakdown: [String: Double] = [:]
+
+    func resetPollCost() {
+        pollCost = PollCost()
+        pollBreakdown = [:]
+    }
+
+    /// How many polls apart the path verdict is re-read.
+    ///
+    /// `engine.pathQuality` is not a stored value: answering it asks the HAL
+    /// which sub-devices are being drift-corrected, whether the destination
+    /// attenuates, what the buffer size is and what the sample rate is — half a
+    /// dozen synchronous round trips to `coreaudiod`. Measured at **1478 µs**,
+    /// which at twenty hertz was 2.96% of one core spent re-deriving a verdict
+    /// that only changes when somebody changes a device.
+    ///
+    /// Ten polls is twice a second. Nothing that can move it happens faster
+    /// than a person: every one of its inputs is on the far side of a route
+    /// rebuild, which is seconds of device work. It is also re-read
+    /// unconditionally whenever there is no verdict yet, so a route coming up
+    /// reports immediately rather than up to half a second later — that
+    /// mattered, because "say when the path is no longer clean" is a promise
+    /// this application makes and a stale pill would be breaking it.
+    private static let pathQualityEveryNPolls = 10
+
+    @ObservationIgnored private var pollsSincePathQuality = 0
+
+    /// Assigns only when the value actually moved.
+    ///
+    /// Every stored property of an `@Observable` publishes on *assignment*, not
+    /// on change. `pathQuality = engine.pathQuality` therefore invalidates every
+    /// view that ever read it, twenty times a second, whether or not the verdict
+    /// has moved — and the verdict moves when somebody switches a device.
+    /// Measured on an idle running route with the window open, seven of the nine
+    /// properties this poll writes never changed at all, and the two that did
+    /// were the meters.
+    ///
+    /// The comparison is not free, but it is a float or a small enum against a
+    /// SwiftUI body re-evaluation, and it is not close.
+    private func publish<Value: Equatable>(
+        _ value: Value, to keyPath: ReferenceWritableKeyPath<RouterModel, Value>
+    ) {
+        pollCost.writes += 1
+        guard self[keyPath: keyPath] != value else {
+            pollCost.unchanged += 1
+            return
+        }
+        self[keyPath: keyPath] = value
+    }
+
     private func poll() {
         guard isRunning else { return }
-        levels = engine.routePeaks
-        refreshPeaks(levels)
-        pathQuality = engine.pathQuality
-        isClockLocked = engine.isClockLocked
-        measuredRateRatio = engine.measuredRateRatio
-        refreshRecordingState()
-        outputPeak = engine.outputPeak
-        if failedPlugins != engine.failedPlugins { failedPlugins = engine.failedPlugins }
-        outputClippedSamples = engine.outputClippedSamples
+        let started = DispatchTime.now().uptimeNanoseconds
+        defer {
+            pollCost.polls += 1
+            pollCost.seconds +=
+                Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        }
+        func lap(_ name: String, _ body: () -> Void) {
+            guard measuresPollBreakdown else { return body() }
+            let entered = DispatchTime.now().uptimeNanoseconds
+            body()
+            pollBreakdown[name, default: 0] +=
+                Double(DispatchTime.now().uptimeNanoseconds - entered) / 1e9
+        }
+        lap("routePeaks") { publish(engine.routePeaks, to: \.levels) }
+        lap("refreshPeaks") { refreshPeaks(levels) }
+        // Twice a second rather than twenty times, and at once when there is no
+        // verdict yet. See `pathQualityEveryNPolls`.
+        pollsSincePathQuality += 1
+        if pathQuality == nil || pollsSincePathQuality >= Self.pathQualityEveryNPolls {
+            pollsSincePathQuality = 0
+            lap("pathQuality") { publish(engine.pathQuality, to: \.pathQuality) }
+        }
+        lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }
+        lap("rateRatio") { publish(engine.measuredRateRatio, to: \.measuredRateRatio) }
+        lap("recordingState") { refreshRecordingState() }
+        lap("outputPeak") { publish(engine.outputPeak, to: \.outputPeak) }
+        lap("failedPlugins") { publish(engine.failedPlugins, to: \.failedPlugins) }
+        lap("clipped") { publish(engine.outputClippedSamples, to: \.outputClippedSamples) }
         // Drained every poll whether or not the analysis panel is open. The ring
         // is finite, so a consumer that only ran while a view was visible would
         // hand the loudness meter a stream with holes in it and report an
         // integrated figure for audio it never saw.
-        refreshAnalysisNeeds()
-        if let analyser, !analyser.isIdle {
-            analyser.drain(from: engine)
-            analysis = analyser.reading()
+        lap("analysisNeeds") { refreshAnalysisNeeds() }
+        lap("analyser") {
+            if let analyser, !analyser.isIdle {
+                analyser.drain(from: engine)
+                analysis = analyser.reading()
+            }
         }
         if isTranscribing { pumpTranscription() }
-        refreshGainReduction()
-        refreshDucking()
+        lap("gainReduction") { refreshGainReduction() }
+        lap("ducking") { refreshDucking() }
         if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
-        lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
+        lap("lighting") { lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted) }
     }
 
     // MARK: Transcription
