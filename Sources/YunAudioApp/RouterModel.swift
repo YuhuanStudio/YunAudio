@@ -1523,6 +1523,22 @@ final class RouterModel {
         return Double(engine.effectLatencyFrames) / rate * 1000
     }
 
+    /// What the whole path costs, in milliseconds.
+    ///
+    /// One IO cycle, the destination's own reported latency and safety offset,
+    /// and whatever the enabled stages add. The buffer alone was the only
+    /// figure on show along the bottom of the window, and it is the flattering
+    /// one: a chain adding 56 ms of voice isolation to a 2.7 ms buffer still
+    /// read "2.67 ms" there. Zero when nothing is running, because there is no
+    /// measurement to report rather than a very good one.
+    var pathLatencyMilliseconds: Double {
+        guard let quality = pathQuality, quality.sampleRate > 0 else { return 0 }
+        let deviceFrames = Double(
+            selectedDestination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0)
+        return (Double(quality.bufferFrames) + deviceFrames) / quality.sampleRate * 1000
+            + addedLatencyMilliseconds
+    }
+
     /// Latency the isolation stage adds, in milliseconds.
     var voiceIsolationLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000

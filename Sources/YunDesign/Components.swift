@@ -166,31 +166,174 @@ public enum YunStatusTone {
 /// A small labelled pill. Status colour is carried by the dot and the text, not
 /// by a saturated fill — the fill stays neutral so several pills can sit
 /// together without the panel turning into a traffic light.
+///
+/// The optional value is kept apart from the label and set in the mono face,
+/// because a row of these is read by scanning down the numbers: "Buffer 128 f"
+/// and "Latency 2.7 ms" only line up if the digits are all the same width.
 public struct YunStatusPill: View {
     private let text: String
+    private let value: String?
+    private let systemImage: String?
     private let tone: YunStatusTone
     private let showsDot: Bool
 
-    public init(_ text: String, tone: YunStatusTone = .neutral, showsDot: Bool = true) {
+    public init(
+        _ text: String,
+        value: String? = nil,
+        systemImage: String? = nil,
+        tone: YunStatusTone = .neutral,
+        showsDot: Bool = true
+    ) {
         self.text = text
+        self.value = value
+        self.systemImage = systemImage
         self.tone = tone
         self.showsDot = showsDot
     }
 
+    private var labelColour: Color {
+        tone == .neutral ? Yun.Palette.textSecondary : tone.color
+    }
+
     public var body: some View {
         HStack(spacing: Yun.Space.xs + 2) {
-            if showsDot {
+            // A glyph stands in for the dot rather than sitting beside it: two
+            // marks in front of two words is a badge, not a pill.
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(labelColour)
+            } else if showsDot {
                 Circle()
                     .fill(tone.color)
                     .frame(width: 6, height: 6)
             }
             Text(text)
                 .font(Yun.Text.caption)
-                .foregroundStyle(tone == .neutral ? Yun.Palette.textSecondary : tone.color)
+                .foregroundStyle(labelColour)
+            if let value {
+                Text(value)
+                    .font(Yun.Text.mono)
+                    .monospacedDigit()
+                    .foregroundStyle(
+                        tone == .neutral ? Yun.Palette.textPrimary : tone.color)
+            }
         }
+        .lineLimit(1)
+        // A pill is the width of what is in it. It has to say so itself: the
+        // wrapping row asks each of them for a size before it decides where the
+        // line breaks, and a pill that answers "as much as you have" would put
+        // every row's first pill on a line of its own.
+        .fixedSize()
         .padding(.horizontal, Yun.Space.sm)
         .padding(.vertical, 4)
-        .background(Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.pill))
+        .modifier(PillSurface())
+    }
+}
+
+/// The pill's own surface, in whichever look the application is wearing.
+///
+/// Applied per pill rather than behind the row: a capsule of material is the
+/// shape the system's own status chips take, and one sheet behind all of them
+/// would read as a bar again — which is the thing the row of pills replaced.
+private struct PillSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        switch YunTheme.shared.style {
+        case .flat:
+            // The border is the full weight rather than the hairline. A pill
+            // fill is one step off the card it usually sits on and no steps at
+            // all off the window background, so on light the row along the
+            // bottom photographed as loose text with dots beside it — the
+            // shapes were there in the tree and not on the screen.
+            content
+                .background(Yun.Palette.elevated, in: .capsule)
+                .overlay {
+                    Capsule().strokeBorder(Yun.Palette.border, lineWidth: 1)
+                }
+        case .glass:
+            // With an edge, unlike the cards. Photographed over a plain dark
+            // desktop the material had nothing to pick up and the pill lost its
+            // shape entirely — a chip the size of two words has no interior for
+            // the effect to show in, so the outline is what makes it a pill
+            // rather than text lying on the window.
+            content
+                .glassEffect(.regular, in: .capsule)
+                .overlay {
+                    Capsule().strokeBorder(Yun.Palette.border, lineWidth: 1)
+                }
+        }
+    }
+}
+
+// MARK: - Wrapping row
+
+/// Lays its children out left to right, starting a new line when the next one
+/// will not fit.
+///
+/// `HStack` cannot wrap and `LazyVGrid` would give every cell the same width,
+/// which is wrong for content ranging from "REC" to "128 f · 2.67 ms". The
+/// status pills have to wrap at the panel's 340 points and must not at the
+/// window's 980; one layout that is right at both widths is cheaper than two
+/// designs of the same row that can disagree.
+public struct YunWrap: Layout {
+    private let spacing: CGFloat
+    private let lineSpacing: CGFloat
+
+    public init(spacing: CGFloat = Yun.Space.sm, lineSpacing: CGFloat = 6) {
+        self.spacing = spacing
+        self.lineSpacing = lineSpacing
+    }
+
+    private struct Line {
+        var indices: [Int] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func lines(within maxWidth: CGFloat, subviews: Subviews) -> [Line] {
+        var lines: [Line] = []
+        var current = Line()
+        for index in subviews.indices {
+            let size = subviews[index].sizeThatFits(.unspecified)
+            let advance = current.indices.isEmpty ? size.width : size.width + spacing
+            if !current.indices.isEmpty, current.width + advance > maxWidth {
+                lines.append(current)
+                current = Line(indices: [index], width: size.width, height: size.height)
+                continue
+            }
+            current.indices.append(index)
+            current.width += advance
+            current.height = max(current.height, size.height)
+        }
+        if !current.indices.isEmpty { lines.append(current) }
+        return lines
+    }
+
+    public func sizeThatFits(
+        proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) -> CGSize {
+        let lines = lines(within: proposal.width ?? .infinity, subviews: subviews)
+        let height =
+            lines.map(\.height).reduce(0, +)
+            + lineSpacing * CGFloat(max(0, lines.count - 1))
+        return CGSize(width: lines.map(\.width).max() ?? 0, height: height)
+    }
+
+    public func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        var y = bounds.minY
+        for line in lines(within: bounds.width, subviews: subviews) {
+            var x = bounds.minX
+            for index in line.indices {
+                let size = subviews[index].sizeThatFits(.unspecified)
+                subviews[index].place(
+                    at: CGPoint(x: x, y: y + (line.height - size.height) / 2),
+                    proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += line.height + lineSpacing
+        }
     }
 }
 

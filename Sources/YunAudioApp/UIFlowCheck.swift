@@ -430,7 +430,8 @@ enum UIFlowCheck {
             // unwinds, and `start()` returns immediately while it is set — so
             // calling it straight away does nothing at all and the retry looks
             // like a second failure.
-            await waitUntil("the failed start finished unwinding", { !model.isBusy }, timeout: 20)
+            await waitUntil(
+                "the failed start finished unwinding", { !model.isBusy }, timeout: 20)
             model.selectedDestinationUID = fallback
             model.start()
             await waitUntil("it came up on the system output", { model.isRunning }, timeout: 15)
@@ -459,6 +460,8 @@ enum UIFlowCheck {
         } else {
             note("destination is a real output — monitoring, so no next step")
         }
+
+        checkStatusPills(model: model)
 
         print("\nmuting the first route")
         model.setMuted(true, forRouteAt: 0)
@@ -1890,7 +1893,68 @@ enum UIFlowCheck {
         check("levels were cleared", model.routeLevels.isEmpty)
         check("routes were cleared", model.activeRoutes.isEmpty)
 
+        // The point of pills rather than a strip: what is on screen at rest is
+        // one word, because there is one thing true at rest.
+        //
+        // After the queue has unwound, not merely after the route came down.
+        // The state pill reads "working" while a stop is still in flight, which
+        // is the truth and not the state being asserted here — it failed on one
+        // run in three until this waited.
+        await waitUntil("the stop finished unwinding", { !model.isBusy }, timeout: 10)
+        let idle = StatusPills.pills(for: model)
+        note("idle: " + idle.map(\.id).joined(separator: " "))
+        check(
+            "the measured pills went away with the route",
+            !idle.contains { ["rate", "buffer", "latency", "integrity"].contains($0.id) })
+        check("the state pill stayed", idle.contains { $0.id == "state" })
+        check("and it says idle", idle.first?.label == loc("Idle"))
+        check("nothing is measured while stopped", model.pathLatencyMilliseconds == 0)
+
         summarise()
+    }
+
+    /// What the bottom of the window is actually showing.
+    ///
+    /// The row is built as data before it is drawn, because which pills are
+    /// present *is* the behaviour — one that disappears when it has nothing to
+    /// say cannot be checked by looking at a screenshot of a machine where it
+    /// happened to have something. A view cannot be asked what it is showing;
+    /// the list it is built from can.
+    private static func checkStatusPills(model: RouterModel) {
+        print("\nstatus pills")
+        let pills = StatusPills.pills(for: model)
+        note(pills.map(\.id).joined(separator: " "))
+        check("every pill carries a label", pills.allSatisfy { !$0.label.isEmpty })
+        check("no pill appears twice", Set(pills.map(\.id)).count == pills.count)
+        check("the state pill leads", pills.first?.id == "state")
+        check("and it says routing", pills.first?.label == loc("Routing"))
+        for id in ["integrity", "rate", "buffer", "latency"] {
+            check("a running path shows its \(id)", pills.contains { $0.id == id })
+        }
+        check(
+            "nothing is recording, so there is no REC pill",
+            !pills.contains { $0.id == "recording" })
+        check(
+            "the driver pill appears exactly when the driver is missing",
+            pills.contains { $0.id == "driver" } == !model.isDriverInstalled)
+
+        // The figure the strip used to carry was the buffer alone, which is the
+        // flattering one: it ignores the output device's own latency and every
+        // stage in the chain. It must never read lower than the buffer it
+        // contains.
+        guard let quality = model.pathQuality else { return }
+        note(
+            String(
+                format: "path %.2f ms against a %.2f ms buffer, %.2f ms of DSP",
+                model.pathLatencyMilliseconds, quality.bufferLatencyMilliseconds,
+                model.addedLatencyMilliseconds))
+        check(
+            "the latency pill is more than the buffer",
+            model.pathLatencyMilliseconds >= quality.bufferLatencyMilliseconds)
+        check(
+            "and it includes what the chain adds",
+            model.pathLatencyMilliseconds
+                >= quality.bufferLatencyMilliseconds + model.addedLatencyMilliseconds)
     }
 
     /// Compares the two string tables against each other.

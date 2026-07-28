@@ -403,3 +403,10 @@
 "%d filters, %.1f dB of headroom taken." = "%d 個濾波器，讓出了 %.1f dB 的餘裕。";
 "Nothing is being corrected until routing starts." = "要開始路由之後才會實際套用補償。";
 "Open the folder" = "打開資料夾";
+
+/* The status pills along the bottom, and the panel's quick controls. */
+"Clipping" = "已削波";
+"Drift corrected" = "已改用漂移修正";
+"Master" = "總輸出";
+"Quick controls" = "快捷控制";
+"%d on" = "已開啟 %d 項";

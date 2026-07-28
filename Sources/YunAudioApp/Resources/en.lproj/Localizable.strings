@@ -403,3 +403,10 @@
 "%d filters, %.1f dB of headroom taken." = "%d filters, %.1f dB of headroom taken.";
 "Nothing is being corrected until routing starts." = "Nothing is being corrected until routing starts.";
 "Open the folder" = "Open the folder";
+
+/* The status pills along the bottom, and the panel's quick controls. */
+"Clipping" = "Clipping";
+"Drift corrected" = "Drift corrected";
+"Master" = "Master";
+"Quick controls" = "Quick controls";
+"%d on" = "%d on";
