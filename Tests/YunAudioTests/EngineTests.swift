@@ -3636,3 +3636,130 @@ struct EqualiserTests {
         #expect(abs(boosted[2] - flat[2]) < 2)
     }
 }
+
+// MARK: - Why AUAudioMix is not in the chain
+
+/// `AUAudioMix` is macOS 26's graded speech/ambience separation — the tunable
+/// successor to `AUSoundIsolation`'s on-or-off, with a Studio style that is
+/// Apple's answer to NVIDIA Broadcast's Studio Voice and a continuous
+/// `RemixAmount` instead of a switch. On paper it is the single most
+/// differentiating thing available on this platform.
+///
+/// It cannot be used here, and these record exactly why rather than leaving a
+/// note in a file somewhere. Three facts, each measured:
+///
+///   · it refuses mono and stereo input outright, taking only four-channel
+///     first-order ambisonics;
+///   · it refuses a four-channel output, wanting five — the ambisonics plus a
+///     separated mono foreground, which is the header's "FOA + mono
+///     foreground" read properly;
+///   · and with both formats accepted it still fails to initialise, because it
+///     wants `kAUAudioMixProperty_SpatialAudioMixMetadata` — the capture-time
+///     metadata an iPhone writes into a Cinematic asset, which a live
+///     microphone does not have and cannot be given.
+///
+/// So it is an asset-processing unit, not a live stage. Encoding a mono
+/// microphone to ambisonics is arithmetic and would have been easy; the
+/// metadata is not. It may still be excellent applied offline to recorded
+/// stems, which is where to look next.
+///
+/// These are assertions rather than notes so that if a future macOS relaxes any
+/// of it, this fails and says so — which is the only way anybody would find
+/// out.
+@Suite("AUAudioMix constraints")
+struct AudioMixConstraintTests {
+
+    private func makeUnit() -> AudioComponentInstance? {
+        var description = AudioComponentDescription(
+            componentType: kAudioUnitType_FormatConverter,
+            componentSubType: kAudioUnitSubType_AUAudioMix,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0, componentFlagsMask: 0)
+        guard let component = AudioComponentFindNext(nil, &description) else { return nil }
+        var instance: AudioComponentInstance?
+        guard AudioComponentInstanceNew(component, &instance) == noErr else { return nil }
+        return instance
+    }
+
+    private func format(channels: UInt32) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: 48000,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+                | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: channels, mBitsPerChannel: 32, mReserved: 0)
+    }
+
+    @Test("the unit exists and offers a style and a remix amount")
+    func exists() throws {
+        let unit = try #require(makeUnit(), "AUAudioMix is missing on this system")
+        defer { AudioComponentInstanceDispose(unit) }
+        let parameters = AudioUnitPlugins.parameters(of: unit)
+        #expect(parameters.count == 2)
+        // A continuous amount rather than a switch is the whole difference from
+        // AUSoundIsolation.
+        #expect(parameters.contains { $0.minimum == 0 && $0.maximum == 1 })
+    }
+
+    /// The first wall. A microphone is mono or stereo and this takes neither.
+    @Test("it refuses a live microphone's format")
+    func refusesLiveFormats() throws {
+        let unit = try #require(makeUnit())
+        defer { AudioComponentInstanceDispose(unit) }
+
+        func accepts(_ channels: UInt32) -> OSStatus {
+            var value = format(channels: channels)
+            return AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                &value, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        }
+        #expect(accepts(1) == kAudioUnitErr_FormatNotSupported)
+        #expect(accepts(2) == kAudioUnitErr_FormatNotSupported)
+        // Four-channel ambisonics is the one it takes.
+        #expect(accepts(4) == noErr)
+    }
+
+    /// The second. Its output is the ambisonics plus a separated foreground.
+    @Test("its output is five channels, not four")
+    func outputIsFiveChannels() throws {
+        let unit = try #require(makeUnit())
+        defer { AudioComponentInstanceDispose(unit) }
+        var input = format(channels: 4)
+        #expect(
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                &input, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)) == noErr)
+
+        func output(_ channels: UInt32) -> OSStatus {
+            var value = format(channels: channels)
+            return AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
+                &value, UInt32(MemoryLayout<AudioStreamBasicDescription>.size))
+        }
+        #expect(output(4) == kAudioUnitErr_FormatNotSupported)
+        #expect(output(2) == kAudioUnitErr_FormatNotSupported)
+        #expect(output(5) == noErr)
+    }
+
+    /// The third, and the one that settles it. Both formats accepted, and it
+    /// still will not start — because it wants metadata only a camera writes.
+    @Test("it will not initialise without capture-time metadata")
+    func refusesToInitialiseWithoutMetadata() throws {
+        let unit = try #require(makeUnit())
+        defer { AudioComponentInstanceDispose(unit) }
+
+        var input = format(channels: 4)
+        try #require(
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                &input, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)) == noErr)
+        var output = format(channels: 5)
+        try #require(
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
+                &output, UInt32(MemoryLayout<AudioStreamBasicDescription>.size)) == noErr)
+
+        #expect(AudioUnitInitialize(unit) == kAudioUnitErr_FailedInitialization)
+    }
+}
