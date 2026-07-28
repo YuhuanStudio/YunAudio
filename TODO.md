@@ -1,410 +1,210 @@
-# What is left to do
+# 還沒做完的
 
-One list, so that a person and an agent picking this up a month apart are
-working from the same picture. `AGENTS.md` says how to work here; this says what
-is worth working on and what has already been settled.
+一份清單，讓一個人和一個 agent 隔一個月接手時看到的是同一張圖。
+`AGENTS.md` 講怎麼在這裡工作；這份講什麼值得做，以及什麼已經定案不要再試。
 
-Two kinds of thing are collected below and they are kept apart on purpose:
-**proposals**, which came from the person whose project this is, and **findings**,
-which came from a competitive research pass. A proposal does not need
-justifying. A finding does, and its evidence is written down beside it — because
-the pass that produced them died partway through on a search quota, one of its
-four streams fabricated roughly half its citations before catching itself, and
-two streams never reported at all. Anything recovered from it is marked with how
-much it can be trusted.
+裡面有兩種東西，而且刻意分開：**提案**來自這個專案的擁有者，**發現**來自一次競爭
+分析。提案不需要理由。發現需要，而且證據就寫在旁邊 —— 因為產出那些發現的那次分析
+中途因搜尋額度死掉，四條研究流裡有一條在自己抓到之前捏造了大約一半的引用，另外兩
+條根本沒回報。從那裡救回來的每一條都標了它值得多少信任。
 
-## Reading the marks
+## 記號怎麼讀
 
-Confidence, carried over from the research:
-
-- **[V]** — verified: a source was actually opened and said this.
-- **[M]** — from a stream that was not independently re-checked, but internally
-  consistent with things that were.
-- **[?]** — plausible, unverified. A lead, not a fact.
-- **[proposal]** — asked for directly. Needs no evidence.
-
-Effort is the researcher's estimate unless this project has since measured it.
+- **[V]** —— 已查證：真的有人打開過那個來源。
+- **[M]** —— 來自沒有被獨立複查的那一流，但與已查證的內容互相吻合。
+- **[?]** —— 合理但未查證。是線索，不是事實。
+- **[提案]** —— 直接指定的。不需要證據。
+- **[本機實測]** —— 在這台機器上量過。這一類最可信，而且**已經推翻過兩條 [V]**。
 
 ---
 
-## Done, so nobody does it twice
+## 已知問題
 
-The short version. `README.md` says what each of these actually is.
+### AirPods 閒置拆除 [?] [疑似現行 bug]
 
-Bit-exact clock-locked path · loudness to BS.1770-4 · 24-band spectrum ·
-automatic levelling gated by Apple's sound classifier · direct monitoring at
-2.7 ms · formant-shifting voice changer with presets · six-band tone EQ ·
-compressor with a reduction meter · gate · pitch · character · reverb · echo ·
-limiter · third-party AUv3 hosting · per-application process taps, one tap per
-application · per-source stem recording · WAV/FLAC/AAC · push to talk ·
-ducking · ten-second all-speak calibration · JSON device profiles ·
-Razer Seiren V3 Pro light ring · voice isolation · echo cancellation ·
-our own virtual device with a working volume control · tabbed inspector ·
-switchable visual style · live transcription attributed per source ·
-fall-back and auto-restore when a device is unplugged · URL remote control.
+路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在
+AirPods 上開麥克風會把整個裝置拖進 HFP —— 雙向 16 kHz。
 
----
+**這台機器上沒有 AirPods，所以還沒量到。** 要做的第一件事是找出這個專案到底有沒有
+這個問題：把 AirPods 加進 aggregate、盯著輸出的取樣率與電平，而不是從程式碼的形狀
+推論。
 
-## Known problems
+已經知道的一件事：`kAudioSubDeviceInputChannelsKey` **沒有用**（見「已定案」），
+所以「把藍牙裝置的輸入排除在 aggregate 之外」這條最明顯的路是堵死的。
 
-### Two ordinary devices cannot be used together [V, measured here]
+### 還有兩種改動仍會重啟路由 [本機實測]
 
-The Razer Barracuda publishes **44.1 kHz out (16 k and 44.1 k available)** and
-**16 kHz in, and nothing else**. The Seiren V3 Pro publishes **48 k and 96 k**.
-They share no sample rate, so the router refuses the pair outright: *"the
-selected devices share no sample rate"*.
+效果鏈本身現在是熱抽換的：11 個級全開再全關（22 次變更）**0.43 秒，約 19 ms 一
+次**，IO cycle 計數器全程沒有倒退過。
 
-Refusing is wrong. The path to a Bluetooth headset is not bit-exact whatever
-happens, and the aggregate can already resample a member — that is what drift
-compensation is. The rule should be: take the best rate each end can do, let the
-HAL reconcile them, and say the path is resampled.
+還走完整重啟的：**人聲隔離的混合比例改變**、**外掛清單改變**。兩者都不在上次的範
+圍內，機制已經證明可行，剩下的是套用。
 
-Related, and visible in the same probe: the Barracuda's input is the system
-default at 16 kHz. That is the HFP downgrade, happening now.
+### 兩個失敗只在藍牙耳機睡著時出現 [本機實測]
 
-### A display's audio endpoint refuses to start, slowly [V, measured here]
+完整 flow check 目前 **571 ✓ / 14 ✗**。14 個裡有 12 個是回音消除器在輸出為藍牙時
+真的拿不到麥克風，另外 2 個是 Barracuda 在裝置掉線那一節中途睡著。都不是程式問題，
+但值得找出一個能讓這幾節在藍牙環境下也穩定的寫法。
 
-Routing to `PG32UCDM` fails with `AudioDeviceStart failed with 'stop'` after
-about twelve seconds. Nothing is wrong with the code; the endpoint will not
-start. Worth knowing because twelve seconds of nothing looks like a hang, and
-because it is a good argument for the fall-back to treat "will not start" the
-same as "not here".
+### 六個英文字一詞兩義，已擋住但還沒消歧義 [本機實測]
 
-### Changing one effect restarts the whole route [V, measured here]
+字串表去重時發現 18 個 key 寫了兩次，其中 6 個翻譯不同 —— 後面那個會**靜默覆蓋**
+前面那個。`Pitch` 同時是效果級和音高，`None` 同時是「不變聲」和「無」。
 
-Still true, and still worth fixing — but it is no longer what makes the flow
-check slow. A live chain swap was tried and reverted: it cannot help the case
-that dominates, which is going from no chain to one stage and back, because
-that changes which source the routes read from and is a different graph rather
-than a different block. Doing it properly means rebuilding the graph in place
-the way `updateRoutes` already does, keeping the aggregate and the IOProc — not
-swapping a pointer. The other thing that attempt got wrong: it took the
-engine's state lock synchronously from the model's `didSet` on the main actor.
-
-
-Enabling or disabling a single stage tears the aggregate down and builds it
-back. Measured end to end it costs about **five seconds**, of which the engine
-is only 0.8: aligning sample rates 56 ms, creating the aggregate 33 ms,
-`AudioDeviceStart` **639 ms**, restoring rates on the way out 87 ms. The rest
-is above the engine — the model's stop-then-start hop, `refreshApps()` at the
-top of every start, and instantiating the chain's audio units.
-
-Five seconds of dropout for one switch is a poor experience, and it is also
-what makes the interface flow check take five minutes: one section walks all
-eleven stages and costs **200 of the 298 seconds**.
-
-The fix is that a change to the effect chain should rebuild the chain, not the
-route. The graph is already published rather than mutated, so the machinery for
-swapping something in under a running IOProc exists — it is used for the routing
-matrix already.
-
-### Six English words are doing two jobs each [V, measured here]
-
-Deduplicating the string tables after a merge turned up eighteen keys written
-twice, and six of them with *different* translations — the last one silently
-wins, so one of the two meanings was showing the other's word:
-
-`Pitch` is both the effect stage and the musical quantity. `None` is both "no
-voice preset" and "nothing". `Record`, `off`, `High-pass` and `none captured`
-are the same shape of problem.
-
-Duplicates are now a failure in `check-strings.sh`, so no more can accumulate.
-Resolved by keeping the later of each pair, which on inspection was the better
-wording in every case — 音高 for pitch rather than 變聲, 高通濾波 rather than
-高通, 不變聲 for the voice preset rather than 無. Worth knowing that this was
-luck: the rule was "keep what is running today", and it happened to agree with
-"keep what is right".
-
-### The interface has outgrown its own layout [proposal]
-
-Named directly: it is untidy now that there are enough features to be untidy.
-
-- Noise reduction and the voice changer are one region and should be two.
-- The scene presets barely change anything.
-- The application list says how many are held back but cannot expand to them,
-  and is often empty when it should not be.
-- The menu bar panel has not kept up with the window at all, and shows no
-  settings.
-- The preferences window is thin — no language, no theme, no colour, while
-  YunUI has all of that to draw on.
-- The bottom status bar should be a row of pills, which is also the natural
-  place to meet Apple's liquid-glass look.
-
-### Two Razer devices are only half supported [proposal]
-
-The Seiren **V2 X** and the **Barracuda** both need what the V3 Pro already has:
-a device profile naming their channels, and whatever their own controls turn out
-to be. The V2 X publishes a settable hardware gain where the V3 Pro does not,
-which is already known and not yet used.
-
-## Known problems (from the research)
-
-Things believed to be wrong now. Each needs measuring before it needs fixing.
-
-### The AirPods idle teardown [?] [suspected live bug]
-
-The router holds a permanent aggregate device. A Bluetooth device inside one may
-never be allowed to go idle, and opening a microphone on AirPods drags the whole
-device into HFP — 16 kHz, both directions. **Not yet measured here.** The first
-job is to find out whether this project actually has the problem, with AirPods
-in the aggregate and a level meter on the output, rather than assuming it from
-the shape of the code.
-
-Related and worth knowing: SoundSource 6.1's release notes say *"unnecessary
-drift correction is no longer applied to Bluetooth devices"* [V]. That is a
-specific, cheap thing to check in our own aggregate construction.
-
-### Media keys do not reach an aggregate device [V, general] [?, here]
-
-`proxy-audio-device` has 1,055 stars for a driver that does only this, and
-`MultiSoundChanger` has 328 and exists because *"native sound volume controller
-can't change volume of aggregate devices"* [V]. Our own virtual device
-publishes a volume control and it works. What is untested is whether F10–F12
-move it while the aggregate is the default output.
-
-Intercepting the media keys needs a `CGEventTap` and Accessibility permission.
-Shipping this **without** requiring that permission would itself be worth
-something.
+重複 key 現在是 `check-strings.sh` 的失敗條件，所以不會再累積。去重時保留的是後者，
+而檢查下來每一個都剛好是比較好的用詞 —— 這是運氣：規則是「保留現在正在跑的」，只
+是它剛好跟「保留正確的」一致。
 
 ---
 
-## Next up
+## 接下來做
 
-Ordered by what this project would gain, not by size.
+依這個專案會得到什麼排序，不是依大小。
 
-### 1. AutoEq headphone correction [V] [effort: low]
+### 1. KTV 的下半 [提案]
 
-Five vendors converged on this independently — SoundSource (*"powered by the
-well-known AutoEq project… thousands of models"*, with JSON profile import and
-per-app application), eqMac, Boom 3D, Sound Control, FineTune. A FineTune issue
-about it reads *"would render other apps obsolete."* [V] The researcher called
-it the highest ratio of demand to effort on the whole list.
+已完成：Music 與 Spotify 的 now playing（走 scripting dictionary，不是私有的
+MediaRemote）、`.lrc` 逐字歌詞（掃過去的高亮）、音高顯示、**調性偵測與建議移調**
+（Krumhansl-Schmuckler，信心度是與第二名的差距而不是相關係數本身）。
 
-The plan here is **documents, not a database**: parse AutoEq's own
-`ParametricEQ.txt` export, the file people already download for their
-headphones. Same argument as device profiles — a profile describes hardware, it
-does not execute, and shipping thousands of them is a licensing and update
-problem for a feature that works better when somebody drops in the file for
-their exact unit.
+還沒做的：
 
-Open question that has to be answered first, and it is the real work: **where in
-the graph does it go?** Correction belongs on what *you* hear, not on what the
-far end hears. The monitor path is currently routes with a gain and no
-processing, so this needs either a per-route effect chain or an output-side
-chain. Neither exists. Do not start the parser before this is decided.
+- **分數。** 唱對了多少時間。旋律要從某處來 —— `.lrc` 只有詞跟時間、沒有音高 ——
+  所以需要旁邊放一個 MIDI 旋律檔，或者用人聲隔離把原唱抽出來量。
+- **對唱模式。** 兩支麥克風、兩個顏色、兩份分數。**每個來源本來就是分開的**，這是
+  結構上白拿的。
+- **調性偵測還沒在真的有音樂在播時驗證過** —— 上次跑的時候 Spotify 是暫停的。
 
-### 2. Excluded applications [V] [effort: low]
+### 2. MIDI 的另一半 [本機實測]
 
-SoundSource, FineTune and OnlyEQ all shipped an exclusion list *after* breakage
-reports — Steam games, DAWs, Krisp, Roon, Bitwig [V]. Pure support-cost
-reduction: its absence generates "your app broke Logic" tickets.
+CoreMIDI 直接寫、沒有第三方相依、推桿有 soft takeover，這些都做完並測過了。
 
-Note this project captures by inclusion — you pick the applications to tap —
-which is already most of the protection. What is missing is a way to say "never
-touch this one" that survives somebody selecting it by accident.
+**但這台機器沒有任何 MIDI 硬體**（`MIDIGetNumberOfSources()` 回 0），所以測試用的
+是一個本行程自己發布的虛擬 source。**還沒測到的**：真實硬體的訊息流（running
+status、14-bit 高解析 CC 對、多個 source 同時）、以及 MIDI 2.0 往下轉譯那條路。
 
-### 3. Quick Configs — one snapshot of the whole audio setup [V] [effort: low–medium]
+### 3. 每個來源、每條匯流排各自的處理 [V]
 
-Headline feature of SoundSource's paid 6.0 upgrade, promoted to its own menu bar
-icon in 6.1 within eight months, which is a strong signal that people use it [V].
+VoiceMeeter 每條匯流排都有完整的參數等化器，所以直播混音可以跟耳機混音調得不一
+樣 [V]。這個專案的效果鏈全部是麥克風的人聲鏈，那是刻意的。
 
-Distinct from the scene presets already here: those capture how to route, this
-captures system-wide *device* state — what is default in and out, what the
-per-application assignments are — so one click puts the whole machine back the
-way it was for a podcast, a game, or a call.
+耳機補償已經證明了**輸出側掛 biquad 級聯是可行且零配置的**，所以「每條匯流排一條
+鏈」現在不是新機制，而是同一個機制多開幾份。值得單獨做一次設計。
 
-### 4. Per-output latency trim [V via VoiceMeeter] [effort: low]
+### 4. 腳本介面 [M]
 
-VoiceMeeter Banana publishes *"Gain/Delay per channel"* on every output bus [V].
-Anybody running speakers and an interface at once has two paths that do not
-arrive together, and there is nothing here to line them up.
+Audio Hijack 的 JavaScript API 是所有評論都特別點名的功能 [M]。而空門是：
+**Loopback 完全沒有 scripting、AppleScript 或 Shortcuts** [M]。
 
-The measurement already exists — the self-test recovers loopback delay from the
-data — so the hard half is done.
+`JavaScriptCore` 是 macOS 內建的，所以直譯器免費。工作在於設計一個穩定的物件模型
+與事件分派 —— 那是一個關於相容性的承諾，所以它排在比較便宜的項目後面。
 
-### 5. MIDI learn [V via VoiceMeeter] [effort: medium]
+### 5. Homebrew cask [V]
 
-VoiceMeeter maps *"Gain faders, Mute, Solo, M.C."* by a learn process [V]. This
-project already has solo, which the same source calls out as worth mapping.
-
-A Stream Deck is served by the URL scheme already shipped; MIDI is for anybody
-with a physical fader, and a fader is a different thing from a button.
-
-### 6. Named A/B buses [V via VoiceMeeter] [effort: low, mostly presentation]
-
-The load-bearing idea in VoiceMeeter, and the general form of Elgato's "monitor
-mix vs stream mix" [V]:
-
-- **A buses are physical outputs** — what you hear.
-- **B buses are virtual outputs** — what other applications capture when they
-  open this as a microphone.
-
-Every source carries independent assignment to every bus. Game audio to your
-headphones but not to the stream; a co-host's return to the stream but not back
-to themselves.
-
-The routing matrix here can already express this. What is missing is the
-*idiom*: named buses, each typed as a monitor path or a capture path, is far
-more legible to a streamer than an abstract matrix. Our virtual driver gives us
-the B-bus half for free, and it is the half that BlackHole-based setups make
-painful.
-
-### 7. A scripting surface [M] [effort: medium]
-
-Audio Hijack's JavaScript API is the feature reviewers single out — Federico
-Viticci called the Scripting tab *"the most important addition to Audio Hijack
-4"*, Jason Snell *"the biggest new feature of all"* [M]. And the open goal:
-**Loopback has no scripting, no AppleScript and no Shortcuts support at all**
-[M].
-
-`JavaScriptCore` ships with macOS, so the interpreter is free. The work is
-designing a stable object model and event dispatch — and that is a promise about
-compatibility, which is why this sits below the cheaper items rather than above
-them.
-
-### 8. Homebrew cask [V] [effort: low, but blocked]
-
-FineTune's single highest-reacted issue is *"Add Homebrew Cask support"*, filed
-two days after launch [V]. Blocked on the same thing distribution is blocked on:
-the driver is ad-hoc signed and a cask wants something notarised.
-
-### 9. KTV, further [proposal] — **the first half is done**
-
-Music and Spotify are read through their scripting dictionaries, and lyrics
-come from `.lrc` files in `~/Library/Application Support/YunAudio/Lyrics`. Not
-`MediaRemote`, which is what every now-playing utility on this platform reaches
-for and is private and has already been restricted once; and not a lyrics
-service, because neither Apple's nor Spotify's may be used by a third party.
-
-What is left, in the order it is worth doing:
-
-- **Key detection and transposition.** The pitch tracker already knows what note
-  somebody is singing. Knowing what key the backing track is in — and being able
-  to shift it — is the thing every karaoke box has and nothing on macOS does.
-  The pitch stage exists; what is missing is measuring the track's key.
-- **A score.** How much of the time the sung note matched the melody. The melody
-  would have to come from somewhere: an `.lrc` carries words and times, not
-  pitches, so this needs either a MIDI melody file beside it or measuring the
-  vocal in the original, which is what the voice isolation stage is for.
-- **A duet mode** — two microphones, two colours, two scores. Every source is
-  already separate.
-
-### 10. Publish the bit-exactness result — **done**
-
-`MEASUREMENT.md`: the method, the sequence, why it is 24 bits, how the delay is
-recovered from the data, what the numbers beside it mean, and what the
-measurement does not prove.
+FineTune 反應數最高的 issue 就是這個，開站兩天後就有人提 [V]。卡在跟散布同一件事：
+驅動是 ad-hoc 簽章，而 cask 要的是公證過的東西。
 
 ---
 
-## Worth exploring first
+## 值得先探一下的
 
-Not ready to be planned. Each needs a spike that answers one question.
+每一項都只需要回答一個問題。
 
-### Does macOS expose the AirPods high-quality recording option? [?]
+### macOS 有沒有 AirPods 高品質錄音的對應 API？[?]
 
-macOS 26 has `AVAudioSessionCategoryOptions.bluetoothHighQualityRecording`, but
-`AVAudioSession` is an iOS framework and **whether there is a CoreAudio
-equivalent is unverified** [V that the iOS API exists; ? for macOS]. Half an
-hour with the headers settles it.
+macOS 26 有 `AVAudioSessionCategoryOptions.bluetoothHighQualityRecording`，但
+`AVAudioSession` 是 iOS 的框架，**macOS 有沒有 CoreAudio 對應物未經查證**。翻半小時
+header 就有答案。
 
-If there is none, there is still a structural answer nobody packages well: the
-aggregate can hold AirPods for output while a *different* device supplies the
-microphone, so the codec never downgrades. SoundSource 6.0 shipped exactly that
-[V]. The demand signal is the strongest the research found anywhere — a Show HN
-for an app that does *only* this got 223 points and 309 comments, and at least
-five projects exist for nothing else [V].
+就算沒有，還有一個結構上的答案沒人包裝得好：aggregate 可以讓 AirPods 只當輸出，而
+由**另一個裝置**供應麥克風，這樣編解碼就不會降級。SoundSource 6.0 出的就是這個 [V]。
+需求訊號是整份研究裡最強的 —— 一個只做這件事的 app 在 Show HN 拿到 223 分、309 則
+回應，而且至少有五個專案只為這件事存在 [V]。
 
-### Per-source and per-bus processing [V via VoiceMeeter]
+### tap-only 模式，驅動變成選配 [M]
 
-VoiceMeeter publishes a full parametric EQ *per bus*, so the stream mix can be
-EQ'd differently from the headphone mix [V]. Everything in this project's effect
-chain is the microphone's voice chain by design.
+Rogue Amoeba 遷到 ARK 之後，Audio Hijack 的擷取**不需要改安全性設定、不需要安裝任
+何東西、也不需要輸入管理員密碼** [M]。我們的驅動要 sudo 又會重啟 `coreaudiod`，這
+件事已經從中性變成劣勢。
 
-This is the same architectural question as AutoEq above, and answering it once
-unlocks both. It is a real change to the realtime path: today one chain runs
-ahead of the routing matrix, and this needs chains hanging off routes or buses.
-Worth a design pass on its own before any of it is built.
+這個應用程式做的事情裡有很大一部分 —— tap、效果、錄音、轉錄、監聽 —— 根本不需要
+驅動。那個子集能不能成為一級模式、而驅動變成「買到 bit-exact 時脈鎖定路徑」的升級，
+是產品問題跟技術問題各半。
 
-### A tap-only mode, with the driver as an opt-in [M]
+### VBAN 網路音訊 [V]
 
-Rogue Amoeba's ARK migration means Audio Hijack's capture now needs *"no need to
-adjust your Mac's security settings, install anything, nor even enter your
-administrator password"* [M]. Installing our driver restarts `coreaudiod` and
-needs an admin password, which has gone from neutral to a liability.
+VB-Audio 自家的 UDP 協定：8 進 8 出、規格公開有文件（不像 Dante），而且已經有一個
+iOS 遙控 app 在講它 [V]。如果哪天網路音訊變得有趣，這是可行的目標。
 
-Much of what this application does — taps, effects, recording, transcription,
-monitoring — needs no driver at all. Whether that subset can be a first-class
-mode, with the driver offered as the upgrade that buys the bit-exact clock-
-locked path, is a product question as much as a technical one.
+### Elgato Wave Link 2.0 到底有沒有上 macOS？[未解]
 
-### VBAN network audio [V]
-
-VB-Audio's own UDP protocol: eight input and eight output streams, an open
-documented spec, unlike Dante, with an existing iOS remote app speaking it [V].
-If network audio is ever interesting, this is the tractable target.
-
-### Whether Elgato Wave Link 2.0 shipped on macOS [open]
-
-The single highest-value unanswered question from the research: it decides
-whether the dual-mix idiom in item 6 is already occupied on this platform or is
-an open niche. Elgato's site blocked every automated fetch — 403 on the help
-centre, 404 on the product page — so this needs a human with a browser.
+整份研究裡價值最高的未解問題：它決定「雙混音」這個語彙在這個平台上是已經被佔住，
+還是一塊空地。Elgato 的網站擋掉了所有自動抓取（說明中心 403、產品頁 404），所以這
+題**需要一個人拿瀏覽器去看**。
 
 ---
 
-## Settled — do not retry without new evidence
+## 已定案 —— 沒有新證據就不要再試
 
-Each of these cost real time. The reasons are written up in `README.md`; this is
-the index.
+每一項都花掉了真實的時間。`README.md` 與 `DEVICES.md` 有完整的寫法；這裡是索引。
 
-- **`AUAudioMix`** (macOS 26's graded speech/ambience separator, and on paper the
-  most differentiating thing available on this platform) cannot run live. It
-  refuses mono and stereo input, wants five channels out, and needs
-  `kAUAudioMixProperty_SpatialAudioMixMetadata` — capture-time metadata a camera
-  writes into a Cinematic asset and a microphone cannot provide. All three
-  constraints are asserted in the tests, so a future macOS relaxing any of them
-  will be noticed. It may still be worth having as an **offline** pass over
-  recorded stems, which is the one use the measurements do not rule out.
-- **MLX** cannot build its Metal shaders under SwiftPM, and does not fall back to
-  the CPU — it fails to load its metallib and takes the process down. Separately,
-  a 2048-point transform is a size where launch and synchronisation cost more
-  than the arithmetic. MLX earns its place when there is a trained model to run.
-- **App Intents** compile and run and never appear anywhere: the entries in a
-  Shortcuts library are discovered from metadata Xcode's own build phase
-  extracts, and an application assembled by a shell script around a SwiftPM
-  binary produces none. The URL scheme is the answer until the build system
-  changes.
-- **`onOpenURL` and `application(_:open:)`** never fire in a menu bar accessory
-  with no window, and `open` still reports success. The Apple Event handler
-  underneath both is what works.
-- **Real-time neural voice conversion** (fish-speech, RVC) needs well over a
-  hundred milliseconds against a 2.7 ms deadline. Every real-time voice changer
-  that ships does what this one does; this one says so.
+- **`kAudioSubDeviceInputChannelsKey` 沒有作用** [本機實測]。header 讀起來像限制，
+  實際上是描述：三個輸入的裝置要求只給一個，仍然給三個；一個輸入要求給零，仍然給
+  一個。這堵死了「把藍牙耳機的輸入排除在 aggregate 外」這條路。**這個結論本身有斷
+  言**，所以哪天 macOS 開始認這個 key，我們會知道。隔壁的
+  `kAudioSubDeviceExtraOutputLatencyKey` 是**真的有用**的：要 480 frames 就量到 480。
+- **`AUAudioMix`**（macOS 26 那個可調的語音／環境分離器，紙面上是這個平台最有差異
+  化的東西）**不能即時跑**。它拒絕單聲道與立體聲輸入、要五聲道輸出、而且需要
+  `kAUAudioMixProperty_SpatialAudioMixMetadata` —— 那是相機寫進 Cinematic 資產的擷
+  取時 metadata，麥克風給不出來。三個限制都有斷言。**唯一沒有被量測排除的用途是對
+  已錄好的 stem 做離線處理。**
+- **MLX** 在命令列的 SwiftPM 下建不出它的 Metal shader，而且不會退回 CPU —— 它會載
+  不到 metallib 然後把整個行程帶走，在一個三元素的乘法上。另外 2048 點的轉換是一個
+  「啟動與同步比算術貴」的尺寸。MLX 要有一個訓練好的模型要跑，才輪得到它。
+- **App Intents** 會編譯、會執行、而且永遠不會出現在任何人用得到的地方：Shortcuts
+  資料庫裡的項目是靠 Xcode 自己的 build phase 抽出的 metadata 被發現的，而用 shell
+  script 包 SwiftPM binary 組出來的 app 產生不了那份 metadata。URL scheme 是答案，
+  直到建置方式改變為止。
+- **`onOpenURL` 與 `application(_:open:)`** 在沒有視窗的選單列 app 裡都不會觸發，
+  而且 `open` 仍然回報成功。底下那層的 Apple Event handler 才行得通。
+- **路由迴圈改用 vDSP 反而更慢** [本機實測]。512 frames 兩條路由是 1501 ns 對
+  954 ns：Accelerate 的 strided 入口會退回純量，而**交錯音訊永遠是 strided**。手寫
+  迴圈留著，理由寫在原地。
+- **即時神經變聲**（fish-speech、RVC）需要遠超過一百毫秒，而這裡的期限是 2.7 ms。
+  今天出貨的每一個即時變聲器做的都是我們做的這件事；差別是這個會講出來。
 
 ---
 
-## The competitive picture, as of the research
+## 已經完成的（免得有人重做）
 
-Kept because it is the reason several items above are ranked where they are.
+排除清單 · 設定組（Quick Configs）· 輸出對齊 · 裝置掉線自動接手 · URL 遙控 ·
+具名 A/B 匯流排 · 耳機補償（AutoEq）· 十段輸出音色（Razer 的頻段中心）·
+即時逐字稿（每個來源分開，不靠聲紋猜）· MIDI learn · 設定視窗（語言／主題／
+強調色／緩衝區）· 選單列面板重整 · 底部藥丸狀態列 · 應用程式清單的三個缺陷 ·
+V2 X 與 Barracuda 裝置設定檔 · 聲音分頁拆成三區 · 場景預設真的各自不同 ·
+效果鏈熱抽換 · IOProc 快 19–49% · 閒置輪詢從 1501 µs 降到 174 µs ·
+V3 Pro 的硬體增益與零延遲監聽 · KTV 的歌詞與調性偵測 · `MEASUREMENT.md` ·
+`DEVICES.md`
 
-**The clock is running faster than it looks [V].** SoundSource 6.0 shipped
-3 Dec 2025 and 6.1 on 21 Jul 2026. Between them: Output Groups, Quick Configs,
-Preferred Device Order, per-app Headphone EQ, Timed Mute, Balance & Pan, cough
-buttons, Recent Noise Indicator, forced software volume control, "Prevent Sound
-Quality Issues with AirPods and Other Bluetooth Devices", and no drift
-correction on Bluetooth. That list is most of what the research was going to
-recommend, shipped in eight months.
+---
 
-**FineTune** launched Jan 2026, free and GPLv3, 8,317 stars and 142 open issues
-[V]. **SoundPipe** undercuts Loopback tenfold at $10 [V].
+## 競爭態勢，研究當下的樣子
 
-**Pricing, from their own buy pages [V]:** Audio Hijack $69 + Loopback $99 +
-SoundSource $49 + Airfoil $35 + Farrago $55 = **$307**. This project already
-covers pieces of three. The loudest complaint found was the cost of the *stack*,
-not of any single one.
+留著，因為上面好幾項的排序是它決定的。
 
-**Coverage gap, stated rather than papered over:** the streamer cluster (Elgato
-Wave Link, RØDE Connect/UNIFY, VoiceMeeter) and the OBS/Krisp/REAPER cluster
-never reported. What is here on those came from single searches and is thinner
-than the rest.
+**時間比看起來緊** [V]。SoundSource 6.0 在 2025-12-03 出、6.1 在 2026-07-21 出。
+兩者之間加了：Output Groups、Quick Configs、偏好裝置順序、每 app 耳機 EQ、定時靜
+音、平衡與相位、cough button、最近噪音指示、強制軟體音量控制、「避免 AirPods 與其
+他藍牙裝置的音質問題」，以及 6.1 的「不再對藍牙裝置套用不必要的 drift correction」。
+那份清單幾乎就是這次研究本來要建議的，他們八個月內出完了。
+
+**FineTune** 2026 年 1 月上線，免費 GPLv3，8,317 星、142 個開放 issue [V]。
+**SoundPipe** 用 $10 把 Loopback 砍了十倍 [V]。
+
+**價格，從他們自己的購買頁 [V]**：Audio Hijack $69 + Loopback $99 + SoundSource
+$49 + Airfoil $35 + Farrago $55 = **$307**。這個專案已經涵蓋其中三個的一部分。研究
+找到最大聲的抱怨是**這一整疊的價格**，不是任何單一個。
+
+**沒覆蓋到的部分，明講而不是糊過去**：直播主那一群（Elgato Wave Link、RØDE
+Connect/UNIFY、VoiceMeeter）以及 OBS/Krisp/REAPER 那一群從來沒回報。這裡關於它們的
+內容只來自單次搜尋，比其他部分薄。
