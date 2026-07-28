@@ -140,6 +140,52 @@ puts the system defaults back at the end and asserts that it did, because
 leaving somebody's default microphone somewhere they did not put it is the kind
 of thing they find out about during a call.
 
+### Do not join the queue
+
+The lock makes parallel work serial rather than impossible, and for one
+microphone that is the right trade — but a queue is not free. Measured on this
+machine with several sessions each running an A/B comparison: **five processes
+waiting on one lock**, each holding the hardware for two to four minutes. That
+is twenty minutes during which the machine's audio is seized and released
+continuously, every other application stutters, and the last process in the
+queue has been sitting with a window open for a quarter of an hour without
+having checked anything.
+
+So the wait is now capped at five minutes and then the run gives up and says
+so, loudly, with `exit 2`. Raise it with `YUNAUDIO_FLOWCHECK_WAIT=<seconds>` if
+you genuinely want to wait. A run that did not happen is a fact somebody can
+act on; a run that silently started fifteen minutes late is a mystery about why
+the machine was unusable.
+
+### What to run instead, most of the time
+
+The compiler is not the slow part, and it is worth knowing the numbers before
+reaching for the expensive check:
+
+| | |
+|---|---|
+| `swift build`, nothing changed | ~2 s |
+| `swift build` after one leaf file | ~7 s |
+| `swift test`, all of it | ~6 s |
+| `./App/build-app.sh` | ~20 s |
+| the whole flow check | **~225 s, and it takes the hardware** |
+
+A change to pure logic is answered by `swift test` in six seconds. Reach for the
+flow check when the change touches the audio path, the devices or the interface
+— and when you do, name the section:
+
+```bash
+YUNAUDIO_FLOWCHECK=1 YUNAUDIO_FLOWCHECK_ONLY="processing chain swapped live" \
+  ./build/YunAudio.app/Contents/MacOS/YunAudioApp
+```
+
+Sections before the named one still run, because the later ones depend on the
+state the earlier ones leave behind. Sections *after* it no longer do: the run
+ends as soon as the last section anybody asked for has finished. Before that,
+naming one section saved nothing at all — a targeted run cost the full 225 s,
+of which about 140 was sections nobody was looking at, each one starting and
+stopping real routes.
+
 ## Things that need a human
 
 Do not run these yourself. Print the command and let the user run it.

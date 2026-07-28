@@ -49,7 +49,31 @@ enum UIFlowCheck {
     private static var sectionStarted = Date()
     private static var sectionTimes: [(String, TimeInterval)] = []
 
-    private static func section(_ name: String) {
+    /// Sections still to come that somebody asked for.
+    ///
+    /// The filter used to save nothing after the last wanted section: the run
+    /// carried on through every remaining one, each of which starts and stops
+    /// real routes, and a check aimed at one section still cost the full run.
+    /// Measured on this machine — a targeted run of a section a third of the
+    /// way down took 143 s of which about 140 was sections nobody had asked
+    /// for, and the whole of that time the audio hardware of the machine is
+    /// being seized and released. That is not merely slow; it is what makes
+    /// every other application on the desktop stutter while a check runs.
+    ///
+    /// So a filtered run ends when the last wanted section has. It does *not*
+    /// skip the ones before, and that is deliberate rather than lazy: the later
+    /// sections depend on the state the earlier ones leave behind — a route
+    /// that is up, a preset applied — and a section run against a machine in
+    /// the wrong state fails for reasons that have nothing to do with the code.
+    private static var wantedRemaining: Set<String> = wanted
+
+    /// True once every asked-for section has been run, so there is nothing left
+    /// worth paying for.
+    private static var nothingLeftToRun: Bool {
+        !wanted.isEmpty && wantedRemaining.isEmpty
+    }
+
+    private static func section(_ name: String) throws {
         // Timed, and the slowest half dozen printed at the end. The whole check
         // is minutes long and it was not obvious where the minutes went — the
         // answer turned out to be route restarts, which are seconds of real
@@ -59,8 +83,24 @@ enum UIFlowCheck {
         }
         sectionStarted = Date()
         currentSection = name.lowercased()
+        // Crossed off as it starts, so that the run can end after it rather
+        // than after everything else as well.
+        wantedRemaining = wantedRemaining.filter { !currentSection.contains($0) }
         print("\n" + name + (inWantedSection ? "" : "  (skimmed)"))
+        if nothingLeftToRun {
+            note("nothing else was asked for — ending here rather than running the rest")
+            throw NothingLeftToRun()
+        }
     }
+
+    /// Thrown by `section` to end a filtered run at a section boundary.
+    ///
+    /// A throw rather than a flag every section would have to remember to
+    /// check: there are seventy-eight of them, they are written inline one
+    /// after another, and a flag that one of them forgets is a run that quietly
+    /// carries on doing the expensive thing. This cannot be forgotten — the
+    /// compiler will not let a `section` call be written without it.
+    private struct NothingLeftToRun: Error {}
 
     private static func check(_ description: String, _ condition: @autoclosure () -> Bool) {
         // A skimmed section is not being tested, so what it observes is not
@@ -100,11 +140,40 @@ enum UIFlowCheck {
         lock = open(path, O_CREAT | O_RDWR, 0o666)
         guard lock >= 0 else { return }
         if flock(lock, LOCK_EX | LOCK_NB) == 0 { return }
-        print("waiting for another flow check to finish with the devices…")
+
+        // Bounded, and the bound is the point. Waiting made parallel work
+        // merely serial, which is the right trade for one microphone — but
+        // nothing capped the queue, and with several sessions each running an
+        // A/B comparison the queue reached five. Five runs of two to four
+        // minutes is twenty minutes during which the audio hardware of the
+        // whole machine is seized and released, every application on the
+        // desktop stutters, and the last process in the queue has been sitting
+        // there with a window open for a quarter of an hour.
+        //
+        // So it gives up and says so. A run that did not happen is a fact
+        // somebody can act on; a run that silently started fifteen minutes late
+        // is a mystery about why the machine was unusable.
+        let limit = TimeInterval(
+            ProcessInfo.processInfo.environment["YUNAUDIO_FLOWCHECK_WAIT"]
+                .flatMap(Double.init) ?? 300)
+        print(
+            "waiting up to \(Int(limit))s for another flow check to finish with the devices…")
+        let deadline = Date().addingTimeInterval(limit)
         // Blocking `flock` would be simpler and would block the run loop, which
         // this process needs: the model hops through the main actor and would
         // never make progress.
         while flock(lock, LOCK_EX | LOCK_NB) != 0 {
+            guard Date() < deadline else {
+                print(
+                    """
+
+                    another flow check still holds the devices after \(Int(limit))s — \
+                    giving up rather than joining the queue.
+                    nothing was checked. run it again when the machine is quiet, or \
+                    raise the wait with YUNAUDIO_FLOWCHECK_WAIT=<seconds>.
+                    """)
+                exit(2)
+            }
             try? await Task.sleep(for: .seconds(2))
         }
     }
@@ -140,7 +209,19 @@ enum UIFlowCheck {
         // the wait for the lock below, which is somebody else's flow check.
         _ = launchSeconds
         await takeTheHardware()
-        section("launch state")
+        // A filtered run ends by throwing out of whichever section was the last
+        // one anybody asked for, which lands here. The summary is printed
+        // either way, because a run that stopped early still found whatever it
+        // found and the caller still has to be told.
+        do {
+            try await runSections(model: model)
+        } catch {
+            summarise()
+        }
+    }
+
+    private static func runSections(model: RouterModel) async throws {
+        try section("launch state")
         // The single-instance guard is bypassed for this mode, so two copies
         // can be running at once — and when they are, they fight over the same
         // microphone and the same aggregate. The result is dozens of unrelated
@@ -195,7 +276,7 @@ enum UIFlowCheck {
         note(
             "\(model.selectedSource?.name ?? "—") → \(model.selectedDestination?.name ?? "—")")
 
-        section("window and shortcuts")
+        try section("window and shortcuts")
         // The frame has to be saved under a name or the window reopens in the
         // middle of the screen at its default size on every launch.
         let window = NSApp.windows.first { $0.title == "YunAudio" }
@@ -224,7 +305,7 @@ enum UIFlowCheck {
         model.toggleMute()
         check("and reflects it being unmuted again", !model.isMuted)
 
-        section("appearance")
+        try section("appearance")
         // The look was half Apple's material and half the source design system:
         // the menu bar panel floated on glass while the window was flat cards,
         // so the same application looked like two applications. It is one
@@ -240,7 +321,7 @@ enum UIFlowCheck {
         }
         model.style = .flat
 
-        section("realtime tripwire")
+        try section("realtime tripwire")
         // The hook is process-wide, so leaving it armed taxes every allocation
         // in SwiftUI, AppKit and CoreAudio for a diagnostics page almost nobody
         // opens. It used to be armed from launch.
@@ -250,7 +331,7 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
-        section("saved presets")
+        try section("saved presets")
         // A snapshot of everything, not a chosen subset. Somebody saving one
         // has just spent time getting a setup right, and one that quietly left
         // out the thing they were adjusting is worse than none.
@@ -299,7 +380,7 @@ enum UIFlowCheck {
         model.voicePreset = .none
         model.inputDecibels = 0
 
-        section("voice presets")
+        try section("voice presets")
         // The claim is that both halves move together. Pitch alone is a
         // chipmunk and formants alone is somebody talking through a tube; the
         // measurement that they really do is in the unit tests, and what is
@@ -325,7 +406,7 @@ enum UIFlowCheck {
             !model.enabledEffects.contains(.pitch)
                 && !model.enabledEffects.contains(.formant))
 
-        section("third-party units")
+        try section("third-party units")
         note("\(model.availablePlugins.count) Audio Unit effect(s) installed")
         // Apple's own are the built-in stages; listing them again would put
         // AUPeakLimiter in the picker beside the limiter in the panel above it.
@@ -352,7 +433,7 @@ enum UIFlowCheck {
             note("nothing installed that can load in-process — hosting not exercised")
         }
 
-        section("light ring")
+        try section("light ring")
         if model.lighting.isAvailable {
             for mode in LightingMode.allCases {
                 model.lightingMode = mode
@@ -386,7 +467,7 @@ enum UIFlowCheck {
             note("no device with a light ring attached")
         }
 
-        section("what each device actually publishes")
+        try section("what each device actually publishes")
         // A device is not one object: it owns controls, one per channel per
         // scope, and which of them exist is a property of the driver rather
         // than of the hardware. The Seiren V3 Pro carries 0 to +36 dB of gain
@@ -427,7 +508,7 @@ enum UIFlowCheck {
             note("\(device.name): \(summary)")
         }
 
-        section("the device's own monitoring")
+        try section("the device's own monitoring")
         // "Zero-latency monitoring" on a microphone's box is not a figure of
         // speech: the signal never reaches the computer. This application's own
         // monitoring is 2.7 ms, which is good and is not zero. CoreAudio
@@ -455,7 +536,7 @@ enum UIFlowCheck {
             note("this microphone does not monitor itself")
         }
 
-        section("hardware gain")
+        try section("hardware gain")
         // Which element it lives on, because the answer is what this project
         // got wrong for months: only the master was asked for, the Seiren V3
         // Pro publishes nothing there, and the written-up reverse engineering
@@ -497,7 +578,7 @@ enum UIFlowCheck {
             note("this input publishes no settable gain of its own")
         }
 
-        section("driver freshness")
+        try section("driver freshness")
         // An older installed driver is missing whatever the newer one added,
         // silently, and every symptom looks like a bug in the application. It
         // cost an hour: the virtual device published no volume control, the
@@ -515,7 +596,7 @@ enum UIFlowCheck {
             note("no driver installed")
         }
 
-        section("our own device's controls")
+        try section("our own device's controls")
         // Volume on an aggregate or virtual device is a well-known gap —
         // `proxy-audio-device` has a thousand stars for a driver that does only
         // this, and BlackHole's top-voted discussion is the same request. We
@@ -544,7 +625,7 @@ enum UIFlowCheck {
             note("our virtual device is not installed — its controls not exercised")
         }
 
-        section("device profiles")
+        try section("device profiles")
         // Loaded from documents beside the application rather than compiled in,
         // which is the only reason supporting somebody else's microphone is a
         // text file rather than a release. It is also the sort of thing that
@@ -558,7 +639,7 @@ enum UIFlowCheck {
             "none of them failed to parse", DeviceChannelNames.shared.problems.isEmpty)
         for problem in DeviceChannelNames.shared.problems.prefix(3) { note(problem) }
 
-        section("channel naming")
+        try section("channel naming")
         // CoreAudio says a device has three input channels and nothing about
         // what is on them. On the Seiren all three carry audio — processed, dry,
         // and past the microphone's own expander — so a number is not just
@@ -582,10 +663,10 @@ enum UIFlowCheck {
                 model.sourceChannelLabel(0).contains("1"))
         }
 
-        section("localisation")
-        checkLocalisation()
+        try section("localisation")
+        try checkLocalisation()
 
-        section("application list")
+        try section("application list")
         model.refreshApps()
         check("applications were found", !model.availableApps.isEmpty)
         check(
@@ -610,7 +691,7 @@ enum UIFlowCheck {
         check("they can still be shown", model.visibleApps.count == model.availableApps.count)
         model.showsBackgroundApps = false
 
-        section("starting")
+        try section("starting")
         model.start()
         // Fifteen seconds, not five. A device that cannot be started does not
         // always say so quickly: a display's audio endpoint takes about twelve
@@ -666,15 +747,15 @@ enum UIFlowCheck {
             note("destination is a real output — monitoring, so no next step")
         }
 
-        checkStatusPills(model: model)
+        try checkStatusPills(model: model)
 
-        section("muting the first route")
+        try section("muting the first route")
         model.setMuted(true, forRouteAt: 0)
         check("the mute took", model.routeMutes.first == true)
         model.setMuted(false, forRouteAt: 0)
         check("unmuting took", model.routeMutes.first == false)
 
-        section("solo, peak hold and clipping")
+        try section("solo, peak hold and clipping")
         check("peak holds are being tracked", model.peakHolds.count == model.activeRoutes.count)
         check("clip latches exist too", model.clipped.count == model.activeRoutes.count)
         // The hold never sits below the instantaneous level, or the marker
@@ -697,7 +778,7 @@ enum UIFlowCheck {
             note("only one route — solo not exercised")
         }
 
-        section("moving a fader")
+        try section("moving a fader")
         model.setFaderDecibels(-12, forRouteAt: 0)
         check(
             "the fader reads back what was set",
@@ -712,7 +793,7 @@ enum UIFlowCheck {
         model.setFaderDecibels(0, forRouteAt: 0)
         check("unity reads back as exactly unity", model.faderDecibels(forRouteAt: 0) == 0)
 
-        section("input trim and master")
+        try section("input trim and master")
         // The two controls anybody looks for first, and the app had neither —
         // only the per-route strips, which balance sources against each other
         // rather than answering "how loud is the microphone".
@@ -762,7 +843,7 @@ enum UIFlowCheck {
         model.inputDecibels = 0
         model.outputDecibels = 0
 
-        section("loudness and spectrum")
+        try section("loudness and spectrum")
         // The unit tests prove the arithmetic against the standard. What they
         // cannot prove is that the ring is wired to the output bus at all — a
         // meter reading a ring nothing writes to reports a clean −inf, which is
@@ -823,7 +904,7 @@ enum UIFlowCheck {
         model.resetLoudness()
         check("reset clears the reading", model.analysis.duration == 0)
 
-        section("what the on-device model hears")
+        try section("what the on-device model hears")
         model.isAnalysisVisible = true
         await pause(2.0)
         // The classifier is what makes the levelling trustworthy, so the check
@@ -837,7 +918,7 @@ enum UIFlowCheck {
             "confidence is a probability",
             model.heardConfidence >= 0 && model.heardConfidence <= 1)
 
-        section("what is actually leaving")
+        try section("what is actually leaving")
         // The measurement that did not exist: every meter in the graph is taken
         // before gain, so nothing could see the trim or the master pushing the
         // signal past full scale. The far end heard distortion and this side
@@ -868,7 +949,7 @@ enum UIFlowCheck {
         await pause(0.3)
         check("the latch can be cleared", model.outputClippedSamples == 0)
 
-        section("balancing sources")
+        try section("balancing sources")
         // The whole flow, at speed. What it cannot check on its own is whether
         // anybody spoke — a silent room produces a failure, and that failure is
         // itself the correct behaviour, so both outcomes are accepted and the
@@ -912,7 +993,7 @@ enum UIFlowCheck {
         }
         check("it is back to idle", model.calibrationPhase == .idle)
 
-        section("named buses")
+        try section("named buses")
         // The two mixes have existed since monitoring became a second mix
         // rather than a sidetone. What did not exist was the vocabulary: the
         // interface showed a fader, and another fader with a headphone symbol,
@@ -949,7 +1030,7 @@ enum UIFlowCheck {
             await waitUntil("and it went back", { !model.isBusy }, timeout: 15)
         }
 
-        section("sources rather than wires")
+        try section("sources rather than wires")
         // A stereo source is two routes, and it used to be two strips: two
         // faders, two mutes and two solo buttons for one microphone. Worse, the
         // balance pass measured each channel separately and proposed a gain for
@@ -984,7 +1065,7 @@ enum UIFlowCheck {
             note("no multi-channel source to exercise grouping against")
         }
 
-        section("per-application taps")
+        try section("per-application taps")
         // One tap per application rather than one for all of them, which is
         // what makes Discord and Spotify separable at all.
         if model.capturedAppBundleIDs.count > 1 {
@@ -996,7 +1077,7 @@ enum UIFlowCheck {
             note("fewer than two applications captured — separation not exercised")
         }
 
-        section("ducking")
+        try section("ducking")
         // The rule that matters more than any other: it must never touch the
         // microphone. A ducker that reached the voice would be a gate keyed off
         // a classifier that reports twice a second, and it would cut the front
@@ -1014,7 +1095,7 @@ enum UIFlowCheck {
         model.isDucking = false
         check("switching it off changed nothing else", model.isRunning && !model.isBusy)
 
-        section("idle cost")
+        try section("idle cost")
         // With the panel closed and nothing switched on, none of the analysis
         // machinery should exist and the IO thread should not be folding a bus
         // for nobody.
@@ -1027,10 +1108,10 @@ enum UIFlowCheck {
         await pause(0.4)
         check("and it comes back when the panel opens", !model.analysisIsIdle)
 
-        await checkStartCost(model: model)
-        await checkPollCost(model: model)
+        try await checkStartCost(model: model)
+        try await checkPollCost(model: model)
 
-        section("automatic levelling")
+        try section("automatic levelling")
         let trimBefore = model.inputDecibels
         model.isAutoLevelling = true
         await pause(1.5)
@@ -1057,7 +1138,7 @@ enum UIFlowCheck {
         check("switching it off keeps the level it settled on", model.inputDecibels == settled)
         check("routing continues without it", model.isRunning && !model.isBusy)
 
-        section("push to talk")
+        try section("push to talk")
         // The property that matters is that arming it is safe: silence has to
         // be the resting state, or somebody broadcasts a room they were sure
         // was muted.
@@ -1081,7 +1162,7 @@ enum UIFlowCheck {
         // by a feature they just switched off.
         check("disarming restores the previous mute", model.isInputMuted == muteBefore)
 
-        section("direct monitoring")
+        try section("direct monitoring")
         if let monitor = model.monitorOptions.first {
             let routesBefore = model.activeRoutes.count
             model.monitorDeviceUID = monitor.uid
@@ -1161,7 +1242,7 @@ enum UIFlowCheck {
             note("no second output to monitor on — skipped")
         }
 
-        section("pitch tracking")
+        try section("pitch tracking")
         // Knowing the actual fundamental is what would let a voice be moved to
         // a range rather than by an amount. Measured against the live signal:
         // in a quiet room there is no pitch to find, and reporting one would be
@@ -1188,7 +1269,7 @@ enum UIFlowCheck {
             check("a silent room reports no pitch", pitch == 0)
         }
 
-        section("every stage on its own")
+        try section("every stage on its own")
         // One at a time, which is how somebody actually uses these and the case
         // that was broken: the chain was only built for more than one stage, so
         // switching on just the gate — or just the compressor, or just the
@@ -1208,7 +1289,7 @@ enum UIFlowCheck {
         model.enabledEffects = effectsBefore
         await waitUntil("the chain came back", { !model.isBusy }, timeout: 14)
 
-        section("gain reduction")
+        try section("gain reduction")
         // A compressor set wrong is completely silent about it: it sounds like
         // a compressor doing nothing, which is what it is. The meter is the
         // only way to tell, so it has to actually report.
@@ -1240,7 +1321,7 @@ enum UIFlowCheck {
             "the meter goes away with the stage",
             { model.gainReduction[.compressor] == nil }, timeout: 3)
 
-        section("switching channel mode while running")
+        try section("switching channel mode while running")
         let before = model.activeRoutes.count
         model.channelMode = model.channelMode == .mono ? .stereo : .mono
         // A channel-mode change is a rebuild, not a live edit: the engine stops,
@@ -1262,7 +1343,7 @@ enum UIFlowCheck {
             "audio is flowing through the rebuilt graph",
             model.cycleCountForDiagnostics > cyclesAfterRebuild)
 
-        section("recording")
+        try section("recording")
         check("recording is offered while routing", model.isRunning)
         model.toggleRecording()
         check("the recording started", model.isRecording)
@@ -1301,7 +1382,7 @@ enum UIFlowCheck {
         check("the recording stopped", !model.isRecording)
         check("stopping clears the pause", !model.isRecordingPaused)
 
-        section("stems")
+        try section("stems")
         // A file per source alongside the mix. What cannot be recovered from a
         // mix at any price is who said what, so this is the recording that
         // matters for anything edited afterwards.
@@ -1357,7 +1438,7 @@ enum UIFlowCheck {
             try? FileManager.default.removeItem(at: file)
         }
 
-        section("stems survive a route edit")
+        try section("stems survive a route edit")
         // The bug this catches was live: rebuilding the graph dropped the stem
         // assignment, so moving one cable during a recording left every file
         // open, silent and still counting time with nothing saying so.
@@ -1416,7 +1497,7 @@ enum UIFlowCheck {
         }
         model.recordsStems = false
 
-        section("transcription")
+        try section("transcription")
         if let reason = model.transcriptionUnavailableReason {
             // Not a failure. On a system without the model this is the correct
             // behaviour, and the point of the check is that it says so rather
@@ -1450,7 +1531,7 @@ enum UIFlowCheck {
             model.stopTranscribing()
         }
 
-        section("switching the echo canceller on while running")
+        try section("switching the echo canceller on while running")
         if model.echoSpeakerOptions.isEmpty {
             note("no hardware output to cancel against — skipped")
         } else {
@@ -1490,7 +1571,7 @@ enum UIFlowCheck {
             check("routing continues without it", !model.activeRoutes.isEmpty)
         }
 
-        section("applying a preset while running")
+        try section("applying a preset while running")
         // One restart per preset, not one per property. Every field a preset
         // sets restarts the route on its own, so this used to tear the audio
         // down and rebuild it three times for a single click.
@@ -1515,7 +1596,7 @@ enum UIFlowCheck {
         check("routing survived every preset", model.isRunning)
         await pause(1.0)
 
-        section("what a scene actually changes")
+        try section("what a scene actually changes")
         // The defect this section exists for. The four scenes carried a sample
         // rate, a buffer and one isolation flag, and deliberately left the
         // processing chain alone — so pressing "Noisy room" instead of "Voice
@@ -1645,7 +1726,7 @@ enum UIFlowCheck {
         await waitUntil("the batch settled", { !model.isBusy }, timeout: 10)
         check("routing survived both", model.isRunning)
 
-        section("processing chain")
+        try section("processing chain")
         // Every stage has to build against the real Audio Unit. A knob wired to
         // a parameter the unit does not have fails silently — the slider moves
         // and nothing happens.
@@ -1673,7 +1754,7 @@ enum UIFlowCheck {
         }
         check("routing survived the whole chain", model.isRunning)
 
-        section("processing chain swapped live")
+        try section("processing chain swapped live")
         // The claim being tested is that changing the chain no longer restarts
         // the route. Measured before it was made true: one stage cost about
         // 880 ms inside the engine, 645 of it in `AudioDeviceStart`, and
@@ -1811,7 +1892,7 @@ enum UIFlowCheck {
         await waitUntil("the chain came back", { !model.isBusy }, timeout: 14)
         check("routing survived every swap", model.isRunning)
 
-        section("patching")
+        try section("patching")
         let sourcePorts = model.canvasSources
         let destinationPorts = model.canvasDestinations
         check("the canvas offers sources", !sourcePorts.isEmpty)
@@ -1890,7 +1971,7 @@ enum UIFlowCheck {
                     .allSatisfy { offered.contains($0.destination.channel) })
         }
 
-        section("device changes")
+        try section("device changes")
         // A real change to the device list, not a simulated one: creating an
         // aggregate makes CoreAudio publish kAudioHardwarePropertyDevices, which
         // is the same notification an unplug produces. What is being checked is
@@ -1933,7 +2014,7 @@ enum UIFlowCheck {
             note("could not build a decoy device — skipped")
         }
 
-        section("devices that share no sample rate")
+        try section("devices that share no sample rate")
         // A Razer Barracuda does 44.1 kHz out and 16 kHz in; a Seiren V3 Pro
         // does 48 and 96. Somebody who owns both is not doing anything unusual,
         // and this used to be refused outright with "the selected devices share
@@ -1971,7 +2052,7 @@ enum UIFlowCheck {
             note("every output shares a rate with the source — not exercised")
         }
 
-        section("output-only aggregate members")
+        try section("output-only aggregate members")
         // The mechanism behind the Bluetooth fix, checked on hardware that is
         // here: a member restricted to no input channels must still create,
         // still present its outputs, and not take its inputs into the
@@ -2067,7 +2148,7 @@ enum UIFlowCheck {
             note("no device with both directions — skipped")
         }
 
-        section("singing")
+        try section("singing")
         // Everything this needs already existed and none of it was joined up:
         // the pitch tracker, the music players' scripting dictionaries, and a
         // routed microphone. What was missing was the words, and those are a
@@ -2136,7 +2217,7 @@ enum UIFlowCheck {
         model.isSingingVisible = false
         check("and looking away clears the track", model.nowPlaying == nil)
 
-        section("output tone")
+        try section("output tone")
         // Ten bands at Razer's own centres, which is a real claim: somebody
         // moving from Windows can copy their settings across band for band.
         // The arithmetic is unit-tested; what is checked here is that a slider
@@ -2171,7 +2252,7 @@ enum UIFlowCheck {
         check("flattening puts it back", model.graphicEQIsFlat)
         check("and stops running anything", model.headphoneCurve == nil)
 
-        section("headphone correction")
+        try section("headphone correction")
         // Written into the folder the application reads, so what is exercised
         // is the path a person takes: download a file for your headphones, drop
         // it in, pick it. Parsing is unit-tested; this is the plumbing.
@@ -2219,9 +2300,9 @@ enum UIFlowCheck {
             note("no application support directory — skipped")
         }
 
-        await checkBusProcessing(model: model)
+        try await checkBusProcessing(model: model)
 
-        section("setups")
+        try section("setups")
         // A setup captures devices; a scene captures processing. Confusing the
         // two would mean somebody choosing "podcast" could not know whether
         // they had changed a compressor or unplugged their headphones.
@@ -2316,7 +2397,7 @@ enum UIFlowCheck {
             (try? AudioDevices.defaultOutput())??.uid == systemOutputBefore)
         await waitUntil("and routing is still up", { model.isRunning }, timeout: 10)
 
-        section("excluded applications")
+        try section("excluded applications")
         // Every product in this category added an exclusion list *after* the
         // breakage reports. A tap changes how an application's audio leaves the
         // machine, and a DAW that finds its output redirected mid-session is a
@@ -2347,7 +2428,7 @@ enum UIFlowCheck {
             note("no applications to exclude — skipped")
         }
 
-        section("volume keys")
+        try section("volume keys")
         // The research said we almost certainly had the aggregate-volume bug,
         // because we ship an aggregate. We do not: ours is created private and
         // is never selectable as a system output, and the device somebody does
@@ -2373,7 +2454,7 @@ enum UIFlowCheck {
                 == !(model.selectedDestination?.hasSettableVolume(
                     scope: kAudioObjectPropertyScopeOutput) ?? true))
 
-        section("output alignment")
+        try section("output alignment")
         // The delay is a property of the aggregate rather than of the graph, so
         // setting one rebuilds the route. What is being checked is that the
         // route survives that and that the value is what the system was told.
@@ -2400,7 +2481,7 @@ enum UIFlowCheck {
             await waitUntil("still running afterwards", { model.isRunning }, timeout: 10)
         }
 
-        section("remote control")
+        try section("remote control")
         // Somebody wiring a Stream Deck key to this has no way to see what
         // happened, so the parse has to be exact rather than forgiving. The
         // failure mode being guarded against is a mistyped URL that means
@@ -2464,7 +2545,7 @@ enum UIFlowCheck {
             check("and one that does is applied", model.perform(.preset(scene.name)) != nil)
         }
 
-        section("falling back when a device disappears")
+        try section("falling back when a device disappears")
         // Unplugging the microphone used to stop everything and wait. That is
         // right only when there is nowhere else to go: somebody on a call whose
         // USB microphone falls out wants the call to carry on, and wants their
@@ -2543,7 +2624,7 @@ enum UIFlowCheck {
             note("could not build a decoy device — skipped")
         }
 
-        section("integrity check")
+        try section("integrity check")
         // The project's central claim, and until now it could only be made from
         // a terminal: somebody who installs the app had no way to find out
         // whether their own path is bit-exact.
@@ -2570,9 +2651,9 @@ enum UIFlowCheck {
             check("no error was left behind", model.lastError == nil)
         }
 
-        checkApplicationList(model: model)
+        try checkApplicationList(model: model)
 
-        section("stopping")
+        try section("stopping")
         // Stop, pressed while the engine queue was busy with a rebuild. The busy
         // guard refused it and returned having done nothing, and the start that
         // every rebuild chains behind its own teardown then brought the route
@@ -2634,7 +2715,7 @@ enum UIFlowCheck {
         // reaches neither the code that reads it nor the disk. So each one is
         // asserted twice — that it changed what it claims to change, and that
         // it survived being written down.
-        section("settings")
+        try section("settings")
         let originalLanguage = YunTheme.shared.language
         let originalAppearance = YunTheme.shared.appearance
         let originalAccent = YunTheme.shared.accent
@@ -2743,11 +2824,11 @@ enum UIFlowCheck {
                 && YunTheme.persisted().language == originalLanguage
                 && model.bufferFrames == originalBuffer)
 
-        await checkMIDI(model: model)
-        await checkScoring(model: model)
-        await checkVoiceActivity(model: model)
-        await checkRedrawCost(model: model)
-        await checkCarriedState(model: model)
+        try await checkMIDI(model: model)
+        try await checkScoring(model: model)
+        try await checkVoiceActivity(model: model)
+        try await checkRedrawCost(model: model)
+        try await checkCarriedState(model: model)
 
         summarise()
     }
@@ -2766,8 +2847,8 @@ enum UIFlowCheck {
     /// plays it through a real process, captures that process through the
     /// application's own tap, and asks what key it is in. Nothing is assumed
     /// about what happens to be installed or playing.
-    private static func checkScoring(model: RouterModel) async {
-        section("scoring the singing")
+    private static func checkScoring(model: RouterModel) async throws {
+        try section("scoring the singing")
 
         // The file half first, because it needs no devices. A hand-built MIDI
         // file so the assertion is against bytes rather than against something
@@ -2881,7 +2962,7 @@ enum UIFlowCheck {
 
         // The key of real music. This is the part the project had written down
         // as unverified.
-        section("the key of music that is actually playing")
+        try section("the key of music that is actually playing")
         let tonic = 5  // F, chosen so an always-C answer is caught
         let wave = URL(fileURLWithPath: "/tmp/yunaudio-key-check.wav")
         guard (try? progressionWave(tonic: tonic).write(to: wave)) != nil else {
@@ -3094,8 +3175,8 @@ enum UIFlowCheck {
     /// So the bodies are counted rather than reasoned about, and the expensive
     /// reads are timed rather than assumed expensive. Both halves have already
     /// been wrong here.
-    private static func checkRedrawCost(model: RouterModel) async {
-        section("what the interface redraws")
+    private static func checkRedrawCost(model: RouterModel) async throws {
+        try section("what the interface redraws")
 
         // The window has to be on screen or SwiftUI evaluates nothing and the
         // counts are all zero, which would read as "nothing redraws".
@@ -3226,8 +3307,8 @@ enum UIFlowCheck {
     /// goes on reporting what the model holds, which is right, while the graph
     /// runs without it. Two have already been found this way. This asserts the
     /// third case rather than waiting for the fourth.
-    private static func checkCarriedState(model: RouterModel) async {
-        section("state carried across a rebuild")
+    private static func checkCarriedState(model: RouterModel) async throws {
+        try section("state carried across a rebuild")
         await bringRoutingBack(model)
         guard model.isRunning else {
             note("no route is up — skipped")
@@ -3312,12 +3393,12 @@ enum UIFlowCheck {
         model.bufferFrames = bufferBefore
         await waitUntil("and back", { model.isRunning && !model.isBusy }, timeout: 30)
 
-        await checkSecondMix(model: model)
+        try await checkSecondMix(model: model)
 
         // And what is written down. A `didSet` that calls `persist()` for a
         // field `Preferences` does not have is a setting that looks remembered
         // and is not.
-        section("settings that survive a relaunch")
+        try section("settings that survive a relaunch")
         let originalBehaviour = model.tapMuteBehavior
         let other: TapMuteBehavior = originalBehaviour == .muted ? .unmuted : .muted
         model.tapMuteBehavior = other
@@ -3339,8 +3420,8 @@ enum UIFlowCheck {
     /// changes a level somewhere else, and a monitor that stopped existing
     /// leaves both buses, both sets of faders and the legend above them
     /// exactly as they were.
-    private static func checkSecondMix(model: RouterModel) async {
-        section("the second mix survives a change to the first")
+    private static func checkSecondMix(model: RouterModel) async throws {
+        try section("the second mix survives a change to the first")
         await bringRoutingBack(model)
         guard model.isRunning else {
             note("no route is up — skipped")
@@ -3430,8 +3511,8 @@ enum UIFlowCheck {
     /// catch and which takes the whole application down mid-check. The first
     /// version of this section did exactly that, silently, and every section
     /// after it simply never ran.
-    private static func checkVoiceActivity(model: RouterModel) async {
-        section("the system's own voice detector")
+    private static func checkVoiceActivity(model: RouterModel) async throws {
+        try section("the system's own voice detector")
 
         let inputs = (try? AudioDevices.all())?.filter(\.hasInput) ?? []
         let publishing = inputs.filter { VoiceActivityWatcher.isAvailable(on: $0.id) }
@@ -3474,8 +3555,8 @@ enum UIFlowCheck {
     /// and receives from it by exactly the path a knob on a desk would take.
     /// Without that, the client, the port, the reconnection and the decode of a
     /// real `MIDIEventList` would only ever run on somebody else's machine.
-    private static func checkMIDI(model: RouterModel) async {
-        section("midi")
+    private static func checkMIDI(model: RouterModel) async throws {
+        try section("midi")
         let midi = model.midiControl
         note(
             "CoreMIDI sources: \(midi.sourceNames.count)"
@@ -3536,7 +3617,7 @@ enum UIFlowCheck {
             "a control claimed for something else leaves its old row empty",
             midi.binding(for: mute) == nil)
 
-        await checkMIDIThroughCoreMIDI(model: model)
+        try await checkMIDIThroughCoreMIDI(model: model)
 
         midi.restore(originalBindings)
         model.persistMIDIBindings()
@@ -3547,7 +3628,7 @@ enum UIFlowCheck {
     }
 
     /// The half that only a real `MIDIEventList` can exercise.
-    private static func checkMIDIThroughCoreMIDI(model: RouterModel) async {
+    private static func checkMIDIThroughCoreMIDI(model: RouterModel) async throws {
         let midi = model.midiControl
         guard let loopback = MIDILoopback(name: "YunAudio flow check") else {
             note("no virtual source could be created; the CoreMIDI half was not exercised")
@@ -3615,8 +3696,8 @@ enum UIFlowCheck {
     /// is most of them, and includes every restart caused by a setting
     /// changing. It buys the process identifiers of the applications about to
     /// be tapped; with none to tap it buys nothing.
-    private static func checkStartCost(model: RouterModel) async {
-        section("what starting costs with nothing captured")
+    private static func checkStartCost(model: RouterModel) async throws {
+        try section("what starting costs with nothing captured")
         let captured = model.capturedAppBundleIDs
         model.capturedAppBundleIDs = []
         model.stop()
@@ -3646,8 +3727,8 @@ enum UIFlowCheck {
     /// than on change, so a poll that writes nine unchanged values still
     /// re-evaluates the body of every view that read any of them, twenty times a
     /// second, for ever.
-    private static func checkPollCost(model: RouterModel) async {
-        section("what the idle interface costs")
+    private static func checkPollCost(model: RouterModel) async throws {
+        try section("what the idle interface costs")
 
         // Deliberately placed straight after the idle-cost section, which has
         // just switched the analysis, the levelling and the ducking off and on
@@ -3746,7 +3827,7 @@ enum UIFlowCheck {
             "most of what it writes is recognised as unchanged",
             quiet.cost.unchanged * 2 > quiet.cost.writes)
 
-        checkStartupCost(model: model)
+        try checkStartupCost(model: model)
     }
 
     /// What launching costs, and which part of it.
@@ -3757,8 +3838,8 @@ enum UIFlowCheck {
     /// measurement. The parts are re-timed warm, which understates every one of
     /// them; what a warm number is good for is saying which of them is worth
     /// looking at cold.
-    private static func checkStartupCost(model: RouterModel) {
-        section("what launching costs")
+    private static func checkStartupCost(model: RouterModel) throws {
+        try section("what launching costs")
 
         note(String(format: "exec to a live run loop: %.0f ms", launchSeconds * 1000))
 
@@ -3808,8 +3889,8 @@ enum UIFlowCheck {
     /// say cannot be checked by looking at a screenshot of a machine where it
     /// happened to have something. A view cannot be asked what it is showing;
     /// the list it is built from can.
-    private static func checkStatusPills(model: RouterModel) {
-        section("status pills")
+    private static func checkStatusPills(model: RouterModel) throws {
+        try section("status pills")
         let pills = StatusPills.pills(for: model)
         note(pills.map(\.id).joined(separator: " "))
         check("every pill carries a label", pills.allSatisfy { !$0.label.isEmpty })
@@ -3852,7 +3933,7 @@ enum UIFlowCheck {
     /// table unused — the table said the work was done and the interface showed
     /// English anyway. Nothing catches that but comparing the two sides, so it
     /// is compared on every run.
-    private static func checkLocalisation() {
+    private static func checkLocalisation() throws {
         guard let bundle = Bundle(path: AppResources.bundle.bundlePath) else {
             note("could not open the resource bundle")
             return
@@ -4017,8 +4098,8 @@ enum UIFlowCheck {
     /// folded in.
     ///
     /// - Parameter model: The live model, mid-route.
-    private static func checkApplicationList(model: RouterModel) {
-        section("application list, with audio running")
+    private static func checkApplicationList(model: RouterModel) throws {
+        try section("application list, with audio running")
 
         // What the panel and the window actually ask for.
         let panelLimit = 6
@@ -4110,8 +4191,8 @@ enum UIFlowCheck {
     /// that a slider reaches only its own, that both survive a save and a load,
     /// and that a file written before any of this existed still opens with its
     /// settings on the bus they used to run on.
-    private static func checkBusProcessing(model: RouterModel) async {
-        section("per-bus processing")
+    private static func checkBusProcessing(model: RouterModel) async throws {
+        try section("per-bus processing")
 
         // A second bus for the duration, because one bus cannot demonstrate
         // that two are independent and this is the only check that drives the
@@ -4235,7 +4316,7 @@ enum UIFlowCheck {
         check("no error was reported", model.lastError == nil)
         check("the route did not go down", model.isRunning)
 
-        await checkChainAlignment(model: model)
+        try await checkChainAlignment(model: model)
     }
 
     /// The chain's latency has to reach something that moves a sample.
@@ -4247,8 +4328,8 @@ enum UIFlowCheck {
     /// arrival frames are asserted against the real callback in the unit tests;
     /// what is checked here is that switching a stage on actually hands the
     /// number to the running graph.
-    private static func checkChainAlignment(model: RouterModel) async {
-        section("chain alignment")
+    private static func checkChainAlignment(model: RouterModel) async throws {
+        try section("chain alignment")
 
         let before = model.chainAlignment
         note("chain \(before.chain) frames, aligning \(before.applied)")
