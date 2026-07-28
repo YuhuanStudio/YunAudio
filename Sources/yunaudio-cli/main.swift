@@ -110,9 +110,14 @@ func describe(_ device: AudioDevice, isDefaultInput: Bool, isDefaultOutput: Bool
     // What the channels carry, where the device's topology is known. CoreAudio
     // will not say, and on the Seiren V3 Pro the three inputs are three
     // different versions of the same capsule.
-    if let named = DeviceChannelNames.channels(
-        modelUID: device.modelUID, name: device.name,
-        scope: kAudioObjectPropertyScopeInput)
+    //
+    // Only for a device that has inputs. A profile is matched on a name, and
+    // the Barracuda publishes the same name twice — so the output half of the
+    // headset was listing an input channel it does not have.
+    if device.hasInput,
+        let named = DeviceChannelNames.channels(
+            modelUID: device.modelUID, name: device.name,
+            scope: kAudioObjectPropertyScopeInput)
     {
         print("  input channels")
         for (index, channel) in named.enumerated() {
@@ -120,6 +125,33 @@ func describe(_ device: AudioDevice, isDefaultInput: Bool, isDefaultOutput: Bool
             print("    ch \(index + 1)  \(channel.name)\(marker)")
         }
     }
+
+    // The rest of what the profile knows. It was written down and then reachable
+    // only from the tests — which is a strange place to keep the one sentence
+    // that explains why somebody's headset records at 16 kHz.
+    if let note = DeviceChannelNames.note(modelUID: device.modelUID, name: device.name) {
+        print("  known about this device")
+        for line in wrapped(note, width: 74) { print("    \(line)") }
+    }
+}
+
+/// Breaks prose at spaces so a paragraph in a device profile does not print as
+/// one line four hundred characters wide.
+func wrapped(_ text: String, width: Int) -> [String] {
+    var lines: [String] = []
+    var line = ""
+    for word in text.split(separator: " ") {
+        if line.isEmpty {
+            line = String(word)
+        } else if line.count + 1 + word.count <= width {
+            line += " " + word
+        } else {
+            lines.append(line)
+            line = String(word)
+        }
+    }
+    if !line.isEmpty { lines.append(line) }
+    return lines
 }
 
 // MARK: - Route mode

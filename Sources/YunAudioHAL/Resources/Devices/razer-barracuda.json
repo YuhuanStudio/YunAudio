@@ -1,0 +1,11 @@
+{
+  "match": "razer barracuda",
+  "note": "One headset, three ways in: a 2.4 GHz dongle that appears as \"Razer Barracuda 2.4\", Bluetooth 5.2 that appears as \"Razer Barracuda (BT)\", and a 3.5 mm jack that appears as nothing at all. Use the dongle if you want the microphone — Bluetooth carries it at 16 kHz and takes the headphones down with it. Razer specify the microphone as 100 Hz to 10 kHz, omnidirectional, two ECM capsules, signal to noise 65 dB or better. Everything Synapse calls Enhance is host-side and Windows-only: a 10-band graphic EQ at 30, 60, 120, 250, 500 Hz, 1, 2, 4, 8 and 16 kHz, plus or minus 5 dB, with bass boost, sound normalisation and voice clarity beside it. Nothing is sent to the headset for any of that, so this application's own equaliser at those same centres is the whole of it on macOS.",
+  "inputChannels": [
+    {
+      "name": "Headset microphone",
+      "detail": "The boom microphone, in mono. Razer specify 100 Hz to 10 kHz and an omnidirectional pattern, so it is a voice microphone and not a room one.",
+      "isDefault": true
+    }
+  ]
+}

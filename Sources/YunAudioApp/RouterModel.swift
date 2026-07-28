@@ -444,12 +444,82 @@ final class RouterModel {
     /// now is always shown — something making noise is worth being able to
     /// point at, whatever its activation policy says.
     var visibleApps: [AudioApplication] {
-        showsBackgroundApps
-            ? availableApps
-            : availableApps.filter { !$0.isBackground || $0.isPlaying }
+        showsBackgroundApps ? availableApps : offeredApps
     }
 
-    var hiddenAppCount: Int { availableApps.count - visibleApps.count }
+    /// The applications, plus anything audible whatever its activation policy
+    /// says — something making noise is worth being able to point at.
+    private var offeredApps: [AudioApplication] {
+        availableApps.filter { !$0.isBackground || $0.isPlaying }
+    }
+
+    /// The daemons: no Dock presence and silent. These are the ones the toggle
+    /// is about.
+    private var backgroundApps: [AudioApplication] {
+        availableApps.filter { $0.isBackground && !$0.isPlaying }
+    }
+
+    /// How many entries the toggle is offering to reveal.
+    ///
+    /// Counted from the list rather than from the difference between the two
+    /// views of it, because that difference is zero exactly when they are being
+    /// shown — so the number was only ever right while it was not needed.
+    var hiddenAppCount: Int { backgroundApps.count }
+
+    /// What one list draws, given how many rows the caller has room for.
+    ///
+    /// The truncation used to be `visibleApps.prefix(limit)`, applied to the
+    /// whole list with the daemons already folded in, and that is why expanding
+    /// them looked broken: on this machine four foreground applications against
+    /// the panel's limit of six left room for two of nineteen daemons, and the
+    /// other seventeen turned into "and 17 more". Pressing the toggle moved two
+    /// rows. So the limit belongs to the applications, which are what it exists
+    /// to keep short, and the daemons — asked for explicitly, one press ago —
+    /// are all shown.
+    ///
+    /// - Parameter limit: How many application rows to draw before the rest are
+    ///   summarised.
+    /// - Returns: The rows to draw, in the two groups the list draws them in.
+    func appListing(limit: Int) -> AppListing {
+        let offered = offeredApps
+        return AppListing(
+            applications: Array(offered.prefix(limit)),
+            overflow: max(0, offered.count - limit),
+            background: showsBackgroundApps ? backgroundApps : [])
+    }
+
+    struct AppListing {
+        /// The applications, truncated to what there is room for.
+        var applications: [AudioApplication]
+        /// How many applications the truncation left out.
+        var overflow: Int
+        /// The daemons, in full, when they have been asked for.
+        var background: [AudioApplication]
+    }
+
+    /// When the application list was last enumerated, so a view can ask for it
+    /// to be fresh without asking for it to be re-read on every redraw.
+    private(set) var appsRefreshedAt: Date?
+
+    /// Enumerates the applications if nobody has done so recently.
+    ///
+    /// The list was refreshed only by the Refresh button, by starting a route,
+    /// and by the offscreen renderer — so opening the panel for the first time
+    /// after launch showed an empty list, with an empty state saying nothing
+    /// was producing audio, on a machine playing three things. Nothing had gone
+    /// wrong; nothing had ever run.
+    ///
+    /// Gated rather than unconditional because it is not free: 12 to 25 ms
+    /// warm on this machine and 118 ms cold, which is fine when a panel opens
+    /// and is not fine on every redraw of a list that is inside a disclosure.
+    ///
+    /// - Parameter seconds: How stale the list may be before it is re-read.
+    func refreshAppsIfStale(olderThan seconds: TimeInterval = 3) {
+        if let refreshed = appsRefreshedAt, Date().timeIntervalSince(refreshed) < seconds {
+            return
+        }
+        refreshApps()
+    }
 
     /// Applications this router will not touch, whatever anybody clicks.
     ///
@@ -1022,6 +1092,7 @@ final class RouterModel {
 
     func refreshApps() {
         availableApps = (try? AudioApplications.grouped()) ?? []
+        appsRefreshedAt = Date()
     }
 
     /// Resolves the saved bundle identifiers to the processes running right now.
@@ -1784,7 +1855,14 @@ final class RouterModel {
         let saved = PreferencesStore.load()
         autoStart = saved.autoStart
         excludedAppBundleIDs = Set(saved.excludedAppBundleIDs ?? [])
-        capturedAppBundleIDs = Set(saved.capturedAppBundleIDs)
+        // A process with no bundle identifier is listed under its PID, and a
+        // PID means nothing after a restart: the number gets reused, and the
+        // capture would silently attach to whatever inherited it. Selecting one
+        // of those is a decision about this session.
+        capturedAppBundleIDs = Set(
+            saved.capturedAppBundleIDs.filter {
+                !$0.hasPrefix(AudioApplications.pidIdentityPrefix)
+            })
         enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
         effectValues = saved.effectValues
         cancelsEcho = saved.cancelsEcho ?? false

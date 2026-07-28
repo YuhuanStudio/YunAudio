@@ -430,7 +430,8 @@ enum UIFlowCheck {
             // unwinds, and `start()` returns immediately while it is set — so
             // calling it straight away does nothing at all and the retry looks
             // like a second failure.
-            await waitUntil("the failed start finished unwinding", { !model.isBusy }, timeout: 20)
+            await waitUntil(
+                "the failed start finished unwinding", { !model.isBusy }, timeout: 20)
             model.selectedDestinationUID = fallback
             model.start()
             await waitUntil("it came up on the system output", { model.isRunning }, timeout: 15)
@@ -1884,6 +1885,8 @@ enum UIFlowCheck {
             check("no error was left behind", model.lastError == nil)
         }
 
+        checkApplicationList(model: model)
+
         print("\nstopping")
         model.stop()
         await waitUntil("the route came down", { !model.isRunning }, timeout: 5)
@@ -2009,6 +2012,102 @@ enum UIFlowCheck {
             await pause(0.05)
         }
         check(description, condition())
+    }
+
+    /// The application list, checked against the HAL rather than against
+    /// itself.
+    ///
+    /// Run with the route up, so the machine is demonstrably producing audio
+    /// while the list is asked whether anything is. Two separate complaints
+    /// live here and neither was visible to any check before: the list was
+    /// empty until somebody pressed Refresh, because nothing else ever
+    /// enumerated it; and the toggle offering nineteen background processes
+    /// revealed two of them, because the row limit was applied after they were
+    /// folded in.
+    ///
+    /// - Parameter model: The live model, mid-route.
+    private static func checkApplicationList(model: RouterModel) {
+        print("\napplication list, with audio running")
+
+        // What the panel and the window actually ask for.
+        let panelLimit = 6
+        let windowLimit = 8
+
+        // Nobody has refreshed since the route started. This is the call the
+        // list itself makes when it appears, and it has to be enough.
+        let before = model.appsRefreshedAt
+        model.refreshAppsIfStale(olderThan: 0)
+        check("appearing is enough to enumerate", model.appsRefreshedAt != before)
+        check("the list is not empty while audio is running", !model.availableApps.isEmpty)
+        note("\(model.availableApps.count) application(s)")
+
+        // And it does not re-enumerate on every redraw: 12 to 25 ms warm, and
+        // this list lives inside a disclosure that redraws with the meters.
+        let settled = model.appsRefreshedAt
+        model.refreshAppsIfStale()
+        check("a redraw a moment later does not re-enumerate", model.appsRefreshedAt == settled)
+
+        // The assertion the empty list should always have had to survive:
+        // whatever the HAL says is producing audio is in the list. A process
+        // with no bundle identifier used to be dropped here, silently, which is
+        // every command-line player there is.
+        let processes = (try? AudioProcesses.all(includingSilent: true)) ?? []
+        let playing = processes.filter(\.isPlaying)
+        let listed = Set(model.availableApps.flatMap(\.processIDs))
+        note("\(playing.count) of \(processes.count) process(es) playing")
+        check(
+            "every process the HAL says is playing is somewhere in the list",
+            playing.allSatisfy { listed.contains($0.id) })
+        // Conditioned on the route rather than asserted outright: this
+        // application is itself writing to an output while it runs, so if the
+        // route is up something is playing by definition. If it never came up
+        // — a device held by another copy, an endpoint that refuses to start —
+        // the machine really is silent and the failure to report is that one,
+        // above, not this.
+        if model.isRunning {
+            check("the running route counts as something producing audio", !playing.isEmpty)
+            // Playing sorts first, so it cannot be beyond the truncation either.
+            check(
+                "whatever is playing is on the first page of rows",
+                model.appListing(limit: panelLimit).applications.contains(where: \.isPlaying))
+        } else {
+            note("no route is up, so nothing is producing audio to check the list against")
+        }
+
+        // The toggle. The number on it is a promise about how many rows appear.
+        model.showsBackgroundApps = false
+        let collapsed = model.appListing(limit: panelLimit)
+        check("the daemons are held back by default", collapsed.background.isEmpty)
+        check(
+            "the applications fit the panel's limit", collapsed.applications.count <= panelLimit
+        )
+        let promised = model.hiddenAppCount
+        note("\(collapsed.applications.count) shown, \(promised) offered by the toggle")
+
+        model.showsBackgroundApps = true
+        let expanded = model.appListing(limit: panelLimit)
+        check(
+            "expanding shows exactly as many as the toggle promised",
+            expanded.background.count == promised)
+        check(
+            "the limit no longer swallows them",
+            expanded.background.count
+                == model.availableApps.filter { $0.isBackground && !$0.isPlaying }.count)
+        // Nothing appears twice and nothing is lost between the two halves.
+        let panelRows =
+            expanded.applications.map(\.bundleID) + expanded.background.map(\.bundleID)
+        check("no row is drawn twice", Set(panelRows).count == panelRows.count)
+        check(
+            "everything either shows, scrolls or is counted as overflow",
+            panelRows.count + expanded.overflow == model.availableApps.count)
+
+        // The window has more room, so it truncates less and reveals the same.
+        let window = model.appListing(limit: windowLimit)
+        check(
+            "the window shows at least as much as the panel",
+            window.applications.count >= expanded.applications.count
+                && window.background.count == expanded.background.count)
+        model.showsBackgroundApps = false
     }
 
     private static func summarise() {

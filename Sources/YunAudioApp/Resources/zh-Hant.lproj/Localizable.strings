@@ -216,6 +216,10 @@
 "The capsule as the device presents it." = "裝置處理後的音頭訊號。";
 "The same capsule with none of the device's own processing." = "同一顆音頭，未經裝置任何處理。";
 "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first." = "經過麥克風自己的擴展器，它位於類比轉換之前——所以能在任何東西削波之前就先去掉房間噪音。";
+"The capsule, in mono. This microphone offers one channel and no dry or expanded version of it." = "單聲道的音頭訊號。這支麥克風只提供一條聲道，沒有乾訊號、也沒有擴展器之後的版本。";
+"Headset microphone" = "耳機麥克風";
+"The boom microphone, in mono. Razer specify 100 Hz to 10 kHz and an omnidirectional pattern, so it is a voice microphone and not a room one." = "單聲道的懸臂麥克風。Razer 標示 100 Hz 至 10 kHz、全指向，所以它是人聲用的，不是收整個房間用的。";
+"One channel at 16 kHz, which is what hands-free Bluetooth carries and roughly what this capsule produces: Razer specify 100 Hz to 10 kHz." = "一條 16 kHz 的聲道，那是藍牙免持模式所能傳的上限，也差不多就是這顆音頭的上限：Razer 標示 100 Hz 至 10 kHz。";
 "Noise gate" = "雜訊閘";
 "High-pass" = "高通濾波";
 "Turns the signal down when nothing is being said. Cheaper than voice isolation and it leaves speech untouched." = "沒有人說話時把訊號壓下去。比人聲隔離便宜得多，而且不動說話的部分。";
