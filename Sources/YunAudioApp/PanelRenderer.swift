@@ -34,7 +34,7 @@ enum PanelRenderer {
             render(
                 MainWindow(model: model, initialInspector: tab, isRendering: true),
                 basename: "window-\(tab.rawValue)\(suffix)", directory: directory,
-                size: CGSize(width: 1060, height: 1180))
+                size: CGSize(width: 1060, height: 1480))
         }
         render(
             MainWindow(model: model, isRendering: true),
@@ -48,7 +48,16 @@ enum PanelRenderer {
             // the window header and the inspector's tab bar were missing from
             // every design check without anything saying so. A capture that
             // silently crops is worse than no capture.
-            size: CGSize(width: 1060, height: 1180))
+            // It outgrew 1180 the same way when the Sound tab became three
+            // labelled regions: the header went at the top and the reverb row
+            // off the bottom. An over-tall capture costs white space; a short
+            // one costs the check.
+            // Sized for the Sound tab with every stage switched on, because
+            // that is the tallest this window gets and it is a state a scene
+            // preset can put it in with one click — each enabled stage adds its
+            // knobs. The capture inherits whatever was last persisted, so the
+            // height cannot be chosen for the empty case.
+            size: CGSize(width: 1060, height: 1900))
 
         for section in PreferencesWindow.Section.allCases {
             render(

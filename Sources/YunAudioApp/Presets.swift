@@ -30,13 +30,21 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     /// Keeping the distinction in the data rather than in a separate list means
     /// there is one thing to iterate and one thing to persist.
     var isUserDefined: Bool = false
-    /// Everything a saved preset captures that the built-in ones do not.
+    /// The processing a preset asks for, and the rest of what it captures.
     ///
-    /// The built-in four describe how to route — sample rate, buffer, a stage
-    /// or two — because that is the part of the decision that is general. A
-    /// preset somebody saves is a snapshot of *their* setup, so it carries what
-    /// they had set: the processing chain, the voice, the levels and the
-    /// devices themselves.
+    /// Optional, all of it, and that is not tidiness: a preset somebody saved
+    /// before these fields existed is still sitting in `UserDefaults` as JSON,
+    /// and a non-optional field would make the whole array fail to decode and
+    /// take every one of their presets with it. `effects` keeps its original
+    /// name for the same reason — renaming it to match the model's
+    /// `enabledEffects` would change the coding key and silently drop the
+    /// chain out of everything already saved.
+    ///
+    /// The built-in four used to leave all of this alone, on the theory that a
+    /// preset described how to *route* rather than how to *process*. That was
+    /// wrong in the way that is hardest to see: switching from a voice call to
+    /// a noisy room moved a buffer size and one isolation flag, so the thing
+    /// somebody pressed to sound better sounded identical.
     var effects: [String]?
     var effectValues: [String: Float]?
     var voicePreset: String?
@@ -46,18 +54,53 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     var sourceDeviceUID: String?
     var destinationDeviceUID: String?
     var capturedAppBundleIDs: [String]?
+    /// Whether application audio steps out of the way of a voice.
+    var isDucking: Bool?
+    var duckDecibels: Float?
+    /// Whether the input trim chases the loudness target on its own.
+    var isAutoLevelling: Bool?
+    /// What the loudness readout is measured against. A call and a recording
+    /// want different numbers, and the target is the thing auto-levelling aims
+    /// at — so it belongs to the scene rather than to the application.
+    var loudnessTarget: String?
 
+    /// Clean and intelligible, and nothing else.
+    ///
+    /// Isolation at a partial mix rather than the full amount: on a call the
+    /// model has to leave the voice alone more than it has to remove the room,
+    /// and at 100% quiet consonants go with the noise.
     static let voiceChat = RoutePreset(
         name: loc("Voice chat"),
         sampleRate: 48000,
         bufferFrames: 128,
-        voiceIsolationEnabled: false,
-        voiceIsolationMix: 100,
+        voiceIsolationEnabled: true,
+        voiceIsolationMix: 70,
         channelMode: SourceChannelMode.mono.rawValue,
         cancelsEcho: false,
         recordingFormat: Recorder.Format.wav.rawValue,
         note:
-            "48 kHz and a small buffer. Anything higher is resampled back down at the far end.")
+            "Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible.",
+        effects: [.voiceIsolation, .equaliser, .gate, .compressor, .limiter],
+        effectValues: [
+            "voiceIsolation.mix": 70,
+            "equaliser.frequency": 80,
+            // Low and shallow. A gate on a call is insurance against a fan, not
+            // a way of removing a room — one set high enough to do that clips
+            // the start of every quiet word.
+            "gate.threshold": -50,
+            "gate.ratio": 6,
+            "gate.release": 300,
+            "compressor.threshold": -20,
+            "compressor.headroom": 6,
+            "limiter.gain": 0,
+        ],
+        // Said rather than left out, here and on every other scene. A field a
+        // preset declines to set is a field that keeps whatever the last scene
+        // put there, and a scene whose behaviour depends on which scene
+        // preceded it is not a starting point.
+        isDucking: false,
+        isAutoLevelling: true,
+        loudnessTarget: LoudnessTarget.discord.rawValue)
 
     /// The case the echo canceller exists for.
     ///
@@ -65,6 +108,10 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
     /// hears themselves a beat late. On headphones none of this applies and the
     /// cost — no clock lock, no bit-exactness, a buffer each way — buys
     /// nothing, which is why it is a preset rather than a default.
+    ///
+    /// Isolation is left off deliberately: the canceller already owns the
+    /// microphone and is already processing it, and stacking a second model on
+    /// top of that costs another 56 ms to remove noise the first one took.
     static let speakerphone = RoutePreset(
         name: loc("Speakers"),
         sampleRate: 48000,
@@ -75,9 +122,33 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         cancelsEcho: true,
         recordingFormat: Recorder.Format.wav.rawValue,
         note:
-            "Removes the speakers from the microphone. Costs the clock lock and a buffer of latency each way."
-    )
+            "Removes the speakers from the microphone, then gates and compresses harder because the room is in it.",
+        effects: [.equaliser, .gate, .compressor, .limiter],
+        effectValues: [
+            // Up from 80 Hz: a laptop sitting on the same desk as its own
+            // speakers puts the whole bottom octave into the microphone as
+            // structure rather than as air, and the canceller cannot see it.
+            "equaliser.frequency": 110,
+            "gate.threshold": -38,
+            "gate.ratio": 20,
+            "gate.release": 180,
+            // Harder than a headset call, because somebody on speakerphone is
+            // further from the microphone and moves about while talking.
+            "compressor.threshold": -26,
+            "compressor.headroom": 3,
+            "limiter.gain": 0,
+        ],
+        isDucking: true,
+        duckDecibels: -18,
+        isAutoLevelling: true,
+        loudnessTarget: LoudnessTarget.discord.rawValue)
 
+    /// Everything turned up, plus the tone control the other three do not use.
+    ///
+    /// The equaliser earns its place here rather than being decoration: what a
+    /// noisy room and a hard isolation setting both leave behind is a voice
+    /// that has lost its top and kept its boxiness, and those are exactly the
+    /// two bands being moved.
     static let noisyRoom = RoutePreset(
         name: loc("Noisy room"),
         sampleRate: 48000,
@@ -87,8 +158,33 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         channelMode: SourceChannelMode.mono.rawValue,
         cancelsEcho: false,
         recordingFormat: Recorder.Format.wav.rawValue,
-        note: "Adds Apple's voice isolation. Costs 56 ms and the path is no longer bit-exact.")
+        note:
+            "Isolation at full, a high gate and the high-pass moved up. Costs 56 ms and the path is no longer bit-exact.",
+        effects: [.voiceIsolation, .equaliser, .tone, .gate, .compressor, .limiter],
+        effectValues: [
+            "voiceIsolation.mix": 100,
+            "equaliser.frequency": 150,
+            "gate.threshold": -28,
+            "gate.ratio": 30,
+            "gate.release": 120,
+            "tone.b1": -4,
+            "tone.b4": 3,
+            "compressor.threshold": -22,
+            "compressor.headroom": 5,
+            "limiter.gain": 0,
+        ],
+        isDucking: false,
+        isAutoLevelling: true,
+        loudnessTarget: LoudnessTarget.discord.rawValue)
 
+    /// Nothing that colours the signal.
+    ///
+    /// The limiter alone, and it is there as insurance rather than as
+    /// processing: it only acts on a sample that would otherwise clip, and a
+    /// clipped capture cannot be repaired afterwards. Auto-levelling is off for
+    /// the same reason the rest is — a recording that had its gain moved while
+    /// it was being made is a record of the gain rider rather than of the
+    /// performance.
     static let recording = RoutePreset(
         name: loc("Recording"),
         sampleRate: 96000,
@@ -98,11 +194,58 @@ struct RoutePreset: Codable, Identifiable, Hashable, Sendable {
         channelMode: SourceChannelMode.mono.rawValue,
         cancelsEcho: false,
         recordingFormat: Recorder.Format.wav.rawValue,
-        note: "96 kHz, untouched signal. Latency matters less than keeping the capture intact.")
+        note:
+            "96 kHz and a limiter as insurance. Nothing else touches the signal, and the target is −23 LUFS.",
+        effects: [.limiter],
+        effectValues: ["limiter.gain": 0],
+        isDucking: false,
+        isAutoLevelling: false,
+        loudnessTarget: LoudnessTarget.broadcast.rawValue)
 
     static let builtIn: [RoutePreset] = [
         .voiceChat, .speakerphone, .noisyRoom, .recording,
     ]
+}
+
+extension RoutePreset {
+    /// The stages this preset asks for, or nil for one saved before presets
+    /// carried a chain at all.
+    var effectKinds: Set<EffectKind>? {
+        effects.map { Set($0.compactMap(EffectKind.init(rawValue:))) }
+    }
+
+    /// Spelling the chain with the enum rather than with strings.
+    ///
+    /// The stored form has to be `[String]`, because a preset written by a
+    /// version that knew about a stage this one does not must still decode. But
+    /// a mistyped raw string in the four definitions above would compile, store
+    /// and then silently produce a preset with one stage fewer than intended —
+    /// which is precisely the failure this whole change exists to end.
+    fileprivate init(
+        name: String, sampleRate: Double, bufferFrames: UInt32,
+        voiceIsolationEnabled: Bool, voiceIsolationMix: Float, channelMode: String,
+        cancelsEcho: Bool, recordingFormat: String, note: String,
+        effects: [EffectKind], effectValues: [String: Float],
+        isDucking: Bool? = nil, duckDecibels: Float? = nil,
+        isAutoLevelling: Bool? = nil, loudnessTarget: String? = nil
+    ) {
+        self.init(
+            name: name, sampleRate: sampleRate, bufferFrames: bufferFrames,
+            voiceIsolationEnabled: voiceIsolationEnabled,
+            voiceIsolationMix: voiceIsolationMix, channelMode: channelMode,
+            cancelsEcho: cancelsEcho, recordingFormat: recordingFormat, note: note)
+        self.effects = effects.map(\.rawValue)
+        self.effectValues = effectValues
+        // Stated rather than left nil. A scene now owns the whole chain, and
+        // leaving the voice alone would put the model in a state it can only
+        // reach through a preset: a voice selected, and neither of the two
+        // stages that produce it in the chain the scene just installed.
+        self.voicePreset = VoicePreset.none.rawValue
+        self.isDucking = isDucking
+        self.duckDecibels = duckDecibels
+        self.isAutoLevelling = isAutoLevelling
+        self.loudnessTarget = loudnessTarget
+    }
 }
 
 /// Presets somebody saved, on disk.
@@ -149,18 +292,30 @@ extension RouterModel {
                 recordingFormat = format
             }
 
-            // The extra fields a saved preset carries. Absent on the built-in
-            // four, which describe how to route rather than what somebody's
-            // setup was.
-            if let effects = preset.effects {
-                enabledEffects = Set(effects.compactMap(EffectKind.init(rawValue:)))
+            // The processing. Every preset carries this now, including the
+            // built-in four — a scene that moves a buffer size and leaves the
+            // chain alone is a scene that does nothing anybody can hear.
+            if let effects = preset.effectKinds {
+                enabledEffects = effects
             }
-            if let values = preset.effectValues { effectValues = values }
+            // Merged rather than assigned. A preset names the knobs it has an
+            // opinion about; the ones it does not name belong to whoever set
+            // them, and wholesale replacement would throw away a stage's tuning
+            // every time somebody pressed a scene that does not use that stage.
+            if let values = preset.effectValues {
+                effectValues.merge(values) { _, fromPreset in fromPreset }
+            }
             if let voice = preset.voicePreset.flatMap(VoicePreset.init(rawValue:)) {
                 voicePreset = voice
             }
             if let level = preset.inputDecibels { inputDecibels = level }
             if let level = preset.outputDecibels { outputDecibels = level }
+            if let ducking = preset.isDucking { isDucking = ducking }
+            if let depth = preset.duckDecibels { duckDecibels = depth }
+            if let levelling = preset.isAutoLevelling { isAutoLevelling = levelling }
+            if let target = preset.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) {
+                loudnessTarget = target
+            }
             // Devices are restored only when they are actually present.
             // Pointing at a microphone somebody unplugged would fail the start
             // and blame the preset.
@@ -218,6 +373,10 @@ extension RouterModel {
         preset.sourceDeviceUID = selectedSourceUID
         preset.destinationDeviceUID = selectedDestinationUID
         preset.capturedAppBundleIDs = Array(capturedAppBundleIDs)
+        preset.isDucking = isDucking
+        preset.duckDecibels = duckDecibels
+        preset.isAutoLevelling = isAutoLevelling
+        preset.loudnessTarget = loudnessTarget.rawValue
 
         // Saving over a name that exists replaces it rather than making a
         // second one: the alternative is a list of "Podcast", "Podcast 2",
@@ -237,13 +396,36 @@ extension RouterModel {
     /// True when the current settings still match the named preset.
     ///
     /// Every field the preset sets has to be compared, or two presets that
-    /// differ only in a field nobody checks both light up at once.
+    /// differ only in a field nobody checks both light up at once. The
+    /// processing chain is now the field they differ in most, so it is compared
+    /// too — which also means that switching one stage off stops the scene
+    /// button claiming to describe what is running, and it no longer does.
     func matches(_ preset: RoutePreset) -> Bool {
-        voiceIsolationEnabled == preset.voiceIsolationEnabled
-            && channelMode.rawValue == preset.channelMode
-            && preferredSampleRate == preset.sampleRate
-            && bufferFrames == preset.bufferFrames
-            && cancelsEcho == preset.cancelsEcho
-            && recordingFormat.rawValue == preset.recordingFormat
+        guard voiceIsolationEnabled == preset.voiceIsolationEnabled,
+            channelMode.rawValue == preset.channelMode,
+            preferredSampleRate == preset.sampleRate,
+            bufferFrames == preset.bufferFrames,
+            cancelsEcho == preset.cancelsEcho,
+            recordingFormat.rawValue == preset.recordingFormat
+        else { return false }
+        // Absent on a preset saved before presets carried a chain. Comparing
+        // against an empty set there would report every one of them as never
+        // matching, which is worse than not comparing.
+        if let effects = preset.effectKinds, effects != enabledEffects { return false }
+        // Only the knobs the preset has an opinion about, because only those
+        // are the ones it set.
+        if let values = preset.effectValues,
+            values.contains(where: { effectValues[$0.key] != $0.value })
+        {
+            return false
+        }
+        if let target = preset.loudnessTarget, target != loudnessTarget.rawValue {
+            return false
+        }
+        if let ducking = preset.isDucking, ducking != isDucking { return false }
+        if let levelling = preset.isAutoLevelling, levelling != isAutoLevelling {
+            return false
+        }
+        return true
     }
 }

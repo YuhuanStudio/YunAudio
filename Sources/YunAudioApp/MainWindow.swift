@@ -901,19 +901,25 @@ struct MainWindow: View {
         }
     }
 
+    /// Three regions rather than one column of eleven switches.
+    ///
+    /// The stages were listed in the order the enum happened to declare them,
+    /// under one heading that said "Processing", and that reads as a list of
+    /// things rather than as a set of decisions. Cleaning a signal up, changing
+    /// whose voice it is and putting that voice somewhere have nothing to do
+    /// with each other: they are wanted at different times, by different
+    /// people, for different reasons, and only one of the three is meant to be
+    /// audible as an effect at all.
+    ///
+    /// The engine is untouched by this. It sorts the whole chain into signal
+    /// order whatever the grouping says, and the limiter is still last.
     @ViewBuilder
     private var soundTab: some View {
         Group {
-            sectionHeading(loc("Voice"))
-            YunCard { voice }
-
-            sectionHeading(loc("Processing"))
+            effectGroupHeading(.cleanUp)
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
-                    ForEach(EffectKind.allCases) { kind in
-                        effectRow(kind)
-                        if kind != EffectKind.allCases.last { YunDivider() }
-                    }
+                    effectStack(.cleanUp)
                     if model.enabledEffects.contains(.voiceIsolation) {
                         Text(
                             loc(
@@ -927,6 +933,46 @@ struct MainWindow: View {
                 }
             }
 
+            effectGroupHeading(.voice)
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    // The whole voice first, the two stages it is made of
+                    // under it. Almost nobody wants to set a formant ratio;
+                    // they want to sound like somebody else, and the stages are
+                    // there for whoever does want to move them by hand.
+                    voice
+                    YunDivider()
+                    effectStack(.voice)
+                }
+            }
+
+            effectGroupHeading(.colour)
+            YunCard { effectStack(.colour) }
+        }
+    }
+
+    /// A region's name and what it is for.
+    ///
+    /// The sentence is not decoration. The one thing the old flat list could
+    /// not say is which switches somebody reaching for "make me sound less
+    /// noisy" should be looking at, and that is exactly what this answers.
+    private func effectGroupHeading(_ group: EffectGroup) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionHeading(loc(group.title))
+            Text(loc(group.detail))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textMuted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func effectStack(_ group: EffectGroup) -> some View {
+        let stages = EffectKind.stages(in: group)
+        return VStack(alignment: .leading, spacing: Yun.Space.md) {
+            ForEach(stages) { kind in
+                effectRow(kind)
+                if kind != stages.last { YunDivider() }
+            }
         }
     }
 

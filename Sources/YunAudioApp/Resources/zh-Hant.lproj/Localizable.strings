@@ -425,3 +425,17 @@
 "Master" = "總輸出";
 "Quick controls" = "快捷控制";
 "%d on" = "已開啟 %d 項";
+/* The three regions of the Sound tab: what a stage is for, rather than where
+   it sits in the signal. */
+"Clean up" = "整理訊號";
+"Takes out what should not be there. None of it is meant to be audible as an effect." = "把不該出現的東西拿掉。這一區沒有任何一項是要讓人聽出效果的。";
+"Change the voice" = "改變聲音";
+"Sound like somebody else. Both halves move together, and both cost latency." = "聽起來像另一個人。兩個階段要一起動，而且兩個都要付出延遲。";
+"Tone and space" = "音色與空間";
+"Shapes the voice and puts it somewhere. All of this is meant to be heard." = "修飾音色，並把聲音放進某個空間。這一區就是要讓人聽出來的。";
+
+/* What each scene preset is a starting point for. */
+"Isolation, a light gate and gentle compression, at 48 kHz. Nothing here is meant to be audible." = "48 kHz，加上人聲隔離、輕微的閘門與溫和的壓縮。這裡沒有一項是要被聽出來的。";
+"Removes the speakers from the microphone, then gates and compresses harder because the room is in it." = "從麥克風中移除喇叭的聲音，並把閘門與壓縮都調得更重，因為整個房間都進來了。";
+"Isolation at full, a high gate and the high-pass moved up. Costs 56 ms and the path is no longer bit-exact." = "人聲隔離開到滿、閘門拉高、高通往上移。代價是 56 毫秒延遲，且路徑不再位元精確。";
+"96 kHz and a limiter as insurance. Nothing else touches the signal, and the target is −23 LUFS." = "96 kHz，只留一個限幅器當保險。其他都不碰訊號，目標響度是 −23 LUFS。";

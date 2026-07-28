@@ -1355,6 +1355,106 @@ enum UIFlowCheck {
         check("routing survived every preset", model.isRunning)
         await pause(1.0)
 
+        print("\nwhat a scene actually changes")
+        // The defect this section exists for. The four scenes carried a sample
+        // rate, a buffer and one isolation flag, and deliberately left the
+        // processing chain alone — so pressing "Noisy room" instead of "Voice
+        // chat" moved a buffer size and was otherwise inaudible. Every check
+        // here is written so that a scene which changes nothing cannot pass it.
+        let declared = RoutePreset.builtIn.map { $0.effectKinds ?? [] }
+        check("every scene declares a chain", declared.allSatisfy { !$0.isEmpty })
+        check(
+            "and no two scenes declare the same one",
+            Set(declared).count == RoutePreset.builtIn.count)
+
+        var installed: [Set<EffectKind>] = []
+        var sceneLatency: [String: Double] = [:]
+        for preset in RoutePreset.builtIn {
+            model.apply(preset)
+            // Settling is the model's business; coming up is the machine's.
+            // Kept apart because a scene that asks for the echo canceller
+            // cannot start at all on hardware the canceller will not take, and
+            // that is a fact about the machine rather than about the scene.
+            await waitUntil("\(preset.name) settled", { !model.isBusy }, timeout: 15)
+            // Brought back up with *this* scene's settings if something earlier
+            // left the route down. After the apply rather than before it: a
+            // retry ahead of the apply would use the previous scene's devices
+            // and canceller, so one scene this machine cannot run would take
+            // every scene after it down as well — which is exactly what a
+            // section written to compare four scenes must not do.
+            await bringRoutingBack(model)
+            let wanted = preset.effectKinds ?? []
+            check(
+                "\(preset.name) put its stages in the model",
+                model.enabledEffects == wanted)
+            // A rebuilt chain comes up at each stage's own defaults, and
+            // nothing was putting the stored values back — so a scene could
+            // carry a gate threshold, display it, and never send it anywhere.
+            for (key, value) in (preset.effectValues ?? [:]).sorted(by: { $0.key < $1.key }) {
+                check("\(preset.name) restored \(key)", model.effectValues[key] == value)
+            }
+            check(
+                "\(preset.name) set its loudness target",
+                preset.loudnessTarget == model.loudnessTarget.rawValue)
+            check("\(preset.name) reads as the active scene", model.matches(preset))
+
+            guard model.isRunning else {
+                note("\(preset.name) would not come up here — its chain was not measured")
+                continue
+            }
+            // The engine's list rather than the model's opinion of it: a chain
+            // that failed to build is the one thing the model cannot see.
+            check(
+                "\(preset.name) built exactly those stages",
+                Set(model.activeEffectStages) == wanted)
+            installed.append(Set(model.activeEffectStages))
+            sceneLatency[preset.name] = model.addedLatencyMilliseconds
+            note(
+                "\(preset.name): "
+                    + model.activeEffectStages.map(\.rawValue).joined(separator: " → ")
+                    + String(format: ", %.1f ms", model.addedLatencyMilliseconds))
+        }
+        if installed.count > 1 {
+            check(
+                "no two scenes left the same chain running",
+                Set(installed).count == installed.count)
+        } else {
+            note("fewer than two scenes came up — the chains were not compared in the engine")
+        }
+        // The one number here that comes from the Audio Units themselves rather
+        // than from anything this application stored. A scene that really
+        // installed a different chain costs a different amount of latency, and
+        // the recording scene is the floor by construction: a limiter, and
+        // nothing else. If the chains were secretly identical this is what
+        // would say so.
+        if let heavy = sceneLatency[RoutePreset.noisyRoom.name],
+            let bare = sceneLatency[RoutePreset.recording.name]
+        {
+            check("a heavier scene costs more latency than the bare one", heavy > bare)
+        }
+
+        model.apply(.voiceChat)
+        await waitUntil("the call scene came back", { !model.isBusy }, timeout: 15)
+        await bringRoutingBack(model)
+        // And a scene has to stop claiming to describe what is running the
+        // moment somebody edits it, or the highlight on the button is
+        // decoration. A knob rather than a stage on purpose: moving one costs
+        // no rebuild, so this measures the comparison and not the restart.
+        if let threshold = EffectKind.gate.parameters.first(where: { $0.id == "threshold" }) {
+            let before = model.value(of: threshold, in: .gate)
+            model.setValue(before + 5, of: threshold, in: .gate)
+            check("moving one of its knobs ends the match", !model.matches(.voiceChat))
+            model.setValue(before, of: threshold, in: .gate)
+            check("and putting it back restores it", model.matches(.voiceChat))
+        }
+
+        // Handed back neutral. A scene now carries auto-levelling and ducking,
+        // and a gain rider left running would move the input trim underneath
+        // every measurement below this — the bit-exactness check included.
+        model.isAutoLevelling = false
+        model.isDucking = false
+        model.inputDecibels = 0
+
         // The batching itself, measured directly rather than through a preset.
         // No two presets happen to differ in more than one rebuilding field, so
         // going through one would pass whether the batching worked or not.
@@ -2260,6 +2360,8 @@ enum UIFlowCheck {
         displayed += YunStyle.allCases.map(\.detail)
         displayed += EffectKind.allCases.map { loc($0.title) }
         displayed += EffectKind.allCases.map { loc($0.detail) }
+        displayed += EffectGroup.allCases.map { loc($0.title) }
+        displayed += EffectGroup.allCases.map { loc($0.detail) }
         displayed += SourceChannelMode.allCases.map(\.title)
         displayed += TapMuteBehavior.allCases.map { loc($0.title) }
         displayed += RoutePreset.builtIn.map(\.name)
@@ -2312,6 +2414,22 @@ enum UIFlowCheck {
         // not measured.
         let wait = inWantedSection ? seconds : min(seconds, 0.05)
         try? await Task.sleep(for: .seconds(wait))
+    }
+
+    /// Starts the route again if it is down, and waits without asserting.
+    ///
+    /// Deliberately not a check. Some settings genuinely cannot come up on some
+    /// machines — the echo canceller will not take every microphone — and a
+    /// failure recorded here would say "routing is down" over and over instead
+    /// of letting the section that cares report which setting it was. Whoever
+    /// calls this asserts what they actually wanted to know afterwards.
+    private static func bringRoutingBack(_ model: RouterModel) async {
+        guard !model.isRunning else { return }
+        model.start()
+        let deadline = Date().addingTimeInterval(15)
+        while Date() < deadline, !model.isRunning {
+            await pause(0.1)
+        }
     }
 
     private static func waitUntil(

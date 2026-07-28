@@ -1580,6 +1580,29 @@ final class RouterModel {
         persist()
     }
 
+    /// Pushes every stored knob position into a chain that has just been built.
+    ///
+    /// A rebuilt chain comes up at each stage's own defaults, and nothing was
+    /// putting the stored values back — so every knob anybody had moved
+    /// silently reverted on the next restart while the interface went on
+    /// showing the number they had chosen. It survived because the interface
+    /// reads the model and the model was right; only the engine disagreed, and
+    /// nothing asked it. It is what made a scene carrying a gate threshold
+    /// change nothing at all.
+    ///
+    /// Only the values actually stored: a knob nobody has touched is already
+    /// sitting at the default this would send it.
+    private func applyEffectValues() {
+        for kind in enabledEffects {
+            for parameter in kind.parameters {
+                guard let value = effectValues["\(kind.rawValue).\(parameter.id)"] else {
+                    continue
+                }
+                engine.setEffectParameter(parameter.id, of: kind, to: value)
+            }
+        }
+    }
+
     func setEffect(_ kind: EffectKind, enabled: Bool) {
         if enabled { enabledEffects.insert(kind) } else { enabledEffects.remove(kind) }
         // The old single toggle stays in step so saved settings and the menu bar
@@ -2446,6 +2469,7 @@ final class RouterModel {
                 self.engine.setInputMuted(self.isInputMuted)
                 self.engine.setOutputGain(Self.gain(fromDecibels: self.outputDecibels))
                 self.engine.setOutputMuted(self.isOutputMuted)
+                self.applyEffectValues()
                 self.activeRoutes = routes
                 self.routeGains = routes.map(\.gain)
                 self.routeMutes = routes.map(\.isMuted)
