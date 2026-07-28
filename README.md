@@ -23,6 +23,10 @@ bit-exact: 261400/261400 samples identical, delay 872 frames
 clock lock held at 0.999986 throughout
 ```
 
+The method is written up in **[MEASUREMENT.md](MEASUREMENT.md)** — the
+sequence, why it is 24 bits, how the delay is recovered from the data, and,
+just as importantly, what the measurement does not prove.
+
 That is possible because YunAudio ships its own virtual device rather than
 borrowing one. A CoreAudio driver defines its own clock through
 `GetZeroTimeStamp()`, so this one derives its sample clock from the microphone

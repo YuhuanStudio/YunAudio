@@ -229,13 +229,11 @@ The singing side is started and not finished. What is missing: a connection to
 Apple Music and to Spotify, and lyrics — the two obvious ones, and both are
 their own frameworks rather than audio work.
 
-### 10. Publish the bit-exactness result [proposal-adjacent]
+### 10. Publish the bit-exactness result — **done**
 
-The number this project is built around is currently only visible to somebody
-who runs the self-test. Nothing else in this category on macOS measures it at
-all. Writing it up with the method — the pseudorandom sequence, the recovered
-delay, the sample-by-sample comparison — is cheap and is the clearest statement
-of what the project is.
+`MEASUREMENT.md`: the method, the sequence, why it is 24 bits, how the delay is
+recovered from the data, what the numbers beside it mean, and what the
+measurement does not prove.
 
 ---
 
