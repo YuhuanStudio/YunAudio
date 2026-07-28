@@ -2227,6 +2227,30 @@ enum UIFlowCheck {
                     partial.missing
                 ).isEmpty)
             _ = model.apply(saved)
+
+            // A setup remembers whether the router was running, and one saved
+            // with it idle has to put it back down. It could not: applying a
+            // setup pushes its device changes in as a batch, a batch restarts a
+            // running route, and the stop that follows therefore always arrived
+            // while that restart still held the engine queue — where it was
+            // refused outright and then undone by the restart's own start. This
+            // is the certain case of the same defect the stopping section
+            // catches by hand; there is no window to miss.
+            await waitUntil("the setup settled", { !model.isBusy }, timeout: 15)
+            await bringRoutingBack(model)
+            if model.isRunning {
+                var idle = saved
+                idle.isRouting = false
+                _ = model.apply(idle)
+                await waitUntil("the idle setup settled", { !model.isBusy }, timeout: 15)
+                check("a setup saved while idle puts the route down", !model.isRunning)
+                _ = model.apply(saved)
+                await waitUntil(
+                    "and one saved while routing brings it back", { model.isRunning },
+                    timeout: 15)
+            } else {
+                note("routing would not come up here — the idle setup was not exercised")
+            }
         }
         model.deleteQuickConfig(named: "Flow check setup")
         check(
@@ -2507,6 +2531,34 @@ enum UIFlowCheck {
         checkApplicationList(model: model)
 
         section("stopping")
+        // Stop, pressed while the engine queue was busy with a rebuild. The busy
+        // guard refused it and returned having done nothing, and the start that
+        // every rebuild chains behind its own teardown then brought the route
+        // back — audio flowing again some seconds after somebody put it down,
+        // with nothing having asked for it.
+        //
+        // Nothing here is a race to catch. `restartIfRunning` takes `isBusy` on
+        // the main actor before it hops to the queue, so the edit below and the
+        // stop after it are one turn apart and the stop lands inside the window
+        // every time.
+        //
+        // Brought up first rather than assumed: there is no rebuild to stop
+        // during if the route is already down, and the assertion below would
+        // then pass without having tested anything.
+        await bringRoutingBack(model)
+        let rateBefore = model.preferredSampleRate
+        let errorBefore = model.lastError
+        model.preferredSampleRate = rateBefore == 48000 ? 44100 : 48000
+        check("the edit took the engine queue", model.isBusy)
+        model.stop()
+        await waitUntil("the queue unwound", { !model.isBusy }, timeout: 15)
+        check("a stop pressed during a rebuild stays stopped", !model.isRunning)
+        // Or it came down for a reason nobody was testing: a rate this hardware
+        // will not take fails the rebuild, and a failed rebuild looks exactly
+        // like an honoured stop from here.
+        check("and it came down because it was asked to", model.lastError == errorBefore)
+        model.preferredSampleRate = rateBefore
+
         model.stop()
         await waitUntil("the route came down", { !model.isRunning }, timeout: 5)
         check("levels were cleared", model.routeLevels.isEmpty)

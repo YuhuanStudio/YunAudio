@@ -2306,6 +2306,10 @@ final class RouterModel {
                 kinds, plugins: pluginList, voiceIsolation: isolation)
             Task { @MainActor in
                 self.isBusy = false
+                // A chain swap holds the queue for as long as it takes to build
+                // the Audio Units, which is long enough for somebody to press
+                // Stop into it and be refused.
+                if self.honourPendingStop() { return }
                 guard swapped else {
                     self.restartIfRunning()
                     return
@@ -3345,6 +3349,10 @@ final class RouterModel {
                     self.isRunning = false
                     self.lastError = failure
                     self.restartIsPending = false
+                    // Nothing came up, so a stop that was refused while this was
+                    // in flight has already got what it wanted. Left set it
+                    // would take down the next start somebody asked for.
+                    self.stopIsPending = false
                     return
                 }
                 self.isRunning = true
@@ -3375,7 +3383,10 @@ final class RouterModel {
                 // is built.
                 self.applyCorrections()
                 self.startPolling()
-                // Anything that arrived while this start was in flight.
+                // Anything that arrived while this start was in flight. The stop
+                // first: it was asked for after everything else here, and it is
+                // the one request that makes the rest moot.
+                if self.honourPendingStop() { return }
                 self.drainPendingRestart()
             }
         }
@@ -3387,9 +3398,15 @@ final class RouterModel {
     }
 
     /// - Parameter completion: Runs on the main actor once the engine is fully
-    ///   down and `isBusy` has been cleared, so a caller can start again.
+    ///   down and `isBusy` has been cleared, so a caller can start again. It is
+    ///   skipped when somebody asked for the route to stay down in the meantime:
+    ///   the completion exists to chain a rebuild behind a teardown, and a
+    ///   rebuild is the one thing a stop request rules out.
     func stop(then completion: (@MainActor () -> Void)? = nil) {
-        guard !isBusy else { return }
+        guard !isBusy else {
+            stopIsPending = true
+            return
+        }
         isBusy = true
         let engine = engine
         engineQueue.async {
@@ -3397,7 +3414,18 @@ final class RouterModel {
             Task { @MainActor in
                 self.isBusy = false
                 self.finishStop()
-                completion?()
+                // Read before it is cleared, because the completion below is
+                // usually a start and this is the only thing standing between a
+                // stop somebody pressed and the route coming straight back up.
+                let stayDown = self.stopIsPending
+                self.stopIsPending = false
+                if stayDown {
+                    // `finishStop` has already dropped the pending rebuild, but
+                    // an edit arriving between it and here would set another.
+                    self.restartIsPending = false
+                } else {
+                    completion?()
+                }
                 self.drainPendingRestart()
             }
         }
@@ -3589,6 +3617,40 @@ final class RouterModel {
     /// check, and only then because a later change restarted the route for its
     /// own reasons. Recorded and carried out when the queue comes free instead.
     @ObservationIgnored private var restartIsPending = false
+
+    /// A stop asked for while the engine queue was already working.
+    ///
+    /// This is how a stopped route came back on its own. `stop()` refuses while
+    /// `isBusy` and used to return having done nothing whatever, while every
+    /// rebuild chains a start behind its own teardown — so a Stop pressed during
+    /// a rebuild was swallowed and the chained start then brought the route up
+    /// with nobody having asked for it. The window is small when the rebuild
+    /// came from a knob, and it is not a window at all when it came from
+    /// applying a setup: that batches its device changes, the batch restarts a
+    /// running route, and the "not routing" stop the setup then asks for lands
+    /// squarely inside the restart it just caused. A setup saved with the router
+    /// idle could not put the router down.
+    ///
+    /// Recorded and carried out when the queue comes free instead, and it
+    /// outranks a pending restart — rebuilding a route somebody has just put
+    /// down is no more wanted than starting it.
+    @ObservationIgnored private var stopIsPending = false
+
+    /// Carries out a stop that the busy guard refused.
+    ///
+    /// - Returns: True when there was one, in which case the caller must not go
+    ///   on to start or rebuild anything: coming down is the last thing that was
+    ///   asked for.
+    @discardableResult
+    private func honourPendingStop() -> Bool {
+        guard stopIsPending else { return false }
+        stopIsPending = false
+        restartIsPending = false
+        // Already down when the refused stop arrived during a teardown rather
+        // than during a start; then there is nothing to do but not come back up.
+        if isRunning { stop(then: nil) }
+        return true
+    }
 
     private func restartIfRunning() {
         guard !isApplyingPreset else { return }
