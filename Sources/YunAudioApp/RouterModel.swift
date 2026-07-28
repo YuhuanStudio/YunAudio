@@ -2629,7 +2629,14 @@ final class RouterModel {
             lastError = loc("The input and the output cannot be the same device.")
             return
         }
-        refreshApps()
+        // Only when something is going to be tapped. Enumerating every audio
+        // process on the machine costs 27 ms warm and 118 cold, and it was
+        // being paid on every start — including the ones with nothing captured
+        // at all, which is most of them, and including every restart caused by
+        // a setting changing. It buys the process identifiers for the
+        // applications about to be tapped, and if there are none it buys
+        // nothing.
+        if !capturedAppBundleIDs.isEmpty { refreshApps() }
         var routeList = routes
         var taps: [ProcessTap] = []
 

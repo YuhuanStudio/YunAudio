@@ -1026,6 +1026,7 @@ enum UIFlowCheck {
         await pause(0.4)
         check("and it comes back when the panel opens", !model.analysisIsIdle)
 
+        await checkStartCost(model: model)
         await checkPollCost(model: model)
 
         section("automatic levelling")
@@ -2741,6 +2742,31 @@ enum UIFlowCheck {
         }
         check("and one that sweeps past it moves the input trim", moved)
         note(String(format: "input trim now %.2f dB", model.inputDecibels))
+    }
+
+    /// What starting a route costs when nothing is being captured.
+    ///
+    /// Enumerating every audio process on the machine used to happen at the top
+    /// of every start, including the ones with no applications captured — which
+    /// is most of them, and includes every restart caused by a setting
+    /// changing. It buys the process identifiers of the applications about to
+    /// be tapped; with none to tap it buys nothing.
+    private static func checkStartCost(model: RouterModel) async {
+        section("what starting costs with nothing captured")
+        let captured = model.capturedAppBundleIDs
+        model.capturedAppBundleIDs = []
+        model.stop()
+        await waitUntil("it came down", { !model.isBusy && !model.isRunning }, timeout: 15)
+
+        let began = Date()
+        model.start()
+        await waitUntil("and up again", { model.isRunning }, timeout: 15)
+        let elapsed = Date().timeIntervalSince(began) * 1000
+        note(String(format: "%.0f ms from asking to routing", elapsed))
+        // Generous, because it is a real aggregate on real hardware and this
+        // machine is not quiet. What it catches is the enumeration coming back.
+        check("starting is not dominated by listing every process", elapsed < 4000)
+        model.capturedAppBundleIDs = captured
     }
 
     /// What the twenty-hertz poll costs while nothing is happening.
