@@ -1455,6 +1455,91 @@ struct CarriedRouteTests {
     }
 }
 
+// MARK: - Giving up on a monitor
+
+/// A monitor is an additional output, and the mix has to survive one that will
+/// not start. The engine finds that out by building again without it, so what
+/// "without it" means is worth asserting on its own: a reduction that took one
+/// route too many would drop the call to save the sidetone, which is the defect
+/// upside down.
+@Suite("Dropping an unusable monitor")
+struct MonitorDropTests {
+
+    private func route(_ source: String, _ destination: String, channel: Int = 0) -> Route {
+        Route(
+            source: ChannelRef(deviceUID: source, channel: channel),
+            destination: ChannelRef(deviceUID: destination, channel: channel))
+    }
+
+    private func configuration(
+        monitor: String?, routes: [Route], destination: String = "Out"
+    ) -> RoutingEngine.StartConfiguration {
+        RoutingEngine.StartConfiguration(
+            sourceDeviceUID: "Mic",
+            destinationDeviceUID: destination,
+            routes: routes,
+            taps: [],
+            additionalDestinationUIDs: [],
+            monitorDeviceUID: monitor,
+            effects: [],
+            plugins: [],
+            preferredSampleRate: nil,
+            bufferFrames: 128,
+            voiceIsolation: nil,
+            echoCancellation: nil,
+            outputLatencyTrim: [:],
+            selftest: false)
+    }
+
+    @Test("the second mix goes and the main mix stays")
+    func keepsTheMainMix() throws {
+        let start = configuration(
+            monitor: "Headphones",
+            routes: [
+                route("Mic", "Out"), route("Mic", "Out", channel: 1),
+                route("Mic", "Headphones"), route("Mic", "Headphones", channel: 1),
+            ])
+        let reduced = try #require(start.withoutMonitor())
+        #expect(reduced.monitorDeviceUID == nil)
+        #expect(reduced.routes.count == 2)
+        #expect(reduced.routes.allSatisfy { $0.destination.deviceUID == "Out" })
+        // In order and unaltered: every fader, mute and stem in the application
+        // is a position in this list.
+        #expect(reduced.routes == Array(start.routes.prefix(2)))
+    }
+
+    @Test("a monitor that is also the destination is not droppable")
+    func refusesToDropTheDestination() {
+        // The routes into it are the mix. Dropping them to save the monitor
+        // would be giving up the call, and a destination that will not start is
+        // not the monitor's failure to answer for.
+        let start = configuration(
+            monitor: "Out", routes: [route("Mic", "Out")], destination: "Out")
+        #expect(start.withoutMonitor() == nil)
+    }
+
+    @Test("nothing to give up when there is no monitor")
+    func refusesWithoutAMonitor() {
+        #expect(
+            configuration(monitor: nil, routes: [route("Mic", "Out")]).withoutMonitor() == nil)
+    }
+
+    /// Monitoring can be on with every send at −∞, which builds no routes into
+    /// it at all. Retrying an identical start would only fail identically, and
+    /// would blame the monitor for something it is not part of.
+    @Test("a monitor carrying nothing is not what went wrong")
+    func refusesWhenNothingWasSentThere() {
+        let start = configuration(monitor: "Headphones", routes: [route("Mic", "Out")])
+        #expect(start.withoutMonitor() == nil)
+    }
+
+    @Test("a start that is nothing but monitor routes is not reduced to silence")
+    func refusesToEmptyTheRoute() {
+        let start = configuration(monitor: "Headphones", routes: [route("Mic", "Headphones")])
+        #expect(start.withoutMonitor() == nil)
+    }
+}
+
 // MARK: - Automatic levelling
 
 /// A control loop that has only ever been tried by talking into a microphone
@@ -2482,7 +2567,6 @@ struct EffectStageTests {
             EffectChain(kinds: [.pitch], sampleRate: 48000, maximumFrames: 512))
         #expect(shifted.latencyFrames > plain.latencyFrames)
     }
-
 
     /// The mix control on voice isolation, when isolation is the whole chain.
     ///

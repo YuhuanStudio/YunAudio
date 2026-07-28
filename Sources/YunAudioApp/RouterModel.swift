@@ -1420,8 +1420,65 @@ final class RouterModel {
         didSet {
             guard oldValue != monitorDeviceUID else { return }
             persist()
+            // A monitor the engine itself gave up on is already out of a route
+            // that is running. Restarting would take a working mix down to
+            // arrive exactly where it already is — and the start it would run
+            // is the one that has just been proved to work.
+            guard !isDroppingMonitor else { return }
+            // A new choice is a new question, so the last refusal stops being
+            // an answer to it.
+            droppedMonitorName = nil
+            droppedMonitorReason = nil
             restartIfRunning()
         }
+    }
+
+    /// The monitor output the engine could not bring up, by name, or nil when
+    /// monitoring is doing what it was asked to.
+    ///
+    /// Kept beside `lastError` rather than only inside it: an error is the last
+    /// thing that went wrong anywhere and is cleared by the next thing that goes
+    /// right, whereas a monitor that was dropped stays dropped. A picker that
+    /// has quietly gone back to "Off" with nothing to explain it is precisely
+    /// the silent disappearance this project keeps finding in other forms.
+    private(set) var droppedMonitorName: String?
+    /// What the engine said when it refused, verbatim. Technical on purpose —
+    /// the failed plugins are reported the same way, because the status is the
+    /// only part the device's own author can act on.
+    private(set) var droppedMonitorReason: String?
+
+    /// Set while the monitor is being cleared on the engine's behalf rather than
+    /// on the user's, so the picker's `didSet` does not order a restart of a
+    /// route that has just come up.
+    @ObservationIgnored private var isDroppingMonitor = false
+
+    /// Takes a monitor the engine gave up on out of the interface, and says
+    /// which one it was and what it said.
+    private func monitorWasDropped(_ dropped: RoutingEngine.DroppedMonitor) {
+        // The name while it is still in the list; the remembered one after that.
+        // "PG32UCDM would not start" is a sentence somebody can act on and
+        // "AppleGFXHDAEngineOutputDP:…" is not.
+        let name =
+            outputDevices.first(where: { $0.uid == dropped.uid })?.name
+            ?? deviceNames[dropped.uid] ?? dropped.uid
+        droppedMonitorName = name
+        droppedMonitorReason = dropped.reason
+        isDroppingMonitor = true
+        monitorDeviceUID = nil
+        isDroppingMonitor = false
+        // Faders are positions in the engine's route list and that list is now
+        // shorter than the one this model handed over. Re-read rather than
+        // adjusted here: the engine is the only thing that knows what it built.
+        let installed = engine.currentRoutes
+        if installed != activeRoutes {
+            activeRoutes = installed
+            routeGains = installed.map(\.gain)
+            routeMutes = installed.map(\.isMuted)
+        }
+        remapMonitorRoutes()
+        lastError = String(
+            format: loc("%@ would not start as a monitor; the mix is carrying on without it."),
+            name)
     }
 
     /// How loud the monitor is, independent of everything else.
@@ -3611,9 +3668,18 @@ final class RouterModel {
                 // interface went on showing as on.
                 self.applyDucking()
                 self.applyEffectValues()
-                self.activeRoutes = routes
-                self.routeGains = routes.map(\.gain)
-                self.routeMutes = routes.map(\.isMuted)
+                // What came up, which is not always what was asked for: a
+                // monitor that will not start is dropped so that the mix
+                // survives it, and a fader for a route the engine never
+                // installed looks exactly like one that works and moves
+                // nothing.
+                let installed = self.engine.currentRoutes
+                self.activeRoutes = installed
+                self.routeGains = installed.map(\.gain)
+                self.routeMutes = installed.map(\.isMuted)
+                if let dropped = self.engine.droppedMonitor {
+                    self.monitorWasDropped(dropped)
+                }
                 // The analysers are built per run, because the K-weighting
                 // coefficients and the FFT bin mapping both depend on the rate
                 // the aggregate settled on.
@@ -4088,6 +4154,16 @@ final class RouterModel {
         lap("recordingState") { refreshRecordingState() }
         lap("outputPeak") { publish(engine.outputPeak, to: \.outputPeak) }
         lap("failedPlugins") { publish(engine.failedPlugins, to: \.failedPlugins) }
+        // Not only after a start this model asked for: the clock-lock recovery
+        // rebuilds the route from the engine's own snapshot, and a monitor
+        // dropped there would otherwise go unmentioned while the picker went on
+        // naming it. Reading a stale drop back is prevented by the comparison —
+        // once it has been acted on, the monitor is nil and nothing matches.
+        lap("droppedMonitor") {
+            if let dropped = engine.droppedMonitor, dropped.uid == monitorDeviceUID {
+                monitorWasDropped(dropped)
+            }
+        }
         lap("clipped") { publish(engine.outputClippedSamples, to: \.outputClippedSamples) }
         // Drained every poll whether or not the analysis panel is open. The ring
         // is finite, so a consumer that only ran while a view was visible would

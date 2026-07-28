@@ -201,6 +201,31 @@ public final class RoutingEngine: @unchecked Sendable {
         var echoCancellation: EchoCancellationSettings?
         var outputLatencyTrim: [String: Int]
         var selftest: Bool
+
+        /// The same start with the monitor given up on: the second mix and
+        /// every route into it gone, the main mix untouched.
+        ///
+        /// - Returns: Nil when there is nothing to give up — no monitor, a
+        ///   monitor nothing was being sent to, or one that is also an end of
+        ///   the main route. In that last case the routes into it *are* the
+        ///   mix, so dropping them would be giving up the thing the monitor is
+        ///   supposed to be additional to, and the failure is not the
+        ///   monitor's to answer for.
+        func withoutMonitor() -> Self? {
+            guard let monitor = monitorDeviceUID,
+                monitor != destinationDeviceUID, monitor != sourceDeviceUID
+            else { return nil }
+            var reduced = self
+            reduced.monitorDeviceUID = nil
+            reduced.routes = routes.filter { $0.destination.deviceUID != monitor }
+            reduced.additionalDestinationUIDs = additionalDestinationUIDs.filter {
+                $0 != monitor
+            }
+            guard reduced.routes.count != routes.count, !reduced.routes.isEmpty else {
+                return nil
+            }
+            return reduced
+        }
     }
     /// Set once a lock failure has forced drift correction back on, so the
     /// recovery cannot loop.
@@ -212,6 +237,28 @@ public final class RoutingEngine: @unchecked Sendable {
     public var onClockLockFailure: (@Sendable () -> Void)?
 
     public private(set) var lastIsolationError: String?
+
+    /// A monitor output that would not come up, and what it said.
+    public struct DroppedMonitor: Sendable, Equatable {
+        public let uid: String
+        public let reason: String
+    }
+
+    /// The monitor the last start had to give up on, or nil when the route came
+    /// up exactly as it was asked for.
+    ///
+    /// A monitor is an *additional* output. The mix going to the far end does
+    /// not depend on it, so refusing to route at all because one output would
+    /// not start gives up the call to save the sidetone. Measured: three
+    /// consecutive flow-check runs where attaching one display's audio endpoint
+    /// left `1 → 0 routes`, and every section after it ran against a dead route.
+    ///
+    /// Named rather than silently dropped, for the same reason the failed
+    /// plugins are: a monitor that vanishes with nothing said about it is a
+    /// person turning their headphones up and wondering why they are still
+    /// deaf.
+    public private(set) var droppedMonitor: DroppedMonitor?
+
     /// Third-party units that were asked for and would not load, each with the
     /// step that refused and the status it returned.
     public private(set) var failedPlugins: [AudioUnitLoadFailure] = []
@@ -386,13 +433,43 @@ public final class RoutingEngine: @unchecked Sendable {
                 selftest: selftest))
     }
 
+    /// A start, and — when a monitor is attached — a second one without it.
+    ///
+    /// There is no asking an output whether it will work: a display's audio
+    /// endpoint takes about twelve seconds to answer `AudioDeviceStart failed
+    /// with 'stop'`, and an aggregate offered as a member of another aggregate
+    /// simply never has its channels appear, so the route fails while resolving
+    /// them. Building again without the monitor is therefore the test as well
+    /// as the remedy — it is what tells the difference between a monitor that
+    /// is unusable and a route that is.
+    private func startLocked(_ configuration: StartConfiguration) throws {
+        droppedMonitor = nil
+        do {
+            try startAttempt(configuration)
+        } catch let failure {
+            guard let uid = configuration.monitorDeviceUID,
+                let withoutMonitor = configuration.withoutMonitor()
+            else { throw failure }
+            do {
+                try startAttempt(withoutMonitor)
+            } catch {
+                // The monitor was not what was wrong. The first failure is the
+                // one that describes the route the caller actually asked for,
+                // so that is the one they are told about; the retry was this
+                // layer's own idea.
+                throw failure
+            }
+            droppedMonitor = DroppedMonitor(uid: uid, reason: String(describing: failure))
+        }
+    }
+
     /// The whole of a start, from one snapshot.
     ///
     /// Taking the configuration as a value rather than as fourteen parameters is
     /// the point: the clock-lock recovery replays exactly what the caller gave,
     /// and a field it forgets is one it cannot forget silently — there is only
     /// one of it.
-    private func startLocked(_ configuration: StartConfiguration) throws {
+    private func startAttempt(_ configuration: StartConfiguration) throws {
         let sourceDeviceUID = configuration.sourceDeviceUID
         let destinationDeviceUID = configuration.destinationDeviceUID
         let routes = configuration.routes

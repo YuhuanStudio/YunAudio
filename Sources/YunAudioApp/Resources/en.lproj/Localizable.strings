@@ -234,6 +234,8 @@
 "Monitor" = "Monitor";
 "Hear yourself, %@ ms behind." = "Hear yourself, %@ ms behind.";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to.";
+"%@ would not start as a monitor; the mix is carrying on without it." = "%@ would not start as a monitor; the mix is carrying on without it.";
+"%1$@ could not be used for monitoring. %2$@" = "%1$@ could not be used for monitoring. %2$@";
 "Hold this level automatically" = "Hold this level automatically";
 "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up.";
 "out of range" = "out of range";

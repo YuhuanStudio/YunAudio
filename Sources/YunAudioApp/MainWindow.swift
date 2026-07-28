@@ -827,6 +827,20 @@ struct MainWindow: View {
                             detail: "\($0.outputChannels)ch")
                     })
         }
+        // The picker has gone back to "Off" on its own, which is a change the
+        // user did not make and would otherwise have to guess at. One line,
+        // with the engine's own words behind it: "would not start" leaves
+        // somebody switching a display on and off, and the status it returned
+        // is the only part that device's author can act on.
+        if let dropped = model.droppedMonitorName, let reason = model.droppedMonitorReason {
+            Text(
+                String(
+                    format: loc("%1$@ could not be used for monitoring. %2$@"), dropped, reason)
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.danger)
+            .fixedSize(horizontal: false, vertical: true)
+        }
         if model.monitorDeviceUID != nil {
             HStack(spacing: Yun.Space.sm) {
                 Image(systemName: "speaker.wave.1")

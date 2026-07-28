@@ -1318,6 +1318,75 @@ enum UIFlowCheck {
                 await bringRoutingBack(model)
                 check("and the route comes back without a monitor", model.isRunning)
             }
+
+            // And now the case above, on purpose.
+            //
+            // A monitor is an additional output, so one that will not start
+            // must cost the monitor and nothing else. Asserting that needs an
+            // output that reliably refuses, and the two displays that produced
+            // the original measurement — three runs of `1 → 0 routes on
+            // PG32UCDM` — are not always on this machine, which is exactly why
+            // the defect went unfixed while it was known.
+            //
+            // A private aggregate is always here: CoreAudio will not have one
+            // as a member of another, so its channels never appear in the
+            // routed aggregate and the start fails resolving the routes into
+            // it. That is the same failure a display's endpoint produces, at
+            // the same point, and it needs no particular hardware.
+            //
+            // Only while this section is being tested. A skimmed section
+            // records nothing, and this is two real route starts — measured at
+            // eight seconds of a run nobody asked it of.
+            if inWantedSection,
+                let decoy = try? AggregateDevice(
+                    name: "YunAudio Unstartable Monitor",
+                    subDevices: [.init(uid: monitor.uid, driftCompensation: false)],
+                    clockMasterUID: monitor.uid)
+            {
+                model.refreshDevices()
+                let decoyIsListed = model.outputDevices.contains { $0.uid == decoy.uid }
+                if decoyIsListed {
+                    let mainMix = model.activeRoutes.count
+                    model.monitorDeviceUID = decoy.uid
+                    // Longer than the twelve above: a monitor that fails is two
+                    // starts rather than one, and the first of them can be a
+                    // device taking twelve seconds to say no.
+                    await waitUntil("the start finished", { !model.isBusy }, timeout: 30)
+                    check(
+                        "the main mix survives a monitor that will not start", model.isRunning)
+                    check(
+                        "and keeps every route it had",
+                        model.activeRoutes.count == mainMix)
+                    check(
+                        "no fader is left pointing at a route that does not exist",
+                        model.routeGains.count == model.activeRoutes.count
+                            && model.routeMutes.count == model.activeRoutes.count)
+                    check("the monitor sends went with it", model.monitorRoutesAreConsistent)
+                    // The point of the whole exercise: a monitor that vanishes
+                    // with nothing said about it is the defect in another form.
+                    check("monitoring took itself off", model.monitorDeviceUID == nil)
+                    check("and the interface names the output", model.droppedMonitorName != nil)
+                    check(
+                        "the message names it too",
+                        model.droppedMonitorName.map { model.lastError?.contains($0) ?? false }
+                            ?? false)
+                    if let reason = model.droppedMonitorReason {
+                        note("the engine said: \(reason)")
+                    }
+                    if let error = model.lastError { note("the user is told: \(error)") }
+                    let cycles = model.cycleCountForDiagnostics
+                    await pause(0.4)
+                    check(
+                        "and audio is still flowing",
+                        model.cycleCountForDiagnostics > cycles)
+                } else {
+                    note("the decoy aggregate is not in the device list — skipped")
+                }
+                decoy.destroy()
+                model.refreshDevices()
+            } else {
+                note("no aggregate could be built to fail with — skipped")
+            }
         } else {
             note("no second output to monitor on — skipped")
         }
