@@ -1524,3 +1524,67 @@ struct SampleRateLabelTests {
         #expect(Format.sampleRate(8000) == "8 kHz")
     }
 }
+
+/// How often the menu bar glyph is worth redrawing.
+///
+/// It was rebuilt twice a second forever — an `NSImage`, locked, drawn into and
+/// unlocked — whether or not anything about it had changed. Idle, nothing about
+/// it *can* change: with no route running there is no level, so the same
+/// eighteen points were redrawn a hundred and seventy thousand times a day to
+/// produce the same pixels.
+///
+/// The rule is asserted rather than the saving, because the saving depends on
+/// how loud the room is. What has to be true is that a mark which draws the
+/// same is the same, and one that draws differently is not.
+@MainActor
+@Suite("Redrawing the menu bar mark")
+struct StatusMarkChangeTests {
+
+    typealias Mark = StatusItemController.Mark
+
+    /// Idle is the case this exists for: no route, no level, nothing to draw
+    /// differently however long anybody waits.
+    @Test("nothing running is always the same mark")
+    func idleNeverChanges() {
+        let first = Mark.of(level: nil, isMuted: false, isSpeakingWhileMuted: false)
+        let second = Mark.of(level: nil, isMuted: false, isSpeakingWhileMuted: false)
+        #expect(first == second)
+        #expect(first.intensity == nil)
+    }
+
+    /// A meter jittering in the noise floor must not redraw, or the change
+    /// would be a comment rather than a saving.
+    @Test("a level moving below one step is the same mark")
+    func smallMovesDoNotRedraw() {
+        let quiet = Mark.of(level: 0.200, isMuted: false, isSpeakingWhileMuted: false)
+        let barely = Mark.of(level: 0.208, isMuted: false, isSpeakingWhileMuted: false)
+        #expect(quiet == barely)
+    }
+
+    /// And a real move does, or the meter would stop being a meter.
+    @Test("a level moving a visible amount is a different mark")
+    func realMovesRedraw() {
+        let quiet = Mark.of(level: 0.1, isMuted: false, isSpeakingWhileMuted: false)
+        let loud = Mark.of(level: 0.8, isMuted: false, isSpeakingWhileMuted: false)
+        #expect(quiet != loud)
+    }
+
+    @Test("muting is a different mark, and so is talking into a mute")
+    func muteStatesDiffer() {
+        let live = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: false)
+        let muted = Mark.of(level: 0.3, isMuted: true, isSpeakingWhileMuted: false)
+        let alarmed = Mark.of(level: 0.3, isMuted: true, isSpeakingWhileMuted: true)
+        #expect(live != muted)
+        #expect(muted != alarmed)
+    }
+
+    /// Voice activity without a mute changes nothing, matching the drawing —
+    /// otherwise the mark would redraw at the rate of speech for no visible
+    /// reason.
+    @Test("speaking on a live microphone is the same mark")
+    func speakingUnmutedIsTheSameMark() {
+        let plain = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: false)
+        let speaking = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: true)
+        #expect(plain == speaking)
+    }
+}

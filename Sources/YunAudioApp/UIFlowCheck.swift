@@ -83,11 +83,17 @@ enum UIFlowCheck {
         }
         sectionStarted = Date()
         currentSection = name.lowercased()
-        // Crossed off as it starts, so that the run can end after it rather
-        // than after everything else as well.
+        // Asked before the section is crossed off, and the order matters: the
+        // first version crossed off and then tested, so entering the last
+        // wanted section emptied the set and threw immediately — the run ended
+        // at the top of the one section anybody had asked for, having checked
+        // nothing, and said "every flow behaved".
+        let isWanted = inWantedSection
         wantedRemaining = wantedRemaining.filter { !currentSection.contains($0) }
-        print("\n" + name + (inWantedSection ? "" : "  (skimmed)"))
-        if nothingLeftToRun {
+        print("\n" + name + (isWanted ? "" : "  (skimmed)"))
+        // So the throw happens on arriving at a section nobody wants, with
+        // nothing left to come. This one gets to run.
+        if !isWanted, nothingLeftToRun {
             note("nothing else was asked for — ending here rather than running the rest")
             throw NothingLeftToRun()
         }
@@ -1110,6 +1116,28 @@ enum UIFlowCheck {
         model.isAnalysisVisible = true
         await pause(0.4)
         check("and it comes back when the panel opens", !model.analysisIsIdle)
+
+        // The menu bar glyph, which is the one thing that runs whether or not
+        // anybody is using this application. It used to be rebuilt twice a
+        // second forever — an image, locked, drawn into and unlocked — to
+        // produce the same pixels. With no route running there is no level, so
+        // there is nothing it could draw differently however long it waits.
+        //
+        // Measured over a window that spans several ticks of its own timer, or
+        // "no redraws" would only mean the window was shorter than half a
+        // second.
+        let wasRunning = model.isRunning
+        if wasRunning { model.stop() }
+        await waitUntil("the route is down to measure idle", { !model.isRunning }, timeout: 12)
+        let redrawsBefore = StatusItemController.redraws
+        await pause(2.0)
+        let idleRedraws = StatusItemController.redraws - redrawsBefore
+        note("\(idleRedraws) menu bar redraw(s) in 2 s idle")
+        check("the menu bar mark is not redrawn while nothing changes", idleRedraws == 0)
+        if wasRunning {
+            model.start()
+            await waitUntil("and routing came back", { model.isRunning }, timeout: 15)
+        }
 
         try await checkStartCost(model: model)
         try await checkPollCost(model: model)

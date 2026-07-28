@@ -99,11 +99,58 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var configItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
 
+    /// What the glyph is showing, in the only detail it can show.
+    ///
+    /// The mark was rebuilt twice a second forever — an `NSImage`, locked,
+    /// drawn into and unlocked — whether or not anything about it had changed.
+    /// Idle, nothing about it *can* change: with no route running there is no
+    /// level, so the same eighteen points were redrawn a hundred and seventy
+    /// thousand times a day to produce the same pixels.
+    ///
+    /// The level is continuous and the drawing is not: it becomes an alpha on a
+    /// four-point dot, and at that size a step of a fortieth is not a step
+    /// anybody can see. So the comparison is against what is *drawn* rather
+    /// than against the level, or a meter jittering in the noise floor would
+    /// redraw as often as before and the whole thing would be a comment.
+    struct Mark: Equatable {
+        var isMuted: Bool
+        var isAlarmed: Bool
+        /// Nil when nothing is running, so there is no dot at all.
+        var intensity: Int?
+
+        /// Forty steps across the alpha ramp, which is finer than the eye at
+        /// eighteen points and coarse enough that a still room is still.
+        static func of(level: Float?, isMuted: Bool, isSpeakingWhileMuted: Bool) -> Mark {
+            Mark(
+                isMuted: isMuted,
+                // Only ever alongside a mute: on a live microphone this is a
+                // meter, and the mark does not draw meters.
+                isAlarmed: isMuted && isSpeakingWhileMuted,
+                intensity: level.map { Int((min(1, max(0, $0)) * 40).rounded()) })
+        }
+    }
+
+    private var drawnMark: Mark?
+    /// How many times the glyph has actually been redrawn, for the check that
+    /// this is not merely a comment.
+    private(set) static var redraws = 0
+
     private func refreshImage() {
-        item.button?.image = Self.statusImage(
-            level: model.isRunning ? model.peakLevel : nil, isMuted: model.isMuted,
+        let level = model.isRunning ? model.peakLevel : nil
+        let mark = Mark.of(
+            level: level, isMuted: model.isMuted,
             isSpeakingWhileMuted: model.isSpeakingWhileMuted)
-        muteItem?.title = model.isMuted ? loc("Unmute") : loc("Mute")
+        if mark != drawnMark {
+            drawnMark = mark
+            Self.redraws += 1
+            item.button?.image = Self.statusImage(
+                level: level, isMuted: model.isMuted,
+                isSpeakingWhileMuted: model.isSpeakingWhileMuted)
+        }
+        // Cheap and it has to stay in step with a mute that arrived from a
+        // hotkey or from MIDI rather than from this menu.
+        let title = model.isMuted ? loc("Unmute") : loc("Mute")
+        if muteItem?.title != title { muteItem?.title = title }
         refreshConfigs()
     }
 
