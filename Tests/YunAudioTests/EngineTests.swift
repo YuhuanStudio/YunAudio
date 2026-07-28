@@ -4556,3 +4556,35 @@ struct LyricsTests {
         #expect(lyrics.progress(at: 22) < 0.6)
     }
 }
+
+// MARK: - Waiting for the loopback
+
+/// The self-test captures its sequence off the destination's input. When the
+/// destination has none — speakers, a Bluetooth headset, a display — nothing
+/// ever arrives, and the obvious `while progress < 1` never ends. That is not
+/// hypothetical: it held this project's own command line for thirty-one
+/// minutes, printing 0% every quarter second.
+@Suite("Waiting for the loopback")
+struct SelftestWaitTests {
+
+    @Test("a capture that never starts gives up rather than waiting for ever")
+    func givesUp() {
+        let engine = RoutingEngine()
+        let began = Date()
+        // Nothing is running, so there is no capture and no progress.
+        #expect(engine.awaitSelftest(timeout: 0.6, poll: 0.05) == false)
+        let elapsed = Date().timeIntervalSince(began)
+        // It has to actually return, and near the deadline rather than long
+        // after it — a loop that overruns its own timeout is the same bug.
+        #expect(elapsed < 2.0)
+    }
+
+    @Test("giving up is reported rather than graded")
+    func reportsFailure() {
+        let engine = RoutingEngine()
+        #expect(engine.awaitSelftest(timeout: 0.3, poll: 0.05) == false)
+        // And there is nothing to grade, so the caller must not be handed a
+        // verdict built from an empty capture.
+        #expect(engine.evaluateSelftest() == nil)
+    }
+}

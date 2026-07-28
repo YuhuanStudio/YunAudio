@@ -343,14 +343,24 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     }
 
     print("\ncapturing…")
-    while engine.selftestProgress < 1.0 {
-        Thread.sleep(forTimeInterval: 0.25)
+    let filled = engine.awaitSelftest { progress in
         print(
             String(
-                format: "  %.0f%%  %@", engine.selftestProgress * 100,
+                format: "  %.0f%%  %@", progress * 100,
                 engine.isClockLocked
                     ? String(format: "clock locked %.6f", engine.measuredRateRatio)
                     : "clock unlocked"))
+    }
+    guard filled else {
+        engine.stop()
+        print(
+            """
+
+            nothing came back. The destination has no input to read the sequence
+            off, so there is no loopback to grade — pick a destination that has
+            one (this project's own driver, or any other loopback device).
+            """)
+        exit(1)
     }
 
     let result = engine.evaluateSelftest()
@@ -522,11 +532,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "driver-timing" 
             sourceDeviceUID: source.uid, destinationDeviceUID: device.uid,
             routes: [], selftest: true)) != nil
         {
-            while engine.selftestProgress < 1.0 { Thread.sleep(forTimeInterval: 0.2) }
-            if let result = engine.evaluateSelftest() {
+            if engine.awaitSelftest(timeout: 20), let result = engine.evaluateSelftest() {
                 verdict =
                     result.isBitExact
                     ? "exact @\(result.delayFrames)" : "MISMATCH"
+            } else {
+                verdict = "no loopback"
             }
             engine.stop()
         }

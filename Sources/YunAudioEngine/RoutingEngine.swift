@@ -1704,6 +1704,48 @@ public final class RoutingEngine: @unchecked Sendable {
         return Double(selftestBlock.pointee.captureCount.pointee) / capacity
     }
 
+    /// Waits for the loopback capture to fill, or gives up.
+    ///
+    /// Deliberately not an open loop. The capture only fills if the destination
+    /// has an input to read back from; when it has none — a pair of speakers, a
+    /// Bluetooth headset, a display — nothing ever arrives and the obvious
+    /// `while progress < 1` never ends. That is not hypothetical: it held this
+    /// project's own command line for thirty-one minutes before anybody noticed,
+    /// printing 0% every quarter second.
+    ///
+    /// - Parameters:
+    ///   - timeout: How long to wait in total. The capture is a fixed number of
+    ///     frames, so a generous multiple of the time it should take is the
+    ///     right shape of limit.
+    ///   - onProgress: Called on each poll, for a caller that wants to say so.
+    /// - Returns: True when the capture filled. False means it stalled, and the
+    ///   caller should say that rather than grading whatever partial data
+    ///   arrived.
+    @discardableResult
+    public func awaitSelftest(
+        timeout: TimeInterval = 30, poll: TimeInterval = 0.25,
+        onProgress: (Double) -> Void = { _ in }
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        var lastProgress = selftestProgress
+        var lastMovement = Date()
+        while selftestProgress < 1.0 {
+            if Date() >= deadline { return false }
+            // A capture that has stopped moving has stopped for good — the
+            // loopback is not carrying anything — so there is no reason to sit
+            // out the whole timeout once that is established.
+            if selftestProgress > lastProgress {
+                lastProgress = selftestProgress
+                lastMovement = Date()
+            } else if Date().timeIntervalSince(lastMovement) > 5 {
+                return false
+            }
+            Thread.sleep(forTimeInterval: poll)
+            onProgress(selftestProgress)
+        }
+        return true
+    }
+
     /// Clears the latch so a future start may attempt clock locking again.
     public func allowClockLockRetry() {
         stateLock.lock()

@@ -3877,7 +3877,18 @@ final class RouterModel {
         }
         integrityResult = engine.evaluateSelftest()
         if integrityResult == nil {
-            integrityError = loc("The check could not be set up on this path.")
+            // Two different failures, and telling them apart is the difference
+            // between a message somebody can act on and one they cannot. The
+            // check reads its sequence back off the destination's input; a
+            // destination with no input — speakers, a headset, a display — can
+            // never return anything, and saying "could not be set up" invites
+            // somebody to go looking for a fault that is not there.
+            integrityError =
+                integrityProgress <= 0
+                ? loc(
+                    "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check."
+                )
+                : loc("The check could not be set up on this path.")
         }
         isCheckingIntegrity = false
 

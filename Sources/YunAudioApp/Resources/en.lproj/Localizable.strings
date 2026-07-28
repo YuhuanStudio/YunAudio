@@ -476,3 +476,4 @@
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "You are singing" = "You are singing";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it.";
+"This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check.";
