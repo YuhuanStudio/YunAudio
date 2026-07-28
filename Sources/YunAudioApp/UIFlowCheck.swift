@@ -115,7 +115,29 @@ enum UIFlowCheck {
         lock = -1
     }
 
+    /// How long the process had been alive when the run loop first reached us.
+    ///
+    /// Captured here rather than computed later because "launch" is a moment
+    /// that has already passed by the time anything else in this file runs, and
+    /// the run loop being alive with a model and a menu bar item on it is the
+    /// closest thing to "the window is usable" that can be observed from inside
+    /// the process. Everything from `exec` onwards is in it: dyld, the
+    /// frameworks, `RouterModel.init` and the first pass through the scene.
+    private static let launchSeconds: TimeInterval = {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.size
+        var name: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        guard sysctl(&name, 4, &info, &size, nil, 0) == 0 else { return 0 }
+        let started =
+            Double(info.kp_proc.p_starttime.tv_sec)
+            + Double(info.kp_proc.p_starttime.tv_usec) / 1e6
+        return Date().timeIntervalSince1970 - started
+    }()
+
     static func run(model: RouterModel) async {
+        // Read on the first line so it is the launch that is measured and not
+        // the wait for the lock below, which is somebody else's flow check.
+        _ = launchSeconds
         await takeTheHardware()
         section("launch state")
         // The single-instance guard is bypassed for this mode, so two copies
@@ -1003,6 +1025,8 @@ enum UIFlowCheck {
         model.isAnalysisVisible = true
         await pause(0.4)
         check("and it comes back when the panel opens", !model.analysisIsIdle)
+
+        await checkPollCost(model: model)
 
         section("automatic levelling")
         let trimBefore = model.inputDecibels
@@ -2717,6 +2741,174 @@ enum UIFlowCheck {
         }
         check("and one that sweeps past it moves the input trim", moved)
         note(String(format: "input trim now %.2f dB", model.inputDecibels))
+    }
+
+    /// What the twenty-hertz poll costs while nothing is happening.
+    ///
+    /// Everything else here asks whether a control works. This asks what the
+    /// interface costs when nobody is touching it, which is the state a menu bar
+    /// application spends its entire life in and the one nothing was measuring.
+    ///
+    /// Two numbers, and the second is the interesting one. The first is the time
+    /// the poll itself takes, which was never the problem. The second is how
+    /// many of the properties it assigns to were already holding that value:
+    /// every stored property of an `@Observable` publishes on assignment rather
+    /// than on change, so a poll that writes nine unchanged values still
+    /// re-evaluates the body of every view that read any of them, twenty times a
+    /// second, for ever.
+    private static func checkPollCost(model: RouterModel) async {
+        section("what the idle interface costs")
+
+        // Deliberately placed straight after the idle-cost section, which has
+        // just switched the analysis, the levelling and the ducking off and on
+        // again. Both of those states are worth a number and they are nothing
+        // like each other.
+        await bringRoutingBack(model)
+        guard model.isRunning else {
+            note("no route is up, so the poll is not running and there is nothing to measure")
+            return
+        }
+
+        /// Runs the poll for a while and reports what one tick cost.
+        func measure() async -> (microseconds: Double, cost: RouterModel.PollCost) {
+            model.measuresPollBreakdown = true
+            model.resetPollCost()
+            // Long enough to be dominated by steady state rather than by
+            // whatever the previous section left moving.
+            await pause(4)
+            let cost = model.pollCost
+            guard cost.polls > 0 else { return (0, cost) }
+            return (cost.seconds / Double(cost.polls) * 1e6, cost)
+        }
+
+        let visible = model.isAnalysisVisible
+
+        model.isAnalysisVisible = false
+        await pause(0.4)
+        let quiet = await measure()
+        guard quiet.cost.polls > 0 else {
+            note("the poll did not run")
+            model.isAnalysisVisible = visible
+            return
+        }
+        note(
+            String(
+                format: "panel closed: %d polls, %.0f µs each — %.2f%% of one core",
+                quiet.cost.polls, quiet.microseconds, quiet.microseconds / 50_000 * 100))
+        note(
+            String(
+                format: "%d observable writes, %d of them unchanged (%.0f%%)",
+                quiet.cost.writes, quiet.cost.unchanged,
+                Double(quiet.cost.unchanged) / Double(max(quiet.cost.writes, 1)) * 100))
+        for (name, seconds) in model.pollBreakdown.sorted(by: { $0.value > $1.value }).prefix(6)
+        {
+            note(
+                String(
+                    format: "    %-16s %6.0f µs", (name as NSString).utf8String!,
+                    seconds / Double(quiet.cost.polls) * 1e6))
+        }
+
+        model.isAnalysisVisible = true
+        await pause(0.4)
+        let analysing = await measure()
+        note(
+            String(
+                format: "panel open:   %d polls, %.0f µs each — %.2f%% of one core",
+                analysing.cost.polls, analysing.microseconds,
+                analysing.microseconds / 50_000 * 100))
+        model.isAnalysisVisible = visible
+        model.measuresPollBreakdown = false
+
+        // The verdict is re-read twice a second rather than twenty times, so it
+        // has to be shown to still be there — a stale pill claiming a clean
+        // path is the one failure mode this application must not have.
+        check("the path verdict is still being reported", model.pathQuality != nil)
+
+        // A ceiling rather than a target, and deliberately a loose one. This is
+        // wall clock on whatever machine is running the check, and the same
+        // build measured 174, 240, 290 and 476 µs on this one depending on what
+        // else was compiling at the time. What it has to do is catch the state
+        // it was found in — 1501 to 1589 µs, because the path verdict was being
+        // re-derived from the HAL twenty times a second — while not failing on
+        // a busy afternoon. Anything approaching a millisecond means something
+        // expensive is back on a path that runs for ever in the background,
+        // which is the kind of thing nobody notices until a laptop is warm.
+        check(
+            "with the panel closed the poll stays well under a millisecond",
+            quiet.microseconds < 900)
+
+        // The analysers cost what they cost — an FFT, a pitch tracker and
+        // Apple's sound model, twenty times a second — and they are the feature.
+        // What matters is that the bill arrives only while somebody is looking:
+        // if the two figures were the same, the panel's switch would not be
+        // doing anything.
+        check(
+            "and the analysers only cost while the panel is open",
+            analysing.microseconds > quiet.microseconds * 3)
+
+        // The real assertion about the poll itself. With a route up and nobody
+        // touching anything, most of what it assigns has not moved — the path
+        // verdict, the clock lock, the plugin list, the clip count, the rate
+        // ratio — and an `@Observable` publishes on assignment rather than on
+        // change, so every one of those used to re-evaluate the body of every
+        // view that had read it. Measured at 67 to 71% of all writes.
+        check(
+            "most of what it writes is recognised as unchanged",
+            quiet.cost.unchanged * 2 > quiet.cost.writes)
+
+        checkStartupCost(model: model)
+    }
+
+    /// What launching costs, and which part of it.
+    ///
+    /// A menu bar application is launched once and then left alone, so this is
+    /// not the number that decides whether the thing is pleasant to use — but
+    /// it is the one nobody had, and "it feels quick on this machine" is not a
+    /// measurement. The parts are re-timed warm, which understates every one of
+    /// them; what a warm number is good for is saying which of them is worth
+    /// looking at cold.
+    private static func checkStartupCost(model: RouterModel) {
+        section("what launching costs")
+
+        note(String(format: "exec to a live run loop: %.0f ms", launchSeconds * 1000))
+
+        func timed(_ name: String, _ body: () -> Void) -> TimeInterval {
+            let entered = DispatchTime.now().uptimeNanoseconds
+            body()
+            let seconds = Double(DispatchTime.now().uptimeNanoseconds - entered) / 1e9
+            note(String(format: "  %@: %.1f ms warm", name, seconds * 1000))
+            return seconds
+        }
+
+        var warm = 0.0
+        warm += timed("refreshDevices") { model.refreshDevices() }
+        warm += timed("refreshPlugins") { model.refreshPlugins() }
+        warm += timed("refreshHeadphoneProfiles") { model.refreshHeadphoneProfiles() }
+        warm += timed("presets and quick configs") {
+            _ = UserPresets.load()
+            _ = QuickConfigStore.load()
+        }
+        note(String(format: "  %.1f ms of that is the model's own, warm", warm * 1000))
+
+        // Not on the launch path — on the *start* path, at the top of every
+        // `start()`, whether or not anything is being tapped. It is here
+        // because it is the same kind of question and because the number is
+        // worth having beside the others: enabling one effect tears the route
+        // down and builds it back, and this is part of what that costs.
+        let apps = timed("refreshApps, at the top of every start") { model.refreshApps() }
+        note(
+            String(
+                format: "  %d application(s) enumerated, %d captured",
+                model.availableApps.count, model.capturedAppBundleIDs.count))
+
+        // Loose, because it is measuring a debug build on a machine that may
+        // have several of these running at once. It is here to catch the shape
+        // of failure that actually happens — somebody putting a device
+        // enumeration or a disk walk on the launch path — rather than to police
+        // a hundred milliseconds either way.
+        check("launch is under three seconds", launchSeconds < 3)
+        check("re-deriving everything the model derives at launch is under a second", warm < 1)
+        check("enumerating applications is under a quarter second", apps < 0.25)
     }
 
     /// What the bottom of the window is actually showing.

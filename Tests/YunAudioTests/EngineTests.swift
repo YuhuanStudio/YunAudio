@@ -4300,6 +4300,144 @@ struct ParametricEQTests {
         #expect(many.filters.count == ParametricEQ.maximumFilters)
     }
 
+    /// The cascade in the IOProc is run section-outermost, so one section's
+    /// coefficients and one channel's history stay in registers for a whole
+    /// block, and two channels are run in the same loop so their multiply
+    /// chains interleave. Both are rearrangements of a loop nest, and a
+    /// rearrangement of a loop nest is the kind of change that is right for
+    /// eight configurations and silently wrong for the ninth: a history term
+    /// shared between channels, an off-by-one on the state slot, the preamp
+    /// applied once per section instead of once.
+    ///
+    /// None of that is visible in a frequency response — a filter with the
+    /// channels crossed still has the right magnitude curve. So this asserts
+    /// the strong thing rather than the convenient one: every sample the
+    /// callback produces equals, bit for bit, what the textbook nesting
+    /// produces from the same input.
+    ///
+    /// Odd channel counts are in the list because the pairing has a tail, and a
+    /// tail is where an off-by-one lives.
+    @Test(
+        "the cascade is bit-for-bit the textbook nesting",
+        arguments: [(1, 1), (2, 1), (2, 10), (3, 10), (2, 24), (5, 24)])
+    func cascadeMatchesTextbookNesting(channels: Int, stages: Int) {
+        let curve = ParametricEQ(
+            name: "reference", preampDecibels: -4.5,
+            filters: (0..<stages).map { index in
+                .init(
+                    kind: .peaking, hertz: 80 * Float(index + 1) * 1.35,
+                    decibels: index.isMultiple(of: 2) ? 5 : -4, q: 1.1)
+            })
+        let packed = curve.coefficients(sampleRate: 48000)
+        #expect(packed.count == stages * 5)
+        let preamp = pow(Float(10), curve.preampDecibels / 20)
+
+        let frames = 96
+        let cycles = 6
+        let graph = RTGraph.allocate(
+            routes: (0..<channels).map { channel in
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: Int32(channel),
+                    destinationBuffer: 0, destinationChannel: Int32(channel))
+            }, bufferFrames: frames, sampleRate: 48000)
+        defer { RTGraph.deallocate(graph) }
+        for index in packed.indices { graph.pointee.eqCoefficients[index] = packed[index] }
+        graph.pointee.eqStages = Int32(stages)
+        graph.pointee.eqChannels = Int32(channels)
+        graph.pointee.eqBuffer = 0
+        graph.pointee.eqPreampGain = preamp
+
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mFlags = .sampleTimeValid
+
+        let input = Bus(channelCounts: [channels], frames: frames)
+        let output = Bus(channelCounts: [channels], frames: frames)
+
+        // The reference keeps its own history, in the obvious nesting.
+        var reference = [Float](repeating: 0, count: stages * channels * 4)
+        var mismatches = 0
+        var compared = 0
+        var loudest: Float = 0
+
+        for cycle in 0..<cycles {
+            // A different waveform per channel and per cycle, so a filter that
+            // read the wrong channel's history would have somewhere to go wrong.
+            for frame in 0..<frames {
+                for channel in 0..<channels {
+                    let phase = Float(cycle * frames + frame)
+                    input.storage[0][frame * channels + channel] =
+                        0.3 * sin(phase * (0.03 + 0.017 * Float(channel)))
+                        + 0.1 * sin(phase * 0.31)
+                }
+            }
+            for index in 0..<(frames * channels) { output.storage[0][index] = 0 }
+
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+                output.list.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+
+            for channel in 0..<channels {
+                for frame in 0..<frames {
+                    var value = input.storage[0][frame * channels + channel] * preamp
+                    for section in 0..<stages {
+                        let slot = (section * channels + channel) * 4
+                        let produced =
+                            packed[section * 5] * value
+                            + packed[section * 5 + 1] * reference[slot]
+                            + packed[section * 5 + 2] * reference[slot + 1]
+                            - packed[section * 5 + 3] * reference[slot + 2]
+                            - packed[section * 5 + 4] * reference[slot + 3]
+                        reference[slot + 1] = reference[slot]
+                        reference[slot] = value
+                        reference[slot + 3] = reference[slot + 2]
+                        reference[slot + 2] = produced
+                        value = produced
+                    }
+                    let actual = output.storage[0][frame * channels + channel]
+                    if actual != value { mismatches += 1 }
+                    compared += 1
+                    loudest = max(loudest, abs(value))
+                }
+            }
+        }
+
+        #expect(mismatches == 0)
+        #expect(compared == frames * channels * cycles)
+        // A cascade that had gone unstable, or one filtering silence, would
+        // compare equal to a reference doing the same thing. Something has to
+        // say the signal was there.
+        #expect(loudest > 0.05)
+        #expect(loudest < 4)
+    }
+
+    /// One interleaved bus, for the comparison above.
+    private final class Bus {
+        let list: UnsafeMutableAudioBufferListPointer
+        var storage: [UnsafeMutablePointer<Float>] = []
+
+        init(channelCounts: [Int], frames: Int) {
+            list = AudioBufferList.allocate(maximumBuffers: channelCounts.count)
+            for (index, channels) in channelCounts.enumerated() {
+                let samples = frames * channels
+                let pointer = UnsafeMutablePointer<Float>.allocate(capacity: samples)
+                pointer.initialize(repeating: 0, count: samples)
+                storage.append(pointer)
+                list[index] = AudioBuffer(
+                    mNumberChannels: UInt32(channels),
+                    mDataByteSize: UInt32(samples * MemoryLayout<Float>.size),
+                    mData: UnsafeMutableRawPointer(pointer))
+            }
+        }
+
+        deinit {
+            for pointer in storage { pointer.deallocate() }
+            free(list.unsafeMutablePointer)
+        }
+    }
+
     @Test("every section is normalised so it can be run as it stands")
     func normalised() {
         let curve = ParametricEQ(
