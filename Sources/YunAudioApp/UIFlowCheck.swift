@@ -130,33 +130,6 @@ enum UIFlowCheck {
         model.watchesIOAllocations = false
         check("and disarmed again", !model.watchesIOAllocations)
 
-        print("\npitch tracking")
-        // Knowing the actual fundamental is what would let a voice be moved to
-        // a range rather than by an amount. Measured against the live signal:
-        // in a quiet room there is no pitch to find, and reporting one would be
-        // the failure worth catching.
-        // Through the analyser rather than beside it: the analyser drains the
-        // ring dry every fifty milliseconds, so a diagnostic that read the same
-        // ring found nothing and reported it as a lack of audio. The tracker is
-        // one of the analyser's outputs now, which is where it belonged.
-        model.isAnalysisVisible = true
-        await pause(1.5)
-        let pitch = model.analysis.pitchHertz
-        note(
-            pitch > 0
-                ? String(format: "%.0f Hz", pitch) : "no pitch — a quiet room has none")
-        check(
-            "any pitch reported is inside the range it searches",
-            pitch == 0
-                || (Double(pitch) >= PitchTracker.lowestHertz - 1
-                    && Double(pitch) <= PitchTracker.highestHertz + 1)
-        )
-        // A quiet room has no fundamental, and inventing one would make a
-        // converter chase noise between words.
-        if model.outputVerdict == .veryQuiet || model.outputVerdict == .silent {
-            check("a silent room reports no pitch", pitch == 0)
-        }
-
         print("\nsaved presets")
         // A snapshot of everything, not a chosen subset. Somebody saving one
         // has just spent time getting a setup right, and one that quietly left
@@ -812,6 +785,85 @@ enum UIFlowCheck {
         } else {
             note("no second output to monitor on — skipped")
         }
+
+        print("\npitch tracking")
+        // Knowing the actual fundamental is what would let a voice be moved to
+        // a range rather than by an amount. Measured against the live signal:
+        // in a quiet room there is no pitch to find, and reporting one would be
+        // the failure worth catching.
+        // Through the analyser rather than beside it: the analyser drains the
+        // ring dry every fifty milliseconds, so a diagnostic that read the same
+        // ring found nothing and reported it as a lack of audio. The tracker is
+        // one of the analyser's outputs now, which is where it belonged.
+        model.isAnalysisVisible = true
+        await pause(1.5)
+        let pitch = model.analysis.pitchHertz
+        note(
+            pitch > 0
+                ? String(format: "%.0f Hz", pitch) : "no pitch — a quiet room has none")
+        check(
+            "any pitch reported is inside the range it searches",
+            pitch == 0
+                || (Double(pitch) >= PitchTracker.lowestHertz - 1
+                    && Double(pitch) <= PitchTracker.highestHertz + 1)
+        )
+        // A quiet room has no fundamental, and inventing one would make a
+        // converter chase noise between words.
+        if model.outputVerdict == .veryQuiet || model.outputVerdict == .silent {
+            check("a silent room reports no pitch", pitch == 0)
+        }
+
+        print("\nevery stage on its own")
+        // One at a time, which is how somebody actually uses these and the case
+        // that was broken: the chain was only built for more than one stage, so
+        // switching on just the gate — or just the compressor, or just the
+        // limiter — did nothing at all and said nothing about it. Every check
+        // that touched processing before this one enabled several at once.
+        let effectsBefore = model.enabledEffects
+        model.enabledEffects = []
+        await waitUntil("the chain is empty", { !model.isBusy }, timeout: 12)
+        for kind in EffectKind.allCases {
+            model.enabledEffects = [kind]
+            await waitUntil("\(kind.rawValue) settled", { !model.isBusy }, timeout: 14)
+            check(
+                "\(kind.rawValue) alone actually renders",
+                model.activeEffectStages.contains(kind))
+            check("\(kind.rawValue) alone kept audio running", model.isRunning)
+        }
+        model.enabledEffects = effectsBefore
+        await waitUntil("the chain came back", { !model.isBusy }, timeout: 14)
+
+        print("\ngain reduction")
+        // A compressor set wrong is completely silent about it: it sounds like
+        // a compressor doing nothing, which is what it is. The meter is the
+        // only way to tell, so it has to actually report.
+        model.setEffect(.compressor, enabled: true)
+        await waitUntil("the compressor is in the path", { !model.isBusy }, timeout: 12)
+        // The figure comes from the poll, and `isBusy` clearing does not mean a
+        // poll has run — the first version checked in the gap between the two
+        // and found nothing.
+        await waitUntil(
+            "it reports a reduction figure",
+            { model.gainReduction[.compressor] != nil }, timeout: 3)
+        // Threshold on the floor, so anything at all is above it. A quiet room
+        // may still be under it, and reporting no reduction then is the correct
+        // answer rather than a failure — what is asserted is that the number is
+        // real, not that it is large.
+        model.setValue(-40, of: EffectKind.compressor.parameters[0], in: .compressor)
+        await pause(1.2)
+        let reducing = model.gainReduction[.compressor] ?? -1
+        note(String(format: "%.1f dB of reduction at a −40 dB threshold", reducing))
+        check("the figure is a plausible amount", reducing >= 0 && reducing < 60)
+        model.setValue(
+            EffectKind.compressor.parameters[0].defaultValue,
+            of: EffectKind.compressor.parameters[0], in: .compressor)
+        model.setEffect(.compressor, enabled: false)
+        await waitUntil("it came back out", { !model.isBusy }, timeout: 12)
+        // The dictionary is cleared by the poll, and `isBusy` clearing does not
+        // mean a poll has run.
+        await waitUntil(
+            "the meter goes away with the stage",
+            { model.gainReduction[.compressor] == nil }, timeout: 3)
 
         print("\nswitching channel mode while running")
         let before = model.activeRoutes.count

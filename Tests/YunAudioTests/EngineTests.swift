@@ -3473,3 +3473,56 @@ struct NoteNameTests {
         #expect(PitchTracker.noteName(20000) == nil)
     }
 }
+
+// MARK: - Pitch needs a level, not just a period
+
+/// The correlation threshold measures periodicity, and a mains hum or a fan is
+/// extremely periodic. Without a level gate as well, a quiet room reports a
+/// confident pitch — which for a voice converter means chasing the room between
+/// every word.
+@Suite("Pitch level gate")
+struct PitchLevelTests {
+
+    private func tone(
+        _ hertz: Double, amplitude: Float, frames: Int = 2, sampleRate: Double = 48000
+    ) -> [Float] {
+        let count = frames * PitchTracker.frameSize
+        return (0..<count).map { index in
+            amplitude
+                * Float(sin(2 * Double.pi * hertz * Double(index) / sampleRate))
+        }
+    }
+
+    /// A perfectly periodic signal at a level nobody could speak at.
+    @Test("a very quiet tone reports no pitch despite being periodic")
+    func quietToneIsIgnored() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        // −60 dBFS: a hum, not a voice.
+        let quiet = tone(150, amplitude: 0.001)
+        #expect(tracker.track(frames: quiet, count: 2).allSatisfy { $0 == 0 })
+    }
+
+    /// And the same tone at a usable level is found, so the gate is a level
+    /// gate rather than a refusal to work.
+    @Test("the same tone at a usable level is found")
+    func loudToneIsFound() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        let loud = tone(150, amplitude: 0.2)
+        for estimate in tracker.track(frames: loud, count: 2) {
+            #expect(abs(Double(estimate) - 150) < 5, "got \(estimate)")
+        }
+    }
+
+    /// The boundary is where it says it is, within a few decibels.
+    @Test("the gate sits near the level it advertises")
+    func gateIsWhereItSays() throws {
+        let tracker = try #require(PitchTracker(sampleRate: 48000))
+        // A sine's RMS is its amplitude over root two, so this is about
+        // −44 dBFS RMS — comfortably above the −50 floor.
+        let above = tone(150, amplitude: 0.009)
+        #expect(tracker.track(frames: above, count: 2).allSatisfy { $0 > 0 })
+        // And about −56 dBFS RMS, comfortably below it.
+        let below = tone(150, amplitude: 0.00225)
+        #expect(tracker.track(frames: below, count: 2).allSatisfy { $0 == 0 })
+    }
+}

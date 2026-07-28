@@ -993,6 +993,41 @@ struct MainWindow: View {
         }
     }
 
+    /// A reduction meter, drawn right to left.
+    ///
+    /// Away from zero rather than towards it, because reduction is something
+    /// being taken away — the same convention every compressor uses, and the
+    /// reason nobody has to be told which way it reads.
+    private func gainReductionMeter(_ decibels: Float) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Text(loc("Reducing"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            GeometryReader { proxy in
+                let span: Float = 24
+                let fraction = CGFloat(min(1, decibels / span))
+                ZStack(alignment: .trailing) {
+                    Capsule()
+                        .fill(Yun.Palette.elevated)
+                        .frame(height: 4)
+                    Capsule()
+                        .fill(
+                            decibels > 12 ? Yun.Palette.warning : Yun.Palette.accent
+                        )
+                        .frame(width: proxy.size.width * fraction, height: 4)
+                }
+                .frame(height: proxy.size.height, alignment: .center)
+            }
+            .frame(height: 10)
+            Text(decibels >= 0.1 ? String(format: "−%.1f", decibels) : "—")
+                .font(Yun.Text.mono)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .monospacedDigit()
+                .frame(width: 42, alignment: .trailing)
+        }
+        .animation(.linear(duration: 0.05), value: decibels)
+    }
+
     private func effectRow(_ kind: EffectKind) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Toggle(
@@ -1006,6 +1041,12 @@ struct MainWindow: View {
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
+
+            // What the stage is actually doing to the signal, for the two that
+            // can be set to do nothing without saying so.
+            if let reduction = model.gainReduction[kind] {
+                gainReductionMeter(reduction)
+            }
 
             // The knobs appear only for a stage that is on: a slider for
             // something bypassed invites the reasonable assumption that moving

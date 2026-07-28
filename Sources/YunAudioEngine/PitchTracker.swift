@@ -46,6 +46,16 @@ public final class PitchTracker {
     public static let lowestHertz: Double = 60
     public static let highestHertz: Double = 400
 
+    /// Below this there is nothing worth calling a pitch, however periodic it
+    /// is.
+    ///
+    /// The correlation threshold below measures periodicity, not level — and a
+    /// quiet mains hum or a fan is extremely periodic. A room at −49 dBFS was
+    /// reported as a confident 153 Hz, which for a voice converter means
+    /// chasing the room between every word. −50 dBFS RMS is well under any
+    /// usable speaking level and well over a room's noise floor.
+    public static let floorDecibels: Float = -50
+
     /// The nearest note to a frequency, in scientific pitch notation.
     ///
     /// Equal temperament from A4 = 440. Hertz alone means something to about
@@ -167,10 +177,18 @@ public final class PitchTracker {
             }
         }
 
-        // Normalised against the zero-lag term, so a loud frame and a quiet one
-        // score the same way and the threshold below means something.
+        // Nothing quiet enough to be the room gets a pitch, however periodic.
+        //
+        // The zero-lag term is the frame's total energy, which is exactly the
+        // measurement needed — no second pass over the samples.
         let energy = correlation[0]
         guard energy > 1e-9 else { return 0 }
+        // zrip's forward-inverse pair scales by 2N, so the mean square is the
+        // zero-lag term over that and over the frame length.
+        let meanSquare = energy / (2 * Float(Self.transformSize) * Float(Self.frameSize))
+        guard meanSquare > 0,
+            10 * log10(meanSquare) > Self.floorDecibels
+        else { return 0 }
 
         // The shortest lag that scores nearly as well as the best, not the best
         // outright.
@@ -188,13 +206,24 @@ public final class PitchTracker {
         // worse than reporting nothing.
         guard best > 0.35 else { return 0 }
 
-        for lag in minimumLag...maximumLag where correlation[lag] / energy > best * 0.85 {
+        // The shortest *local maximum* scoring near the best, not the first lag
+        // to cross the threshold.
+        //
+        // A voice has a sharply peaked autocorrelation and the two are the same
+        // thing. A pure tone does not: its correlation is a broad cosine, so
+        // lags well before the true period already exceed 85% of the maximum
+        // and a threshold crossing lands early — a 150 Hz sine came back as
+        // 136. A local maximum is the period whichever shape the signal has.
+        for lag in (minimumLag + 1)..<maximumLag {
+            let previous = correlation[lag - 1]
+            let centre = correlation[lag]
+            let next = correlation[lag + 1]
+            guard centre > previous, centre >= next, centre / energy > best * 0.85 else {
+                continue
+            }
             // Parabolic interpolation around the peak: the true period is
             // rarely a whole number of samples, and at 48 kHz one sample at
             // 200 Hz is more than a hertz.
-            let previous = correlation[max(minimumLag, lag - 1)]
-            let centre = correlation[lag]
-            let next = correlation[min(maximumLag, lag + 1)]
             let denominator = previous - 2 * centre + next
             let offset = denominator != 0 ? 0.5 * (previous - next) / denominator : 0
             let refined = Double(lag) + Double(max(-1, min(1, offset)))

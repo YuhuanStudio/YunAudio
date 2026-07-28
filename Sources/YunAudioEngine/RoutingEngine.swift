@@ -165,6 +165,23 @@ public final class RoutingEngine: @unchecked Sendable {
     public private(set) var lastIsolationError: String?
     /// Third-party units that were asked for and would not load, by name.
     public private(set) var failedPlugins: [String] = []
+    /// The stages actually rendering, which is not the same as the stages that
+    /// were asked for: one that will not instantiate is dropped.
+    public var activeEffectStages: [EffectKind] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if let effectChain { return effectChain.stages }
+        return isolationUnit != nil ? [.voiceIsolation] : []
+    }
+
+    /// How much a dynamics stage is pulling the signal down right now, in
+    /// decibels. Zero when the stage is not in the chain.
+    public func gainReduction(of kind: EffectKind) -> Float {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return effectChain?.gainReduction(of: kind) ?? 0
+    }
+
     /// What the hosted plugins say their controls are, by plugin id.
     public func pluginParameters(_ id: String) -> [EffectParameter] {
         stateLock.lock()
@@ -389,11 +406,21 @@ public final class RoutingEngine: @unchecked Sendable {
         // up before the routes are resolved: a route that reads the model's
         // output has a different stride and channel index from one that reads
         // the raw device buffer.
-        // A chain of more than one stage supersedes the single isolation slot:
-        // it renders the same model plus whatever else is switched on, so
-        // running both would process the signal twice.
+        // A chain is built for anything except the one case the dedicated
+        // isolation unit exists for.
+        //
+        // The condition was `effects.count > 1`, which meant exactly one
+        // enabled stage built no chain at all: switching on only the gate, or
+        // only the compressor, or only the limiter did nothing whatsoever and
+        // said nothing about it. Two stages worked, one did not. It went
+        // unnoticed because every check that touched processing switched on
+        // more than one thing at a time.
+        //
+        // The dedicated unit still handles isolation alone, because it carries
+        // the mix and quality settings the chain has no way to express.
+        let isolationOnly = effects == [.voiceIsolation]
         var isolatedSource: ChannelRef?
-        if effects.count > 1, let first = routes.first {
+        if !effects.isEmpty, !isolationOnly, let first = routes.first {
             isolatedSource = first.source
             if let chain = EffectChain(
                 kinds: effects, plugins: plugins, sampleRate: rate,

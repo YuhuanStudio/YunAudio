@@ -887,6 +887,31 @@ final class EffectChain {
         AudioUnitSetParameter(unit, identifier, kAudioUnitScope_Global, 0, value, 0)
     }
 
+    /// How much a stage is currently pulling the signal down, in decibels.
+    ///
+    /// Every compressor ever shipped has this meter, and for one reason: a
+    /// compressor with the threshold set wrong is completely silent about it.
+    /// It sounds like a compressor doing nothing, which is exactly what it is,
+    /// and the only way to tell is to watch how much it is reducing. Without
+    /// it the two knobs here are guesswork.
+    ///
+    /// The dynamics processor publishes it as a read-only parameter, so this is
+    /// the unit's own opinion rather than anything inferred.
+    func gainReduction(of kind: EffectKind) -> Float {
+        guard kind == .compressor || kind == .gate,
+            let index = hostedStages.firstIndex(of: kind), index < units.count
+        else { return 0 }
+        var value: AudioUnitParameterValue = 0
+        guard
+            AudioUnitGetParameter(
+                units[index], kDynamicsProcessorParam_CompressionAmount,
+                kAudioUnitScope_Global, 0, &value) == noErr
+        else { return 0 }
+        // Reported as a negative number of decibels; returned as a positive
+        // amount of reduction, which is what a meter shows.
+        return max(0, -value)
+    }
+
     /// How many units the chain built, for tests that care about placement.
     var unitCountForTesting: Int { units.count }
 

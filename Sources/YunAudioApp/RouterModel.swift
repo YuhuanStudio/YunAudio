@@ -1161,6 +1161,34 @@ final class RouterModel {
         didSet { if oldValue != enabledEffects { persist(); restartIfRunning() } }
     }
 
+    /// The stages actually rendering. Not the same as `enabledEffects`: one
+    /// that will not instantiate is dropped, and until recently a single
+    /// enabled stage built no chain at all.
+    var activeEffectStages: [EffectKind] { engine.activeEffectStages }
+
+    /// How much each dynamics stage is pulling the signal down, in decibels.
+    ///
+    /// A compressor with its threshold set wrong is completely silent about it:
+    /// it sounds like a compressor doing nothing, which is what it is. The only
+    /// way to tell is to watch the reduction, which is why every compressor
+    /// ever shipped has this meter and why two knobs without one are guesswork.
+    private(set) var gainReduction: [EffectKind: Float] = [:]
+
+    private func refreshGainReduction() {
+        for kind in [EffectKind.compressor, .gate] where enabledEffects.contains(kind) {
+            let value = engine.gainReduction(of: kind)
+            // Falls at a readable rate rather than following the unit exactly:
+            // the reduction moves at the release time, which at 150 ms is a
+            // flicker rather than a reading.
+            let previous = gainReduction[kind] ?? 0
+            gainReduction[kind] = value > previous ? value : previous * 0.82 + value * 0.18
+        }
+        // Snapshotted, because the loop mutates the dictionary it is walking.
+        for kind in Array(gainReduction.keys) where !enabledEffects.contains(kind) {
+            gainReduction[kind] = nil
+        }
+    }
+
     /// Knob positions, keyed by "<stage>.<parameter>". Persisted so a chain
     /// comes back tuned the way it was left rather than at its defaults.
     ///
@@ -2012,6 +2040,7 @@ final class RouterModel {
             analyser.drain(from: engine)
             analysis = analyser.reading()
         }
+        refreshGainReduction()
         refreshDucking()
         if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
