@@ -2498,7 +2498,11 @@ enum UIFlowCheck {
         // The key of what is playing, and how far it would have to move. The
         // profile match is unit-tested against synthesised chromas; what only
         // this can show is that a real spectrum reaches it at all.
-        await pause(upTo: 2.0, until: { model.songKey != nil })
+        //
+        // Five seconds because a key is no longer offered from the first window
+        // — twenty of them is four seconds — and two would have measured only
+        // that nothing had arrived yet.
+        await pause(upTo: 5.0, until: { model.songKey != nil })
         if let key = model.songKey {
             note(
                 String(
@@ -3358,14 +3362,34 @@ enum UIFlowCheck {
             "the player was captured", { model.isRunning && !model.isBusy }, timeout: 10)
         note("capturing \(captured.name) — \(model.activeRoutes.count) route(s)")
 
+        // With the chain running, because that is the case anybody karaokes in
+        // and it is the one that was in doubt. Voice isolation is a speech
+        // model and the equaliser is a high-pass at 80 Hz, and both of them
+        // exist to remove exactly what music is made of — so if the key came
+        // from a signal they had touched, this is where it would show.
+        let alreadyEnabled = model.enabledEffects
+        model.enabledEffects.formUnion([.voiceIsolation, .equaliser])
+        await waitUntil("the chain came up", { model.isRunning && !model.isBusy }, timeout: 10)
+        note(
+            "chain: "
+                + model.enabledEffects.map(\.rawValue).sorted().joined(separator: ", "))
+
         // Started over, so the chroma is of the music and not of whatever was
         // in the room a moment ago.
         model.isSingingVisible = false
         model.isSingingVisible = true
-        // Until the detector has an answer it is confident about, rather than
-        // eight seconds regardless. Eight is what a cold chroma needs in the
-        // worst case; a warm one is usually done in two.
-        await pause(upTo: 8.0, until: { (model.songKey?.confidence ?? 0) > 0.15 })
+
+        // One chord is not a key, and the first fold of the chroma is one
+        // chord. This was the whole defect: the panel answered from whichever
+        // chord happened to be sounding when it opened, so a song in F was
+        // reported as B♭ — its own subdominant — at 100% confidence, with a
+        // transpose suggestion built on top of that.
+        await pause(0.6)
+        check("one chord is not yet a key", model.songKey == nil)
+
+        // Then until there is an answer at all, which now means until enough of
+        // the piece has been heard for one to be offered.
+        await pause(upTo: 10.0, until: { model.songKey != nil })
 
         if let key = model.songKey {
             note(
@@ -3412,6 +3436,7 @@ enum UIFlowCheck {
             note("the capture did not become a second source — the duet was not exercised")
         }
 
+        model.enabledEffects = alreadyEnabled
         model.capturedAppBundleIDs = alreadyCaptured
         model.isSingingVisible = false
         if player.isRunning { player.terminate() }

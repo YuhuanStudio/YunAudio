@@ -5125,6 +5125,54 @@ struct KeyDetectorTests {
         #expect(clear.confidence > key.confidence)
     }
 
+    /// The defect this gate exists for, written out as the numbers that found
+    /// it: a song in F major, one window of it landing on the IV chord.
+    ///
+    /// The profile match is not wrong here — B♭–D–F really is a B♭ chord, and
+    /// it correlates with B♭ major better than with anything else by a wide
+    /// enough margin to be reported as certain. What is wrong is answering at
+    /// all from one window. Nothing in twelve numbers can tell one chord of a
+    /// progression from a piece that only plays that chord, so the gate is a
+    /// count of how much was heard rather than any arithmetic on the chroma.
+    @Test("one chord is not a key, however certain it looks")
+    func oneChordIsNotAKey() throws {
+        // B♭ major, the IV of F: the chord the flow check's progression is on
+        // for a quarter of its bar.
+        var chord = [Double](repeating: 0, count: 12)
+        for pitchClass in [10, 2, 5] { chord[pitchClass] = 1 }
+
+        // Left to itself the match is confident and it is confidently the
+        // wrong question's answer.
+        let unguarded = try #require(KeyDetector.key(from: chord))
+        #expect(unguarded.pitchClass == 10)
+        #expect(unguarded.confidence > 0.15)
+
+        // Guarded by how much went in, nothing is claimed.
+        #expect(KeyDetector.key(from: chord, windows: 1) == nil)
+        #expect(KeyDetector.key(from: chord, windows: 0) == nil)
+        #expect(
+            KeyDetector.key(from: chord, windows: KeyDetector.leastWindowsForAKey - 1) == nil)
+    }
+
+    /// And once enough has been heard the gate gets out of the way: the whole
+    /// progression, summed, is F major rather than any of the chords in it.
+    @Test("enough of a progression is its key rather than its chords")
+    func enoughOfAProgressionIsAKey() throws {
+        // I–IV–V–I in F, each chord a triad, summed the way the panel sums
+        // windows. The tonic appears twice because the progression returns to
+        // it, which is what makes it a key rather than a list of chords.
+        var total = [Double](repeating: 0, count: 12)
+        let progression = [[5, 9, 0], [10, 2, 5], [0, 4, 7], [5, 9, 0]]
+        for chord in progression {
+            for pitchClass in chord { total[pitchClass] += 1 }
+        }
+        let windows = KeyDetector.leastWindowsForAKey
+        let key = try #require(KeyDetector.key(from: total, windows: windows))
+        #expect(key.pitchClass == 5)  // F
+        #expect(key.isMinor == false)
+        #expect(key.confidence > 0.15)
+    }
+
     @Test("the wrong number of pitch classes is refused")
     func refusesMalformed() {
         #expect(KeyDetector.key(from: [1, 2, 3]) == nil)

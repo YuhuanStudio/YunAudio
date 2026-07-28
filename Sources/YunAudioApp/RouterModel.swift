@@ -425,6 +425,10 @@ final class RouterModel {
     /// is a chord, and a chord is in several keys at once. A few seconds of
     /// them is a key.
     @ObservationIgnored private var chromaTotal = [Double](repeating: 0, count: 12)
+    /// How many windows went into it, which is what decides whether the total
+    /// is a key or merely the chord that happened to be playing when the panel
+    /// opened. See `KeyDetector.leastWindowsForAKey`.
+    @ObservationIgnored private var chromaWindows = 0
     @ObservationIgnored private var pollsSinceChroma = 0
 
     /// How often the chroma is folded in, in polls of the twenty-a-second
@@ -450,7 +454,14 @@ final class RouterModel {
         pollsSinceChroma = 0
         guard let chroma = analyser?.chroma(), chroma.count == 12 else { return }
         for index in 0..<12 { chromaTotal[index] += chroma[index] }
-        guard let key = KeyDetector.key(from: chromaTotal) else { return }
+        chromaWindows += 1
+        // Nothing is published until enough of the piece has gone in. The first
+        // fold used to be published, and it answered whichever chord was
+        // sounding at the moment the panel opened — B♭ for a song in F, at
+        // 100% confidence, with a transpose suggestion built on top of it.
+        guard let key = KeyDetector.key(from: chromaTotal, windows: chromaWindows) else {
+            return
+        }
         songKey = key
         suggestedShift = comfortableMidi.map {
             KeyDetector.suggestedShift(songKey: key, comfortableMidi: $0)
@@ -479,6 +490,7 @@ final class RouterModel {
         sungTotal = 0
         sungCount = 0
         chromaTotal = [Double](repeating: 0, count: 12)
+        chromaWindows = 0
         pollsSinceChroma = 0
         nowPlaying = nil
         lyrics = nil

@@ -118,6 +118,38 @@ public struct KeyDetector: Sendable {
             confidence: min(1, gap / 0.2))
     }
 
+    /// How many folds of the chroma it takes before a key is a key.
+    ///
+    /// A single window is one chord, and a chord is not a key. Measured against
+    /// the F major progression the flow check plays: one window that landed on
+    /// the IV chord gave a chroma of B♭–D–F and almost nothing else, which
+    /// correlates with B♭ major at 0.87 and is reported at full confidence,
+    /// because nothing else comes close to it either. The same tap folded over
+    /// four seconds gave 0.97 for F, and F is the answer.
+    ///
+    /// No amount of arithmetic on twelve numbers can separate those two cases.
+    /// A piece that only ever plays a B♭ chord produces exactly the chroma that
+    /// one window of an F major progression does, and both of them genuinely
+    /// are a B♭ chord — the difference is entirely in what came before and
+    /// after. So the only thing that tells them apart is having listened for
+    /// longer, and that is a count rather than a correlation.
+    ///
+    /// Twenty is four seconds at the five-a-second rate the singing panel folds
+    /// at, which crosses several chords of anything at a sane tempo.
+    public static let leastWindowsForAKey = 20
+
+    /// The key of a chroma that has had enough music folded into it.
+    ///
+    /// - Parameters:
+    ///   - chroma: Windows summed together, not averaged.
+    ///   - windows: How many of them were summed.
+    /// - Returns: Nil until there are enough windows to be talking about a key
+    ///   rather than a chord, and then whatever `key(from:)` makes of the sum.
+    public static func key(from chroma: [Double], windows: Int) -> Key? {
+        guard windows >= leastWindowsForAKey else { return nil }
+        return key(from: chroma)
+    }
+
     /// Pearson's correlation, or nil when either side does not vary.
     static func correlation(_ first: [Double], _ second: [Double]) -> Double? {
         let count = Double(first.count)
