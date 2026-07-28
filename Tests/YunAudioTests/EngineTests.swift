@@ -4125,8 +4125,8 @@ struct ParametricEQTests {
     func correctionRunsOnTheOutput() {
         let curve = ParametricEQ(
             name: "test", filters: [.init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)])
-        let plain = peakThroughIOProc(curve: nil)
-        let corrected = peakThroughIOProc(curve: curve)
+        let plain = peaksThroughIOProc(curves: [:])[0]
+        let corrected = peaksThroughIOProc(curves: [0: curve])[0]
         #expect(plain > 0.2)
         let lift = 20 * log10(corrected / plain)
         #expect(abs(lift - 6) < 0.4)
@@ -4140,29 +4140,173 @@ struct ParametricEQTests {
     func correctionIsPerOutput() {
         let curve = ParametricEQ(
             name: "test", filters: [.init(kind: .peaking, hertz: 1000, decibels: 12, q: 1)])
-        let untouched = peakThroughIOProc(curve: curve, appliedTo: 1, measuring: 0)
-        let plain = peakThroughIOProc(curve: nil, appliedTo: 1, measuring: 0)
+        let untouched = peaksThroughIOProc(curves: [1: curve])[0]
+        let plain = peaksThroughIOProc(curves: [:])[0]
         #expect(abs(20 * log10(untouched / plain)) < 0.01)
     }
 
-    /// Runs a 1 kHz sine through a real graph and returns the peak that came
-    /// out of one buffer.
-    private func peakThroughIOProc(
-        curve: ParametricEQ?, appliedTo eqBuffer: Int = 0, measuring measured: Int = 0
-    ) -> Float {
+    /// The whole point of per-bus processing: the stream mix and the headphone
+    /// mix are shaped independently, so a streamer can boost what they hear
+    /// without boosting what everybody else hears.
+    ///
+    /// Both buses are measured out of *one* run of the real callback rather
+    /// than two, because that is the arrangement that can actually go wrong.
+    /// Two separate runs would pass with a single global slot — the second run
+    /// simply would not have installed anything — while one run with a curve on
+    /// A and nothing on B fails the moment the slots share coefficients, share
+    /// filter history, or index each other.
+    ///
+    /// The tolerance on B is twenty times tighter than on A on purpose. A is a
+    /// filter's gain, measured through a peak detector, and 0.4 dB is what that
+    /// is worth. B is meant to be the *same arithmetic as no filter at all*, so
+    /// anything above float noise there is a leak.
+    @Test("two buses carry two different curves at once")
+    func busesAreShapedIndependently() {
+        let curve = ParametricEQ(
+            name: "bus A", filters: [.init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)])
+        let plain = peaksThroughIOProc(curves: [:])
+        let shaped = peaksThroughIOProc(curves: [0: curve])
+
+        #expect(plain[0] > 0.2)
+        // Both buses are fed the same signal, so anything else below is about
+        // the correction rather than about the routing.
+        #expect(plain[0] == plain[1])
+
+        let liftOnA = 20 * log10(shaped[0] / plain[0])
+        let liftOnB = 20 * log10(shaped[1] / plain[1])
+        #expect(abs(liftOnA - 6) < 0.4)
+        #expect(abs(liftOnB) < 0.05)
+
+        // And the other way round, so a slot that only ever wrote to buffer
+        // zero cannot pass this by accident.
+        let onB = peaksThroughIOProc(curves: [1: curve])
+        #expect(abs(20 * log10(onB[1] / plain[1]) - 6) < 0.4)
+        #expect(abs(20 * log10(onB[0] / plain[0])) < 0.05)
+
+        // Two different curves at the same time, which is what somebody
+        // actually sets up: a lift on the monitor and a cut on the send.
+        let cut = ParametricEQ(
+            name: "bus B", filters: [.init(kind: .peaking, hertz: 1000, decibels: -6, q: 1)])
+        let both = peaksThroughIOProc(curves: [0: curve, 1: cut])
+        #expect(abs(20 * log10(both[0] / plain[0]) - 6) < 0.4)
+        #expect(abs(20 * log10(both[1] / plain[1]) + 6) < 0.4)
+    }
+
+    /// The microphone goes through the effect chain and the tapped applications
+    /// go through none of it, so without compensation the voice arrives behind
+    /// the backing track by the whole chain — 56 ms for voice isolation alone.
+    ///
+    /// That is not a missing feature, it is a wrong mix. In a karaoke session it
+    /// is tens of milliseconds of the singer being late, which somebody
+    /// compensates for by rushing the beat; the per-source stems came out
+    /// offset from each other by the same amount, so a recording had to be
+    /// nudged back into line by hand.
+    ///
+    /// Asserted as an arrival frame in the destination buffer rather than as a
+    /// number the engine reports about itself, because the number was already
+    /// there — `effectLatencyFrames` has been measured and shown in the
+    /// interface all along, and nothing used it to move a sample.
+    ///
+    /// The chain is stood in for by what it does to the samples: its output is
+    /// its input delayed by its reported latency, so the microphone's impulse
+    /// is fed that many frames late. Whether an `AudioUnit` reports its latency
+    /// honestly is `EffectChain`'s business and is asserted there; what is
+    /// asserted here is that the router does something with the answer.
+    @Test(
+        "the tapped path is held back to meet the microphone",
+        arguments: [0, 1, 64, 480, 2688])
+    func chainLatencyIsCompensated(latency: Int) {
+        // First the defect, so the assertion below is known to be able to fail:
+        // with no compensation the two impulses land a whole chain apart.
+        let uncompensated = arrivalsThroughIOProc(alignment: 0, chainLatency: latency)
+        #expect(uncompensated.microphone - uncompensated.tap == latency)
+
+        // Then the fix: the same graph, the same signal, one number set.
+        let compensated = arrivalsThroughIOProc(
+            alignment: latency, chainLatency: latency)
+        #expect(compensated.microphone - compensated.tap == 0)
+        // And the microphone itself was not moved — alignment delays what
+        // skipped the chain, never what went through it.
+        #expect(compensated.microphone == uncompensated.microphone)
+    }
+
+    /// Sends one impulse down a microphone route and one down a tapped route,
+    /// and reports the frame each arrived at in the destination.
+    ///
+    /// - Parameters:
+    ///   - alignment: Frames of compensation on paths that skipped the chain.
+    ///   - chainLatency: How late the chain's output is, modelled by feeding
+    ///     the microphone's impulse that many frames after the tap's.
+    /// - Returns: The frame each impulse arrived at, or -1 if it never did.
+    private func arrivalsThroughIOProc(
+        alignment: Int, chainLatency: Int
+    ) -> (microphone: Int, tap: Int) {
+        // One cycle long enough to hold the late impulse and the delayed one:
+        // the longest chain here is 56 ms, which is 2688 frames at 48 kHz.
+        let frames = 4096
+        let impulseAt = 64
         let graph = RTGraph.allocate(
             routes: [
+                // The microphone, which in the running app reads the chain's
+                // output. Flagged as such so it is exempt from the alignment;
+                // with no chain in this graph it falls back to the input, which
+                // is where its already-late impulse has been put.
                 RTRoute(
                     sourceBuffer: 0, sourceChannel: 0,
-                    destinationBuffer: 0, destinationChannel: 0)
-            ], bufferFrames: 512, sampleRate: 48000)
+                    destinationBuffer: 0, destinationChannel: 0,
+                    usesIsolatedSource: true),
+                // A tapped application, which goes through nothing.
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 1),
+            ], bufferFrames: frames, sampleRate: 48000)
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.alignmentFrames = Int32(alignment)
+
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mFlags = .sampleTimeValid
+
+        let input = Bus(channelCounts: [2], frames: frames)
+        let output = Bus(channelCounts: [2], frames: frames)
+        input.storage[0][(impulseAt + chainLatency) * 2] = 1  // microphone
+        input.storage[0][impulseAt * 2 + 1] = 1  // tapped application
+
+        _ = yunAudioIOProc(
+            0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+            output.list.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+
+        func arrival(_ channel: Int) -> Int {
+            for frame in 0..<frames where output.storage[0][frame * 2 + channel] != 0 {
+                return frame
+            }
+            return -1
+        }
+        return (microphone: arrival(0), tap: arrival(1))
+    }
+
+    /// Runs a 1 kHz sine through a real graph and returns the peak that came
+    /// out of each output bus.
+    ///
+    /// Two output buffers, each fed by its own route from the same input, so
+    /// "the correction went on the other bus" is a real arrangement rather than
+    /// an index nothing reads.
+    private func peaksThroughIOProc(curves: [Int: ParametricEQ]) -> [Float] {
+        let buses = 2
+        let graph = RTGraph.allocate(
+            routes: (0..<buses).map { bus in
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: Int32(bus), destinationChannel: 0)
+            }, bufferFrames: 512, sampleRate: 48000)
         defer { RTGraph.deallocate(graph) }
 
-        if let curve {
-            let packed = curve.coefficients(sampleRate: 48000)
-            for index in packed.indices { graph.pointee.eqCoefficients[index] = packed[index] }
-            graph.pointee.eqStages = Int32(packed.count / 5)
-            graph.pointee.eqBuffer = Int32(eqBuffer)
+        for (bus, curve) in curves {
+            RTGraph.installCorrection(
+                curve.coefficients(sampleRate: 48000),
+                preampGain: pow(10, curve.preampDecibels / 20), onBuffer: bus, of: graph)
         }
 
         let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
@@ -4173,14 +4317,18 @@ struct ParametricEQTests {
 
         let frames = 512
         let inputList = AudioBufferList.allocate(maximumBuffers: 1)
-        let outputList = AudioBufferList.allocate(maximumBuffers: 1)
+        let outputList = AudioBufferList.allocate(maximumBuffers: buses)
         let inputStorage = UnsafeMutablePointer<Float>.allocate(capacity: frames)
-        let outputStorage = UnsafeMutablePointer<Float>.allocate(capacity: frames)
         inputStorage.initialize(repeating: 0, count: frames)
-        outputStorage.initialize(repeating: 0, count: frames)
+        var outputStorage: [UnsafeMutablePointer<Float>] = []
+        for _ in 0..<buses {
+            let pointer = UnsafeMutablePointer<Float>.allocate(capacity: frames)
+            pointer.initialize(repeating: 0, count: frames)
+            outputStorage.append(pointer)
+        }
         defer {
             inputStorage.deallocate()
-            outputStorage.deallocate()
+            for pointer in outputStorage { pointer.deallocate() }
             free(inputList.unsafeMutablePointer)
             free(outputList.unsafeMutablePointer)
         }
@@ -4188,13 +4336,15 @@ struct ParametricEQTests {
         inputList[0] = AudioBuffer(
             mNumberChannels: 1, mDataByteSize: bytes,
             mData: UnsafeMutableRawPointer(inputStorage))
-        outputList[0] = AudioBuffer(
-            mNumberChannels: 1, mDataByteSize: bytes,
-            mData: UnsafeMutableRawPointer(outputStorage))
+        for bus in 0..<buses {
+            outputList[bus] = AudioBuffer(
+                mNumberChannels: 1, mDataByteSize: bytes,
+                mData: UnsafeMutableRawPointer(outputStorage[bus]))
+        }
 
         var phase: Float = 0
         let step = 2 * Float.pi * 1000 / 48000
-        var peak: Float = 0
+        var peaks = [Float](repeating: 0, count: buses)
         // Twenty cycles, measuring only the last ten: a biquad's first few
         // milliseconds are its transient, not its gain.
         for cycle in 0..<20 {
@@ -4202,15 +4352,95 @@ struct ParametricEQTests {
                 inputStorage[frame] = 0.25 * sin(phase)
                 phase += step
             }
-            for frame in 0..<frames { outputStorage[frame] = 0 }
+            for bus in 0..<buses {
+                for frame in 0..<frames { outputStorage[bus][frame] = 0 }
+            }
             _ = yunAudioIOProc(
                 0, &now, UnsafePointer(inputList.unsafeMutablePointer), &time,
                 outputList.unsafeMutablePointer, &time,
                 UnsafeMutableRawPointer(cell))
-            guard cycle >= 10, measured == 0 else { continue }
-            for frame in 0..<frames { peak = max(peak, abs(outputStorage[frame])) }
+            guard cycle >= 10 else { continue }
+            for bus in 0..<buses {
+                for frame in 0..<frames {
+                    peaks[bus] = max(peaks[bus], abs(outputStorage[bus][frame]))
+                }
+            }
         }
-        return peak
+        return peaks
+    }
+
+    /// Reinstalling a curve that has not changed must not reset its filter
+    /// memory.
+    ///
+    /// Every publish carries every bus, so moving bus A's tone control
+    /// reinstalls bus B's unchanged curve — and a biquad restarted from zero
+    /// history in the middle of a signal is a click on an output nobody
+    /// touched. Asserted on the history itself rather than by listening,
+    /// because a click is one buffer long and averages away.
+    @Test("an unchanged curve keeps its filter history")
+    func reinstallingKeepsHistory() {
+        let curve = ParametricEQ(
+            name: "test", filters: [.init(kind: .peaking, hertz: 1000, decibels: 6, q: 1)])
+        let packed = curve.coefficients(sampleRate: 48000)
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 128, sampleRate: 48000)
+        defer { RTGraph.deallocate(graph) }
+
+        RTGraph.installCorrection(packed, preampGain: 1, onBuffer: 1, of: graph)
+        // Stand in for a filter that has been running: any non-zero history.
+        let state = graph.pointee.eqState + RTGraph.eqStateOffset(slot: 1)
+        for index in 0..<4 { state[index] = Float(index + 1) * 0.25 }
+
+        RTGraph.installCorrection(packed, preampGain: 1, onBuffer: 1, of: graph)
+        #expect(state[0] == 0.25)
+        #expect(state[3] == 1.0)
+
+        // A different curve is a different filter, and carrying the old tail
+        // into it is the click this is avoiding in the other direction.
+        let other = ParametricEQ(
+            name: "other", filters: [.init(kind: .peaking, hertz: 400, decibels: -3, q: 1)])
+        RTGraph.installCorrection(
+            other.coefficients(sampleRate: 48000), preampGain: 1, onBuffer: 1, of: graph)
+        #expect(state[0] == 0)
+        #expect(state[3] == 0)
+    }
+
+    /// Slots must not overlap. A stride computed one section short would put
+    /// bus B's first coefficients on top of bus A's last, which changes a curve
+    /// somebody set without touching anything they can see.
+    @Test("one bus's coefficients cannot reach another's")
+    func slotsDoNotOverlap() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 128, sampleRate: 48000)
+        defer { RTGraph.deallocate(graph) }
+
+        // The longest curve every slot can hold, so the blocks are packed as
+        // tightly as they ever get.
+        let full = [Float](repeating: 1, count: RTGraph.maximumEQStages * 5)
+        for slot in 0..<RTGraph.maximumEQBuffers {
+            RTGraph.installCorrection(full, preampGain: 1, onBuffer: slot, of: graph)
+        }
+        let zeroes = [Float](repeating: 0, count: RTGraph.maximumEQStages * 5)
+        RTGraph.installCorrection(zeroes, preampGain: 1, onBuffer: 3, of: graph)
+
+        for slot in 0..<RTGraph.maximumEQBuffers where slot != 3 {
+            let base = graph.pointee.eqCoefficients + RTGraph.eqCoefficientOffset(slot: slot)
+            #expect(base[0] == 1)
+            #expect(base[RTGraph.maximumEQStages * 5 - 1] == 1)
+        }
+        // And a slot beyond the table is refused rather than written past the
+        // end of the allocation.
+        #expect(
+            RTGraph.installCorrection(
+                full, preampGain: 1, onBuffer: RTGraph.maximumEQBuffers, of: graph) == false)
     }
 
     /// The band centres are Razer's own, so somebody moving from Windows can
@@ -4341,11 +4571,7 @@ struct ParametricEQTests {
                     destinationBuffer: 0, destinationChannel: Int32(channel))
             }, bufferFrames: frames, sampleRate: 48000)
         defer { RTGraph.deallocate(graph) }
-        for index in packed.indices { graph.pointee.eqCoefficients[index] = packed[index] }
-        graph.pointee.eqStages = Int32(stages)
-        graph.pointee.eqChannels = Int32(channels)
-        graph.pointee.eqBuffer = 0
-        graph.pointee.eqPreampGain = preamp
+        RTGraph.installCorrection(packed, preampGain: preamp, onBuffer: 0, of: graph)
 
         let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
         defer { yun_rt_cell_free(cell) }

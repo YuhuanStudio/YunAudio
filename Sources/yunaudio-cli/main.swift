@@ -1705,6 +1705,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
         ("stereo + monitor", .init(frames: 128, routes: 2, monitorRoutes: 2)),
         ("+ 10-section EQ", .init(frames: 128, routes: 2, monitorRoutes: 2, eqStages: 10)),
         ("+ 24-section EQ", .init(frames: 128, routes: 2, monitorRoutes: 2, eqStages: 24)),
+        // 2688 frames is 56 ms at 48 kHz — voice isolation, the longest stage
+        // here, and so the most alignment anything asks for.
+        ("+ tap alignment", .init(frames: 128, routes: 2, alignmentFrames: 2688)),
+        // Deliberately without the alignment, so this row stays comparable with
+        // every measurement taken before the delay lines existed. The row above
+        // is what the alignment costs.
         (
             "everything on",
             .init(
