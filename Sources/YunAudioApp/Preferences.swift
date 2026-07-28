@@ -73,9 +73,24 @@ struct Preferences: Codable, Equatable, Sendable {
     /// outputs that do not arrive together.
     var outputDelays: [String: Double]?
     /// The headphone correction in use, by file name.
+    ///
+    /// Superseded by `busHeadphoneProfiles`, and kept so that a file written
+    /// before buses had their own still opens. Read once on the way in and
+    /// folded into the bus it used to mean; never written again.
     var headphoneProfileName: String?
     /// Ten slider positions for the output tone control, in decibels.
+    ///
+    /// Superseded by `busGraphicEQ`, on the same terms.
     var graphicEQ: [Float]?
+    /// Ten slider positions per bus, by output device UID.
+    ///
+    /// Keyed by device rather than by the bus's letter: the letters are
+    /// positional — turning the monitor off promotes B to A — and a tone
+    /// somebody dialled in for their headphones must not migrate to the stream
+    /// mix because a picker changed.
+    var busGraphicEQ: [String: [Float]]?
+    /// The headphone correction per bus, by output device UID, by file name.
+    var busHeadphoneProfiles: [String: String]?
     /// Devices chosen before, most recent first.
     ///
     /// Not a preference somebody sets — a record of what they have actually
@@ -131,6 +146,8 @@ struct Preferences: Codable, Equatable, Sendable {
         outputDelays: [:],
         headphoneProfileName: nil,
         graphicEQ: [Float](repeating: 0, count: 10),
+        busGraphicEQ: [:],
+        busHeadphoneProfiles: [:],
         recentSourceUIDs: [],
         recentDestinationUIDs: [],
         midiBindings: [:])

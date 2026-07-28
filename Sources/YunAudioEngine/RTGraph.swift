@@ -305,28 +305,80 @@ struct RTGraph {
     var stemFrames: Int32
     static let maxStemChannels = 2
 
-    // MARK: Headphone correction
+    // MARK: Aligning what did not go through the chain
 
-    /// Which output buffer the correction runs on, or -1 for none.
+    /// Frames every path that skipped the effect chain is held back by.
     ///
-    /// One buffer rather than all of them, and that is the whole design
-    /// decision: a headphone correction belongs on what *you* hear and nowhere
-    /// else. Applying it to the main output would send the far end a signal
-    /// shaped for the deficiencies of your headphones, which is worse than not
-    /// correcting at all — they would be hearing the inverse of a fault they do
-    /// not have.
-    var eqBuffer: Int32
-    var eqStages: Int32
-    var eqChannels: Int32
-    /// Five per section — b0, b1, b2, a1, a2 — already normalised by a0, so the
-    /// IO thread does no division.
+    /// The chain's own reported latency, so the two arrive together. Zero when
+    /// nothing in the chain adds any, which is the ordinary case and costs one
+    /// branch per route.
+    var alignmentFrames: Int32
+    /// One delay line per route, `maximumAlignmentFrames` apart.
+    ///
+    /// Per route rather than per source channel: two routes reading one channel
+    /// are two lines and a few kilobytes, whereas sharing would need a table
+    /// mapping channels to lines that has to be rebuilt in step with the routes
+    /// — one more thing to get out of step, for memory nobody is short of.
+    var alignmentLines: UnsafeMutablePointer<Float>
+    /// Where each line is being read and written.
+    var alignmentPositions: UnsafeMutablePointer<Int32>
+    /// Packed scratch for one route's delayed block, reused by each in turn.
+    var alignmentScratch: UnsafeMutablePointer<Float>
+    var alignmentCapacity: Int32
+    /// The longest delay a chain can ask for.
+    ///
+    /// Voice isolation, the longest stage here, is 56 ms — 5376 frames at
+    /// 96 kHz, the highest rate this router offers. Eight thousand is the next
+    /// power of two above that with room to spare. Fixed because the lines are
+    /// allocated once and handed to the IO thread, and a delay that could grow
+    /// without bound would mean allocating there.
+    static let maximumAlignmentFrames = 8192
+
+    // MARK: Per-bus correction
+
+    /// Sections to run on each output buffer, indexed by buffer; zero for none.
+    ///
+    /// One slot per output rather than one slot in total, and that is the whole
+    /// design decision. A headphone correction belongs on what *you* hear and
+    /// nowhere else — putting it on the main output would send the far end a
+    /// signal shaped for the deficiencies of your headphones, which is worse
+    /// than not correcting at all. But the converse is just as true: a stream
+    /// mix wants its own tone, and the reason VoiceMeeter is praised is that
+    /// its buses are shaped independently. One slot could express the first
+    /// rule and not the second.
+    ///
+    /// The slot index *is* the output buffer index. A separate table of "which
+    /// buffer does slot k belong to" would be one more thing the IO thread has
+    /// to read and one more thing that can be stale after a rebuild.
+    var eqStages: UnsafeMutablePointer<Int32>
+    /// Five per section per slot — b0, b1, b2, a1, a2 — already normalised by
+    /// a0, so the IO thread does no division. Slot-major, `maximumEQStages`
+    /// sections apart, so a slot's block is contiguous.
     var eqCoefficients: UnsafeMutablePointer<Float>
-    /// Four per section per channel: two inputs back, two outputs back.
+    /// Four per section per channel per slot: two inputs back, two outputs
+    /// back. Slot-major on the same stride argument.
     var eqState: UnsafeMutablePointer<Float>
-    /// Headroom for the boost, applied first.
-    var eqPreampGain: Float
+    /// Headroom for the boost, per slot, applied first.
+    var eqPreampGain: UnsafeMutablePointer<Float>
     static let maximumEQStages = 24
     static let maximumEQChannels = 8
+    /// Outputs that can carry a curve at once.
+    ///
+    /// Fixed for the same reason the section count is: the whole table is
+    /// allocated once and handed to the IO thread, and a table that could grow
+    /// would mean allocating there. Eight is generous — an aggregate with more
+    /// than two output streams is already unusual, and the buses somebody
+    /// actually shapes are the two the mixer names.
+    static let maximumEQBuffers = 8
+
+    /// Where one slot's coefficients start.
+    static func eqCoefficientOffset(slot: Int) -> Int { slot * maximumEQStages * 5 }
+    /// Where one slot's filter history starts.
+    static func eqStateOffset(slot: Int) -> Int {
+        slot * maximumEQStages * maximumEQChannels * 4
+    }
+    /// Words of history one slot owns.
+    static var eqStateStride: Int { maximumEQStages * maximumEQChannels * 4 }
 
     // MARK: Transcription
 
@@ -477,10 +529,31 @@ struct RTGraph {
             capacity: stemScratchCount)
         stemScratchStorage.initialize(repeating: 0, count: stemScratchCount)
 
+        let alignmentLineCount = count * maximumAlignmentFrames
+        let alignmentLineStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: alignmentLineCount)
+        alignmentLineStorage.initialize(repeating: 0, count: alignmentLineCount)
+        let alignmentPositionStorage = UnsafeMutablePointer<Int32>.allocate(capacity: count)
+        alignmentPositionStorage.initialize(repeating: 0, count: count)
+        let alignmentCapacity = max(bufferFrames, 4096)
+        let alignmentScratchStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: alignmentCapacity)
+        alignmentScratchStorage.initialize(repeating: 0, count: alignmentCapacity)
+
+        // Every slot's worth, whether or not any of them is used: the IO thread
+        // cannot allocate, so the table for the second bus has to exist before
+        // anybody asks for a curve on it.
+        let eqStageStorage = UnsafeMutablePointer<Int32>.allocate(
+            capacity: maximumEQBuffers)
+        eqStageStorage.initialize(repeating: 0, count: maximumEQBuffers)
+        let eqPreampStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: maximumEQBuffers)
+        eqPreampStorage.initialize(repeating: 1, count: maximumEQBuffers)
+        let eqCoefficientCount = maximumEQBuffers * maximumEQStages * 5
         let eqCoefficientStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: maximumEQStages * 5)
-        eqCoefficientStorage.initialize(repeating: 0, count: maximumEQStages * 5)
-        let eqStateCount = maximumEQStages * maximumEQChannels * 4
+            capacity: eqCoefficientCount)
+        eqCoefficientStorage.initialize(repeating: 0, count: eqCoefficientCount)
+        let eqStateCount = maximumEQBuffers * eqStateStride
         let eqStateStorage = UnsafeMutablePointer<Float>.allocate(capacity: eqStateCount)
         eqStateStorage.initialize(repeating: 0, count: eqStateCount)
 
@@ -569,12 +642,15 @@ struct RTGraph {
                 stemCount: Int32(count),
                 stemCapacity: Int32(stemCapacity),
                 stemFrames: 0,
-                eqBuffer: -1,
-                eqStages: 0,
-                eqChannels: 0,
+                alignmentFrames: 0,
+                alignmentLines: alignmentLineStorage,
+                alignmentPositions: alignmentPositionStorage,
+                alignmentScratch: alignmentScratchStorage,
+                alignmentCapacity: Int32(alignmentCapacity),
+                eqStages: eqStageStorage,
                 eqCoefficients: eqCoefficientStorage,
                 eqState: eqStateStorage,
-                eqPreampGain: 1,
+                eqPreampGain: eqPreampStorage,
                 transcriptRings: transcriptRingStorage,
                 transcriptScratch: transcriptScratchStorage,
                 transcriptCount: Int32(count),
@@ -623,10 +699,21 @@ struct RTGraph {
             count * Int(graph.pointee.stemCapacity) * maxStemChannels
         graph.pointee.stemScratch.deinitialize(count: stemScratchCount)
         graph.pointee.stemScratch.deallocate()
-        graph.pointee.eqCoefficients.deinitialize(count: maximumEQStages * 5)
+        graph.pointee.alignmentLines.deinitialize(count: count * maximumAlignmentFrames)
+        graph.pointee.alignmentLines.deallocate()
+        graph.pointee.alignmentPositions.deinitialize(count: count)
+        graph.pointee.alignmentPositions.deallocate()
+        graph.pointee.alignmentScratch.deinitialize(
+            count: Int(graph.pointee.alignmentCapacity))
+        graph.pointee.alignmentScratch.deallocate()
+        graph.pointee.eqStages.deinitialize(count: maximumEQBuffers)
+        graph.pointee.eqStages.deallocate()
+        graph.pointee.eqPreampGain.deinitialize(count: maximumEQBuffers)
+        graph.pointee.eqPreampGain.deallocate()
+        graph.pointee.eqCoefficients.deinitialize(
+            count: maximumEQBuffers * maximumEQStages * 5)
         graph.pointee.eqCoefficients.deallocate()
-        graph.pointee.eqState.deinitialize(
-            count: maximumEQStages * maximumEQChannels * 4)
+        graph.pointee.eqState.deinitialize(count: maximumEQBuffers * eqStateStride)
         graph.pointee.eqState.deallocate()
         graph.pointee.transcriptRings.deinitialize(count: count)
         graph.pointee.transcriptRings.deallocate()
@@ -640,6 +727,127 @@ struct RTGraph {
         if let commands = graph.pointee.commands { yun_rt_queue_free(commands) }
         graph.deinitialize(count: 1)
         graph.deallocate()
+    }
+
+    // MARK: Installing a correction
+
+    /// Puts one output's cascade in place, from the control thread.
+    ///
+    /// Here rather than in `RoutingEngine` because the slot arithmetic is the
+    /// part that is easy to get wrong — an off-by-one in the stride would run
+    /// bus A's curve on bus B's history and sound like nothing in particular —
+    /// and it should exist in exactly one place.
+    ///
+    /// The section count is written last and zeroed first. The IO thread reads
+    /// it before it reads anything else in the slot, so a cycle landing in the
+    /// middle of this sees either the old curve or no curve, never the old
+    /// count against the new coefficients.
+    ///
+    /// - Parameters:
+    ///   - packed: Five coefficients per section, as `ParametricEQ` produces.
+    ///   - preampGain: Linear headroom, applied ahead of the first section.
+    ///   - buffer: Which output buffer, which is also the slot.
+    ///   - graph: The graph to install into.
+    /// - Returns: True when something will now run on that output. False means
+    ///   the curve was empty or the buffer is beyond the fixed table, and in
+    ///   either case the slot is left running nothing.
+    @discardableResult
+    static func installCorrection(
+        _ packed: [Float], preampGain: Float, onBuffer buffer: Int,
+        of graph: UnsafeMutablePointer<RTGraph>
+    ) -> Bool {
+        guard buffer >= 0, buffer < maximumEQBuffers else { return false }
+        let stages = min(packed.count / 5, maximumEQStages)
+        let coefficients = graph.pointee.eqCoefficients + eqCoefficientOffset(slot: buffer)
+
+        // Whether the filter this slot runs actually changed. Reinstalling the
+        // same curve happens on every publish — moving bus A's tone control
+        // republishes bus B untouched — and resetting a filter's memory for
+        // that would be a click on an output nobody adjusted.
+        var changed =
+            Int(graph.pointee.eqStages[buffer]) != stages
+            || graph.pointee.eqPreampGain[buffer] != preampGain
+        if !changed {
+            for index in 0..<(stages * 5) where coefficients[index] != packed[index] {
+                changed = true
+                break
+            }
+        }
+
+        graph.pointee.eqStages[buffer] = 0
+        for index in 0..<(stages * 5) { coefficients[index] = packed[index] }
+        if changed {
+            // Carrying the history across a change of curve puts the tail of
+            // the old filter into the first milliseconds of the new one.
+            let state = graph.pointee.eqState + eqStateOffset(slot: buffer)
+            for index in 0..<eqStateStride { state[index] = 0 }
+        }
+        graph.pointee.eqPreampGain[buffer] = preampGain
+        graph.pointee.eqStages[buffer] = Int32(stages)
+        return stages > 0
+    }
+
+    /// Takes the correction off one output, leaving every other one alone.
+    static func clearCorrection(
+        onBuffer buffer: Int, of graph: UnsafeMutablePointer<RTGraph>
+    ) {
+        guard buffer >= 0, buffer < maximumEQBuffers else { return }
+        graph.pointee.eqStages[buffer] = 0
+        graph.pointee.eqPreampGain[buffer] = 1
+        let state = graph.pointee.eqState + eqStateOffset(slot: buffer)
+        for index in 0..<eqStateStride { state[index] = 0 }
+    }
+
+    /// Carries one route's alignment delay line across a graph rebuild.
+    ///
+    /// Only when the delay is the same length, and that is the decision worth
+    /// recording. A line is a ring whose modulus *is* the delay, so reading it
+    /// back at a different length hands the mix its own recent past in the
+    /// wrong order — a burst of scrambled audio, which is worse than a gap.
+    ///
+    /// So: the length is unchanged (a cable moved, a fader touched, a plugin
+    /// swapped) and the contents come across, and nothing is heard. The length
+    /// changed, which only happens when somebody switches a processing stage on
+    /// or off, and the new line starts empty — a gap of at most the new delay,
+    /// at the one moment when the chain is being rebuilt underneath and the
+    /// signal is already discontinuous.
+    ///
+    /// - Returns: True when the line was carried.
+    @discardableResult
+    static func carryAlignment(
+        from previous: UnsafeMutablePointer<RTGraph>, slot old: Int,
+        to next: UnsafeMutablePointer<RTGraph>, slot new: Int
+    ) -> Bool {
+        guard previous.pointee.alignmentFrames == next.pointee.alignmentFrames,
+            old >= 0, old < Int(previous.pointee.routeCount),
+            new >= 0, new < Int(next.pointee.routeCount)
+        else { return false }
+        let from = previous.pointee.alignmentLines + old * maximumAlignmentFrames
+        let to = next.pointee.alignmentLines + new * maximumAlignmentFrames
+        to.update(from: from, count: maximumAlignmentFrames)
+        next.pointee.alignmentPositions[new] = previous.pointee.alignmentPositions[old]
+        return true
+    }
+
+    /// Copies every slot — curves and history alike — from one graph to another.
+    ///
+    /// The history comes across with the coefficients on purpose: after a chain
+    /// swap it is the same filter continuing, and starting it again from
+    /// nothing is a click.
+    static func carryCorrections(
+        from previous: UnsafeMutablePointer<RTGraph>,
+        to next: UnsafeMutablePointer<RTGraph>
+    ) {
+        for slot in 0..<maximumEQBuffers {
+            next.pointee.eqStages[slot] = previous.pointee.eqStages[slot]
+            next.pointee.eqPreampGain[slot] = previous.pointee.eqPreampGain[slot]
+        }
+        for index in 0..<(maximumEQBuffers * maximumEQStages * 5) {
+            next.pointee.eqCoefficients[index] = previous.pointee.eqCoefficients[index]
+        }
+        for index in 0..<(maximumEQBuffers * eqStateStride) {
+            next.pointee.eqState[index] = previous.pointee.eqState[index]
+        }
     }
 }
 
@@ -858,9 +1066,9 @@ func yunAudioIOProc(
         guard let destinationData = destinationBuffer.mData else { continue }
         if readsInput && sourceBuffer.mData == nil { continue }
 
-        let sourceStride = readsInput ? Int(sourceBuffer.mNumberChannels) : 1
+        var sourceStride = readsInput ? Int(sourceBuffer.mNumberChannels) : 1
         let destinationStride = Int(destinationBuffer.mNumberChannels)
-        let sourceChannel = readsInput ? Int(route.sourceChannel) : 0
+        var sourceChannel = readsInput ? Int(route.sourceChannel) : 0
         let destinationChannel = Int(route.destinationChannel)
         guard sourceChannel < sourceStride, destinationChannel < destinationStride,
             sourceStride > 0, destinationStride > 0
@@ -883,7 +1091,7 @@ func yunAudioIOProc(
         let frames = min(sourceFrames, destinationFrames)
         guard frames > 0 else { continue }
 
-        let source: UnsafePointer<Float>
+        var source: UnsafePointer<Float>
         if useIsolated {
             source = UnsafePointer(graph.pointee.voiceIsolation!.pointee.outputBuffer)
         } else if useCancelled {
@@ -892,6 +1100,59 @@ func yunAudioIOProc(
             source = UnsafePointer(
                 sourceBuffer.mData!.assumingMemoryBound(to: Float.self))
         }
+
+        // Hold back everything that did not go through the effect chain.
+        //
+        // The microphone goes through the chain and comes out late by whatever
+        // the chain's units report — voice isolation alone is 56 ms. Tapped
+        // application audio goes through none of it and arrives on time. Mixed
+        // together, the voice is behind the backing track by the whole chain,
+        // which in a karaoke session is tens of milliseconds and is exactly the
+        // thing somebody compensates for by rushing the beat. The per-source
+        // stems were offset from each other by the same amount, so a recording
+        // had to be nudged back into line by hand afterwards.
+        //
+        // The choice this makes is explicit: **aligned or early, not both.**
+        // A tapped application now reaches the destination later than it used
+        // to, by the length of the chain. That is the price of the mix being in
+        // time, and there is no arrangement of a causal signal path that avoids
+        // it — the only alternative is predicting the chain's output.
+        //
+        // Keyed on the route's own flag rather than on whether the chain
+        // produced anything this cycle, so a chain that is still filling does
+        // not make the alignment flicker on and off between cycles.
+        //
+        // The delay is taken before the fader, before the meters and before the
+        // stems, so what a stem records and what a meter reads are both what
+        // the mix will hear.
+        let alignment = Int(graph.pointee.alignmentFrames)
+        if alignment > 0, route.usesIsolatedSource == 0,
+            alignment <= RTGraph.maximumAlignmentFrames,
+            frames <= Int(graph.pointee.alignmentCapacity)
+        {
+            // A ring exactly `alignment` long, read before it is written: the
+            // sample coming out is the one that went in `alignment` frames ago.
+            let line = graph.pointee.alignmentLines + index * RTGraph.maximumAlignmentFrames
+            let scratch = graph.pointee.alignmentScratch
+            var position = Int(graph.pointee.alignmentPositions[index])
+            if position >= alignment { position = 0 }
+            var take = sourceChannel
+            for frame in 0..<frames {
+                scratch[frame] = line[position]
+                line[position] = source[take]
+                position += 1
+                if position == alignment { position = 0 }
+                take += sourceStride
+            }
+            graph.pointee.alignmentPositions[index] = Int32(position)
+            // One scratch shared by every route, because it is consumed inside
+            // this iteration — the accumulate, the stem and the transcript all
+            // read it before the next route touches it.
+            source = UnsafePointer(scratch)
+            sourceStride = 1
+            sourceChannel = 0
+        }
+
         let destination = destinationData.assumingMemoryBound(to: Float.self)
         // The trim rides on the route's own fader rather than being a separate
         // pass over the samples: one multiply either way, and no second walk.
@@ -1186,23 +1447,31 @@ func yunAudioIOProc(
         }
     }
 
-    // Headphone correction, last of all and deliberately after the recorder
-    // and the stems have already taken their copies. A correction is a fault in
-    // somebody's headphones being undone; baking it into a file would carry
-    // that fault, inverted, to everybody who plays the file back on anything
-    // else.
-    let eqBuffer = Int(graph.pointee.eqBuffer)
-    let eqStages = Int(graph.pointee.eqStages)
-    if eqBuffer >= 0, eqBuffer < output.count, eqStages > 0 {
-        let buffer = output[eqBuffer]
+    // Per-bus correction, last of all and deliberately after the recorder and
+    // the stems have already taken their copies. A correction is a fault in
+    // somebody's headphones being undone and a bus tone is that bus's taste;
+    // baking either into a file would carry it to everybody who plays the file
+    // back somewhere else.
+    //
+    // Every output is offered its own cascade, so the monitor mix and the send
+    // mix can be shaped differently. The loop is over the outputs rather than
+    // over a list of installed curves: there are two of them in practice, the
+    // section count for a bus running nothing is one load and one predictable
+    // branch, and a list would need its own indirection to stay in step with a
+    // rebuild.
+    for slot in 0..<min(RTGraph.maximumEQBuffers, output.count) {
+        let eqStages = Int(graph.pointee.eqStages[slot])
+        guard eqStages > 0 else { continue }
+        let buffer = output[slot]
         if let data = buffer.mData {
             let channels = min(Int(buffer.mNumberChannels), RTGraph.maximumEQChannels)
             let stride = Int(buffer.mNumberChannels)
             let frames = Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * stride)
             let samples = data.assumingMemoryBound(to: Float.self)
-            let coefficients = graph.pointee.eqCoefficients
-            let state = graph.pointee.eqState
-            let preamp = graph.pointee.eqPreampGain
+            let coefficients =
+                graph.pointee.eqCoefficients + RTGraph.eqCoefficientOffset(slot: slot)
+            let state = graph.pointee.eqState + RTGraph.eqStateOffset(slot: slot)
+            let preamp = graph.pointee.eqPreampGain[slot]
 
             // Section outermost and frames innermost — the transpose of the
             // obvious nesting, and the whole reason this stage is affordable.
@@ -1354,6 +1623,12 @@ public enum RTBenchmark {
         public var monitorRoutes: Int
         /// Biquad sections of headphone correction on the monitor buffer.
         public var eqStages: Int
+        /// Frames of alignment on the paths that skipped the effect chain.
+        ///
+        /// Its own knob because it is a copy per route per cycle that the
+        /// ordinary case does not pay, and "how much does aligning the taps
+        /// cost" is a question somebody will ask.
+        public var alignmentFrames: Int
         /// Whether the mono fold for the analysers runs.
         public var analysis: Bool
         /// Whether the destination bus is also fed to a recording ring.
@@ -1363,12 +1638,14 @@ public enum RTBenchmark {
 
         public init(
             frames: Int = 128, routes: Int = 2, monitorRoutes: Int = 0, eqStages: Int = 0,
-            analysis: Bool = false, record: Bool = false, master: Float = 1
+            alignmentFrames: Int = 0, analysis: Bool = false, record: Bool = false,
+            master: Float = 1
         ) {
             self.frames = frames
             self.routes = routes
             self.monitorRoutes = monitorRoutes
             self.eqStages = eqStages
+            self.alignmentFrames = alignmentFrames
             self.analysis = analysis
             self.record = record
             self.master = master
@@ -1453,6 +1730,8 @@ public enum RTBenchmark {
         graph.pointee.masterExemptBuffer = 0
         graph.pointee.outputGain = options.master
         graph.pointee.analysisEnabled = options.analysis ? 1 : 0
+        graph.pointee.alignmentFrames = Int32(
+            min(max(options.alignmentFrames, 0), RTGraph.maximumAlignmentFrames))
 
         var recordRing: OpaquePointer?
         if options.record {
@@ -1465,18 +1744,14 @@ public enum RTBenchmark {
             let stages = min(options.eqStages, RTGraph.maximumEQStages)
             // A gentle peaking section repeated. The coefficients only have to
             // be stable — what is being timed is the cascade, not the curve.
-            for section in 0..<stages {
-                let base = graph.pointee.eqCoefficients + section * 5
-                base[0] = 1.0009
-                base[1] = -1.9781
-                base[2] = 0.9781
-                base[3] = -1.9781
-                base[4] = 0.9790
+            var packed: [Float] = []
+            for _ in 0..<stages {
+                packed += [1.0009, -1.9781, 0.9781, -1.9781, 0.9790]
             }
-            graph.pointee.eqStages = Int32(stages)
-            graph.pointee.eqChannels = 2
-            graph.pointee.eqBuffer = 0
-            graph.pointee.eqPreampGain = 0.9
+            // Slot zero, which is the monitor here — the bus a correction has
+            // always run on, so the figures stay comparable with what came
+            // before per-bus slots existed.
+            RTGraph.installCorrection(packed, preampGain: 0.9, onBuffer: 0, of: graph)
         }
 
         let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!

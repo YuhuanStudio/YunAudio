@@ -146,6 +146,19 @@ public final class RoutingEngine: @unchecked Sendable {
     public private(set) var voiceIsolationLatencyFrames = 0
     /// Latency every enabled processing stage adds together, in frames.
     public private(set) var effectLatencyFrames = 0
+
+    /// Frames the graph is actually holding back the paths that skipped the
+    /// chain, read off the graph rather than off the number above.
+    ///
+    /// The defect this exists to catch is precisely a latency that is measured,
+    /// stored, shown in the interface and never handed to anything that moves a
+    /// sample — which is what `effectLatencyFrames` was for the life of the
+    /// effect chain.
+    public var alignmentFrames: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return Int(graph?.pointee.alignmentFrames ?? 0)
+    }
     private var effectChain: EffectChain?
     /// Renders the model refused. Non-zero means audio passed through
     /// unprocessed, which the UI should surface rather than hide.
@@ -635,6 +648,13 @@ public final class RoutingEngine: @unchecked Sendable {
         // order, so with a monitor attached buffer zero may well be the
         // headphones, and every one of those three would then be measuring or
         // recording the wrong device.
+        // Everything that skipped the chain is held back by what the chain
+        // costs, so the microphone and the tapped applications land on the same
+        // frame. Set here rather than where the latency is first read, because
+        // the graph does not exist until the routes are known.
+        graph.pointee.alignmentFrames = Int32(
+            min(effectLatencyFrames, RTGraph.maximumAlignmentFrames))
+
         graph.pointee.mainOutputBuffer =
             outputMap[ChannelRef(deviceUID: destinationDeviceUID, channel: 0)]?.buffer ?? 0
         graph.pointee.masterExemptBuffer =
@@ -900,13 +920,61 @@ public final class RoutingEngine: @unchecked Sendable {
     ///
     /// Off by default. Nothing should be folding the output bus every cycle for
     /// a panel nobody has open.
+    /// Puts a correction on each named output, and none on any other.
+    ///
+    /// The whole set at once rather than one output at a time, because this is
+    /// a publish rather than a mutation: a bus whose curve was taken away has
+    /// to stop running the old one, and a call naming a single device could
+    /// never say so. Every output not named here is left running nothing, which
+    /// is the only reading of the argument that cannot go stale.
+    ///
+    /// - Parameter curves: The curve for each output device UID.
+    /// - Returns: How many of them reached an output. A curve for a device that
+    ///   is not in this route is dropped rather than held — the ordinary case
+    ///   of a profile left selected after the headphones were unplugged.
+    @discardableResult
+    public func setCorrections(_ curves: [String: ParametricEQ]) -> Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let graph else { return 0 }
+
+        // Resolved to buffer indices first, on the control thread, so the loop
+        // below can walk the slots in order and leave each one in exactly one
+        // state. Two UIDs cannot claim one slot: the map is by device.
+        var wanted: [Int: ParametricEQ] = [:]
+        for (uid, curve) in curves {
+            guard let buffer = outputBufferIndex(forDeviceUID: uid) else { continue }
+            wanted[buffer] = curve
+        }
+
+        let rate = aggregate?.device?.currentSampleRate ?? 48000
+        var installed = 0
+        for slot in 0..<RTGraph.maximumEQBuffers {
+            if let curve = wanted[slot] {
+                let packed = curve.coefficients(sampleRate: rate)
+                let preamp = pow(10, curve.preampDecibels / 20)
+                if RTGraph.installCorrection(
+                    packed, preampGain: preamp, onBuffer: slot, of: graph)
+                {
+                    installed += 1
+                    continue
+                }
+            }
+            RTGraph.clearCorrection(onBuffer: slot, of: graph)
+        }
+        return installed
+    }
+
     /// Puts a headphone correction on one output, or takes it off.
+    ///
+    /// The special case of `setCorrections(_:)` where there is exactly one
+    /// correction in the whole router, which is what this was before buses had
+    /// their own. The correction belongs on what the person wearing the
+    /// headphones hears and nowhere else, so naming the device is not optional.
     ///
     /// - Parameters:
     ///   - curve: The correction, or nil to run none.
-    ///   - deviceUID: Which output it applies to. The correction belongs on
-    ///     what the person wearing the headphones hears and nowhere else, so
-    ///     naming the device is not optional.
+    ///   - deviceUID: Which output it applies to.
     /// - Returns: True when the correction was installed. False means the named
     ///   device is not in this route, which is the ordinary case of a headphone
     ///   profile left selected after the headphones were unplugged.
@@ -916,40 +984,12 @@ public final class RoutingEngine: @unchecked Sendable {
     )
         -> Bool
     {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let graph else { return false }
-
-        // Cleared first and unconditionally: a rebuild that left the old
-        // coefficients in place while the new buffer index was being written
-        // would run one headphone's correction on another's output for a cycle.
-        graph.pointee.eqBuffer = -1
-        graph.pointee.eqStages = 0
-        graph.pointee.eqPreampGain = 1
-
-        guard let curve, let deviceUID,
-            let buffer = outputBufferIndex(forDeviceUID: deviceUID)
-        else {
+        guard let curve, let deviceUID else {
+            setCorrections([:])
             // Silence is not a failure when there was nothing to install.
             return curve == nil
         }
-
-        let rate = aggregate?.device?.currentSampleRate ?? 48000
-        let packed = curve.coefficients(sampleRate: rate)
-        let stages = min(packed.count / 5, RTGraph.maximumEQStages)
-        guard stages > 0 else { return false }
-
-        for index in 0..<(stages * 5) { graph.pointee.eqCoefficients[index] = packed[index] }
-        // The history has to start from nothing. Carrying it across a change of
-        // curve puts the tail of the old filter into the first milliseconds of
-        // the new one, which is a click.
-        for index in 0..<(RTGraph.maximumEQStages * RTGraph.maximumEQChannels * 4) {
-            graph.pointee.eqState[index] = 0
-        }
-        graph.pointee.eqPreampGain = pow(10, curve.preampDecibels / 20)
-        graph.pointee.eqStages = Int32(stages)
-        graph.pointee.eqBuffer = Int32(buffer)
-        return true
+        return setCorrections([deviceUID: curve]) == 1
     }
 
     /// Which output buffer carries a device, if any of them do.
@@ -1309,10 +1349,17 @@ public final class RoutingEngine: @unchecked Sendable {
             next.pointee.transcriptRings[slot] = previous.pointee.transcriptRings[slot]
         }
 
+        // Moving a cable does not change the chain, so the alignment does not
+        // change either — and the delay lines have to come with the routes they
+        // belong to, or every patchbay edit would put a hole the length of the
+        // chain into the tapped applications.
+        next.pointee.alignmentFrames = previous.pointee.alignmentFrames
+
         for (index, old) in RoutingEngine.carriedPositions(from: activeRoutes, to: routes)
             .enumerated()
         {
             guard let old, old < Int(previous.pointee.routeCount) else { continue }
+            RTGraph.carryAlignment(from: previous, slot: old, to: next, slot: index)
             next.pointee.routes[index].stemIndex = previous.pointee.routes[old].stemIndex
             next.pointee.routes[index].stemChannel = previous.pointee.routes[old].stemChannel
             next.pointee.routes[index].transcriptIndex =
@@ -1514,22 +1561,20 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.duckGain = previous.pointee.duckGain
         next.pointee.masterExemptBuffer = previous.pointee.masterExemptBuffer
 
-        // And the headphone correction, which `updateRoutes` does not carry
-        // because the model reinstalls it after a route edit. Nothing
-        // reinstalls it after a chain swap, so dropping it here would mean
+        // And every bus's correction, which `updateRoutes` does not carry
+        // because the model reinstalls them after a route edit. Nothing
+        // reinstalls them after a chain swap, so dropping them here would mean
         // somebody's correction quietly disappearing the moment they switched
-        // on a compressor. The filter history comes across with the
-        // coefficients: it is the same filter continuing, and starting it again
-        // from nothing is a click.
-        next.pointee.eqBuffer = previous.pointee.eqBuffer
-        next.pointee.eqStages = previous.pointee.eqStages
-        next.pointee.eqChannels = previous.pointee.eqChannels
-        next.pointee.eqPreampGain = previous.pointee.eqPreampGain
-        for index in 0..<(RTGraph.maximumEQStages * 5) {
-            next.pointee.eqCoefficients[index] = previous.pointee.eqCoefficients[index]
-        }
-        for index in 0..<(RTGraph.maximumEQStages * RTGraph.maximumEQChannels * 4) {
-            next.pointee.eqState[index] = previous.pointee.eqState[index]
+        // on a compressor.
+        RTGraph.carryCorrections(from: previous, to: next)
+
+        // The chain is what decides the alignment, so a chain swap is the one
+        // rebuild that can change it. Set before the graph is published, or a
+        // cycle would run the new chain against the old compensation.
+        next.pointee.alignmentFrames = Int32(
+            min(chain?.latencyFrames ?? 0, RTGraph.maximumAlignmentFrames))
+        for slot in 0..<Int(next.pointee.routeCount) {
+            RTGraph.carryAlignment(from: previous, slot: slot, to: next, slot: slot)
         }
 
         // Handed over rather than replaced, as in `updateRoutes`: the consumer

@@ -63,7 +63,7 @@ final class RouterModel {
         }
     }
 
-    // MARK: Headphone correction
+    // MARK: Per-bus processing
 
     /// Corrections found on disk, by name.
     ///
@@ -75,56 +75,132 @@ final class RouterModel {
     /// problem, and worse than the file for somebody's exact unit.
     private(set) var headphoneProfiles: [ParametricEQ] = []
 
-    /// Which one is in use, by name, or nil for none.
+    /// Ten slider positions per bus, in decibels, at the band centres in
+    /// `ParametricEQ`, keyed by the bus's output device UID.
+    ///
+    /// Per bus rather than one for the whole router, which is the point of the
+    /// exercise: the stream mix and the headphone mix are two different
+    /// audiences, and shaping one for the other is the thing every review of
+    /// VoiceMeeter singles out as what it gets right.
+    ///
+    /// Keyed by device UID rather than by the bus letter, because the letters
+    /// are positional — turning the monitor off promotes B to A — and a tone
+    /// dialled in for a pair of headphones must not migrate to the send.
+    private(set) var busGraphicEQ: [String: [Float]] = [:]
+
+    /// The headphone correction chosen for each bus, by file name.
+    private(set) var busHeadphoneProfiles: [String: String] = [:]
+
+    /// The tone control for one bus, ten bands, flat when it has never been set.
+    func graphicEQ(forBus id: String) -> [Float] {
+        let bands = busGraphicEQ[id] ?? []
+        return bands.count == 10 ? bands : [Float](repeating: 0, count: 10)
+    }
+
+    func graphicEQIsFlat(forBus id: String) -> Bool {
+        graphicEQ(forBus: id).allSatisfy { abs($0) < 0.05 }
+    }
+
+    func setGraphicBand(_ decibels: Float, at index: Int, forBus id: String) {
+        var bands = graphicEQ(forBus: id)
+        guard bands.indices.contains(index) else { return }
+        let clamped = max(
+            ParametricEQ.graphicRange.lowerBound,
+            min(ParametricEQ.graphicRange.upperBound, decibels))
+        guard abs(bands[index] - clamped) > 0.001 else { return }
+        bands[index] = clamped
+        busGraphicEQ[id] = bands
+        persist()
+        applyCorrections()
+    }
+
+    func resetGraphicEQ(forBus id: String) {
+        guard !graphicEQIsFlat(forBus: id) else { return }
+        busGraphicEQ[id] = [Float](repeating: 0, count: 10)
+        persist()
+        applyCorrections()
+    }
+
+    func headphoneProfileName(forBus id: String) -> String? { busHeadphoneProfiles[id] }
+
+    func headphoneProfile(forBus id: String) -> ParametricEQ? {
+        headphoneProfiles.first { $0.name == busHeadphoneProfiles[id] }
+    }
+
+    func setHeadphoneProfileName(_ name: String?, forBus id: String) {
+        guard busHeadphoneProfiles[id] != name else { return }
+        busHeadphoneProfiles[id] = name
+        persist()
+        applyCorrections()
+    }
+
+    /// What is actually run on one bus: its correction, its tone control, or
+    /// both cascaded.
+    ///
+    /// A correction undoes a fault somebody measured in the hardware and the
+    /// tone control is taste, so neither replaces the other. Cascaded biquads
+    /// compose by concatenation, so running both costs only its own sections.
+    func curve(forBus id: String) -> ParametricEQ? {
+        var curves: [ParametricEQ] = []
+        if let profile = headphoneProfile(forBus: id) { curves.append(profile) }
+        if !graphicEQIsFlat(forBus: id) {
+            curves.append(ParametricEQ.graphic(graphicEQ(forBus: id)))
+        }
+        return ParametricEQ.combined(curves, name: loc("Output"))
+    }
+
+    /// Every bus that has something to run, by output device UID.
+    var busCurves: [String: ParametricEQ] {
+        var result: [String: ParametricEQ] = [:]
+        for bus in buses {
+            if let curve = curve(forBus: bus.id) { result[bus.id] = curve }
+        }
+        return result
+    }
+
+    // MARK: The primary bus, by its old names
+
+    /// The bus a correction ran on before buses had their own.
+    ///
+    /// The monitor when there is one, because that is the headphone path by
+    /// definition. Otherwise the destination — somebody routing straight to
+    /// their headphones with no separate monitor is still wearing them. The
+    /// device tab's two cards edit this one, so the shortcut somebody already
+    /// knows keeps working and a saved file keeps meaning what it meant.
+    var correctedOutputUID: String? { monitorDeviceUID ?? selectedDestinationUID }
+
+    /// Which one is in use on the primary bus, by name, or nil for none.
     var headphoneProfileName: String? {
-        didSet {
-            guard oldValue != headphoneProfileName else { return }
-            persist()
-            applyHeadphoneCorrection()
+        get { correctedOutputUID.flatMap { busHeadphoneProfiles[$0] } }
+        set {
+            guard let bus = correctedOutputUID else { return }
+            setHeadphoneProfileName(newValue, forBus: bus)
         }
     }
 
     var headphoneProfile: ParametricEQ? {
-        headphoneProfiles.first { $0.name == headphoneProfileName }
+        correctedOutputUID.flatMap { headphoneProfile(forBus: $0) }
     }
 
-    /// Ten slider positions in decibels, at the band centres in `ParametricEQ`.
-    ///
-    /// Kept apart from the headphone profile because they are different
-    /// intentions: a correction undoes a fault somebody measured in the
-    /// hardware, and this is taste. Somebody wants both at once without having
-    /// to choose, and cascaded biquads compose, so they run one after the
-    /// other rather than one replacing the other.
-    private(set) var graphicEQ: [Float] = [Float](repeating: 0, count: 10)
+    var graphicEQ: [Float] {
+        correctedOutputUID.map { graphicEQ(forBus: $0) }
+            ?? [Float](repeating: 0, count: 10)
+    }
 
     var graphicEQIsFlat: Bool { graphicEQ.allSatisfy { abs($0) < 0.05 } }
 
     func setGraphicBand(_ decibels: Float, at index: Int) {
-        guard graphicEQ.indices.contains(index) else { return }
-        let clamped = max(
-            ParametricEQ.graphicRange.lowerBound,
-            min(ParametricEQ.graphicRange.upperBound, decibels))
-        guard abs(graphicEQ[index] - clamped) > 0.001 else { return }
-        graphicEQ[index] = clamped
-        persist()
-        applyHeadphoneCorrection()
+        guard let bus = correctedOutputUID else { return }
+        setGraphicBand(decibels, at: index, forBus: bus)
     }
 
     func resetGraphicEQ() {
-        guard !graphicEQIsFlat else { return }
-        graphicEQ = [Float](repeating: 0, count: 10)
-        persist()
-        applyHeadphoneCorrection()
+        guard let bus = correctedOutputUID else { return }
+        resetGraphicEQ(forBus: bus)
     }
 
-    /// What is actually run on the output: the correction, the tone control, or
-    /// both cascaded.
-    var headphoneCurve: ParametricEQ? {
-        var curves: [ParametricEQ] = []
-        if let profile = headphoneProfile { curves.append(profile) }
-        if !graphicEQIsFlat { curves.append(ParametricEQ.graphic(graphicEQ)) }
-        return ParametricEQ.combined(curves, name: loc("Output"))
-    }
+    /// What the primary bus runs.
+    var headphoneCurve: ParametricEQ? { correctedOutputUID.flatMap { curve(forBus: $0) } }
 
     /// Where corrections are read from.
     static var headphoneDirectory: URL? {
@@ -156,28 +232,70 @@ final class RouterModel {
                     text, name: (file as NSString).deletingPathExtension)
             }
         // A profile that has been deleted from the folder must stop being used,
-        // not silently keep running from memory.
-        if let chosen = headphoneProfileName,
-            !headphoneProfiles.contains(where: { $0.name == chosen })
-        {
-            headphoneProfileName = nil
+        // not silently keep running from memory. Every bus, not only the one
+        // the device tab shows: a file deleted while the send was using it
+        // would otherwise keep running off a copy nothing can reach.
+        let available = Set(headphoneProfiles.map(\.name))
+        let stale = busHeadphoneProfiles.filter { !available.contains($0.value) }
+        if !stale.isEmpty {
+            for id in stale.keys { busHeadphoneProfiles[id] = nil }
+            persist()
+            applyCorrections()
         }
     }
 
-    /// Which output the correction belongs on.
-    ///
-    /// The monitor when there is one, because that is the headphone path by
-    /// definition. Otherwise the destination — somebody routing straight to
-    /// their headphones with no separate monitor is still wearing them.
-    var correctedOutputUID: String? { monitorDeviceUID ?? selectedDestinationUID }
-
-    /// True when a correction is chosen but is not reaching anything.
+    /// True when a correction is chosen somewhere and is not reaching anything.
     var headphoneCorrectionIsIdle: Bool {
-        headphoneCurve != nil && (!isRunning || correctedOutputUID == nil)
+        !busCurves.isEmpty && !isRunning
     }
 
-    func applyHeadphoneCorrection() {
-        engine.setHeadphoneCorrection(headphoneCurve, forDeviceUID: correctedOutputUID)
+    /// Publishes every bus's curve at once.
+    ///
+    /// The whole set rather than the one that changed, because a bus that has
+    /// just lost its curve has to stop running the old one and only a whole
+    /// set can say so. Reinstalling an unchanged curve costs nothing: the
+    /// engine leaves a slot's filter history alone when its coefficients did
+    /// not move, so adjusting one bus does not click the other.
+    ///
+    /// - Returns: How many curves reached an output, which is not always how
+    ///   many were asked for — a bus whose device has gone is dropped.
+    @discardableResult
+    func applyCorrections() -> Int {
+        engine.setCorrections(busCurves)
+    }
+
+    /// Reads per-bus processing out of a saved file, old shape or new.
+    ///
+    /// A file written before buses had their own carries one tone control and
+    /// one correction for the whole router. Those ran on the monitor when there
+    /// was one and on the destination otherwise, so that is the bus they become
+    /// — folding them onto anything else would silently move somebody's
+    /// headphone correction onto the mix the far end hears, which is the exact
+    /// mistake the per-output rule exists to prevent.
+    ///
+    /// A per-bus entry always wins over the flat one: both are written on every
+    /// save so that an older build can still open the file, and the flat pair
+    /// is the lossy copy.
+    static func busProcessing(
+        from saved: Preferences
+    ) -> (graphic: [String: [Float]], profiles: [String: String]) {
+        // A malformed band list is dropped rather than padded: ten sliders is
+        // what the interface draws, and anything else came from a file that
+        // was edited by hand.
+        var graphic = (saved.busGraphicEQ ?? [:]).filter { $0.value.count == 10 }
+        var profiles = saved.busHeadphoneProfiles ?? [:]
+        guard let previous = saved.monitorDeviceUID ?? saved.destinationDeviceUID else {
+            return (graphic, profiles)
+        }
+        if graphic[previous] == nil, let bands = saved.graphicEQ, bands.count == 10,
+            bands.contains(where: { abs($0) > 0.05 })
+        {
+            graphic[previous] = bands
+        }
+        if profiles[previous] == nil, let name = saved.headphoneProfileName {
+            profiles[previous] = name
+        }
+        return (graphic, profiles)
     }
 
     // MARK: Output alignment
@@ -1971,6 +2089,12 @@ final class RouterModel {
         return Double(engine.effectLatencyFrames) / rate * 1000
     }
 
+    /// What the chain costs, and what the paths that skipped it are held back
+    /// by to meet it. The two are the same number or something is adrift.
+    var chainAlignment: (chain: Int, applied: Int) {
+        (engine.effectLatencyFrames, engine.alignmentFrames)
+    }
+
     /// What the whole path costs, in milliseconds.
     ///
     /// One IO cycle, the destination's own reported latency and safety offset,
@@ -2288,8 +2412,9 @@ final class RouterModel {
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
         outputDelays = saved.outputDelays ?? [:]
-        headphoneProfileName = saved.headphoneProfileName
-        if let bands = saved.graphicEQ, bands.count == 10 { graphicEQ = bands }
+        let processing = Self.busProcessing(from: saved)
+        busGraphicEQ = processing.graphic
+        busHeadphoneProfiles = processing.profiles
         recentSourceUIDs = saved.recentSourceUIDs ?? []
         recentDestinationUIDs = saved.recentDestinationUIDs ?? []
         monitorDecibels = saved.monitorDecibels ?? -6
@@ -2373,8 +2498,14 @@ final class RouterModel {
                 recordsStems: recordsStems,
                 monitorSends: monitorSends,
                 outputDelays: outputDelays,
+                // The two flat fields are still written so that a file this
+                // version saves can be opened by one that predates buses having
+                // their own: the primary bus is what that version would have
+                // run, which is the closest thing to the truth it can hold.
                 headphoneProfileName: headphoneProfileName,
                 graphicEQ: graphicEQ,
+                busGraphicEQ: busGraphicEQ,
+                busHeadphoneProfiles: busHeadphoneProfiles,
                 recentSourceUIDs: recentSourceUIDs,
                 recentDestinationUIDs: recentDestinationUIDs,
                 // Written on every save, not only when a binding changes: this
@@ -2878,10 +3009,10 @@ final class RouterModel {
                 // coefficients and the FFT bin mapping both depend on the rate
                 // the aggregate settled on.
                 self.startAnalysis(sampleRate: self.engine.pathQuality?.sampleRate ?? 48000)
-                // After the graph exists, not before: the correction names an
+                // After the graph exists, not before: a correction names an
                 // output buffer, and there are no buffers until the aggregate
                 // is built.
-                self.applyHeadphoneCorrection()
+                self.applyCorrections()
                 self.startPolling()
             }
         }

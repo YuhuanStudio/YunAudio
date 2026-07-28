@@ -27,6 +27,8 @@ struct MainWindow: View {
     @State private var setupOutcome: String?
     @State private var isNamingPreset = false
     @State private var presetName = ""
+    /// Which buses have their processing open. Empty at launch on purpose.
+    @State private var expandedBuses: Set<String> = []
     /// Skips the scroll views. `ImageRenderer` gives a ScrollView no height, so
     /// the offscreen design captures come out as three empty columns otherwise.
     var isRendering = false
@@ -856,6 +858,9 @@ struct MainWindow: View {
                 sectionHeading(loc("Mixer"))
                 if !model.buses.isEmpty {
                     YunCard { busLegend }
+                    ForEach(model.buses) { bus in
+                        busProcessing(bus)
+                    }
                 }
                 if model.isRunning {
                     YunCard { CalibrationPanel(model: model) }
@@ -919,6 +924,57 @@ struct MainWindow: View {
                     }
                 }
             }
+        }
+    }
+
+    /// One bus's own tone control and headphone correction.
+    ///
+    /// Under the legend that names the buses rather than on the device tab,
+    /// because this is the answer to "why is A different from B" and it should
+    /// be next to the thing that says what A and B are. VoiceMeeter's whole
+    /// reputation rests on the stream mix and the headphone mix being shaped
+    /// independently; until now every effect here ran before the matrix, so
+    /// both buses got the same one whether that made sense or not.
+    ///
+    /// Collapsed until asked for. Two buses is two sets of ten sliders, and a
+    /// mixer column that opens on four hundred points of equaliser has hidden
+    /// the faders it exists to show.
+    @ViewBuilder
+    private func busProcessing(_ bus: RouterModel.Bus) -> some View {
+        YunDisclosure(
+            String(format: loc("Bus %@ processing"), bus.letter),
+            subtitle: busProcessingSummary(bus),
+            isExpanded: Binding(
+                get: { isRendering || expandedBuses.contains(bus.id) },
+                set: { expanded in
+                    if expanded {
+                        expandedBuses.insert(bus.id)
+                    } else {
+                        expandedBuses.remove(bus.id)
+                    }
+                })
+        ) {
+            VStack(alignment: .leading, spacing: Yun.Space.md) {
+                graphicBands(forBus: bus.id)
+                if !model.headphoneProfiles.isEmpty {
+                    YunDivider()
+                    headphonePicker(forBus: bus.id)
+                }
+            }
+        }
+    }
+
+    /// What the collapsed row says, so somebody can see which bus is shaped
+    /// without opening either.
+    private func busProcessingSummary(_ bus: RouterModel.Bus) -> String {
+        let moved = model.graphicEQ(forBus: bus.id).filter { abs($0) > 0.05 }.count
+        let profile = model.headphoneProfile(forBus: bus.id)?.name
+        switch (moved, profile) {
+        case (0, nil): return loc("flat")
+        case (0, let name?): return name
+        case (let count, nil): return String(format: loc("%d band(s)"), count)
+        case (let count, let name?):
+            return String(format: loc("%d band(s), %@"), count, name)
         }
     }
 
@@ -1532,7 +1588,7 @@ struct MainWindow: View {
         }
     }
 
-    /// Ten bands on the output, at the centres Razer's own software publishes.
+    /// Ten bands on one bus, at the centres Razer's own software publishes.
     ///
     /// Vertical, because that is what a graphic equaliser looks like everywhere
     /// and the shape of the curve is the thing being read — a column of
@@ -1543,7 +1599,7 @@ struct MainWindow: View {
     /// measured, this is taste. They run one after the other, so neither has to
     /// be given up for the other.
     @ViewBuilder
-    private var graphicEqualiser: some View {
+    private func graphicBands(forBus id: String) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             HStack(alignment: .bottom, spacing: 2) {
                 ForEach(Array(ParametricEQ.graphicBands.enumerated()), id: \.offset) {
@@ -1556,7 +1612,7 @@ struct MainWindow: View {
                                         ParametricEQ.graphicRange.upperBound
                                         - ParametricEQ.graphicRange.lowerBound
                                     return Double(
-                                        (model.graphicEQ[index]
+                                        (model.graphicEQ(forBus: id)[index]
                                             - ParametricEQ.graphicRange.lowerBound) / span)
                                 },
                                 set: {
@@ -1565,7 +1621,7 @@ struct MainWindow: View {
                                         - ParametricEQ.graphicRange.lowerBound
                                     model.setGraphicBand(
                                         ParametricEQ.graphicRange.lowerBound
-                                            + Float($0) * span, at: index)
+                                            + Float($0) * span, at: index, forBus: id)
                                 }))
                         Text(Self.bandLabel(hertz))
                             .font(Yun.Text.caption)
@@ -1578,21 +1634,77 @@ struct MainWindow: View {
 
             HStack(spacing: Yun.Space.sm) {
                 Text(
-                    model.graphicEQIsFlat
+                    model.graphicEQIsFlat(forBus: id)
                         ? loc("Flat. These are the band centres Razer's own software uses.")
                         : String(
                             format: loc("%d band(s) moved."),
-                            model.graphicEQ.filter { abs($0) > 0.05 }.count)
+                            model.graphicEQ(forBus: id).filter { abs($0) > 0.05 }.count)
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                if !model.graphicEQIsFlat {
-                    Button(loc("Flatten")) { model.resetGraphicEQ() }
+                if !model.graphicEQIsFlat(forBus: id) {
+                    Button(loc("Flatten")) { model.resetGraphicEQ(forBus: id) }
                         .buttonStyle(YunButtonStyle(.ghost, small: true))
                 }
             }
+        }
+    }
+
+    /// The device tab's tone card, which edits the bus a correction has always
+    /// landed on.
+    ///
+    /// Kept as a shortcut to the one bus most people have rather than removed
+    /// once every bus got its own: it is where somebody already knows to look.
+    /// The line above the sliders says which bus that is, because with two of
+    /// them a control that does not name its target is a guess.
+    @ViewBuilder
+    private var graphicEqualiser: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            primaryBusNote
+            if let bus = model.correctedOutputUID {
+                graphicBands(forBus: bus)
+            }
+        }
+    }
+
+    /// Which bus the device tab's two cards are editing, and where the others
+    /// are.
+    private var primaryBusNote: some View {
+        Text(
+            model.buses.first(where: { $0.id == model.correctedOutputUID }).map {
+                String(
+                    format: loc("Bus %@ · %@. Every bus has its own, in the mixer."),
+                    $0.letter, $0.deviceName)
+            } ?? loc("No output is chosen, so there is no bus to shape yet.")
+        )
+        .font(Yun.Text.caption)
+        .foregroundStyle(Yun.Palette.textTertiary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// Which correction one bus runs, and what it costs in headroom.
+    @ViewBuilder
+    private func headphonePicker(forBus id: String) -> some View {
+        YunSelect(
+            selection: Binding(
+                get: { model.headphoneProfileName(forBus: id) },
+                set: { model.setHeadphoneProfileName($0, forBus: id) }),
+            options: [.init(value: String?.none, title: loc("Off"))]
+                + model.headphoneProfiles.map {
+                    .init(
+                        value: $0.name as String?, title: $0.name,
+                        detail: "\($0.filters.count)")
+                })
+        if let profile = model.headphoneProfile(forBus: id) {
+            Text(
+                String(
+                    format: loc("%d filters, %.1f dB of headroom taken."),
+                    profile.filters.count, -profile.preampDecibels)
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
         }
     }
 
@@ -1611,6 +1723,7 @@ struct MainWindow: View {
     @ViewBuilder
     private var headphoneCorrection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
+            primaryBusNote
             if model.headphoneProfiles.isEmpty {
                 Text(
                     loc(
@@ -1621,24 +1734,10 @@ struct MainWindow: View {
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             } else {
-                YunSelect(
-                    selection: Binding(
-                        get: { model.headphoneProfileName },
-                        set: { model.headphoneProfileName = $0 }),
-                    options: [.init(value: String?.none, title: loc("Off"))]
-                        + model.headphoneProfiles.map {
-                            .init(
-                                value: $0.name as String?, title: $0.name,
-                                detail: "\($0.filters.count)")
-                        })
+                if let bus = model.correctedOutputUID {
+                    headphonePicker(forBus: bus)
+                }
                 if let profile = model.headphoneProfile {
-                    Text(
-                        String(
-                            format: loc("%d filters, %.1f dB of headroom taken."),
-                            profile.filters.count, -profile.preampDecibels)
-                    )
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
                     // What it does, drawn from the coefficients that will
                     // actually run rather than from the filter list — a picture
                     // built from the definitions would stay right while the

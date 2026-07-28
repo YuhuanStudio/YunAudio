@@ -2170,6 +2170,8 @@ enum UIFlowCheck {
             note("no application support directory — skipped")
         }
 
+        await checkBusProcessing(model: model)
+
         section("setups")
         // A setup captures devices; a scene captures processing. Confusing the
         // two would mean somebody choosing "podcast" could not know whether
@@ -3258,6 +3260,191 @@ enum UIFlowCheck {
             window.applications.count >= expanded.applications.count
                 && window.background.count == expanded.background.count)
         model.showsBackgroundApps = false
+    }
+
+    /// Each bus's own processing, which is the thing the mixer column now
+    /// offers under the legend.
+    ///
+    /// The arithmetic is unit-tested against the real callback — a curve on bus
+    /// A lifts A by six decibels and moves B by less than 0.05. What is checked
+    /// here is everything above that: that the two buses have separate stores,
+    /// that a slider reaches only its own, that both survive a save and a load,
+    /// and that a file written before any of this existed still opens with its
+    /// settings on the bus they used to run on.
+    private static func checkBusProcessing(model: RouterModel) async {
+        section("per-bus processing")
+
+        // A second bus for the duration, because one bus cannot demonstrate
+        // that two are independent and this is the only check that drives the
+        // model rather than the callback.
+        let previousMonitor = model.monitorDeviceUID
+        var borrowedMonitor = false
+        if previousMonitor == nil,
+            let second = model.monitorOptions.first(where: {
+                $0.uid != model.selectedDestinationUID
+            })
+        {
+            model.monitorDeviceUID = second.uid
+            await waitUntil("a second bus came up", { !model.isBusy }, timeout: 15)
+            borrowedMonitor = model.monitorDeviceUID == second.uid
+        }
+        defer {
+            if borrowedMonitor { model.monitorDeviceUID = previousMonitor }
+        }
+
+        let buses = model.buses
+        note(buses.map { "\($0.letter) \($0.deviceName)" }.joined(separator: " · "))
+        guard let first = buses.first else {
+            note("no bus in the path — skipped")
+            return
+        }
+
+        // Every bus starts with nothing on it, or the ones that follow are
+        // measuring whatever the last section left behind.
+        for bus in buses { model.resetGraphicEQ(forBus: bus.id) }
+        check(
+            "every bus starts flat",
+            buses.allSatisfy { model.graphicEQIsFlat(forBus: $0.id) })
+        check("and nothing is being run", model.busCurves.isEmpty)
+
+        model.setGraphicBand(4, at: 5, forBus: first.id)  // 1 kHz
+        check(
+            "moving one bus's band leaves it not flat", !model.graphicEQIsFlat(forBus: first.id)
+        )
+        if let curve = model.curve(forBus: first.id) {
+            note(
+                String(
+                    format: "bus %@: %.1f dB at 1 kHz", first.letter,
+                    curve.response(atHertz: 1000, sampleRate: 48000)))
+            check(
+                "and the band it moved is the one that moved",
+                abs(curve.response(atHertz: 1000, sampleRate: 48000) - 4) < 0.4)
+        } else {
+            check("a moved band produces a curve", false)
+        }
+
+        // The whole point. Two buses, two mixes, two audiences.
+        if buses.count > 1 {
+            let other = buses[1]
+            check(
+                "the other bus is still flat",
+                model.graphicEQIsFlat(forBus: other.id)
+                    && model.curve(forBus: other.id) == nil)
+            model.setGraphicBand(-3, at: 2, forBus: other.id)  // 120 Hz
+            check(
+                "and takes its own shape without disturbing the first",
+                abs(model.graphicEQ(forBus: first.id)[5] - 4) < 0.001
+                    && abs(model.graphicEQ(forBus: other.id)[2] + 3) < 0.001
+                    && abs(model.graphicEQ(forBus: other.id)[5]) < 0.001)
+            if let curve = model.curve(forBus: other.id) {
+                note(
+                    String(
+                        format: "bus %@: %.1f dB at 120 Hz, %.1f dB at 1 kHz", other.letter,
+                        curve.response(atHertz: 120, sampleRate: 48000),
+                        curve.response(atHertz: 1000, sampleRate: 48000)))
+            }
+        } else {
+            note("only one bus in the path — choose a monitor to exercise two")
+        }
+
+        // Reaching the engine is a separate claim from being in the model, and
+        // this is the only check that makes it against a running route.
+        let curves = model.busCurves
+        let installed = model.applyCorrections()
+        note("\(curves.count) curve(s) asked for, \(installed) reached an output")
+        check(
+            "every bus with a curve got one installed",
+            !model.isRunning || installed == curves.count)
+
+        // Persisted per bus, because the whole feature is worthless if it does
+        // not survive a restart.
+        let saved = PreferencesStore.load()
+        check(
+            "each bus's bands were saved under its own device",
+            (saved.busGraphicEQ?[first.id]?[5]).map { abs($0 - 4) < 0.001 } ?? false)
+        check(
+            "and the file still carries the flat pair an older build would read",
+            saved.graphicEQ?.count == 10)
+
+        // A file from before buses had their own processing must open with its
+        // settings where they used to run — on the monitor when there was one,
+        // and never on the mix the far end hears.
+        var legacy = Preferences.default
+        legacy.busGraphicEQ = [:]
+        legacy.busHeadphoneProfiles = [:]
+        legacy.graphicEQ = [0, 0, 0, 0, 0, 5, 0, 0, 0, 0]
+        legacy.headphoneProfileName = "Old Headphones"
+        legacy.destinationDeviceUID = "far-end"
+        legacy.monitorDeviceUID = "headphones"
+        let migrated = RouterModel.busProcessing(from: legacy)
+        check(
+            "an old file's tone lands on the bus it used to run on",
+            migrated.graphic["headphones"]?[5] == 5 && migrated.graphic["far-end"] == nil)
+        check(
+            "and so does its correction",
+            migrated.profiles["headphones"] == "Old Headphones"
+                && migrated.profiles["far-end"] == nil)
+        legacy.monitorDeviceUID = nil
+        let withoutMonitor = RouterModel.busProcessing(from: legacy)
+        check(
+            "with no monitor it lands on the destination instead",
+            withoutMonitor.graphic["far-end"]?[5] == 5)
+
+        // Put it back: everything after this reads the same model.
+        for bus in buses { model.resetGraphicEQ(forBus: bus.id) }
+        check("flattening every bus stops running anything", model.busCurves.isEmpty)
+        check("no error was reported", model.lastError == nil)
+        check("the route did not go down", model.isRunning)
+
+        await checkChainAlignment(model: model)
+    }
+
+    /// The chain's latency has to reach something that moves a sample.
+    ///
+    /// It was measured, stored and shown in the interface for the whole life of
+    /// the effect chain, and nothing used it: the microphone came out of the
+    /// chain late and the tapped applications came out on time, so the mix was
+    /// the voice behind the backing track by the length of the chain. The
+    /// arrival frames are asserted against the real callback in the unit tests;
+    /// what is checked here is that switching a stage on actually hands the
+    /// number to the running graph.
+    private static func checkChainAlignment(model: RouterModel) async {
+        section("chain alignment")
+
+        let before = model.chainAlignment
+        note("chain \(before.chain) frames, aligning \(before.applied)")
+        check("with no stage on, nothing is held back", before.applied == 0)
+
+        let originalEffects = model.enabledEffects
+        model.setEffect(.voiceIsolation, enabled: true)
+        await waitUntil("the chain came up", { !model.isBusy }, timeout: 20)
+        let during = model.chainAlignment
+        let rate = model.pathQuality?.sampleRate ?? 48000
+        note(
+            String(
+                format: "chain %d frames (%.1f ms), aligning %d", during.chain,
+                Double(during.chain) / rate * 1000, during.applied))
+        note(
+            "enabled: " + model.enabledEffects.map(\.rawValue).sorted().joined(separator: ", "))
+        // Whether a particular unit reports any latency is the unit's business
+        // and varies by machine — what must hold either way is that whatever it
+        // reports is exactly what the graph holds back. The arrival frames for
+        // a chain that does report some are asserted in the unit tests, which
+        // do not need one to exist.
+        check(
+            "every path that skipped the chain is held back by exactly what it costs",
+            during.applied == during.chain)
+        if during.chain == 0 {
+            note("this chain added no latency here — nothing to align")
+        }
+        check("no error was reported", model.lastError == nil)
+        check("the route did not go down", model.isRunning)
+
+        for kind in EffectKind.allCases where !originalEffects.contains(kind) {
+            model.setEffect(kind, enabled: false)
+        }
+        await waitUntil("the chain went back", { !model.isBusy }, timeout: 20)
+        check("switching it off stops holding anything back", model.chainAlignment.applied == 0)
     }
 
     private static func summarise() {
