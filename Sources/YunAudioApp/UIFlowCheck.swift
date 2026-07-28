@@ -1129,10 +1129,16 @@ enum UIFlowCheck {
         let wasRunning = model.isRunning
         if wasRunning { model.stop() }
         await waitUntil("the route is down to measure idle", { !model.isRunning }, timeout: 12)
+        // A full tick of the mark's own timer before the window opens. Going
+        // from running to idle *is* a change — the dot was showing a level and
+        // now there is none — so exactly one redraw is correct there, and
+        // counting it would be counting the thing working. Measured: without
+        // this, one redraw every time.
+        await pause(0.7)
         let redrawsBefore = StatusItemController.redraws
         await pause(2.0)
         let idleRedraws = StatusItemController.redraws - redrawsBefore
-        note("\(idleRedraws) menu bar redraw(s) in 2 s idle")
+        note("\(idleRedraws) menu bar redraw(s) in 2 s idle, after the change to idle")
         check("the menu bar mark is not redrawn while nothing changes", idleRedraws == 0)
         if wasRunning {
             model.start()
