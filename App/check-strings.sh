@@ -74,6 +74,25 @@ for directory in ("Sources/YunAudioApp", "Sources/YunDesign"):
                 line = source[: match.start()].count("\n") + 1
                 failures.append(f"{path}:{line}: {match.group(1)} {literal}")
 
+# A key written twice is not a warning from anything: the last one silently
+# wins, so a translation can be overridden by a different translation of the
+# same word and the only symptom is a label that reads oddly. Six of these had
+# accumulated — "Pitch" meaning both the effect and the musical quantity,
+# "None" meaning both "no voice preset" and "nothing" — and each was one
+# English word doing two jobs.
+for table in sorted(pathlib.Path("Sources").glob("**/*.lproj/Localizable.strings")):
+    seen = {}
+    for number, line in enumerate(table.read_text().splitlines(), start=1):
+        match = re.match(r'^"((?:[^"\\]|\\.)*)"\s*=', line)
+        if not match:
+            continue
+        key = match.group(1)
+        if key in seen:
+            failures.append(
+                f"{table}:{number}: duplicate key {key!r}, first seen on line {seen[key]}")
+        else:
+            seen[key] = number
+
 if failures:
     print("user-facing literals not passed through loc():\n")
     for failure in failures:

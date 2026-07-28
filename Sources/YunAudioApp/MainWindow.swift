@@ -109,7 +109,7 @@ struct MainWindow: View {
             .padding(.bottom, Yun.Space.lg)
             .frame(maxHeight: .infinity, alignment: .top)
 
-            statusBar
+            StatusPills(model: model)
         }
         .frame(minWidth: 980, minHeight: 600)
         .yunWindowBackground()
@@ -1493,121 +1493,6 @@ struct MainWindow: View {
                     }
                 ))
         }
-    }
-
-    // MARK: Status bar
-
-    /// A thin strip of live numbers along the bottom, after OBS.
-    ///
-    /// What was here before was a forty-point bar carrying one device picker
-    /// and one button, both of which belong somewhere else — the picker beside
-    /// its opposite number, the button in the corner. What a bottom bar is
-    /// actually good for is the readings you glance at without stopping: is it
-    /// running, at what rate, how much latency, how long have I been recording.
-    private var statusBar: some View {
-        HStack(spacing: 0) {
-            // The lamp. Green while audio moves, red while recording, grey at
-            // rest — the one thing readable from across a desk.
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(lampColour)
-                    .frame(width: 7, height: 7)
-                Text(statusWord)
-                    .foregroundStyle(Yun.Palette.textSecondary)
-            }
-            .padding(.trailing, Yun.Space.md)
-
-            if let quality = model.pathQuality {
-                statusDivider
-                statusField("\(Int(quality.sampleRate / 1000)) kHz")
-                statusDivider
-                statusField(
-                    String(
-                        format: "%d f · %.2f ms", quality.bufferFrames,
-                        quality.bufferLatencyMilliseconds))
-                statusDivider
-                statusField(
-                    loc(quality.integrityKey),
-                    tone: quality.isBitExact ? Yun.Palette.success : Yun.Palette.warning)
-                if model.isClockLocked {
-                    statusDivider
-                    statusField(
-                        String(
-                            format: "%+.1f ppm", (model.measuredRateRatio - 1) * 1_000_000),
-                        tone: Yun.Palette.success)
-                }
-            }
-
-            if model.isRecording {
-                statusDivider
-                statusField(
-                    "\(loc("REC"))  \(Self.clock(model.recordingSeconds))",
-                    tone: Yun.Palette.danger)
-            }
-
-            Spacer(minLength: Yun.Space.md)
-
-            // Dropouts last, on the right, where a number that is normally zero
-            // can sit without drawing the eye until it is not.
-            if model.watchesIOAllocations && model.allocationViolations > 0 {
-                statusField(
-                    String(
-                        format: loc("%d IO allocations"), model.allocationViolations),
-                    tone: Yun.Palette.warning)
-            }
-            if let dropped = model.echoStatus?.dropped, dropped > 0 {
-                statusDivider
-                statusField(
-                    String(format: loc("%llu dropped"), dropped),
-                    tone: Yun.Palette.danger)
-            }
-            statusField(model.isDriverInstalled ? loc("YunAudio") : loc("no driver"))
-        }
-        .font(Yun.Text.mono)
-        .frame(height: 26)
-        .padding(.horizontal, Yun.Space.xl)
-        .background(statusBarBackground)
-        .overlay(alignment: .top) {
-            Rectangle().fill(Yun.Palette.borderHairline).frame(height: 1)
-        }
-    }
-
-    @ViewBuilder
-    private var statusBarBackground: some View {
-        if YunTheme.shared.style == .glass {
-            Rectangle().fill(.ultraThinMaterial)
-        } else {
-            Rectangle().fill(Yun.Palette.card)
-        }
-    }
-
-    private var lampColour: Color {
-        if model.isRecording { return Yun.Palette.danger }
-        return model.isRunning ? Yun.Palette.success : Yun.Palette.textMuted
-    }
-
-    private var statusWord: String {
-        if model.isBusy { return loc("Working") }
-        return loc(model.isRunning ? "Routing" : "Idle")
-    }
-
-    private func statusField(_ text: String, tone: Color? = nil) -> some View {
-        Text(text)
-            .foregroundStyle(tone ?? Yun.Palette.textTertiary)
-            .monospacedDigit()
-            .fixedSize()
-            .padding(.horizontal, Yun.Space.md)
-    }
-
-    private var statusDivider: some View {
-        Rectangle()
-            .fill(Yun.Palette.borderHairline)
-            .frame(width: 1, height: 12)
-    }
-
-    private static func clock(_ seconds: TimeInterval) -> String {
-        let whole = Int(seconds)
-        return String(format: "%02d:%02d", whole / 60, whole % 60)
     }
 
     private func sectionHeading(_ text: String) -> some View {

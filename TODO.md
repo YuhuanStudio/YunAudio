@@ -88,6 +88,21 @@ route. The graph is already published rather than mutated, so the machinery for
 swapping something in under a running IOProc exists — it is used for the routing
 matrix already.
 
+### Six English words are doing two jobs each [V, measured here]
+
+Deduplicating the string tables after a merge turned up eighteen keys written
+twice, and six of them with *different* translations — the last one silently
+wins, so one of the two meanings was showing the other's word:
+
+`Pitch` is both the effect stage and the musical quantity. `None` is both "no
+voice preset" and "nothing". `Record`, `off`, `High-pass` and `none captured`
+are the same shape of problem.
+
+Duplicates are now a failure in `check-strings.sh`, so no more can accumulate.
+What is left is disambiguating the six at their call sites — which means
+deciding what each one is actually naming, and that is a translation question
+rather than a code one.
+
 ### The interface has outgrown its own layout [proposal]
 
 Named directly: it is untidy now that there are enough features to be untidy.
