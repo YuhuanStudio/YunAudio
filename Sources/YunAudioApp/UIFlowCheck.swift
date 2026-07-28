@@ -2267,7 +2267,156 @@ enum UIFlowCheck {
                 && YunTheme.persisted().language == originalLanguage
                 && model.bufferFrames == originalBuffer)
 
+        await checkMIDI(model: model)
+
         summarise()
+    }
+
+    /// MIDI learn, both halves.
+    ///
+    /// The decoding, the takeover rule and the binding storage are asserted as
+    /// pure functions in the unit tests. What only this can show is that a
+    /// message arriving through CoreMIDI reaches the model and moves it.
+    ///
+    /// There is no controller on this machine — `MIDIGetNumberOfSources()`
+    /// reports zero — so a virtual source stands in for one. As far as the rest
+    /// of the system is concerned it is a source like any other: the
+    /// application's own client sees it appear, connects its input port to it
+    /// and receives from it by exactly the path a knob on a desk would take.
+    /// Without that, the client, the port, the reconnection and the decode of a
+    /// real `MIDIEventList` would only ever run on somebody else's machine.
+    private static func checkMIDI(model: RouterModel) async {
+        section("midi")
+        let midi = model.midiControl
+        note(
+            "CoreMIDI sources: \(midi.sourceNames.count)"
+                + (midi.sourceNames.isEmpty
+                    ? "" : " — " + midi.sourceNames.joined(separator: ", ")))
+        if let error = midi.startupError { note(error) }
+        check("the client and the input port opened", midi.startupError == nil)
+
+        // This is somebody's real preferences file.
+        let originalBindings = midi.storedBindings
+        let originalOutput = model.outputDecibels
+        let originalInput = model.inputDecibels
+        let originalMute = model.isInputMuted
+
+        let master = MIDITarget.fader(.master)
+        midi.forget(master)
+        midi.learningTarget = master
+        midi.receive(.cc(7, 100))
+        check(
+            "learn bound the control that moved",
+            midi.binding(for: master) == MIDIAddress(channel: 0, kind: .controlChange(7)))
+        check("and stopped listening once it had one", midi.learningTarget == nil)
+        check(
+            "the binding reached the preferences file",
+            PreferencesStore.load().midiBindings?[master.storageKey] == "0.cc.7")
+
+        // Soft takeover, against the real model rather than a stand-in for it.
+        model.outputDecibels = -6
+        midi.receive(.cc(7, 0))
+        check(
+            "a fader arriving at the bottom leaves the master where it was",
+            abs(model.outputDecibels + 6) < 0.01)
+        check("and the row still shows it as not in charge", !midi.isEngaged(master))
+        midi.receive(.cc(7, 127))
+        check(
+            "sweeping past the level takes the master over",
+            abs(model.outputDecibels - 12) < 0.01)
+        check("and the row says so", midi.isEngaged(master))
+        midi.receive(.cc(7, 64))
+        check(
+            "after which the master follows the knob to the decibel",
+            abs(model.outputDecibels + 13.7953) < 0.01)
+        note(String(format: "CC 64 is %.2f dB", model.outputDecibels))
+
+        // A pad, carried out through the same list the URL scheme answers to.
+        let mute = MIDITarget.command(url: RemoteCommand.mute(nil).url.absoluteString)
+        midi.bind(MIDIAddress(channel: 0, kind: .note(36)), to: mute)
+        model.isInputMuted = false
+        midi.receive(.note(36, velocity: 100))
+        check("a pad bound to mute mutes the microphone", model.isInputMuted)
+        midi.receive(.note(36, velocity: 0))
+        check("letting go of it does not unmute", model.isInputMuted)
+        midi.receive(.note(36, velocity: 100))
+        check("and pressing it again does", !model.isInputMuted)
+
+        midi.bind(MIDIAddress(channel: 0, kind: .note(36)), to: .fader(.input))
+        check(
+            "a control claimed for something else leaves its old row empty",
+            midi.binding(for: mute) == nil)
+
+        await checkMIDIThroughCoreMIDI(model: model)
+
+        midi.restore(originalBindings)
+        model.persistMIDIBindings()
+        model.outputDecibels = originalOutput
+        model.inputDecibels = originalInput
+        model.isInputMuted = originalMute
+        check("the bindings were put back", midi.storedBindings == originalBindings)
+    }
+
+    /// The half that only a real `MIDIEventList` can exercise.
+    private static func checkMIDIThroughCoreMIDI(model: RouterModel) async {
+        let midi = model.midiControl
+        guard let loopback = MIDILoopback(name: "YunAudio flow check") else {
+            note("no virtual source could be created; the CoreMIDI half was not exercised")
+            check("a virtual MIDI source could be created", false)
+            return
+        }
+        defer { loopback.tearDown() }
+
+        // A source that appeared after launch is the ordinary case: somebody
+        // plugs a controller in and then presses learn.
+        var appeared = false
+        for _ in 0..<40 where !appeared {
+            if midi.sourceNames.contains(loopback.name) {
+                appeared = true
+            } else {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        check("a source that appeared after launch was connected", appeared)
+        note("CoreMIDI sources now: \(midi.sourceNames.joined(separator: ", "))")
+
+        let input = MIDITarget.fader(.input)
+        midi.forget(input)
+        midi.learningTarget = input
+        check("the virtual source accepted a message", loopback.send(.cc(11, 20)) == noErr)
+        var learned = false
+        for _ in 0..<40 where !learned {
+            if midi.binding(for: input) != nil {
+                learned = true
+            } else {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        check("a message that travelled through CoreMIDI was learned", learned)
+        check(
+            "and it decoded as the control that sent it",
+            midi.binding(for: input) == MIDIAddress(channel: 0, kind: .controlChange(11)))
+
+        // And then moves the model. Sent one at a time with a pause: each
+        // packet arrives on CoreMIDI's thread and hops to the main actor, and
+        // two hops in flight at once have no guaranteed order between them.
+        model.inputDecibels = 0
+        loopback.send(.cc(11, 0))
+        try? await Task.sleep(for: .milliseconds(200))
+        check(
+            "a real message at the bottom of the travel does not slam the trim",
+            abs(model.inputDecibels) < 0.01)
+        loopback.send(.cc(11, 127))
+        var moved = false
+        for _ in 0..<40 where !moved {
+            if model.inputDecibels > 11 {
+                moved = true
+            } else {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        check("and one that sweeps past it moves the input trim", moved)
+        note(String(format: "input trim now %.2f dB", model.inputDecibels))
     }
 
     /// What the bottom of the window is actually showing.

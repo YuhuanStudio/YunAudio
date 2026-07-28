@@ -33,7 +33,7 @@ struct PreferencesWindow: View {
     }
 
     enum Section: String, CaseIterable, Identifiable {
-        case general, appearance, audio, shortcuts, diagnostics, about
+        case general, appearance, audio, shortcuts, midi, diagnostics, about
         var id: String { rawValue }
 
         var title: String {
@@ -42,6 +42,7 @@ struct PreferencesWindow: View {
             case .appearance: loc("Appearance")
             case .audio: loc("Audio")
             case .shortcuts: loc("Shortcuts")
+            case .midi: loc("MIDI control")
             case .diagnostics: loc("Diagnostics")
             case .about: loc("About")
             }
@@ -53,6 +54,7 @@ struct PreferencesWindow: View {
             case .appearance: "paintpalette"
             case .audio: "waveform"
             case .shortcuts: "command"
+            case .midi: "pianokeys"
             case .diagnostics: "waveform.path.ecg"
             case .about: "info.circle"
             }
@@ -125,6 +127,7 @@ struct PreferencesWindow: View {
         case .appearance: appearanceSection
         case .audio: audioSection
         case .shortcuts: shortcutsSection
+        case .midi: midiSection
         case .diagnostics: diagnosticsSection
         case .about: aboutSection
         }
@@ -492,6 +495,144 @@ struct PreferencesWindow: View {
                 }
             }
         }
+    }
+
+    // MARK: MIDI
+
+    /// Beside the shortcuts rather than under Audio, because this is the same
+    /// kind of thing a keyboard shortcut is: a way of reaching a control
+    /// without the window. The difference is that a fader has a position, which
+    /// is why every continuous row also says whether the hardware has taken
+    /// over yet.
+    private var midiSection: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.lg) {
+            heading(loc("Controller"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunDetailRow(
+                        loc("Connected"),
+                        value: model.midiControl.sourceNames.isEmpty
+                            ? loc("nothing") : midiSourceSummary,
+                        tone: model.midiControl.sourceNames.isEmpty ? .neutral : .success)
+                    // The one line that separates "nothing is bound" from
+                    // "nothing is arriving". Without it a controller sending on
+                    // a channel nobody is listening to looks exactly like a
+                    // controller that is not plugged in.
+                    YunDetailRow(loc("Last received"), value: midiLastMessage)
+                    if let error = model.midiControl.startupError {
+                        Text(error)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            heading(loc("Levels"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    ForEach(MIDITarget.Fader.allCases, id: \.self) { fader in
+                        midiRow(.fader(fader))
+                    }
+                }
+            }
+
+            heading(loc("Buttons"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    ForEach(RemoteCommand.bindable, id: \.url) { command in
+                        midiRow(.command(url: command.url.absoluteString))
+                    }
+                }
+            }
+
+            if !model.midiSourceTargets.isEmpty {
+                heading(loc("Sources"))
+                YunCard {
+                    VStack(alignment: .leading, spacing: Yun.Space.md) {
+                        ForEach(model.midiSourceTargets, id: \.uid) { source in
+                            Text(source.label)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                            ForEach(source.targets, id: \.self) { target in
+                                midiRow(target)
+                            }
+                        }
+                    }
+                }
+            }
+
+            Text(
+                loc(
+                    "Press Learn, then move the knob or hit the pad. A fader does nothing until it passes through the level already set, so picking one up cannot slam the signal."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// One row: what it drives, what it is bound to, and the two buttons.
+    private func midiRow(_ target: MIDITarget) -> some View {
+        let midi = model.midiControl
+        let isLearning = midi.learningTarget == target
+        let bound = midi.binding(for: target)
+        return HStack(spacing: Yun.Space.sm) {
+            Text(target.title)
+                .font(Yun.Text.body)
+                .foregroundStyle(Yun.Palette.textPrimary)
+                .lineLimit(1)
+            Spacer(minLength: Yun.Space.sm)
+
+            // Filled once the hardware has caught up with the software value.
+            // A hollow ring is the whole of soft takeover made visible: the
+            // knob is bound, it is being received, and it is deliberately not
+            // doing anything yet.
+            if bound != nil, target.isContinuous {
+                Circle()
+                    .fill(
+                        midi.isEngaged(target)
+                            ? Yun.Palette.accent : Color.clear
+                    )
+                    .overlay {
+                        Circle().strokeBorder(Yun.Palette.borderStrong, lineWidth: 1)
+                    }
+                    .frame(width: 7, height: 7)
+            }
+
+            Text(bound?.displayName ?? loc("unbound"))
+                .font(Yun.Text.mono)
+                .foregroundStyle(
+                    bound == nil ? Yun.Palette.textMuted : Yun.Palette.textSecondary
+                )
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Yun.Palette.elevated, in: .rect(cornerRadius: 6))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 6)
+                        .strokeBorder(Yun.Palette.border, lineWidth: 1)
+                }
+
+            Button(isLearning ? loc("Listening…") : loc("Learn")) {
+                midi.learningTarget = isLearning ? nil : target
+            }
+            .buttonStyle(YunButtonStyle(isLearning ? .primary : .secondary, small: true))
+
+            Button(loc("Clear")) { midi.forget(target) }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+                .disabled(bound == nil)
+                .opacity(bound == nil ? 0.35 : 1)
+        }
+    }
+
+    private var midiSourceSummary: String {
+        model.midiControl.sourceNames.joined(separator: " · ")
+    }
+
+    private var midiLastMessage: String {
+        guard let message = model.midiControl.lastMessage else { return loc("nothing yet") }
+        return message.address.displayName + " · \(message.value)"
     }
 
     // MARK: Diagnostics
