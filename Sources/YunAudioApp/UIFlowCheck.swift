@@ -850,7 +850,7 @@ enum UIFlowCheck {
         // indistinguishable from a quiet room until somebody speaks into it.
         model.isAnalysisVisible = true
         model.resetLoudness()
-        await pause(1.5)
+        await pause(upTo: 1.5, until: { model.analysis.duration > 0.5 })
         check("the analyser is receiving audio", model.analysis.duration > 0.5)
         note(
             String(
@@ -885,7 +885,10 @@ enum UIFlowCheck {
         if model.analysis.shortTerm.isFinite, model.analysis.shortTerm > -45 {
             let beforeCut = model.analysis.shortTerm
             model.outputDecibels = -20
-            await pause(3.5)
+            // Until the cut has actually shown up in the short-term reading.
+            // The check below is the one that decides whether it is enough of a
+            // cut; this only stops waiting once there is something to check.
+            await pause(upTo: 3.5, until: { model.analysis.shortTerm < beforeCut - 10 })
             note(
                 String(
                     format: "short-term %.1f → %.1f LUFS after a 20 dB cut",
@@ -906,7 +909,7 @@ enum UIFlowCheck {
 
         try section("what the on-device model hears")
         model.isAnalysisVisible = true
-        await pause(2.0)
+        await pause(upTo: 2.0, until: { !model.analysis.verdictLabel.isEmpty })
         // The classifier is what makes the levelling trustworthy, so the check
         // is that it is actually producing a verdict — not what the verdict is.
         // A quiet room says "quiet", and that is a correct answer.
@@ -1114,7 +1117,7 @@ enum UIFlowCheck {
         try section("automatic levelling")
         let trimBefore = model.inputDecibels
         model.isAutoLevelling = true
-        await pause(1.5)
+        await pause(upTo: 1.5, until: { model.isRunning && !model.isBusy })
         check("no rebuild was needed to engage it", model.isRunning && !model.isBusy)
         // In a quiet room it must hold still. That is the entire difference
         // between this and the AGC everybody switches off: with no speech there
@@ -1252,7 +1255,7 @@ enum UIFlowCheck {
         // ring found nothing and reported it as a lack of audio. The tracker is
         // one of the analyser's outputs now, which is where it belonged.
         model.isAnalysisVisible = true
-        await pause(1.5)
+        await pause(upTo: 1.5, until: { model.analysis.pitchHertz > 0 })
         let pitch = model.analysis.pitchHertz
         note(
             pitch > 0
@@ -1306,7 +1309,7 @@ enum UIFlowCheck {
         // answer rather than a failure — what is asserted is that the number is
         // real, not that it is large.
         model.setValue(-40, of: EffectKind.compressor.parameters[0], in: .compressor)
-        await pause(1.2)
+        await pause(upTo: 1.2, until: { (model.gainReduction[.compressor] ?? 0) > 0 })
         let reducing = model.gainReduction[.compressor] ?? -1
         note(String(format: "%.1f dB of reduction at a −40 dB threshold", reducing))
         check("the figure is a plausible amount", reducing >= 0 && reducing < 60)
@@ -1350,7 +1353,7 @@ enum UIFlowCheck {
         check("no error was reported", model.lastError == nil)
         let file = model.recordingURL
         check("a file was named", file != nil)
-        await pause(2.0)
+        await pause(upTo: 2.0, until: { model.recordingSeconds > 0.5 })
         check("the elapsed time is advancing", model.recordingSeconds > 0.5)
         // Pausing has to stop the clock as well as the writing, or the elapsed
         // time claims audio that is not in the file.
@@ -1403,7 +1406,18 @@ enum UIFlowCheck {
                 let title = Recorder.sanitised(model.routeTitle(route))
                 return title.isEmpty || url.lastPathComponent.contains(title)
             })
-        await pause(2.0)
+        // Until every stem has enough in it to assert on, rather than two
+        // seconds whichever way it goes. The size below is the real check.
+        await pause(
+            upTo: 2.0,
+            until: {
+                stems.allSatisfy { url in
+                    let size =
+                        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
+                        as? Int ?? 0
+                    return size > 100_000
+                }
+            })
         model.toggleRecording()
         await pause(0.6)
         for url in stems {
@@ -1577,7 +1591,7 @@ enum UIFlowCheck {
         // down and rebuild it three times for a single click.
         let cyclesBeforePreset = model.cycleCountForDiagnostics
         model.apply(.recording)
-        await pause(1.5)
+        await pause(upTo: 1.5, until: { model.isRunning && !model.isBusy })
         check("still running after a preset", model.isRunning)
         check("no error after a preset", model.lastError == nil)
         check("audio came back", model.cycleCountForDiagnostics > cyclesBeforePreset)
@@ -2044,7 +2058,7 @@ enum UIFlowCheck {
                 check("it does not claim to be bit-exact", !quality.isBitExact)
                 check("and it names the mismatch", quality.hasSampleRateMismatch)
             }
-            await pause(1.0)
+            await pause(upTo: 1.0, until: { model.cycleCountForDiagnostics > 0 })
             check("audio is flowing", model.cycleCountForDiagnostics > 0)
             model.selectedDestinationUID = previous
             await waitUntil("and it went back", { model.isRunning }, timeout: 15)
@@ -2191,7 +2205,7 @@ enum UIFlowCheck {
         // The key of what is playing, and how far it would have to move. The
         // profile match is unit-tested against synthesised chromas; what only
         // this can show is that a real spectrum reaches it at all.
-        await pause(2.0)
+        await pause(upTo: 2.0, until: { model.songKey != nil })
         if let key = model.songKey {
             note(
                 String(
@@ -2593,7 +2607,9 @@ enum UIFlowCheck {
             await waitUntil("and came up on it", { model.isRunning }, timeout: 8)
 
             decoy.destroy()
-            await pause(2.0)
+            // Until the router has noticed and moved, rather than two seconds
+            // whatever happens. What is asserted is where it ended up.
+            await pause(upTo: 2.0, until: { model.selectedDestinationUID != decoy.uid })
             check("it did not stop", model.isRunning)
             check("it moved to another output", model.selectedDestinationUID != decoy.uid)
             check("and remembers what it was forced off", model.displacedDestinationUID != nil)
@@ -2911,7 +2927,7 @@ enum UIFlowCheck {
 
         model.isSingingVisible = true
         model.isScoringSinging = true
-        await pause(1.0)
+        await pause(upTo: 1.0, until: { model.isScoringSinging })
         check("scoring started", model.isScoringSinging)
         if let problem = model.singingError { note(problem) }
         check("one singer per source", model.singers.count == model.sourceGroups.count)
@@ -3005,7 +3021,10 @@ enum UIFlowCheck {
         // in the room a moment ago.
         model.isSingingVisible = false
         model.isSingingVisible = true
-        await pause(8.0)
+        // Until the detector has an answer it is confident about, rather than
+        // eight seconds regardless. Eight is what a cold chroma needs in the
+        // worst case; a warm one is usually done in two.
+        await pause(upTo: 8.0, until: { (model.songKey?.confidence ?? 0) > 0.15 })
 
         if let key = model.songKey {
             note(
@@ -4030,6 +4049,34 @@ enum UIFlowCheck {
 
     private static func size(of url: URL) -> Int {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int ?? 0
+    }
+
+    /// Waits for something observable rather than for a number of seconds.
+    ///
+    /// Seventy-six fixed pauses add up to seventy-two seconds of the run, which
+    /// is a third of it and none of it device work — it is waiting and hoping.
+    /// Each one is sized for the worst case, because a pause that is sometimes
+    /// too short is a check that sometimes fails for no reason, and that is
+    /// worse than a slow one. So they were all sized generously and every run
+    /// paid the worst case.
+    ///
+    /// This costs what the thing actually takes, with the old fixed pause as
+    /// the ceiling. Unlike `waitUntil` it does not assert: a fixed pause never
+    /// failed either, and the assertion that follows it is the real check. Its
+    /// job is only to stop waiting once there is nothing left to wait for.
+    ///
+    /// Not every pause can become one of these. Two of them are measurement
+    /// windows — "how much audio did the analyser count in two seconds of wall
+    /// clock", "what does one poll cost averaged over four seconds" — and a
+    /// window that ends early measures something else. Those stay.
+    private static func pause(
+        upTo seconds: TimeInterval, until condition: () -> Bool
+    ) async {
+        let ceiling = inWantedSection ? seconds : min(seconds, 0.05)
+        let deadline = Date().addingTimeInterval(ceiling)
+        while Date() < deadline, !condition() {
+            try? await Task.sleep(for: .milliseconds(50))
+        }
     }
 
     private static func pause(_ seconds: TimeInterval) async {

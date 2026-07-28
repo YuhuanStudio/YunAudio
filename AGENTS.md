@@ -167,7 +167,7 @@ reaching for the expensive check:
 | `swift build`, nothing changed | ~2 s |
 | `swift build` after one leaf file | ~7 s |
 | `swift test`, all of it | ~6 s |
-| `./App/build-app.sh` | ~20 s |
+| `./App/build-app.sh` after a change | ~7 s |
 | the whole flow check | **~225 s, and it takes the hardware** |
 
 A change to pure logic is answered by `swift test` in six seconds. Reach for the
