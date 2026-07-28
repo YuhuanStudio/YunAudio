@@ -6,6 +6,10 @@ how to work on it without breaking the things that are hard to notice breaking.
 
 Read this first. Most of it exists because something already went wrong.
 
+`TODO.md` is the other half: what is worth working on next, what has already
+been settled and should not be retried, and where each of those conclusions came
+from. Read it before deciding what to do; read this before doing it.
+
 ## The one thing to understand before anything else
 
 **Audio bugs do not look like bugs.** A router that silently resamples still

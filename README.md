@@ -485,6 +485,10 @@ with it.
 
 ## Contributing
 
+**[TODO.md](TODO.md)** is what is worth doing next, with the evidence for each
+item and the confidence it deserves — and, just as usefully, the things already
+measured and ruled out.
+
 **[AGENTS.md](AGENTS.md)** is the working agreement: what the invariants are,
 what needs a human, how the four interface checks differ, and which dead ends
 have already been measured and are not worth retrying. Read it before changing

@@ -23,4 +23,5 @@ The short version, none of which is a substitute for reading it:
   Chinese.**
 
 `README.md` is for people evaluating or using the project; `AGENTS.md` is for
-people changing it.
+people changing it; **[TODO.md](TODO.md)** is what to change next and what has
+already been ruled out.
