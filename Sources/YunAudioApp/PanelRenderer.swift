@@ -72,6 +72,14 @@ enum PanelRenderer {
         }
     }
 
+    /// Set when anything could not be written, so the process can exit
+    /// non-zero. A verification tool that reports success while producing
+    /// nothing is worse than one that is missing.
+    private nonisolated(unsafe) static var failed = false
+
+    /// False when any file could not be written.
+    static var wroteEverything: Bool { !failed }
+
     private static func render(
         _ view: some View, basename: String, directory: String, size: CGSize? = nil
     ) {
@@ -105,8 +113,22 @@ enum PanelRenderer {
                 continue
             }
             let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
-            try? png.write(to: url)
-            print("wrote \(url.path)")
+            // Both halves of this were wrong, and together they were worse than
+            // either. The directory was never created, so pointing
+            // YUNAUDIO_RENDER at somewhere that does not exist wrote nothing —
+            // and `try?` swallowed every failure while the line below announced
+            // success for each of them. Eighteen "wrote …" lines and an empty
+            // directory is the least helpful output a tool can produce.
+            do {
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try png.write(to: url)
+                print("wrote \(url.path)")
+            } catch {
+                FileHandle.standardError.write(
+                    Data("could not write \(url.path): \(error.localizedDescription)\n".utf8))
+                failed = true
+            }
         }
     }
 

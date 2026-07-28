@@ -127,7 +127,9 @@ struct YunAudioApp: App {
             MainActor.assumeIsolated {
                 PanelRenderer.write(to: directory, model: RouterModel())
             }
-            exit(0)
+            // Non-zero when anything could not be written. A design check whose
+            // output is missing must not look like one that passed.
+            exit(MainActor.assumeIsolated { PanelRenderer.wroteEverything } ? 0 : 1)
         }
     }
 
