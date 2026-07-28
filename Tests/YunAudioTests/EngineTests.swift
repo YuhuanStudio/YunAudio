@@ -4730,3 +4730,680 @@ struct KeyDetectorTests {
         #expect(bins.reduce(0, +) == 0)
     }
 }
+
+// MARK: - Melody files
+
+/// A Standard MIDI File written by hand, so a parse can be asserted against
+/// bytes somebody chose rather than against a file nobody can read.
+///
+/// Every one of these is built from the format's own primitives — variable
+/// length deltas, running status, a tempo map — because those are exactly the
+/// parts that look like they work. A parser that ignores tempo changes reads a
+/// file perfectly and puts the last verse ten seconds from where it is sung.
+struct SMFWriter {
+
+    /// Seven bits a byte, high bit set on every byte but the last.
+    static func variableLength(_ value: Int) -> [UInt8] {
+        var buffer = [UInt8(value & 0x7F)]
+        var rest = value >> 7
+        while rest > 0 {
+            buffer.insert(UInt8(rest & 0x7F | 0x80), at: 0)
+            rest >>= 7
+        }
+        return buffer
+    }
+
+    static func big32(_ value: Int) -> [UInt8] {
+        [
+            UInt8(value >> 24 & 0xFF), UInt8(value >> 16 & 0xFF),
+            UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF),
+        ]
+    }
+
+    static func big16(_ value: Int) -> [UInt8] {
+        [UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
+    }
+
+    /// Wraps events — each a delta and its bytes — in an `MTrk`, ending it the
+    /// way the format requires.
+    static func track(_ events: [(delta: Int, bytes: [UInt8])]) -> [UInt8] {
+        var body: [UInt8] = []
+        for event in events {
+            body += variableLength(event.delta)
+            body += event.bytes
+        }
+        body += variableLength(0) + [0xFF, 0x2F, 0x00]
+        return Array("MTrk".utf8) + big32(body.count) + body
+    }
+
+    static func file(division: Int, tracks: [[UInt8]]) -> Data {
+        var bytes = Array("MThd".utf8) + big32(6) + big16(tracks.count > 1 ? 1 : 0)
+        bytes += big16(tracks.count) + big16(division)
+        for track in tracks { bytes += track }
+        return Data(bytes)
+    }
+
+    static func name(_ text: String) -> [UInt8] {
+        let raw = Array(text.utf8)
+        return [0xFF, 0x03, UInt8(raw.count)] + raw
+    }
+
+    /// Microseconds per quarter note.
+    static func tempo(_ microseconds: Int) -> [UInt8] {
+        [
+            0xFF, 0x51, 0x03, UInt8(microseconds >> 16 & 0xFF),
+            UInt8(microseconds >> 8 & 0xFF), UInt8(microseconds & 0xFF),
+        ]
+    }
+
+    static func noteOn(_ note: Int, channel: Int = 0, velocity: Int = 100) -> [UInt8] {
+        [UInt8(0x90 | channel), UInt8(note), UInt8(velocity)]
+    }
+
+    static func noteOff(_ note: Int, channel: Int = 0) -> [UInt8] {
+        [UInt8(0x80 | channel), UInt8(note), 0]
+    }
+}
+
+@Suite("Melody files")
+struct MidiMelodyTests {
+
+    /// 480 ticks a quarter at 120 bpm is half a second a quarter, so a note a
+    /// quarter long is 0.5 s. Every timing below is that arithmetic.
+    @Test("a note lands where the tempo puts it")
+    func notesAreTimed() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.tempo(500_000)),
+                    (0, SMFWriter.noteOn(60)),
+                    (480, SMFWriter.noteOff(60)),
+                    (0, SMFWriter.noteOn(64)),
+                    (960, SMFWriter.noteOff(64)),
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.notes.count == 2)
+        #expect(melody.notes[0].midi == 60)
+        #expect(abs(melody.notes[0].start - 0) < 1e-9)
+        #expect(abs(melody.notes[0].end - 0.5) < 1e-9)
+        #expect(melody.notes[1].midi == 64)
+        #expect(abs(melody.notes[1].start - 0.5) < 1e-9)
+        #expect(abs(melody.notes[1].end - 1.5) < 1e-9)
+    }
+
+    /// Tempo is a map, not a number. A parser that reads only the first one
+    /// gets every note before the change exactly right, which is what makes it
+    /// hard to notice.
+    @Test("a tempo change moves everything after it and nothing before it")
+    func tempoChangesApply() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.tempo(500_000)),  // 120 bpm
+                    (0, SMFWriter.noteOn(60)),
+                    (480, SMFWriter.noteOff(60)),
+                    (0, SMFWriter.tempo(1_000_000)),  // 60 bpm, so twice as slow
+                    (0, SMFWriter.noteOn(62)),
+                    (480, SMFWriter.noteOff(62)),
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(abs(melody.notes[0].end - 0.5) < 1e-9)
+        // The second quarter now takes a whole second rather than half of one.
+        #expect(abs(melody.notes[1].start - 0.5) < 1e-9)
+        #expect(abs(melody.notes[1].end - 1.5) < 1e-9)
+    }
+
+    /// The default is 120 bpm, which is what the standard says to assume, not
+    /// zero and not whatever the first tempo event happens to say.
+    @Test("a file with no tempo event is 120 bpm")
+    func defaultTempo() throws {
+        let data = SMFWriter.file(
+            division: 96,
+            tracks: [
+                SMFWriter.track([(0, SMFWriter.noteOn(60)), (96, SMFWriter.noteOff(60))])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(abs(melody.notes[0].end - 0.5) < 1e-9)
+    }
+
+    /// Running status is not an optimisation somebody might have used; it is
+    /// what every sequencer emits. A parser without it reads the first note and
+    /// then garbage.
+    @Test("running status is understood")
+    func runningStatus() throws {
+        // One 0x90 status byte, then three note-on pairs with no status of
+        // their own — two with velocity zero, which is a note off.
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(60)),
+                    (480, [60, 0]),
+                    (0, [67, 100]),
+                    (480, [67, 0]),
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.notes.count == 2)
+        #expect(melody.notes.map(\.midi) == [60, 67])
+        #expect(abs(melody.notes[1].start - 0.5) < 1e-9)
+        #expect(abs(melody.notes[1].end - 1.0) < 1e-9)
+    }
+
+    /// A drum kit has no melody however high its note numbers read, and it is
+    /// on channel 10 by a convention every file follows.
+    @Test("percussion is not a tune")
+    func percussionIsExcluded() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(60)),
+                    (0, SMFWriter.noteOn(100, channel: 9)),
+                    (480, SMFWriter.noteOff(60)),
+                    (0, SMFWriter.noteOff(100, channel: 9)),
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.notes.count == 1)
+        #expect(melody.notes[0].midi == 60)
+        // And the tune is not the cymbal, which would be the top note.
+        #expect(melody.melody.map(\.midi) == [60])
+    }
+
+    /// The whole point of the reduction: an arrangement is several parts at
+    /// once and a singer sings one of them.
+    @Test("the tune is the top line")
+    func skylinePicksTheTop() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                // A bass line under a melody, both sounding throughout.
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(36)),
+                    (960, SMFWriter.noteOff(36)),
+                    (0, SMFWriter.noteOn(38)),
+                    (960, SMFWriter.noteOff(38)),
+                ]),
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(72)),
+                    (480, SMFWriter.noteOff(72)),
+                    (0, SMFWriter.noteOn(74)),
+                    (480, SMFWriter.noteOff(74)),
+                    (0, SMFWriter.noteOn(76)),
+                    (960, SMFWriter.noteOff(76)),
+                ]),
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.notes.count == 5)
+        #expect(melody.melody.map(\.midi) == [72, 74, 76])
+        #expect(abs(melody.duration - 2.0) < 1e-9)
+    }
+
+    /// A name is a statement of intent from whoever made the file, and nothing
+    /// inferred beats it — here the named vocal line is deliberately *below*
+    /// the accompaniment, so the skyline alone would get it wrong.
+    @Test("a track that says it is the voice wins over the top line")
+    func namedVocalTrackWins() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.name("Piano")),
+                    (0, SMFWriter.noteOn(84)),
+                    (960, SMFWriter.noteOff(84)),
+                ]),
+                SMFWriter.track([
+                    (0, SMFWriter.name("Lead Vocal")),
+                    (0, SMFWriter.noteOn(60)),
+                    (480, SMFWriter.noteOff(60)),
+                    (0, SMFWriter.noteOn(62)),
+                    (480, SMFWriter.noteOff(62)),
+                ]),
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.trackNames == ["Piano", "Lead Vocal"])
+        #expect(melody.melody.map(\.midi) == [60, 62])
+    }
+
+    /// A held note split by something happening underneath it is one note, not
+    /// two.
+    @Test("a note held under a changing accompaniment stays one note")
+    func heldNotesMerge() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(72)),
+                    (240, SMFWriter.noteOn(48)),
+                    (240, SMFWriter.noteOff(48)),
+                    (480, SMFWriter.noteOff(72)),
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.melody.count == 1)
+        #expect(melody.melody[0].midi == 72)
+        #expect(abs(melody.melody[0].duration - 1.0) < 1e-9)
+    }
+
+    /// A file somebody downloaded is somebody else's output and truncation is
+    /// the ordinary failure. It has to come back nil rather than trap.
+    @Test("what is not a MIDI file is refused rather than guessed at")
+    func refusesRubbish() {
+        #expect(MidiMelody.parse(Data()) == nil)
+        #expect(MidiMelody.parse(Data("not a midi file at all".utf8)) == nil)
+        let good = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([(0, SMFWriter.noteOn(60)), (480, SMFWriter.noteOff(60))])
+            ])
+        // Every truncation of a real file. None of them may trap.
+        for length in 1..<good.count {
+            _ = MidiMelody.parse(good.prefix(length))
+        }
+        #expect(MidiMelody.parse(good.prefix(good.count - 4)) == nil)
+    }
+
+    /// A file that parses and holds nothing is a different answer from a file
+    /// that is not a MIDI file, and the interface says different things about
+    /// them.
+    @Test("an empty but valid file is an empty melody, not a refusal")
+    func emptyIsNotNil() throws {
+        let data = SMFWriter.file(division: 480, tracks: [SMFWriter.track([])])
+        let melody = try #require(MidiMelody.parse(data))
+        #expect(melody.notes.isEmpty)
+        #expect(melody.melody.isEmpty)
+        #expect(melody.duration == 0)
+    }
+
+    @Test("sampling the melody skips the rests")
+    func samplingSkipsRests() throws {
+        let data = SMFWriter.file(
+            division: 480,
+            tracks: [
+                SMFWriter.track([
+                    (0, SMFWriter.noteOn(60)),
+                    (480, SMFWriter.noteOff(60)),  // 0 to 0.5 s
+                    (960, SMFWriter.noteOn(62)),  // a whole rest
+                    (480, SMFWriter.noteOff(62)),  // 1.5 to 2.0 s
+                ])
+            ])
+        let melody = try #require(MidiMelody.parse(data))
+        let samples = melody.samples(every: 0.1)
+        // Five in each note and none in the second between them.
+        #expect(samples.count == 10)
+        #expect(samples.allSatisfy { $0.time < 0.5 || $0.time >= 1.5 })
+        #expect(melody.midi(at: 0.25) == 60)
+        #expect(melody.midi(at: 1.0) == nil)
+        #expect(melody.midi(at: 1.75) == 62)
+        #expect(melody.midi(at: 99) == nil)
+    }
+}
+
+// MARK: - Karaoke scoring
+
+/// How much of the tune somebody sang.
+///
+/// A pure function of two series, which is the only reason any of this can be
+/// asserted at all: the failure mode of a scorer is not a crash but eighty-seven
+/// per cent for a performance that was nothing of the kind, and that looks
+/// exactly like a correct answer.
+@Suite("Karaoke scoring")
+struct KaraokeScoreTests {
+
+    /// A steady reference: one note, sampled every 50 ms.
+    private func reference(midi: Double = 60, seconds: Double = 10) -> [PitchSample] {
+        stride(from: 0.0, to: seconds, by: 0.05).map { PitchSample(time: $0, midi: midi) }
+    }
+
+    /// A singer over the same span, offset from the tune by a fixed amount.
+    /// Sampled at the pitch tracker's own rate, which is what the live path
+    /// produces and is deliberately not the reference's rate.
+    private func singer(
+        offBy semitones: Double, midi: Double = 60, seconds: Double = 10, from: Double = 0
+    ) -> [PitchSample] {
+        stride(from: from, to: seconds, by: 2048.0 / 48000).map {
+            PitchSample(time: $0, midi: midi + semitones)
+        }
+    }
+
+    @Test("singing it exactly is a hundred")
+    func perfect() {
+        let score = KaraokeScore.score(sung: singer(offBy: 0), reference: reference())
+        #expect(abs(score.percentage - 100) < 0.001)
+        #expect(score.silentSeconds == 0)
+        #expect(abs(score.referenceSeconds - 10) < 0.06)
+        #expect(abs((score.meanErrorSemitones ?? 9) - 0) < 1e-9)
+    }
+
+    @Test("singing nothing is nothing")
+    func silence() {
+        let score = KaraokeScore.score(sung: [], reference: reference())
+        #expect(score.percentage == 0)
+        #expect(abs(score.silentSeconds - score.referenceSeconds) < 1e-9)
+        #expect(score.meanErrorSemitones == nil)
+        #expect(score.sungSeconds == 0)
+    }
+
+    /// The thresholds, either side of each. These are the numbers the whole
+    /// feature rests on, so they are asserted rather than trusted.
+    @Test("a semitone out is still on the note, and a tone out is not")
+    func thresholds() {
+        // Just inside "on".
+        #expect(
+            KaraokeScore.score(sung: singer(offBy: 0.99), reference: reference()).percentage
+                > 99.9)
+        // Between the two: half credit.
+        let near = KaraokeScore.score(sung: singer(offBy: 1.4), reference: reference())
+        #expect(abs(near.percentage - 50) < 0.5)
+        #expect(near.onPitchSeconds == 0)
+        #expect(near.nearPitchSeconds > 9)
+        // Past both: nothing, even though a pitch was produced the whole time.
+        let wrong = KaraokeScore.score(sung: singer(offBy: 2), reference: reference())
+        #expect(wrong.percentage < 0.5)
+        #expect(wrong.silentSeconds == 0)
+        #expect(wrong.sungSeconds > 9)
+        // Singing badly is not the same as not singing, and neither of them
+        // shrinks the tune: the denominator is ten seconds whatever happened.
+        #expect(abs(wrong.referenceSeconds - 10) < 0.06)
+    }
+
+    /// Flat is a different thing from bad, and the sign is what says which.
+    @Test("the mean error keeps its sign")
+    func meanErrorIsSigned() {
+        let flat = KaraokeScore.score(sung: singer(offBy: -0.4), reference: reference())
+        #expect((flat.meanErrorSemitones ?? 0) < -0.39)
+        let sharp = KaraokeScore.score(sung: singer(offBy: 0.4), reference: reference())
+        #expect((sharp.meanErrorSemitones ?? 0) > 0.39)
+    }
+
+    /// Every karaoke machine ever built forgives the octave, because a man
+    /// singing a melody written for a soprano sings it an octave down and he is
+    /// singing the tune.
+    @Test("an octave down is the same note")
+    func octavesAreForgiven() {
+        let score = KaraokeScore.score(sung: singer(offBy: -12), reference: reference())
+        #expect(abs(score.percentage - 100) < 0.001)
+        #expect(abs(KaraokeScore.semitoneError(sung: 48, reference: 60)) < 1e-9)
+        #expect(abs(KaraokeScore.semitoneError(sung: 84, reference: 60)) < 1e-9)
+        // And it takes the shorter way round, so eight semitones up reads as
+        // four down.
+        #expect(abs(KaraokeScore.semitoneError(sung: 65, reference: 60) - 5) < 1e-9)
+        #expect(abs(KaraokeScore.semitoneError(sung: 68, reference: 60) + 4) < 1e-9)
+    }
+
+    /// The denominator is the tune, not the performance. Measured the other way
+    /// round, somebody could score a hundred by singing one note perfectly and
+    /// then stopping — which is the single most likely way to get this wrong.
+    @Test("singing one note of ten and stopping is not a hundred")
+    func theDenominatorIsTheTune() {
+        let score = KaraokeScore.score(
+            sung: singer(offBy: 0, seconds: 1), reference: reference(seconds: 10))
+        #expect(score.percentage > 5)
+        #expect(score.percentage < 15)
+        #expect(score.silentSeconds > 8.5)
+    }
+
+    /// And a singer producing samples twice as fast cannot earn twice the
+    /// credit, which is the same bug pointing the other way.
+    @Test("a faster tracker does not score higher")
+    func sampleRateDoesNotChangeTheScore() {
+        let slow = stride(from: 0.0, to: 10, by: 0.05).map { PitchSample(time: $0, midi: 60) }
+        let fast = stride(from: 0.0, to: 10, by: 0.02).map { PitchSample(time: $0, midi: 60) }
+        let a = KaraokeScore.score(sung: slow, reference: reference())
+        let b = KaraokeScore.score(sung: fast, reference: reference())
+        #expect(abs(a.percentage - b.percentage) < 0.001)
+    }
+
+    /// A rest is not something to be wrong about. A reference series with a gap
+    /// in it must not charge the singer for the gap, or a song with an
+    /// instrumental break would be unscoreable.
+    @Test("a rest costs nothing")
+    func restsAreFree() {
+        let first = stride(from: 0.0, to: 2.0, by: 0.05).map {
+            PitchSample(time: $0, midi: 60)
+        }
+        let second = stride(from: 30.0, to: 32.0, by: 0.05).map {
+            PitchSample(time: $0, midi: 60)
+        }
+        let sung =
+            stride(from: 0.0, to: 2.0, by: 2048.0 / 48000).map {
+                PitchSample(time: $0, midi: 60)
+            }
+            + stride(from: 30.0, to: 32.0, by: 2048.0 / 48000).map {
+                PitchSample(time: $0, midi: 60)
+            }
+        let score = KaraokeScore.score(sung: sung, reference: first + second)
+        #expect(abs(score.percentage - 100) < 0.001)
+        // Four seconds of tune, not thirty-two.
+        #expect(abs(score.referenceSeconds - 4) < 0.06)
+    }
+
+    /// The per-line breakdown is the half a singer can act on: a total says how
+    /// it went, a line says where it went wrong.
+    @Test("each line is scored on its own")
+    func perLine() {
+        let lines = [
+            Lyrics.Line(time: 0, text: "first"),
+            Lyrics.Line(time: 5, text: "second"),
+        ]
+        // Right for the first five seconds, a tone and a half out for the last.
+        let sung = singer(offBy: 0, seconds: 5) + singer(offBy: 3, seconds: 10, from: 5)
+        let score = KaraokeScore.score(sung: sung, reference: reference(), lyrics: lines)
+        #expect(score.lines.count == 2)
+        #expect(score.lines[0].text == "first")
+        #expect(score.lines[0].percentage > 99)
+        #expect(score.lines[1].percentage < 1)
+        #expect(abs(score.lines[0].referenceSeconds - 5) < 0.06)
+        #expect(abs(score.lines[1].referenceSeconds - 5) < 0.06)
+        // And the total is the two of them together. This is the assertion that
+        // found the one real bug in the scorer: the denominator was rebuilt by
+        // adding up on, near and silent, and a moment that was sung badly is in
+        // none of those — so a performance that was half right and half a tone
+        // and a half out came back as a hundred per cent.
+        #expect(abs(score.percentage - 50) < 1)
+    }
+
+    /// Tune before the first line — an introduction — still counts towards the
+    /// total, and belongs to no line.
+    @Test("an introduction counts towards the total and towards no line")
+    func introductionIsInTheTotalOnly() {
+        let lines = [Lyrics.Line(time: 5, text: "the only line")]
+        let score = KaraokeScore.score(
+            sung: singer(offBy: 0, seconds: 10), reference: reference(), lyrics: lines)
+        #expect(score.lines.count == 1)
+        #expect(abs(score.lines[0].referenceSeconds - 5) < 0.06)
+        #expect(abs(score.referenceSeconds - 10) < 0.06)
+    }
+
+    /// Below a bar of music the number swings by tens of points a note, and
+    /// showing it would be showing noise with a decimal point on it.
+    @Test("too little to judge says so")
+    func tooShortToJudge() {
+        let brief = stride(from: 0.0, to: 1.0, by: 0.05).map {
+            PitchSample(time: $0, midi: 60)
+        }
+        #expect(KaraokeScore.score(sung: [], reference: brief).isMeaningful == false)
+        #expect(KaraokeScore.score(sung: [], reference: reference()).isMeaningful)
+        #expect(KaraokeScore.none.isMeaningful == false)
+        #expect(KaraokeScore.none.percentage == 0)
+    }
+
+    /// A singer whose samples fall a frame away from the reference moments
+    /// still counts — otherwise the score would depend on where the tracker's
+    /// frame boundaries happened to land — and one two hundred milliseconds
+    /// away does not, because that is a different note.
+    @Test("the pairing window is one tracker frame, not zero and not a second")
+    func pairingWindow() {
+        // Two moments, because one sample has no gap to take a median of.
+        let reference = [
+            PitchSample(time: 1.0, midi: 60), PitchSample(time: 1.05, midi: 60),
+        ]
+        let close = [PitchSample(time: 1.05, midi: 60)]
+        let far = [PitchSample(time: 1.3, midi: 60)]
+        #expect(KaraokeScore.score(sung: close, reference: reference).onPitchSeconds > 0)
+        #expect(KaraokeScore.score(sung: far, reference: reference).onPitchSeconds == 0)
+        #expect(KaraokeScore.score(sung: far, reference: reference).silentSeconds > 0)
+    }
+
+    /// The series arrive from a ring drained on a timer, so "already sorted" is
+    /// an assumption rather than a guarantee.
+    @Test("samples out of order are put back in order rather than believed")
+    func unsortedInput() {
+        let ordered = reference(seconds: 3)
+        let score = KaraokeScore.score(
+            sung: singer(offBy: 0, seconds: 3).reversed(), reference: ordered.reversed())
+        #expect(abs(score.percentage - 100) < 0.001)
+    }
+}
+
+// MARK: - Following a singer off one source
+
+/// A duet is two microphones, two colours and two scores, and it is structurally
+/// free: the sources were never mixed, so each already has its own ring. What
+/// was not free is that the pitch tracker existed once, on the mixed analysis
+/// tap — a score off that would be the two singers averaged.
+@Suite("Following a singer")
+struct SingerPitchTests {
+
+    private func tone(hertz: Double, seconds: Double, sampleRate: Double = 48000) -> [Float] {
+        (0..<Int(seconds * sampleRate)).map {
+            Float(0.5 * sin(2 * .pi * hertz * Double($0) / sampleRate))
+        }
+    }
+
+    /// A440 is MIDI 69 by definition, so this is the one measurement in the
+    /// whole path with no tolerance to argue about.
+    @Test("a tone comes back as its own note")
+    func findsTheNote() throws {
+        let singer = try #require(SingerPitch(sampleRate: 48000))
+        singer.reset(at: 0)
+        singer.add(tone(hertz: 220, seconds: 1))
+        #expect(!singer.samples.isEmpty)
+        let mean = singer.samples.reduce(0) { $0 + $1.midi } / Double(singer.samples.count)
+        #expect(abs(mean - 57) < 0.2)  // A3
+        #expect(abs(Double(singer.hertz) - 220) < 2)
+    }
+
+    /// The clock is the audio, not the player: an Apple event round trip is
+    /// tens of milliseconds and irregular, and the pairing window is sixty.
+    @Test("the clock is anchored where the song was and counts frames from there")
+    func clockIsAnchored() throws {
+        let singer = try #require(SingerPitch(sampleRate: 48000))
+        singer.reset(at: 30)
+        singer.add(tone(hertz: 220, seconds: 1))
+        #expect(singer.samples.first.map { $0.time >= 30 } == true)
+        // Twenty-three frames of 2048 fit in a second at 48 kHz.
+        #expect(abs(singer.elapsed - 30.98) < 0.05)
+        #expect(singer.samples.last.map { $0.time < 31 } == true)
+        singer.reset(at: 0)
+        #expect(singer.samples.isEmpty)
+        #expect(singer.elapsed == 0)
+    }
+
+    /// Silence is not a note. A tracker that reported one would fill the score
+    /// with credit for a room.
+    @Test("silence produces no samples at all")
+    func silenceIsNotSung() throws {
+        let singer = try #require(SingerPitch(sampleRate: 48000))
+        singer.reset(at: 0)
+        singer.add([Float](repeating: 0, count: 48000))
+        #expect(singer.samples.isEmpty)
+        #expect(singer.hertz == 0)
+        #expect(singer.comfortableMidi == nil)
+        // But the clock still ran, or a rest would shift everything after it.
+        #expect(singer.elapsed > 0.9)
+    }
+
+    /// Two singers on two rings is the whole of duet mode, and what has to be
+    /// true is that neither is the other.
+    @Test("two singers on two taps are two different answers")
+    func twoSingersAreSeparate() throws {
+        let low = try #require(SingerPitch(sampleRate: 48000))
+        let high = try #require(SingerPitch(sampleRate: 48000))
+        low.reset(at: 0)
+        high.reset(at: 0)
+        low.add(tone(hertz: 110, seconds: 1))
+        high.add(tone(hertz: 330, seconds: 1))
+        let lowMidi = try #require(low.comfortableMidi)
+        let highMidi = try #require(high.comfortableMidi)
+        #expect(abs(lowMidi - 45) < 0.3)  // A2
+        #expect(abs(highMidi - 64) < 0.3)  // E4
+        #expect(highMidi - lowMidi > 18)
+    }
+}
+
+// MARK: - The key of real audio
+
+/// The profile match was tested against synthesised chromas, which checks the
+/// arithmetic and nothing else. This is the other half: real samples, through
+/// the same FFT the application runs, into the same chroma, and out as a key.
+///
+/// A chord progression rather than a scale, because a scale has no mode — every
+/// note of C major is a note of A minor, and what decides between them is which
+/// chords are used and for how long.
+@Suite("The key of real audio")
+struct KeyFromAudioTests {
+
+    /// I – IV – V – I, three times, as pure tones.
+    ///
+    /// The union of those three chords is the whole diatonic scale, and the
+    /// tonic triad appears twice, which is the shape the key profiles are built
+    /// to find. Voiced from MIDI 72 upwards rather than down where a bass
+    /// singer lives, for a reason worth writing down: a 2048-point transform at
+    /// 48 kHz is 23.4 Hz a bin, and a semitone at 130 Hz is 7.8 Hz — three
+    /// notes to a bin. The chroma cannot separate them down there, and a test
+    /// voiced there would be measuring that rather than the key.
+    private func progression(tonic: Int, sampleRate: Double = 48000) -> [Float] {
+        let chords = [0, 5, 7, 0].map { degree in
+            [degree, degree + 4, degree + 7, degree + 12].map { 72 + tonic + $0 }
+        }
+        var samples: [Float] = []
+        var phase = 0
+        for _ in 0..<3 {
+            for chord in chords {
+                let frames = Int(sampleRate)  // one second a chord
+                for index in 0..<frames {
+                    let time = Double(phase + index) / sampleRate
+                    var value = 0.0
+                    for note in chord {
+                        let hertz = 440 * pow(2, (Double(note) - 69) / 12)
+                        value += sin(2 * .pi * hertz * time)
+                    }
+                    samples.append(Float(value / Double(chord.count) * 0.5))
+                }
+                phase += frames
+            }
+        }
+        return samples
+    }
+
+    /// Every key, so a detector that always answers C is caught.
+    @Test("a major progression comes back in the key it was built in", arguments: 0..<12)
+    func majorProgression(tonic: Int) throws {
+        let rate = 48000.0
+        let analyser = try #require(SpectrumAnalyser(sampleRate: rate))
+        let samples = progression(tonic: tonic, sampleRate: rate)
+        var total = [Double](repeating: 0, count: 12)
+        // Accumulated over the whole progression rather than judged a window at
+        // a time: one window is a chord, and a chord is in several keys at once.
+        var offset = 0
+        while offset + 2048 <= samples.count {
+            samples.withUnsafeBufferPointer {
+                analyser.add($0.baseAddress! + offset, count: 2048)
+            }
+            let chroma = analyser.chroma(sampleRate: rate)
+            for index in 0..<12 { total[index] += chroma[index] }
+            offset += 2048
+        }
+        let key = try #require(KeyDetector.key(from: total))
+        #expect(key.pitchClass == tonic)
+        #expect(key.isMinor == false)
+        // And it is not reported as a guess, because this one is not.
+        #expect(key.confidence > 0.3)
+    }
+}

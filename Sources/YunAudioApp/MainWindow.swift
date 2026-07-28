@@ -1316,6 +1316,9 @@ struct MainWindow: View {
                     .monospacedDigit()
             }
 
+            YunDivider()
+            scoring
+
             Button(loc("Open the folder")) {
                 guard let directory = RouterModel.lyricsDirectory else { return }
                 try? FileManager.default.createDirectory(
@@ -1323,6 +1326,132 @@ struct MainWindow: View {
                 NSWorkspace.shared.open(directory)
             }
             .buttonStyle(YunButtonStyle(.ghost, small: true))
+        }
+    }
+
+    /// How much of the tune each person actually sang.
+    ///
+    /// Two microphones is two scores rather than one, and it costs nothing to
+    /// do it that way: the sources were never mixed, so each already had its
+    /// own ring. Every other product that does this has to work out from the
+    /// sound which of the two is singing, and is sometimes wrong.
+    @ViewBuilder
+    private var scoring: some View {
+        HStack(spacing: Yun.Space.sm) {
+            YunSwitch(isOn: $model.isScoringSinging)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(loc("Score the singing"))
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                Text(
+                    loc(
+                        "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        if let problem = model.singingError {
+            Text(problem)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if model.isScoringSinging, model.melody == nil {
+            // Said rather than shown as nought per cent: a score of zero
+            // because nobody sang and a score of zero because there is nothing
+            // to sing against are different facts.
+            Text(
+                loc(
+                    "No tune for this one, so there is nothing to score against — the note below is still live."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        // Driven by whether there are any rather than by the switch, which is
+        // the same thing in the running application — the list is filled when
+        // scoring starts and emptied when it stops — and is what lets the
+        // offscreen capture show the rows without opening a tap.
+        ForEach(Array(model.singers.enumerated()), id: \.element.id) { index, singer in
+            singerRow(singer, colour: Self.singerColour(index))
+        }
+    }
+
+    /// One colour a singer, so two of them can be told apart at a glance.
+    ///
+    /// The first stays on the accent, so one person singing looks like the rest
+    /// of the application rather than like a special mode. The rest come from
+    /// the status palette, which is the only place in this design system where
+    /// hue is allowed at all — and amber against any of the accents on offer is
+    /// the pair that survives both appearances.
+    private static func singerColour(_ index: Int) -> Color {
+        switch index % 4 {
+        case 0: Yun.Palette.accent
+        case 1: Yun.Palette.warning
+        case 2: Yun.Palette.success
+        default: Yun.Palette.info
+        }
+    }
+
+    @ViewBuilder
+    private func singerRow(_ singer: RouterModel.Singer, colour: Color) -> some View {
+        VStack(alignment: .leading, spacing: Yun.Space.xs) {
+            HStack(spacing: Yun.Space.sm) {
+                Circle()
+                    .fill(colour)
+                    .frame(width: 8, height: 8)
+                Text(singer.name)
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                    .lineLimit(1)
+                Spacer(minLength: Yun.Space.sm)
+                Text(singer.note ?? "—")
+                    .font(Yun.Text.mono)
+                    .foregroundStyle(
+                        singer.note == nil ? Yun.Palette.textMuted : Yun.Palette.textSecondary)
+                Text(
+                    singer.score.isMeaningful
+                        ? String(format: "%.0f%%", singer.score.percentage) : "—"
+                )
+                .font(Yun.Text.title)
+                .foregroundStyle(singer.score.isMeaningful ? colour : Yun.Palette.textMuted)
+                .monospacedDigit()
+            }
+            // Drawn here rather than with YunProgressBar because that one is
+            // always the accent, and the whole point of this row is that the
+            // second singer is not.
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Yun.Palette.elevated)
+                    Capsule()
+                        .fill(colour)
+                        .frame(
+                            width: geometry.size.width
+                                * (singer.score.isMeaningful
+                                    ? singer.score.percentage / 100 : 0))
+                }
+            }
+            .frame(height: 4)
+            // The one number a singer can act on: consistently under the note
+            // is flat, which is a different problem from being wrong.
+            if singer.score.isMeaningful, let error = singer.score.meanErrorSemitones,
+                abs(error) > 0.2
+            {
+                Text(
+                    String(
+                        format: error < 0
+                            ? loc("A little flat — about %.0f cents under.")
+                            : loc("A little sharp — about %.0f cents over."),
+                        abs(error) * 100)
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            }
         }
     }
 

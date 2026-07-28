@@ -295,6 +295,17 @@ final class RouterModel {
     /// is a chord, and a chord is in several keys at once. A few seconds of
     /// them is a key.
     @ObservationIgnored private var chromaTotal = [Double](repeating: 0, count: 12)
+    @ObservationIgnored private var pollsSinceChroma = 0
+
+    /// How often the chroma is folded in, in polls of the twenty-a-second
+    /// timer.
+    ///
+    /// Five times a second. The fold walks a thousand FFT bins and the interface
+    /// wants a key about once a second, so doing it every poll would be paying
+    /// four times over for an answer nobody reads that fast — but the sung
+    /// pitch above it *is* taken every poll, because twenty of those is what
+    /// makes a range rather than a note.
+    private static let chromaEveryNPolls = 4
 
     private func updateSinging() {
         // The singer, from the pitch tracker that is already running.
@@ -304,6 +315,9 @@ final class RouterModel {
             sungCount += 1
         }
 
+        pollsSinceChroma += 1
+        guard pollsSinceChroma >= Self.chromaEveryNPolls else { return }
+        pollsSinceChroma = 0
         guard let chroma = analyser?.chroma(), chroma.count == 12 else { return }
         for index in 0..<12 { chromaTotal[index] += chroma[index] }
         guard let key = KeyDetector.key(from: chromaTotal) else { return }
@@ -329,15 +343,176 @@ final class RouterModel {
     var heardNote: String? { PitchTracker.noteName(analysis.pitchHertz) }
 
     private func clearSinging() {
+        isScoringSinging = false
         songKey = nil
         suggestedShift = nil
         sungTotal = 0
         sungCount = 0
         chromaTotal = [Double](repeating: 0, count: 12)
+        pollsSinceChroma = 0
         nowPlaying = nil
         lyrics = nil
+        melody = nil
         lyricLine = nil
         lyricProgress = 0
+    }
+
+    // MARK: Scoring, and duets
+
+    /// The tune for what is playing, when a `.mid` was found beside the `.lrc`.
+    private(set) var melody: MidiMelody?
+
+    /// One singer, their own microphone, their own score.
+    struct Singer: Identifiable, Equatable {
+        /// The device the voice came in on, which is what makes two of these
+        /// two of them rather than one averaged.
+        let uid: String
+        let name: String
+        let hertz: Float
+        let score: KaraokeScore
+        var id: String { uid }
+        var note: String? { PitchTracker.noteName(hertz) }
+    }
+
+    /// One entry per source being listened to, in the order the sources appear.
+    private(set) var singers: [Singer] = []
+    /// Set when scoring could not start, in words somebody can act on.
+    private(set) var singingError: String?
+
+    /// Scores everybody singing, each on their own microphone.
+    ///
+    /// A duet is structurally free here and it is worth saying why, because it
+    /// is the whole argument for how this application is wired. Every other
+    /// product that scores two singers has to work out which of them is
+    /// singing, from the sound, and is sometimes wrong. Here the two were never
+    /// mixed: each microphone is its own route with its own ring, so the name
+    /// on a score is the wiring. What had to be built was one pitch tracker per
+    /// source — the existing one runs on the mixed analysis tap, and a score
+    /// off that would be the two of them averaged.
+    var isScoringSinging = false {
+        didSet {
+            guard oldValue != isScoringSinging else { return }
+            if isScoringSinging { startScoring() } else { stopScoring() }
+        }
+    }
+
+    @ObservationIgnored private var singerTracks: [SingerPitch] = []
+    @ObservationIgnored private var scoringNames: [String] = []
+    @ObservationIgnored private var scoringUIDs: [String] = []
+    /// The melody sampled once, rather than on every poll: it is seven thousand
+    /// samples for a five-minute song and it does not change while it plays.
+    @ObservationIgnored private var scoringReference: [PitchSample] = []
+    @ObservationIgnored private var pollsSinceScore = 0
+
+    /// How often a score is recomputed, in polls of the twenty-a-second timer.
+    ///
+    /// Four times a second. The comparison is over every reference sample of
+    /// the whole song and a score that moves faster than somebody can read it
+    /// is not more informative — but the note being sung is taken every poll,
+    /// because that one is a tuner and has to feel immediate.
+    private static let scoreEveryNPolls = 5
+
+    /// How far the player's own position may be from where the tapped audio
+    /// says the song has reached before it counts as a seek.
+    ///
+    /// Somebody restarting the song to have another go is the ordinary case,
+    /// not an edge one, and the sung samples are timestamped from where the
+    /// song was when scoring started. Two seconds is far more than the drift
+    /// between an Apple event and a frame count, and far less than any seek
+    /// somebody makes on purpose.
+    private static let seekToleranceSeconds: Double = 2
+
+    private func startScoring() {
+        guard isRunning else {
+            singingError = loc("Start routing before it can score you.")
+            // Assigning inside an observer does not run the observer again, so
+            // this cannot recurse.
+            isScoringSinging = false
+            return
+        }
+        let opened = openSourceTaps()
+        guard opened > 0 else {
+            singingError = loc("Could not listen to any source.")
+            isScoringSinging = false
+            return
+        }
+        let groups = Array(sourceGroups.prefix(opened))
+        scoringUIDs = groups.map(\.uid)
+        scoringNames = groups.map {
+            representative(of: $0).map(routeTitle) ?? loc("Source")
+        }
+        let anchor = nowPlaying?.position ?? 0
+        singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
+        for track in singerTracks { track.reset(at: anchor) }
+        rebuildScoringReference()
+        singingError = nil
+        pollsSinceScore = Self.scoreEveryNPolls
+        refreshSingers()
+    }
+
+    private func stopScoring() {
+        singerTracks = []
+        scoringReference = []
+        singers = []
+        singingError = nil
+        closeSourceTapsIfIdle()
+    }
+
+    private func rebuildScoringReference() {
+        scoringReference = melody?.samples(every: KaraokeScore.referenceInterval) ?? []
+    }
+
+    /// Recomputes what the interface shows for each singer.
+    private func refreshSingers() {
+        guard !singerTracks.isEmpty else {
+            if !singers.isEmpty { singers = [] }
+            return
+        }
+        pollsSinceScore += 1
+        let rescore =
+            pollsSinceScore >= Self.scoreEveryNPolls || singers.count != singerTracks.count
+        if rescore { pollsSinceScore = 0 }
+
+        // An `.lrc` offset says the words are late against the recording, so a
+        // line the file stamps at 30 s is sung at 30 s minus the offset — and
+        // the melody file is on the recording's clock, not the words'.
+        let shift = lyrics?.offset ?? 0
+        let lines = (lyrics?.lines ?? []).map {
+            Lyrics.Line(time: $0.time - shift, text: $0.text)
+        }
+
+        var updated: [Singer] = []
+        for (index, track) in singerTracks.enumerated() {
+            let score: KaraokeScore
+            if !rescore, index < singers.count {
+                score = singers[index].score
+            } else if scoringReference.isEmpty {
+                score = .none
+            } else {
+                score = KaraokeScore.score(
+                    sung: track.samples, reference: scoringReference, lyrics: lines)
+            }
+            updated.append(
+                Singer(
+                    uid: index < scoringUIDs.count ? scoringUIDs[index] : "\(index)",
+                    name: index < scoringNames.count ? scoringNames[index] : loc("Source"),
+                    hertz: track.hertz, score: score))
+        }
+        if updated != singers { singers = updated }
+    }
+
+    /// Puts every singer's clock back where the player says the song is.
+    ///
+    /// Only when the two have genuinely parted company. Re-anchoring on every
+    /// poll would hand the score whatever jitter an Apple event round trip
+    /// happened to have.
+    private func reanchorIfSeeked(to track: NowPlaying.Track) {
+        guard isScoringSinging, track.isPlaying, let first = singerTracks.first else {
+            return
+        }
+        guard abs(track.position - first.elapsed) > Self.seekToleranceSeconds else { return }
+        for singer in singerTracks { singer.reset(at: track.position) }
+        singers = []
     }
 
     /// Where lyrics are read from.
@@ -357,10 +532,18 @@ final class RouterModel {
         let track = NowPlaying.current()
         if track?.title != nowPlaying?.title || track?.artist != nowPlaying?.artist {
             lyrics = track.flatMap(Self.findLyrics)
+            melody = track.flatMap(Self.findMelody)
+            if isScoringSinging { rebuildScoringReference() }
         }
         nowPlaying = track
 
-        guard let track, let lyrics else {
+        guard let track else {
+            lyricLine = nil
+            lyricProgress = 0
+            return
+        }
+        reanchorIfSeeked(to: track)
+        guard let lyrics else {
             lyricLine = nil
             lyricProgress = 0
             return
@@ -370,20 +553,49 @@ final class RouterModel {
     }
 
     /// Finds an `.lrc` for a track by name.
+    static func findLyrics(for track: NowPlaying.Track) -> Lyrics? {
+        guard let url = bestFile(for: track, extensions: ["lrc"]),
+            let text = try? String(contentsOf: url, encoding: .utf8)
+        else { return nil }
+        return Lyrics.parse(text)
+    }
+
+    /// Finds the tune, which lives beside the words under the same name.
+    ///
+    /// Beside rather than inside: an `.lrc` has nowhere to put a pitch, and
+    /// inventing an extension to the format would mean nobody's existing files
+    /// worked. A karaoke MIDI is older than the `.lrc` and people already have
+    /// them.
+    static func findMelody(for track: NowPlaying.Track) -> MidiMelody? {
+        guard let url = bestFile(for: track, extensions: ["mid", "midi"]),
+            let data = try? Data(contentsOf: url)
+        else { return nil }
+        return MidiMelody.parse(data)
+    }
+
+    /// Picks the file in the lyrics folder that best matches a track.
     ///
     /// Matched loosely on purpose. A file somebody downloaded is called
     /// whatever the person who made it called it — "Artist - Title.lrc",
     /// "Title.lrc", with or without accents — and refusing to find it because
     /// of a hyphen would make the feature useless in exactly the case it exists
     /// for.
-    static func findLyrics(for track: NowPlaying.Track) -> Lyrics? {
+    ///
+    /// - Parameters:
+    ///   - track: What is playing.
+    ///   - extensions: Which suffixes count, without the dot.
+    /// - Returns: The best match, or nil when nothing in the folder looks like
+    ///   this song.
+    static func bestFile(for track: NowPlaying.Track, extensions: [String]) -> URL? {
         guard let directory = lyricsDirectory,
             let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
         else { return nil }
         let wanted = normalised(track.searchKey)
         let title = normalised(track.title)
 
-        let candidates = names.filter { $0.lowercased().hasSuffix(".lrc") }
+        let candidates = names.filter { name in
+            extensions.contains { name.lowercased().hasSuffix("." + $0) }
+        }
         // Both names present is a better match than the title alone, so it is
         // preferred rather than taking whatever the directory listed first.
         let best =
@@ -393,11 +605,7 @@ final class RouterModel {
                 return file.contains(title) && file.contains(normalised(track.artist))
             }
             ?? candidates.first { normalised($0).contains(title) }
-        guard let best,
-            let text = try? String(
-                contentsOf: directory.appendingPathComponent(best), encoding: .utf8)
-        else { return nil }
-        return Lyrics.parse(text)
+        return best.map { directory.appendingPathComponent($0) }
     }
 
     /// Lower case, no accents, letters and digits only — so "Björk – Jóga.lrc"
@@ -1334,6 +1542,20 @@ final class RouterModel {
             duration: 42, verdict: .speech, verdictConfidence: 0.86,
             verdictLabel: "speech", pitchHertz: 147)
         outputPeak = 0.39
+        // Two singers, because two is what the duet has to be checked at: one
+        // score is one colour and proves nothing about whether the second is
+        // legible beside it in either appearance. The switch above them stays
+        // off, because it is wired to real taps and this model has none — so
+        // the capture shows the control at rest and the rows it produces at
+        // once, which is what a design check wants to look at.
+        singers = [
+            Singer(
+                uid: "preview-one", name: loc("Microphone"), hertz: 220,
+                score: Self.previewScore(percentage: 78, error: -0.31)),
+            Singer(
+                uid: "preview-two", name: loc("Source"), hertz: 330,
+                score: Self.previewScore(percentage: 54, error: 0.42)),
+        ]
 
         guard let source = selectedSource else { return }
         let destinationUID = selectedDestination?.uid ?? "preview-destination"
@@ -1345,6 +1567,14 @@ final class RouterModel {
         routeGains = [1.0, 0.7]
         routeMutes = [false, true]
         levels = [0.28, 0.0]
+    }
+
+    /// A score with nothing behind it, for the design captures only.
+    private static func previewScore(percentage: Double, error: Double) -> KaraokeScore {
+        KaraokeScore(
+            percentage: percentage, onPitchSeconds: 84 * percentage / 100,
+            nearPitchSeconds: 6, silentSeconds: 12, referenceSeconds: 96, sungSeconds: 88,
+            meanErrorSemitones: error, lines: [])
     }
 
     // MARK: Driver
@@ -2925,6 +3155,9 @@ final class RouterModel {
         // transcript stays: it is what somebody was there for, and losing it
         // because a device changed underneath would be the worst moment to.
         if isTranscribing { stopTranscribing() }
+        // The score goes with it for the same reason and not the same one: the
+        // rings it reads are the route's, so there is nothing left to hear.
+        isScoringSinging = false
         levels = []
         peakHolds = []
         clipped = []
@@ -3203,8 +3436,15 @@ final class RouterModel {
                 analysis = analyser.reading()
             }
         }
-        if isTranscribing { pumpTranscription() }
-        lap("nowPlaying") { if isSingingVisible { refreshNowPlaying() } }
+        if isTranscribing || isScoringSinging { pumpSourceTaps() }
+        lap("singers") { if isScoringSinging { refreshSingers() } }
+        // `updateSinging` was reached from the tab appearing and from nowhere
+        // else, so the key was worked out once, from a single FFT window taken
+        // before any audio had reached the analyser — and the singer's range
+        // never got past one sample of the twenty it needs, which is why the
+        // suggested transpose was permanently nil. Every unit test passed
+        // throughout: they call `KeyDetector` directly.
+        lap("nowPlaying") { if isSingingVisible { refreshNowPlaying(); updateSinging() } }
         lap("gainReduction") { refreshGainReduction() }
         lap("ducking") { refreshDucking() }
         if isAutoLevelling { stepAutoLevel() }
@@ -3256,18 +3496,16 @@ final class RouterModel {
         }
 
         let groups = sourceGroups
-        let first = groups.compactMap(\.routes.first)
-        guard !first.isEmpty else {
+        guard !groups.compactMap(\.routes.first).isEmpty else {
             transcriptionError = loc("Nothing is routed to transcribe.")
             return
         }
-        let opened = engine.startTranscriptTaps(routes: first)
+        let opened = openSourceTaps()
         guard opened > 0 else {
             transcriptionError = loc("Could not listen to any source.")
             return
         }
 
-        transcriptRate = engine.pathQuality?.sampleRate ?? 48000
         transcribers = groups.prefix(opened).map { group in
             Transcriber(speaker: representative(of: group).map(routeTitle) ?? loc("Source"))
         }
@@ -3295,7 +3533,7 @@ final class RouterModel {
     func stopTranscribing() {
         guard isTranscribing else { return }
         isTranscribing = false
-        engine.stopTranscriptTaps()
+        closeSourceTapsIfIdle()
         let finishing = transcribers
         transcribers = []
         // Finalised rather than dropped: the model is holding the end of the
@@ -3307,17 +3545,57 @@ final class RouterModel {
         }
     }
 
-    /// Moves audio from the rings to the models, and lines back.
-    private func pumpTranscription() {
+    /// True while the per-source rings are open.
+    @ObservationIgnored private var sourceTapsOpen = false
+
+    /// Opens one ring per source, or leaves the open ones alone.
+    ///
+    /// There is one set of rings and there are now two things that want them:
+    /// the transcribers and the singing scorer. A ring is single-consumer by
+    /// construction, so two independent drains would each get half the audio
+    /// and neither would say so. One drain, handing the same block to whoever
+    /// is listening, is the only shape that works — and it is the reason the
+    /// second feature needed no new audio path at all.
+    ///
+    /// - Returns: How many were opened, or how many are already open.
+    @discardableResult
+    private func openSourceTaps() -> Int {
+        if sourceTapsOpen { return engine.transcriptTapCount }
+        let first = sourceGroups.compactMap(\.routes.first)
+        guard !first.isEmpty else { return 0 }
+        let opened = engine.startTranscriptTaps(routes: first)
+        sourceTapsOpen = opened > 0
+        transcriptRate = engine.pathQuality?.sampleRate ?? 48000
+        return opened
+    }
+
+    /// Closes them once nothing is listening. Not before: stopping the
+    /// transcript while somebody is being scored would take the scorer's audio
+    /// away with it.
+    private func closeSourceTapsIfIdle() {
+        guard sourceTapsOpen, !isTranscribing, !isScoringSinging else { return }
+        engine.stopTranscriptTaps()
+        sourceTapsOpen = false
+    }
+
+    /// Moves audio from the rings to whoever asked for it, and lines back.
+    private func pumpSourceTaps() {
         let rate = transcriptRate
-        for (slot, transcriber) in transcribers.enumerated() {
+        let slots = max(transcribers.count, singerTracks.count)
+        guard slots > 0 else { return }
+        for slot in 0..<slots {
             let taken = transcriptScratch.withUnsafeMutableBufferPointer { buffer in
                 engine.drainTranscript(
                     slot, into: buffer.baseAddress!, capacity: buffer.count)
             }
             guard taken > 0 else { continue }
-            transcriber.add(Array(transcriptScratch[0..<taken]), sampleRate: rate)
+            let block = Array(transcriptScratch[0..<taken])
+            if slot < transcribers.count {
+                transcribers[slot].add(block, sampleRate: rate)
+            }
+            if slot < singerTracks.count { singerTracks[slot].add(block) }
         }
+        guard !transcribers.isEmpty else { return }
         let running = transcribers
         Task { @MainActor in await self.collectTranscript(from: running) }
     }
