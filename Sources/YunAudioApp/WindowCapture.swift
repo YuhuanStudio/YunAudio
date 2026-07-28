@@ -104,9 +104,12 @@ enum WindowCapture {
                     FileHandle.standardError.write(Data(message.utf8))
                     continue
                 }
-                let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
-                try? png.write(to: url)
-                print("photographed \(url.path)")
+                // Through the renderer's writer, which creates the directory and
+                // reports a failure rather than announcing a file it did not
+                // write. See `PanelRenderer.write(_:named:to:)`.
+                print(
+                    PanelRenderer.write(png, named: name, to: directory)
+                        .replacingOccurrences(of: "wrote ", with: "photographed "))
             }
         }
         NSApp.appearance = nil

@@ -19,6 +19,7 @@ struct RouteStrip: View {
     var isCompact = false
 
     var body: some View {
+        BodyCount.tick("RouteStrip")
         guard let route = model.representative(of: group) else {
             return AnyView(EmptyView())
         }

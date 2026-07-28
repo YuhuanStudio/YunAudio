@@ -77,6 +77,7 @@ struct MainWindow: View {
     private var trafficLightInset: CGFloat { isRendering ? Yun.Space.lg : Yun.Space.xs }
 
     var body: some View {
+        let _ = BodyCount.tick("MainWindow")
         VStack(spacing: 0) {
             header
 
@@ -846,8 +847,7 @@ struct MainWindow: View {
                 sectionHeading(loc("Analysis"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {
-                        SpectrumView(
-                            bands: model.analysis.bands, isRunning: model.isRunning)
+                        LiveSpectrum(model: model)
                         YunDivider()
                         LoudnessReadout(model: model)
                     }
@@ -1758,7 +1758,7 @@ struct MainWindow: View {
     /// Away from zero rather than towards it, because reduction is something
     /// being taken away — the same convention every compressor uses, and the
     /// reason nobody has to be told which way it reads.
-    private func gainReductionMeter(_ decibels: Float) -> some View {
+    fileprivate static func gainReductionMeter(_ decibels: Float) -> some View {
         HStack(spacing: Yun.Space.sm) {
             Text(loc("Reducing"))
                 .font(Yun.Text.caption)
@@ -1803,9 +1803,12 @@ struct MainWindow: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             // What the stage is actually doing to the signal, for the two that
-            // can be set to do nothing without saying so.
-            if let reduction = model.gainReduction[kind] {
-                gainReductionMeter(reduction)
+            // can be set to do nothing without saying so — and only those two.
+            // A row for the other nine reads a property the poll rewrites and
+            // then draws nothing, which cost 220 body evaluations a second for
+            // two meters.
+            if RouterModel.meteredStages.contains(kind) {
+                GainReductionRow(model: model, kind: kind)
             }
 
             // The knobs appear only for a stage that is on: a slider for
@@ -1869,5 +1872,25 @@ struct MainWindow: View {
             .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(Yun.Palette.textTertiary)
             .textCase(.uppercase)
+    }
+}
+
+/// How far one dynamics stage is pulling the signal down, reading the model
+/// itself.
+///
+/// A view of its own for the same reason as `LiveSpectrum`. `gainReduction` is
+/// rewritten on every poll while a compressor or a gate is on, and a dictionary
+/// subscript is a read of the whole property — so switching on one compressor
+/// pinned the entire window, header and device pickers and all, to twenty
+/// re-evaluations a second.
+private struct GainReductionRow: View {
+    let model: RouterModel
+    let kind: EffectKind
+
+    var body: some View {
+        let _ = BodyCount.tick("GainReductionRow")
+        if let reduction = model.gainReduction[kind] {
+            MainWindow.gainReductionMeter(reduction)
+        }
     }
 }

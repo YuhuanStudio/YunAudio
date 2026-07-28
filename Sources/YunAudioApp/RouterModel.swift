@@ -177,7 +177,14 @@ final class RouterModel {
     }
 
     func applyHeadphoneCorrection() {
-        engine.setHeadphoneCorrection(headphoneCurve, forDeviceUID: correctedOutputUID)
+        if engine.setHeadphoneCorrection(headphoneCurve, forDeviceUID: correctedOutputUID) {
+            appliedToGraph.insert(.headphoneCorrection)
+        } else {
+            // False means the output named is not in this route, which is the
+            // ordinary case of a profile left selected after the headphones
+            // were unplugged. `headphoneCorrectionIsIdle` is what says so.
+            appliedToGraph.remove(.headphoneCorrection)
+        }
     }
 
     // MARK: Output alignment
@@ -889,30 +896,56 @@ final class RouterModel {
     var inputDecibels: Float = 0 {
         didSet {
             guard oldValue != inputDecibels else { return }
-            engine.setInputGain(Self.gain(fromDecibels: inputDecibels))
+            applyInputGain()
             persist()
         }
     }
     var isInputMuted = false {
         didSet {
             guard oldValue != isInputMuted else { return }
-            engine.setInputMuted(isInputMuted)
+            applyInputMute()
             persist()
         }
     }
     var outputDecibels: Float = 0 {
         didSet {
             guard oldValue != outputDecibels else { return }
-            engine.setOutputGain(Self.gain(fromDecibels: outputDecibels))
+            applyOutputGain()
             persist()
         }
     }
     var isOutputMuted = false {
         didSet {
             guard oldValue != isOutputMuted else { return }
-            engine.setOutputMuted(isOutputMuted)
+            applyOutputMute()
             persist()
         }
+    }
+
+    /// The four level settings, each in one place.
+    ///
+    /// Written once rather than at each call site because they are set from two
+    /// of them — the control being moved, and a freshly built graph being
+    /// caught up — and a push that is recorded in one place and not the other
+    /// is exactly the bookkeeping this is here to make impossible.
+    private func applyInputGain() {
+        engine.setInputGain(Self.gain(fromDecibels: inputDecibels))
+        appliedToGraph.insert(.inputGain)
+    }
+
+    private func applyInputMute() {
+        engine.setInputMuted(isInputMuted)
+        appliedToGraph.insert(.inputMute)
+    }
+
+    private func applyOutputGain() {
+        engine.setOutputGain(Self.gain(fromDecibels: outputDecibels))
+        appliedToGraph.insert(.outputGain)
+    }
+
+    private func applyOutputMute() {
+        engine.setOutputMuted(isOutputMuted)
+        appliedToGraph.insert(.outputMute)
     }
 
     // MARK: Direct monitoring
@@ -1361,13 +1394,22 @@ final class RouterModel {
     ///
     /// Worth saying out loud: an older driver is missing whatever the newer one
     /// added, silently, and every symptom looks like a bug in the application.
-    var driverIsOutOfDate: Bool { DriverInstaller.installedIsOutOfDate }
+    ///
+    /// Answered once and remembered. The answer is two binaries read off disk
+    /// and hashed — 128 µs with a driver bundled beside the app, 23 µs without
+    /// — and the window's body asked for it on every redraw, which is twenty
+    /// times a second while a route is up. Nothing can change it except this
+    /// application installing a driver, which is the one place it is recomputed.
+    private(set) var driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
 
     func installDriver() {
         isInstallingDriver = true
         driverMessage = nil
         let outcome = DriverInstaller.install()
         isInstallingDriver = false
+        // The one thing that can change the answer, so the one place it is
+        // asked again.
+        driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
         switch outcome {
         case .installed:
             driverMessage = nil
@@ -1612,6 +1654,55 @@ final class RouterModel {
             activeRoutes = engine.currentRoutes
             routeGains = activeRoutes.map(\.gain)
             routeMutes = activeRoutes.map(\.isMuted)
+            rebuiltRoutes()
+        }
+    }
+
+    /// Called after the engine has published a graph built by `updateRoutes`.
+    ///
+    /// That path carries the gains, the mutes, the recording rings and the
+    /// ducking across, and does not carry the output correction — the engine
+    /// says so in as many words, and says the model puts it back. Nothing did:
+    /// dragging one cable in the patchbay, or switching between mono and
+    /// stereo, silently took somebody's headphone correction and tone control
+    /// out of the path, with the interface still showing both.
+    private func rebuiltRoutes() {
+        remapMonitorRoutes()
+        appliedToGraph.remove(.headphoneCorrection)
+        applyHeadphoneCorrection()
+    }
+
+    /// Rebuilds the source-to-monitor-route map from the routes that are
+    /// actually running.
+    ///
+    /// Route indices are positions in a list, and a patchbay edit moves them:
+    /// pulling one cable from the main mix shifts every monitor route down by
+    /// one. The map was built once, in `start`, and never rebuilt — so after an
+    /// edit the monitor faders drove whichever route had inherited the old
+    /// index, which on a two-bus setup is somebody's send to the far end.
+    private func remapMonitorRoutes() {
+        guard let uid = monitorDeviceUID else {
+            monitorRouteIndices = [:]
+            return
+        }
+        var map: [String: [Int]] = [:]
+        for (index, route) in activeRoutes.enumerated()
+        where route.destination.deviceUID == uid {
+            map[route.source.deviceUID, default: []].append(index)
+        }
+        monitorRouteIndices = map
+    }
+
+    /// True when every remembered monitor route still points at a route into
+    /// the monitor.
+    ///
+    /// The invariant behind every monitor fader. It is not visible from the
+    /// interface — a send driving the wrong route changes a level somewhere
+    /// else and nothing says so — so it is asserted instead.
+    var monitorRoutesAreConsistent: Bool {
+        guard let uid = monitorDeviceUID else { return monitorRouteIndices.isEmpty }
+        return monitorRouteIndices.values.joined().allSatisfy { index in
+            index < activeRoutes.count && activeRoutes[index].destination.deviceUID == uid
         }
     }
 
@@ -1870,6 +1961,7 @@ final class RouterModel {
                 // A freshly built chain comes up at each stage's own defaults,
                 // so the stored knob positions have to be pushed back — the
                 // same reason a restart does it.
+                self.appliedToGraph.remove(.effectValues)
                 self.applyEffectValues()
             }
         }
@@ -1889,8 +1981,15 @@ final class RouterModel {
     /// ever shipped has this meter and why two knobs without one are guesswork.
     private(set) var gainReduction: [EffectKind: Float] = [:]
 
+    /// The stages that can report how much they are pulling the signal down.
+    ///
+    /// Named rather than repeated, because the interface needs the same answer:
+    /// a meter for a stage that will never publish one is a view that redraws
+    /// with the poll and draws nothing, eleven times over.
+    static let meteredStages: Set<EffectKind> = [.compressor, .gate]
+
     private func refreshGainReduction() {
-        for kind in [EffectKind.compressor, .gate] where enabledEffects.contains(kind) {
+        for kind in Self.meteredStages where enabledEffects.contains(kind) {
             let value = engine.gainReduction(of: kind)
             // Falls at a readable rate rather than following the unit exactly:
             // the reduction moves at the release time, which at 150 ms is a
@@ -1947,6 +2046,7 @@ final class RouterModel {
     /// Only the values actually stored: a knob nobody has touched is already
     /// sitting at the default this would send it.
     private func applyEffectValues() {
+        appliedToGraph.insert(.effectValues)
         for kind in enabledEffects {
             for parameter in kind.parameters {
                 guard let value = effectValues["\(kind.rawValue).\(parameter.id)"] else {
@@ -1981,11 +2081,19 @@ final class RouterModel {
     /// measurement to report rather than a very good one.
     var pathLatencyMilliseconds: Double {
         guard let quality = pathQuality, quality.sampleRate > 0 else { return 0 }
-        let deviceFrames = Double(
-            selectedDestination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0)
-        return (Double(quality.bufferFrames) + deviceFrames) / quality.sampleRate * 1000
-            + addedLatencyMilliseconds
+        return (Double(quality.bufferFrames) + Double(destinationLatencyFrames))
+            / quality.sampleRate * 1000 + addedLatencyMilliseconds
     }
+
+    /// The destination's own reported latency and safety offset, in frames.
+    ///
+    /// Read from the HAL and kept, rather than asked for wherever it is wanted.
+    /// The status bar quotes the whole path latency and is redrawn by the
+    /// meters, so this was a synchronous round trip to `coreaudiod` twenty
+    /// times a second — measured at 129 µs, which is more than the entire poll
+    /// costs. It is re-read beside the path verdict, on the same reasoning:
+    /// every input to it is on the far side of a route rebuild.
+    private(set) var destinationLatencyFrames = 0
 
     /// Latency the isolation stage adds, in milliseconds.
     var voiceIsolationLatencyMilliseconds: Double {
@@ -2304,6 +2412,8 @@ final class RouterModel {
         voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
         recordsStems = saved.recordsStems ?? false
         monitorSends = saved.monitorSends ?? [:]
+        tapMuteBehavior =
+            saved.tapMuteBehavior.flatMap(TapMuteBehavior.init(storageKey:)) ?? .unmuted
         // Only restored when the device is actually present: a monitor pointing
         // at headphones that are not plugged in would fail the whole start.
         if let uid = saved.monitorDeviceUID,
@@ -2380,7 +2490,13 @@ final class RouterModel {
                 // Written on every save, not only when a binding changes: this
                 // rebuilds the whole file, so leaving it out would quietly
                 // erase somebody's controller the next time they moved a fader.
-                midiBindings: midiControl.storedBindings))
+                midiBindings: midiControl.storedBindings,
+                // Its `didSet` has called `persist()` since the day it was
+                // written, and `Preferences` had no field for it — so the one
+                // setting that decides whether a captured application is still
+                // audible was forgotten at every launch, silently, back to the
+                // default.
+                tapMuteBehavior: tapMuteBehavior.storageKey))
     }
 
     // MARK: Devices
@@ -2804,6 +2920,7 @@ final class RouterModel {
 
         clockLockFailed = false
         isBusy = true
+        isStarting = true
 
         let engine = engine
         let effects = Array(enabledEffects)
@@ -2857,19 +2974,28 @@ final class RouterModel {
             }
             Task { @MainActor [failure] in
                 self.isBusy = false
+                self.isStarting = false
                 if let failure {
                     self.isRunning = false
                     self.lastError = failure
+                    self.restartIsPending = false
                     return
                 }
                 self.isRunning = true
                 self.lastError = nil
-                // The engine holds these across a restart, but the model is the
-                // one that knows what the user set, so it re-asserts them.
-                self.engine.setInputGain(Self.gain(fromDecibels: self.inputDecibels))
-                self.engine.setInputMuted(self.isInputMuted)
-                self.engine.setOutputGain(Self.gain(fromDecibels: self.outputDecibels))
-                self.engine.setOutputMuted(self.isOutputMuted)
+                // A graph built by `start` carries nothing from the one before
+                // it, so everything the user set has to be pushed in again.
+                self.appliedToGraph = []
+                self.applyInputGain()
+                self.applyInputMute()
+                self.applyOutputGain()
+                self.applyOutputMute()
+                // Ducking too. `start` takes no ducking arguments, so a fresh
+                // graph comes up with it off — and nothing put it back, so
+                // anything that restarted the route (a buffer size, a plugin,
+                // an isolation mix) silently switched off a feature the
+                // interface went on showing as on.
+                self.applyDucking()
                 self.applyEffectValues()
                 self.activeRoutes = routes
                 self.routeGains = routes.map(\.gain)
@@ -2883,6 +3009,8 @@ final class RouterModel {
                 // is built.
                 self.applyHeadphoneCorrection()
                 self.startPolling()
+                // Anything that arrived while this start was in flight.
+                self.drainPendingRestart()
             }
         }
     }
@@ -2904,6 +3032,7 @@ final class RouterModel {
                 self.isBusy = false
                 self.finishStop()
                 completion?()
+                self.drainPendingRestart()
             }
         }
     }
@@ -2933,6 +3062,12 @@ final class RouterModel {
         routeMutes = []
         pathQuality = nil
         isClockLocked = false
+        // There is no graph to have been told anything, and no routes for the
+        // monitor map to be pointing at. A restart waiting for the queue is
+        // also moot: the route it wanted to rebuild is down.
+        appliedToGraph = []
+        monitorRouteIndices = [:]
+        restartIsPending = false
     }
 
     func toggle() { isRunning ? stop() : start() }
@@ -3039,6 +3174,35 @@ final class RouterModel {
         restartIfRunning()
     }
 
+    // MARK: What the running graph has been told
+
+    /// One thing the model holds that the realtime graph has to be told
+    /// separately.
+    ///
+    /// A published graph comes up at the realtime defaults, and the engine
+    /// carries a different subset of the previous one across depending on how
+    /// it was published: `start` carries nothing, `updateRoutes` carries
+    /// everything except the output correction, `updateEffects` carries the
+    /// correction but builds fresh Audio Units. Whatever is not carried has to
+    /// be pushed again — and when it is not, the failure is silent, because the
+    /// interface reports what the model holds and the model is right.
+    enum GraphSetting: String, CaseIterable, Sendable {
+        case inputGain
+        case inputMute
+        case outputGain
+        case outputMute
+        case effectValues
+        case headphoneCorrection
+        case ducking
+    }
+
+    /// Which of those the graph running right now has actually been given.
+    ///
+    /// Recorded rather than derived: there is no way to ask the graph what it
+    /// is holding, and "the model has the value" is exactly the question that
+    /// has already answered yes twice while the audio said no.
+    @ObservationIgnored private(set) var appliedToGraph: Set<GraphSetting> = []
+
     /// Rebuilds triggered since launch. Only for the flow check, which asserts
     /// that one preset costs one rebuild — the alternative is a race, not
     /// merely waste: back-to-back restarts hit `stop`'s busy guard and are
@@ -3046,8 +3210,28 @@ final class RouterModel {
     /// fast the engine queue happens to be.
     private(set) var restartCount = 0
 
+    /// A restart that arrived while the engine queue was already working.
+    ///
+    /// `stop()` refuses while `isBusy`, so this used to return having done
+    /// nothing at all: the model held the new value, the interface showed it,
+    /// and the route went on running the old one until something unrelated
+    /// happened to rebuild. It is not theoretical — attaching a monitor
+    /// immediately after a chain swap took twenty seconds to appear in the flow
+    /// check, and only then because a later change restarted the route for its
+    /// own reasons. Recorded and carried out when the queue comes free instead.
+    @ObservationIgnored private var restartIsPending = false
+
     private func restartIfRunning() {
         guard !isApplyingPreset else { return }
+        guard !isBusy else {
+            // A start in flight has already read every parameter off the model,
+            // so a change arriving now is lost — and `isRunning` is still false,
+            // which is why the old guard below never even saw it. A stop in
+            // flight needs no note: the start chained after it reads the model
+            // fresh.
+            if isStarting { restartIsPending = true }
+            return
+        }
         guard isRunning else { return }
         restartCount += 1
         // stop() is asynchronous and holds `isBusy` until the engine queue has
@@ -3058,15 +3242,39 @@ final class RouterModel {
         }
     }
 
+    /// True while a start is in flight, as opposed to a stop.
+    @ObservationIgnored private var isStarting = false
+
+    /// Carries out a restart that was asked for while a start was in flight.
+    ///
+    /// Called wherever `isBusy` is cleared. Nothing here loops: the restart it
+    /// runs sets `isBusy` again immediately, so a further request during that
+    /// one is recorded rather than run.
+    private func drainPendingRestart() {
+        guard restartIsPending, !isBusy else { return }
+        restartIsPending = false
+        restartIfRunning()
+    }
+
     /// Reroutes without stopping. Returns false when the change needs a rebuild.
+    ///
+    /// Only when the whole route list *is* `routes` — the microphone into the
+    /// destination and nothing else. That computed property knows nothing about
+    /// taps, which is why they are excluded, and nothing about the monitor
+    /// either, which was not: swapping it in with a monitor attached replaced
+    /// the second mix with silence and left the interface showing both buses,
+    /// both sets of faders and no way to tell.
     @discardableResult
     private func reconfigureIfPossible() -> Bool {
-        guard isRunning, capturedAppBundleIDs.isEmpty else { return false }
+        guard isRunning, capturedAppBundleIDs.isEmpty, monitorDeviceUID == nil else {
+            return false
+        }
         let updated = routes
         guard !updated.isEmpty, engine.updateRoutes(updated) else { return false }
         activeRoutes = engine.currentRoutes
         routeGains = activeRoutes.map(\.gain)
         routeMutes = activeRoutes.map(\.isMuted)
+        rebuiltRoutes()
         return true
     }
 
@@ -3184,7 +3392,13 @@ final class RouterModel {
         pollsSincePathQuality += 1
         if pathQuality == nil || pollsSincePathQuality >= Self.pathQualityEveryNPolls {
             pollsSincePathQuality = 0
-            lap("pathQuality") { publish(engine.pathQuality, to: \.pathQuality) }
+            lap("pathQuality") {
+                publish(engine.pathQuality, to: \.pathQuality)
+                publish(
+                    selectedDestination?.latencyFrames(
+                        scope: kAudioObjectPropertyScopeOutput) ?? 0,
+                    to: \.destinationLatencyFrames)
+            }
         }
         lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }
         lap("rateRatio") { publish(engine.measuredRateRatio, to: \.measuredRateRatio) }
@@ -3659,7 +3873,7 @@ final class RouterModel {
     var isDucking = false {
         didSet {
             guard oldValue != isDucking else { return }
-            engine.setDucking(enabled: isDucking, depth: Self.gain(fromDecibels: duckDecibels))
+            applyDucking()
             persist()
         }
     }
@@ -3668,9 +3882,14 @@ final class RouterModel {
     var duckDecibels: Float = -14 {
         didSet {
             guard oldValue != duckDecibels else { return }
-            engine.setDucking(enabled: isDucking, depth: Self.gain(fromDecibels: duckDecibels))
+            applyDucking()
             persist()
         }
+    }
+
+    private func applyDucking() {
+        engine.setDucking(enabled: isDucking, depth: Self.gain(fromDecibels: duckDecibels))
+        appliedToGraph.insert(.ducking)
     }
 
     /// The duck depth as a 0...1 travel, from silent to no attenuation at all.
@@ -3980,4 +4199,29 @@ final class RouterModel {
 
     /// Loudest route, for the menu bar icon and the signal path graphic.
     var peakLevel: Float { levels.max() ?? 0 }
+}
+
+/// How often each view's `body` is evaluated.
+///
+/// `@Observable` tracks per property, so a view reading only `isRunning` should
+/// survive a meter moving. What decides that is not the view's *purpose* but
+/// every property reached anywhere inside its body — including through a
+/// computed property it merely passes along — and reasoning about which those
+/// are has been wrong here every time it has been tried. So they are counted.
+///
+/// Off unless the flow check switches it on: the counter is a dictionary write,
+/// and a measurement large enough to be part of what it measures is not one.
+@MainActor
+enum BodyCount {
+    static var isCounting = false
+    private(set) static var counts: [String: Int] = [:]
+
+    /// Called as `let _ = BodyCount.tick("…")` at the head of a body, which is
+    /// the only way to run a statement inside a `ViewBuilder`.
+    static func tick(_ name: String) {
+        guard isCounting else { return }
+        counts[name, default: 0] += 1
+    }
+
+    static func reset() { counts = [:] }
 }

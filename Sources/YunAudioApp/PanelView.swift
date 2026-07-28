@@ -43,6 +43,7 @@ struct PanelView: View {
     private static let labelColumn: CGFloat = 62
 
     var body: some View {
+        let _ = BodyCount.tick("PanelView")
         // Under glass the whole panel is one material; flat, it is a plain
         // surface the cards sit on. Wrapping a flat panel in a glass container
         // is what made the menu bar look like a different application from the

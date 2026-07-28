@@ -12,6 +12,7 @@ struct CalibrationPanel: View {
     @Bindable var model: RouterModel
 
     var body: some View {
+        let _ = BodyCount.tick("CalibrationPanel")
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             switch model.calibrationPhase {
             case .idle: invitation

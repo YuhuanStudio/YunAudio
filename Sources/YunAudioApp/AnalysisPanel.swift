@@ -12,6 +12,7 @@ struct SpectrumView: View {
     var isRunning: Bool
 
     var body: some View {
+        let _ = BodyCount.tick("SpectrumView")
         VStack(spacing: 2) {
             chart
             scale
@@ -101,12 +102,34 @@ struct SpectrumView: View {
     }
 }
 
+/// The spectrum, reading the analyser rather than being handed it.
+///
+/// One line, and it is the reason it exists. The bands used to be read in the
+/// window's own body — `SpectrumView(bands: model.analysis.bands, …)` — which
+/// made a reading twenty times a second a dependency of the *whole window*:
+/// measured at 19.8 body evaluations a second for `MainWindow`, one per poll,
+/// each of them re-deriving the header, the device pickers, the patchbay and
+/// the inspector for a picture that had changed by one frame. `@Observable`
+/// tracks per property, but per property reached *anywhere* in a body, and the
+/// window's columns are computed properties of the window rather than views of
+/// their own. Reading it here puts the invalidation where the moving picture
+/// is.
+struct LiveSpectrum: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("LiveSpectrum")
+        SpectrumView(bands: model.analysis.bands, isRunning: model.isRunning)
+    }
+}
+
 /// Loudness to the broadcast standard, and how far it is from the platform the
 /// user is aiming at.
 struct LoudnessReadout: View {
     @Bindable var model: RouterModel
 
     var body: some View {
+        let _ = BodyCount.tick("LoudnessReadout")
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             outgoing
             YunDivider()
