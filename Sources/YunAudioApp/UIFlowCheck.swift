@@ -2014,6 +2014,126 @@ enum UIFlowCheck {
         check("levels were cleared", model.routeLevels.isEmpty)
         check("routes were cleared", model.activeRoutes.isEmpty)
 
+        // Settings, last, because every one of them changes something
+        // process-wide — the language every string is read in, the appearance
+        // every window is drawn in, the activation policy — and doing that in
+        // the middle of the routing flows would leave whatever failed there
+        // looking like a routing failure.
+        //
+        // A preference is exactly the kind of thing that looks right and does
+        // nothing: the control moves, the interface redraws, and the value
+        // reaches neither the code that reads it nor the disk. So each one is
+        // asserted twice — that it changed what it claims to change, and that
+        // it survived being written down.
+        print("\nsettings")
+        let originalLanguage = YunTheme.shared.language
+        let originalAppearance = YunTheme.shared.appearance
+        let originalAccent = YunTheme.shared.accent
+        let originalHue = YunTheme.shared.accentHue
+        let originalBuffer = model.bufferFrames
+        let originalDock = InterfaceOptions.showsDockIcon
+
+        // A language that changes what `loc()` returns and leaves every open
+        // window showing the old strings is half a feature, and the half that
+        // is missing is the visible one. `loc()` reads the theme so that
+        // Observation registers the dependency; this is that wiring, asserted
+        // rather than assumed — the tracker stands in for a view body.
+        final class Repaint: @unchecked Sendable { var happened = false }
+        let repaint = Repaint()
+        withObservationTracking {
+            _ = loc("Settings")
+        } onChange: {
+            repaint.happened = true
+        }
+
+        YunTheme.shared.language = .english
+        check("English is what the table returns", loc("Settings") == "Settings")
+        check("a view that had read a string was invalidated", repaint.happened)
+        YunTheme.shared.language = .traditionalChinese
+        check("Chinese is what the table returns", loc("Settings") == "設定")
+        check("the choice reached the lookup", YunStrings.language == .traditionalChinese)
+        check("it was written down", YunTheme.persisted().language == .traditionalChinese)
+        // The window builds these from enums, which is how four English words
+        // sat in the sidebar of an otherwise Chinese interface for months.
+        let labels = YunAppearance.allCases.map(\.title) + YunAccent.allCases.map(\.title)
+        check(
+            "every theme and accent label is translated",
+            labels.allSatisfy { !$0.allSatisfy(\.isASCII) })
+        YunTheme.shared.language = .system
+        check("the override was cleared again", YunTheme.persisted().language == .system)
+
+        YunTheme.shared.appearance = .dark
+        check(
+            "the process went dark",
+            NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua)
+        YunTheme.shared.appearance = .light
+        check(
+            "and light again",
+            NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua)
+        check("it was written down", YunTheme.persisted().appearance == .light)
+
+        // Judged in one appearance, since a dynamic colour resolves against
+        // whichever is current: the pair is what the two-appearance render is
+        // for, and what is asserted here is that the choice arrives at all.
+        YunTheme.shared.accent = .monochrome
+        let monochrome = Yun.Palette.accentComponents()
+        check(
+            "monochrome is neutral",
+            abs(monochrome.red - monochrome.blue) < 0.02)
+        YunTheme.shared.accent = .blue
+        let blue = Yun.Palette.accentComponents()
+        // Channel-wise, because the two share one: near-white and the dark
+        // theme's blue are both 0.98 in the blue channel, so comparing that
+        // alone would pass whether or not the setting did anything.
+        let moved = max(
+            abs(blue.red - monochrome.red),
+            max(abs(blue.green - monochrome.green), abs(blue.blue - monochrome.blue)))
+        check("the accent reached the palette", moved > 0.1)
+        check("and it is blue", blue.blue > blue.red + 0.2)
+        YunTheme.shared.accent = .custom
+        YunTheme.shared.accentHue = 1.0 / 3
+        let custom = Yun.Palette.accentComponents()
+        check(
+            "the hue control reaches the colour",
+            custom.green > custom.red + 0.1 && custom.green > custom.blue + 0.1)
+        let storedAccent = YunTheme.persisted()
+        check(
+            "the accent was written down",
+            storedAccent.accent == .custom
+                && abs((storedAccent.hue ?? 0) - 1.0 / 3) < 1e-9)
+
+        InterfaceOptions.showsDockIcon = true
+        check("the Dock icon appeared", NSApp.activationPolicy() == .regular)
+        InterfaceOptions.showsDockIcon = false
+        check("and went away again", NSApp.activationPolicy() == .accessory)
+
+        // The one setting here that the audio path reads. It was persisted and
+        // never passed to the engine for the life of the presets, so "it is in
+        // the file" is not the assertion — "the model is holding it" is, and
+        // both are checked.
+        let otherBuffer: UInt32 = originalBuffer == 256 ? 128 : 256
+        model.bufferFrames = otherBuffer
+        check("the buffer size was taken", model.bufferFrames == otherBuffer)
+        check("and saved", PreferencesStore.load().bufferFrames == otherBuffer)
+        note(
+            String(
+                format: "%d frames is %.2f ms per IO cycle at %.0f Hz", otherBuffer,
+                Double(otherBuffer) / model.preferredSampleRate * 1000,
+                model.preferredSampleRate))
+
+        // Everything above is somebody's real settings file.
+        model.bufferFrames = originalBuffer
+        InterfaceOptions.showsDockIcon = originalDock
+        YunTheme.shared.accentHue = originalHue
+        YunTheme.shared.accent = originalAccent
+        YunTheme.shared.appearance = originalAppearance
+        YunTheme.shared.language = originalLanguage
+        check(
+            "the settings were put back",
+            YunTheme.persisted().accent == originalAccent
+                && YunTheme.persisted().language == originalLanguage
+                && model.bufferFrames == originalBuffer)
+
         summarise()
     }
 

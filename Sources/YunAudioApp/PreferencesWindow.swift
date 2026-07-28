@@ -1,4 +1,5 @@
 import SwiftUI
+import YunAudioEngine
 import YunAudioHAL
 import YunDesign
 
@@ -9,7 +10,16 @@ import YunDesign
 /// them made the panel tall enough to matter on a laptop screen.
 struct PreferencesWindow: View {
     @Bindable var model: RouterModel
+    /// The design system's own settings — language, appearance and accent —
+    /// which are not the router's state and outlive any particular model.
+    @Bindable private var theme = YunTheme.shared
     @State private var selection: Section
+    /// Mirrored rather than read through a computed binding: the activation
+    /// policy lives on `NSApp`, nothing observes it, and a switch bound
+    /// straight to it would not move when clicked.
+    @State private var showsDockIcon = InterfaceOptions.showsDockIcon
+    /// Something for the accent preview to act on.
+    @State private var previewSwitch = true
 
     /// Skips the ScrollView. `ImageRenderer` gives a ScrollView no height even
     /// when the surrounding frame is fixed, so the offscreen design captures
@@ -23,12 +33,14 @@ struct PreferencesWindow: View {
     }
 
     enum Section: String, CaseIterable, Identifiable {
-        case general, shortcuts, diagnostics, about
+        case general, appearance, audio, shortcuts, diagnostics, about
         var id: String { rawValue }
 
         var title: String {
             switch self {
             case .general: loc("General")
+            case .appearance: loc("Appearance")
+            case .audio: loc("Audio")
             case .shortcuts: loc("Shortcuts")
             case .diagnostics: loc("Diagnostics")
             case .about: loc("About")
@@ -37,7 +49,9 @@ struct PreferencesWindow: View {
 
         var symbol: String {
             switch self {
-            case .general: "slider.horizontal.3"
+            case .general: "gearshape"
+            case .appearance: "paintpalette"
+            case .audio: "waveform"
             case .shortcuts: "command"
             case .diagnostics: "waveform.path.ecg"
             case .about: "info.circle"
@@ -108,6 +122,8 @@ struct PreferencesWindow: View {
     private var content: some View {
         switch selection {
         case .general: generalSection
+        case .appearance: appearanceSection
+        case .audio: audioSection
         case .shortcuts: shortcutsSection
         case .diagnostics: diagnosticsSection
         case .about: aboutSection
@@ -118,7 +134,24 @@ struct PreferencesWindow: View {
 
     private var generalSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
-            heading(loc("General"))
+            heading(loc("Language"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunSegmented(
+                        selection: $theme.language,
+                        options: YunLanguage.allCases.map { ($0, $0.title) })
+                    Text(
+                        loc(
+                            "Takes effect at once. Kept separately from the system's own language, so this application can be read in one language on a Mac set up in another."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("At launch"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
                     Toggle(
@@ -140,9 +173,56 @@ struct PreferencesWindow: View {
                 }
             }
 
-            heading(loc("Appearance"))
+            heading(loc("Where it lives"))
             YunCard {
-                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Toggle(
+                        loc("Show in the Dock"),
+                        isOn: Binding(
+                            get: { showsDockIcon },
+                            set: {
+                                showsDockIcon = $0
+                                InterfaceOptions.showsDockIcon = $0
+                            })
+                    )
+                    .toggleStyle(YunToggleStyle())
+                    Text(
+                        loc(
+                            "Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    // MARK: Appearance
+
+    private var appearanceSection: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.lg) {
+            heading(loc("Theme"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunSegmented(
+                        selection: $theme.appearance,
+                        options: YunAppearance.allCases.map { ($0, $0.title) })
+                    Text(
+                        loc(
+                            "Set on the application rather than on the window, so the menu bar panel follows it too."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("Surfaces"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
                     YunSegmented(
                         selection: $model.style,
                         options: YunStyle.allCases.map { ($0, $0.title) })
@@ -153,6 +233,95 @@ struct PreferencesWindow: View {
                 }
             }
 
+            heading(loc("Accent colour"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    accentSwatches
+                    if theme.accent == .custom {
+                        HStack(spacing: Yun.Space.md) {
+                            HueStrip(hue: $theme.accentHue)
+                            Text("\(Int(theme.accentHue * 360))°")
+                                .font(Yun.Text.mono)
+                                .foregroundStyle(Yun.Palette.textSecondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                    }
+                    YunDivider()
+                    accentPreview
+                }
+            }
+        }
+    }
+
+    /// The accents, drawn in themselves. A list of colour names would be the
+    /// one control in this window that cannot be read at a glance.
+    private var accentSwatches: some View {
+        HStack(alignment: .top, spacing: Yun.Space.md) {
+            ForEach(YunAccent.allCases) { accent in
+                let isSelected = theme.accent == accent
+                Button {
+                    theme.accent = accent
+                } label: {
+                    VStack(spacing: 6) {
+                        Circle()
+                            .fill(accent.colour(hue: theme.accentHue))
+                            .frame(width: 22, height: 22)
+                            .overlay {
+                                // Two rings rather than one: the inner gap in
+                                // the card's own colour is what stops a
+                                // selected near-white swatch from merging into
+                                // its own selection ring on a dark theme.
+                                Circle()
+                                    .strokeBorder(Yun.Palette.card, lineWidth: 2)
+                                    .padding(-3)
+                            }
+                            .overlay {
+                                Circle()
+                                    .strokeBorder(
+                                        isSelected
+                                            ? Yun.Palette.textPrimary : Yun.Palette.border,
+                                        lineWidth: isSelected ? 2 : 1
+                                    )
+                                    .padding(-5)
+                            }
+                            .padding(5)
+                        Text(accent.title)
+                            .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? Yun.Palette.textPrimary : Yun.Palette.textTertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+                .accessibilityLabel(Text(accent.title))
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    /// What the accent actually reaches. Three controls that all take their
+    /// colour from it, so the choice can be judged where it is used rather
+    /// than on a swatch.
+    private var accentPreview: some View {
+        HStack(spacing: Yun.Space.lg) {
+            YunSwitch(isOn: $previewSwitch)
+            YunLevelMeter(level: 0.42, peakHold: 0.6, segments: 16)
+                .frame(width: 120)
+            YunProgressBar(fraction: 0.62)
+                .frame(width: 90)
+            Spacer(minLength: 0)
+            Text(loc("Preview"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+        }
+    }
+
+    // MARK: Audio
+
+    private var audioSection: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.lg) {
             heading(loc("Sample rate"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
@@ -171,7 +340,75 @@ struct PreferencesWindow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
+
+            heading(loc("Buffer size"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunSegmented(
+                        selection: $model.bufferFrames,
+                        options: RouterModel.bufferSizes.map { ($0, "\($0)") })
+                    YunDetailRow(
+                        loc("One IO cycle"),
+                        value: String(format: "%.2f ms", cycleMilliseconds))
+                    Text(
+                        loc(
+                            "Frames the engine is handed at a time. Smaller is less delay and less room to do the work in; a route that is running restarts to take the new size."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("Loudness target"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    YunSegmented(
+                        selection: $model.loudnessTarget,
+                        options: LoudnessTarget.allCases.map { ($0, $0.title) })
+                    YunDetailRow(
+                        loc("Target"),
+                        value: String(format: "%.0f LUFS", model.loudnessTarget.lufs))
+                    Text(
+                        loc(
+                            "What the loudness readout is compared against, and what automatic levelling aims for. Every platform normalises to its own number."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("Recording"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Toggle(
+                        loc("Write a file per source as well as the mix"),
+                        isOn: $model.recordsStems
+                    )
+                    .toggleStyle(YunToggleStyle())
+                    Text(
+                        loc(
+                            "Stems are taken before the fader, so each one is what that source produced rather than a record of this session's mix decisions."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
+    }
+
+    /// One IO cycle at the requested rate, which is the part of the latency
+    /// this window can actually decide. The device's own offset is measured
+    /// under Diagnostics once a route is up.
+    private var cycleMilliseconds: Double {
+        let rate = model.preferredSampleRate
+        guard rate > 0 else { return 0 }
+        return Double(model.bufferFrames) / rate * 1000
     }
 
     // MARK: Shortcuts

@@ -27,6 +27,13 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let environment = ProcessInfo.processInfo.environment
 
+        // Here rather than in `App.init`, where there is no `NSApp` yet to put
+        // either of them on. A chosen appearance that only takes effect once
+        // the settings window has been opened looks exactly like one that was
+        // never saved.
+        YunTheme.shared.applyAppearance()
+        InterfaceOptions.apply()
+
         // Photographing the real window has to happen here for the same reason:
         // there is no window until the scene has been through the run loop.
         if let directory = environment["YUNAUDIO_SCREENSHOT"] {

@@ -403,3 +403,34 @@
 "%d filters, %.1f dB of headroom taken." = "%d filters, %.1f dB of headroom taken.";
 "Nothing is being corrected until routing starts." = "Nothing is being corrected until routing starts.";
 "Open the folder" = "Open the folder";
+
+/* Settings: language, theme and accent. */
+"Language" = "Language";
+"Follow the system" = "Follow the system";
+"Takes effect at once. Kept separately from the system's own language, so this application can be read in one language on a Mac set up in another." = "Takes effect at once. Kept separately from the system's own language, so this application can be read in one language on a Mac set up in another.";
+"At launch" = "At launch";
+"Where it lives" = "Where it lives";
+"Show in the Dock" = "Show in the Dock";
+"Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it." = "Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it.";
+"Theme" = "Theme";
+"System" = "System";
+"Light" = "Light";
+"Dark" = "Dark";
+"Set on the application rather than on the window, so the menu bar panel follows it too." = "Set on the application rather than on the window, so the menu bar panel follows it too.";
+"Surfaces" = "Surfaces";
+"Accent colour" = "Accent colour";
+"Monochrome" = "Monochrome";
+"Blue" = "Blue";
+"Green" = "Green";
+"Amber" = "Amber";
+"Red" = "Red";
+"Custom" = "Custom";
+"Preview" = "Preview";
+"Audio" = "Audio";
+"Buffer size" = "Buffer size";
+"One IO cycle" = "One IO cycle";
+"Frames the engine is handed at a time. Smaller is less delay and less room to do the work in; a route that is running restarts to take the new size." = "Frames the engine is handed at a time. Smaller is less delay and less room to do the work in; a route that is running restarts to take the new size.";
+"Loudness target" = "Loudness target";
+"What the loudness readout is compared against, and what automatic levelling aims for. Every platform normalises to its own number." = "What the loudness readout is compared against, and what automatic levelling aims for. Every platform normalises to its own number.";
+"Write a file per source as well as the mix" = "Write a file per source as well as the mix";
+"Stems are taken before the fader, so each one is what that source produced rather than a record of this session's mix decisions." = "Stems are taken before the fader, so each one is what that source produced rather than a record of this session's mix decisions.";
