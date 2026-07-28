@@ -122,6 +122,24 @@ A leak of a few kilobytes a minute, a cycle rate that wanders, or a clock lock
 that gives up an hour in are all invisible in a few seconds and all ruin the
 thing this is for.
 
+## The flow check takes over the audio hardware
+
+Worth knowing before running it on a machine somebody is using, and worth
+knowing twice before running several at once.
+
+It starts and stops real routes about fifty times, creates and destroys
+aggregate devices, changes device sample rates and puts them back, takes the
+microphone and the output, and — in the setups section — sets the *system's*
+own default input and output. All of that is what it is testing. What it looks
+like from outside is the machine's audio glitching every few seconds for two
+minutes.
+
+It takes a file lock so two copies cannot run at once, which is not politeness:
+two of them do not produce two results, they produce two wrong ones. And it
+puts the system defaults back at the end and asserts that it did, because
+leaving somebody's default microphone somewhere they did not put it is the kind
+of thing they find out about during a call.
+
 ## Things that need a human
 
 Do not run these yourself. Print the command and let the user run it.

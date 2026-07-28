@@ -2174,6 +2174,15 @@ enum UIFlowCheck {
         // A setup captures devices; a scene captures processing. Confusing the
         // two would mean somebody choosing "podcast" could not know whether
         // they had changed a compressor or unplugged their headphones.
+        //
+        // Applying one sets the *system's* default input and output, which is
+        // the point of the feature and is also the most invasive thing anything
+        // in this file does: it reaches outside the application and moves
+        // somebody's Sound settings. So what they were is taken first and put
+        // back at the end, whatever happens in between — this check runs on a
+        // machine somebody is using.
+        let systemInputBefore = (try? AudioDevices.defaultInput())??.uid
+        let systemOutputBefore = (try? AudioDevices.defaultOutput())??.uid
         let sourceBefore = model.selectedSourceUID
         model.saveQuickConfig(named: "Flow check setup")
         check(
@@ -2214,6 +2223,22 @@ enum UIFlowCheck {
         check(
             "it was deleted",
             !model.quickConfigs.contains { $0.name == "Flow check setup" })
+
+        // Put the machine's own settings back. Asserted rather than merely
+        // attempted: leaving somebody's default microphone somewhere they did
+        // not put it is the kind of thing they discover during a call.
+        if let systemInputBefore {
+            _ = try? AudioDevices.setDefault(systemInputBefore, forInput: true)
+        }
+        if let systemOutputBefore {
+            _ = try? AudioDevices.setDefault(systemOutputBefore, forInput: false)
+        }
+        check(
+            "the machine's own input was left where it was found",
+            (try? AudioDevices.defaultInput())??.uid == systemInputBefore)
+        check(
+            "and its output too",
+            (try? AudioDevices.defaultOutput())??.uid == systemOutputBefore)
         await waitUntil("and routing is still up", { model.isRunning }, timeout: 10)
 
         section("excluded applications")
