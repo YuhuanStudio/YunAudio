@@ -23,6 +23,7 @@ struct StatusPills: View {
     var isCompact = false
 
     var body: some View {
+        let _ = BodyCount.tick("StatusPills")
         YunWrap(spacing: Yun.Space.sm) {
             ForEach(Self.pills(for: model)) { pill in
                 YunStatusPill(

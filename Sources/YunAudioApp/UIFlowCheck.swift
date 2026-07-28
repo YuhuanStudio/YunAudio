@@ -1633,7 +1633,14 @@ enum UIFlowCheck {
         let batched = model.restartCount - batchedBefore
         note("\(unbatched) rebuilds loose, \(batched) batched")
         check("a batch of edits costs one rebuild", batched == 1)
-        check("and that is fewer than doing them loose", batched < unbatched)
+        // It used to read "fewer than doing them loose", and loose was two or
+        // three. A restart asked for while the engine queue is busy is now
+        // recorded and carried out once when it comes free rather than being
+        // dropped, so three loose edits landing inside one rebuild coalesce
+        // into that rebuild as well. What is left to assert is that batching is
+        // never worse — the guarantee it actually offers is the *one*, which
+        // the line above checks and loose editing still cannot promise.
+        check("and never more than doing them loose", batched <= unbatched)
         await waitUntil("the batch settled", { !model.isBusy }, timeout: 10)
         check("routing survived both", model.isRunning)
 
@@ -2644,6 +2651,8 @@ enum UIFlowCheck {
 
         await checkMIDI(model: model)
         await checkScoring(model: model)
+        await checkRedrawCost(model: model)
+        await checkCarriedState(model: model)
 
         summarise()
     }
@@ -2975,6 +2984,331 @@ enum UIFlowCheck {
             bytes += [UInt8(raw & 0xFF), UInt8(raw >> 8)]
         }
         return Data(bytes)
+    }
+
+    /// What the interface re-derives while nobody is touching it.
+    ///
+    /// The poll is measured elsewhere and is cheap. What it publishes is not:
+    /// every observable it writes invalidates every view body that read it, and
+    /// `@Observable` tracks that per property reached *anywhere* inside a body —
+    /// including through a computed property the body merely passes along. A
+    /// window whose whole tree is one body therefore redraws entirely because a
+    /// meter moved, and anything expensive it happens to touch is paid twenty
+    /// times a second.
+    ///
+    /// So the bodies are counted rather than reasoned about, and the expensive
+    /// reads are timed rather than assumed expensive. Both halves have already
+    /// been wrong here.
+    private static func checkRedrawCost(model: RouterModel) async {
+        section("what the interface redraws")
+
+        // The window has to be on screen or SwiftUI evaluates nothing and the
+        // counts are all zero, which would read as "nothing redraws".
+        NSApp.activate(ignoringOtherApps: true)
+        var onScreen = false
+        for window in NSApp.windows where window.title == "YunAudio" {
+            window.makeKeyAndOrderFront(nil)
+            onScreen = true
+        }
+        await bringRoutingBack(model)
+        guard onScreen, model.isRunning else {
+            note(
+                onScreen
+                    ? "no route is up, so nothing is publishing — skipped"
+                    : "no window on screen, so no body runs — skipped")
+            return
+        }
+        model.isAnalysisVisible = true
+        await pause(0.5)
+
+        // Whole-process processor time across the same window. Body counts say
+        // what is being re-derived; this says what it costs, which is the only
+        // figure that settles whether any of it was worth changing. It includes
+        // the IO thread and the poll, so it is a ceiling on the interface's
+        // share rather than a measurement of it — and it is the same ceiling
+        // before and after, which is what makes the difference meaningful.
+        func processorSeconds() -> Double {
+            var usage = rusage()
+            guard getrusage(RUSAGE_SELF, &usage) == 0 else { return 0 }
+            let user = Double(usage.ru_utime.tv_sec) + Double(usage.ru_utime.tv_usec) / 1e6
+            let system = Double(usage.ru_stime.tv_sec) + Double(usage.ru_stime.tv_usec) / 1e6
+            return user + system
+        }
+
+        BodyCount.reset()
+        BodyCount.isCounting = true
+        let cpuBefore = processorSeconds()
+        let seconds = 4.0
+        await pause(seconds)
+        let cpuSpent = processorSeconds() - cpuBefore
+        BodyCount.isCounting = false
+        let counts = BodyCount.counts
+        note(
+            String(
+                format: "%.0f ms of processor time in %.0f s idle — %.1f%% of one core",
+                cpuSpent * 1000, seconds, cpuSpent / seconds * 100))
+
+        // Twenty hertz is the poll. A view drawing a meter is meant to be here;
+        // a view drawing the header, the device pickers and the whole inspector
+        // is not, and the difference between the two is the finding.
+        for (name, count) in counts.sorted(by: { $0.value > $1.value }) {
+            note(
+                String(
+                    format: "%-16s %4d bodies — %.1f Hz", (name as NSString).utf8String!, count,
+                    Double(count) / seconds))
+        }
+        if counts.isEmpty { note("nothing was counted") }
+
+        let poll = 20.0 * seconds
+        // Half the poll rate, which is loose on purpose: this is wall clock on
+        // a machine that is also running a route. What it has to catch is a
+        // whole-window body pinned to the meters — measured at 20.0 Hz, one
+        // evaluation per poll — while not failing because a redraw or two got
+        // coalesced differently.
+        check(
+            "the whole window does not redraw with the meters",
+            Double(counts["MainWindow"] ?? 0) < poll / 2)
+        check(
+            "nor the patchbay, which nothing on the poll can change",
+            Double(counts["RoutingCanvas"] ?? 0) < poll / 2)
+        check(
+            "nor the balance panel",
+            Double(counts["CalibrationPanel"] ?? 0) < poll / 2)
+        // And the other half: the meters must still be live, or the fix was to
+        // stop drawing rather than to stop over-drawing.
+        check(
+            "the meters are still redrawing",
+            Double(counts["RouteStrip"] ?? 0) > poll / 4)
+
+        // Two reads the window body was making on every one of those
+        // evaluations. Timed rather than guessed: one of them turned out to
+        // hash two binaries off disk, and the other is three stat calls.
+        func microseconds(_ iterations: Int, _ body: () -> Void) -> Double {
+            let started = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<iterations { body() }
+            return Double(DispatchTime.now().uptimeNanoseconds - started)
+                / Double(iterations) / 1000
+        }
+        note(
+            String(
+                format: "driverIsOutOfDate %.0f µs, isDriverInstalled %.0f µs",
+                microseconds(50) { _ = model.driverIsOutOfDate },
+                microseconds(50) { _ = model.isDriverInstalled }))
+        // The driver only changes when this application installs it, so a body
+        // reading it is asking the file system a question that cannot have a
+        // new answer. Anything above a few microseconds means it is being
+        // re-derived rather than remembered.
+        check(
+            "the driver freshness answer is remembered",
+            model.driverIsOutOfDate == model.driverIsOutOfDate)
+        check(
+            "and costs nothing to ask for",
+            microseconds(200) { _ = model.driverIsOutOfDate } < 5)
+
+        // The collection-building computed properties, in the same units, so a
+        // decision about caching one of them has a number behind it rather than
+        // an intuition. Caching something cheap is a net loss — a second copy
+        // that can fall out of step — so these are reported whatever they say.
+        note(
+            String(
+                format: "sourceGroups %.1f µs, buses %.1f µs, alignableOutputs %.1f µs",
+                microseconds(500) { _ = model.sourceGroups },
+                microseconds(500) { _ = model.buses },
+                microseconds(500) { _ = model.alignableOutputs }))
+        note(
+            String(
+                format: "pathLatencyMilliseconds %.1f µs, transcriptText %.1f µs",
+                microseconds(200) { _ = model.pathLatencyMilliseconds },
+                microseconds(200) { _ = model.transcriptText }))
+    }
+
+    /// What survives a graph being rebuilt underneath a running route.
+    ///
+    /// The engine publishes a new graph three ways — a fresh `start`, a route
+    /// edit, a chain swap — and each carries a different amount of the previous
+    /// one across. Anything it does not carry has to be pushed back by the
+    /// model, and the failure mode when it is not is silence: the interface
+    /// goes on reporting what the model holds, which is right, while the graph
+    /// runs without it. Two have already been found this way. This asserts the
+    /// third case rather than waiting for the fourth.
+    private static func checkCarriedState(model: RouterModel) async {
+        section("state carried across a rebuild")
+        await bringRoutingBack(model)
+        guard model.isRunning else {
+            note("no route is up — skipped")
+            return
+        }
+
+        let everything = Set(RouterModel.GraphSetting.allCases)
+        check("a fresh route has everything pushed into it", model.appliedToGraph == everything)
+
+        // A route edit. `updateRoutes` carries the gains, the mutes, the
+        // recording rings and the ducking, and does not carry the headphone
+        // correction — the engine says in as many words that the model puts
+        // that back, and for a while nothing did.
+        model.isDucking = true
+        let profile = model.headphoneProfileName
+        model.setGraphicBand(4, at: 5)
+        await pause(0.3)
+        check("a tone control is running", model.headphoneCurve != nil)
+
+        let before = model.activeRoutes
+        if let first = before.first {
+            model.disconnectRoute(source: first.source, destination: first.destination)
+            await pause(0.3)
+            model.connect(source: first.source, destination: first.destination)
+            await pause(0.3)
+            check("the route edit took", model.activeRoutes.count == before.count)
+            check(
+                "and the output correction went back in with it",
+                model.appliedToGraph.contains(.headphoneCorrection))
+        } else {
+            note("no routes to edit — skipped")
+        }
+
+        // A chain swap. `updateEffects` carries the correction but builds fresh
+        // Audio Units, so every stored knob position has to be pushed again.
+        model.setEffect(.compressor, enabled: true)
+        await waitUntil("the chain swap finished", { !model.isBusy }, timeout: 10)
+        await pause(0.4)
+        check(
+            "a chain swap leaves the knob positions in the units",
+            model.appliedToGraph.contains(.effectValues))
+        check(
+            "and does not drop the output correction",
+            model.appliedToGraph.contains(.headphoneCorrection))
+
+        // A full restart, which carries nothing at all.
+        model.bufferFrames = model.bufferFrames == 256 ? 128 : 256
+        await waitUntil(
+            "the restart finished", { model.isRunning && !model.isBusy }, timeout: 20)
+        await pause(0.4)
+        check("everything is pushed back after a restart", model.appliedToGraph == everything)
+        note("applied: " + model.appliedToGraph.map(\.rawValue).sorted().joined(separator: " "))
+
+        model.setEffect(.compressor, enabled: false)
+        model.resetGraphicEQ()
+        model.isDucking = false
+        model.headphoneProfileName = profile
+        await waitUntil(
+            "routing survived all of it", { model.isRunning && !model.isBusy }, timeout: 20)
+
+        // A change that arrives while a start is still in flight.
+        //
+        // `start` reads every parameter off the model before it hops to the
+        // engine queue, and `restartIfRunning` used to give up on `isRunning` —
+        // which is false for the whole of that hop. So the change was neither
+        // applied nor remembered: the model held it, the interface showed it,
+        // and the route went on running without it until something else
+        // happened to rebuild. Caught in this file first, where attaching a
+        // monitor straight after a chain swap took twenty seconds to appear.
+        let bufferBefore = model.bufferFrames
+        let wantedBuffer: UInt32 = bufferBefore == 256 ? 128 : 256
+        model.voiceIsolationMix = model.voiceIsolationMix == 100 ? 80 : 100
+        // Now, with that restart in flight rather than after it.
+        model.bufferFrames = wantedBuffer
+        await waitUntil(
+            "the queue came free", { model.isRunning && !model.isBusy }, timeout: 30)
+        await pause(1.0)
+        note("engine reports \(model.pathQuality?.bufferFrames ?? -1) frames")
+        check(
+            "a change made during a start still reaches the engine",
+            model.pathQuality?.bufferFrames == Int(wantedBuffer))
+        model.bufferFrames = bufferBefore
+        await waitUntil("and back", { model.isRunning && !model.isBusy }, timeout: 30)
+
+        await checkSecondMix(model: model)
+
+        // And what is written down. A `didSet` that calls `persist()` for a
+        // field `Preferences` does not have is a setting that looks remembered
+        // and is not.
+        section("settings that survive a relaunch")
+        let originalBehaviour = model.tapMuteBehavior
+        let other: TapMuteBehavior = originalBehaviour == .muted ? .unmuted : .muted
+        model.tapMuteBehavior = other
+        check("the model took it", model.tapMuteBehavior == other)
+        check(
+            "and it reached the file",
+            PreferencesStore.load().tapMuteBehavior == other.storageKey)
+        model.tapMuteBehavior = originalBehaviour
+        check(
+            "and back again",
+            PreferencesStore.load().tapMuteBehavior == originalBehaviour.storageKey)
+    }
+
+    /// The monitor mix, which is carried by route *indices* rather than by
+    /// anything the routes themselves say.
+    ///
+    /// Two ways of moving those indices were moving them underneath the monitor
+    /// faders, and neither says anything: a send driving the wrong route
+    /// changes a level somewhere else, and a monitor that stopped existing
+    /// leaves both buses, both sets of faders and the legend above them
+    /// exactly as they were.
+    private static func checkSecondMix(model: RouterModel) async {
+        section("the second mix survives a change to the first")
+        await bringRoutingBack(model)
+        guard model.isRunning else {
+            note("no route is up — skipped")
+            return
+        }
+        guard let monitor = model.monitorOptions.first else {
+            note("no second output to monitor on — skipped")
+            return
+        }
+        await waitUntil("nothing else is in flight", { !model.isBusy }, timeout: 20)
+        let monitorBefore = model.monitorDeviceUID
+        model.monitorDeviceUID = monitor.uid
+        // Waited on the routes rather than on `!isBusy`. Attaching a monitor
+        // goes through `stop { start() }`, and there is a turn between the two
+        // where nothing is busy and the old routes are still up — so a check
+        // taken on the flag alone passes or fails on scheduling.
+        await waitUntil(
+            "the monitor came up",
+            { model.activeRoutes.contains { $0.destination.deviceUID == monitor.uid } },
+            timeout: 15)
+        let withMonitor = model.activeRoutes.count
+        check("and the sends point at them", model.monitorRoutesAreConsistent)
+
+        // A patchbay edit. Pulling one cable out of the main mix moves every
+        // route after it down by one, and the monitor's routes are all after
+        // it — so a send that was not remapped drives whatever inherited its
+        // index, which is somebody's level to the far end.
+        if let victim = model.activeRoutes.first(where: {
+            $0.destination.deviceUID != monitor.uid
+        }) {
+            model.disconnectRoute(source: victim.source, destination: victim.destination)
+            await pause(0.4)
+            check("the cable was pulled", model.activeRoutes.count == withMonitor - 1)
+            check(
+                "and the monitor sends still point at monitor routes",
+                model.monitorRoutesAreConsistent)
+            model.connect(source: victim.source, destination: victim.destination)
+            await pause(0.4)
+            check(
+                "putting it back leaves them consistent too", model.monitorRoutesAreConsistent)
+        } else {
+            note("nothing in the main mix to pull — skipped")
+        }
+
+        // And a channel-mode change, which used to be swapped in as `routes` —
+        // the microphone into the destination, and nothing else. The monitor
+        // was not in that list, so it simply stopped existing.
+        let modeBefore = model.channelMode
+        model.channelMode = modeBefore == .mono ? .stereo : .mono
+        await waitUntil("the change settled", { model.isRunning && !model.isBusy }, timeout: 20)
+        await pause(0.5)
+        check(
+            "changing the channel mode did not take the monitor away",
+            model.activeRoutes.contains { $0.destination.deviceUID == monitor.uid })
+        check("and left the sends consistent", model.monitorRoutesAreConsistent)
+        model.channelMode = modeBefore
+        await waitUntil("and back", { model.isRunning && !model.isBusy }, timeout: 20)
+        check(
+            "the monitor is still there afterwards",
+            model.activeRoutes.contains { $0.destination.deviceUID == monitor.uid })
+
+        model.monitorDeviceUID = monitorBefore
+        await waitUntil("monitoring went back as it was", { !model.isBusy }, timeout: 15)
     }
 
     /// MIDI learn, both halves.

@@ -112,27 +112,35 @@ enum PanelRenderer {
                 FileHandle.standardError.write(Data("failed to render \(name)\n".utf8))
                 continue
             }
-            let url = URL(fileURLWithPath: directory).appendingPathComponent(name)
-            // Both halves of this were wrong, and together they were worse than
-            // either. The directory was never created, so pointing
-            // YUNAUDIO_RENDER at somewhere that does not exist wrote nothing —
-            // and `try?` swallowed every failure while the line below announced
-            // success for each of them. Eighteen "wrote …" lines and an empty
-            // directory is the least helpful output a tool can produce.
-            do {
-                try FileManager.default.createDirectory(
-                    at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-                try png.write(to: url)
-                print("wrote \(url.path)")
-            } catch {
-                FileHandle.standardError.write(
-                    Data("could not write \(url.path): \(error.localizedDescription)\n".utf8))
-                failed = true
-            }
+            print(write(png, named: name, to: directory))
         }
     }
 
     private static let scale: CGFloat = 2
+
+    /// Writes one capture and says what actually happened.
+    ///
+    /// It used to be `try? png.write(to: url)` followed unconditionally by
+    /// `print("wrote …")`, and the directory was never created — so the
+    /// documented invocation on a machine that has not run this before wrote
+    /// nothing at all and reported twenty files. A capture harness that lies
+    /// about having produced captures is worse than no harness: the design
+    /// check it exists for then passes by reading yesterday's images, or none.
+    static func write(_ png: Data, named name: String, to directory: String) -> String {
+        let folder = URL(fileURLWithPath: directory, isDirectory: true)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let url = folder.appendingPathComponent(name)
+        do {
+            try png.write(to: url)
+            return "wrote \(url.path)"
+        } catch {
+            // Recorded as well as reported, so the process can exit non-zero.
+            // A design check whose output is missing must not look like one
+            // that passed — printing the reason is only half of saying so.
+            failed = true
+            return "could not write \(url.path): \(error.localizedDescription)"
+        }
+    }
 
     /// Sends a known colour through the real capture path and checks it comes
     /// back unchanged.

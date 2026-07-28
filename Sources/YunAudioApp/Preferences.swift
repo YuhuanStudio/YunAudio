@@ -2,6 +2,7 @@ import AppKit
 import Foundation
 import ServiceManagement
 import YunAudioEngine
+import YunAudioHAL
 import YunDesign
 
 /// Everything the app remembers between launches.
@@ -105,6 +106,12 @@ struct Preferences: Codable, Equatable, Sendable {
     /// version has never heard of can be dropped on the way in without taking
     /// the rest of the decode down with it.
     var midiBindings: [String: String]?
+    /// Whether a captured application is still heard while it is being tapped.
+    ///
+    /// Stored as a string rather than by giving `TapMuteBehavior` a raw value:
+    /// that type lives in the HAL layer, where the shape of this application's
+    /// preferences file has no business being.
+    var tapMuteBehavior: String?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -150,7 +157,29 @@ struct Preferences: Codable, Equatable, Sendable {
         busHeadphoneProfiles: [:],
         recentSourceUIDs: [],
         recentDestinationUIDs: [],
-        midiBindings: [:])
+        midiBindings: [:],
+        tapMuteBehavior: TapMuteBehavior.unmuted.storageKey)
+}
+
+extension TapMuteBehavior {
+    /// A name that is safe to write down.
+    ///
+    /// Not `String(describing:)`: that is a debugging convenience the compiler
+    /// is free to change, and a preferences file is a promise to a copy of the
+    /// application that has not been built yet.
+    var storageKey: String {
+        switch self {
+        case .unmuted: "unmuted"
+        case .muted: "muted"
+        case .mutedWhenTapped: "mutedWhenTapped"
+        }
+    }
+
+    init?(storageKey: String) {
+        guard let match = TapMuteBehavior.allCases.first(where: { $0.storageKey == storageKey })
+        else { return nil }
+        self = match
+    }
 }
 
 @MainActor

@@ -22,6 +22,7 @@ struct RoutingCanvas: View {
     private var destinations: [PortGroup] { model.canvasDestinations }
 
     var body: some View {
+        let _ = BodyCount.tick("RoutingCanvas")
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             HStack {
                 Text(loc("Patchbay"))

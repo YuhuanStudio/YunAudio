@@ -1265,3 +1265,65 @@ struct MIDIBindingTests {
         #expect(!controller.isEngaged(.fader(.master)))
     }
 }
+
+// MARK: - What the preferences file promises
+
+/// The preferences blob is a promise to a copy of the application that has not
+/// been built yet, and every way it can fail is silent: a field nobody writes,
+/// a field nobody reads, or a type change that makes the whole file undecodable
+/// and drops every setting at once.
+///
+/// `tapMuteBehavior` was the first kind. Its `didSet` had called `persist()`
+/// since the day it was written and `Preferences` had no field for it, so the
+/// setting deciding whether a captured application stays audible was forgotten
+/// at every launch.
+@Suite("Preferences round trip")
+struct PreferencesRoundTripTests {
+
+    @Test("every tap mute behaviour survives being written down")
+    func tapMuteBehaviourRoundTrip() {
+        for behaviour in TapMuteBehavior.allCases {
+            #expect(TapMuteBehavior(storageKey: behaviour.storageKey) == behaviour)
+        }
+        // Distinct, or two of them would collapse into one on the way back in.
+        #expect(
+            Set(TapMuteBehavior.allCases.map(\.storageKey)).count
+                == TapMuteBehavior.allCases.count)
+    }
+
+    @Test("a name this version has never seen is refused rather than guessed")
+    func unknownStorageKey() {
+        #expect(TapMuteBehavior(storageKey: "mutedOnAlternateTuesdays") == nil)
+    }
+
+    @Test("the whole blob survives an encode and decode")
+    func blobRoundTrip() throws {
+        var preferences = Preferences.default
+        preferences.tapMuteBehavior = TapMuteBehavior.mutedWhenTapped.storageKey
+        preferences.sourceDeviceUID = "a-source"
+        preferences.effectValues = ["gate.threshold": -38]
+        let data = try JSONEncoder().encode(preferences)
+        let decoded = try JSONDecoder().decode(Preferences.self, from: data)
+        #expect(decoded == preferences)
+    }
+
+    /// The reason every field added since the first release is optional: a file
+    /// written by an older copy has none of them, and one non-optional addition
+    /// would fail the whole decode and take every setting with it.
+    @Test("a file written before a field existed still decodes")
+    func forwardCompatibility() throws {
+        let legacy = """
+            {"channelMode":"mono","monoChannel":0,"bufferFrames":128,"autoStart":false,
+             "voiceIsolationEnabled":false,"voiceIsolationMix":100,
+             "preferredSampleRate":48000,"capturedAppBundleIDs":[],
+             "enabledEffects":[],"effectValues":{}}
+            """
+        let decoded = try JSONDecoder().decode(Preferences.self, from: Data(legacy.utf8))
+        #expect(decoded.bufferFrames == 128)
+        // Absent rather than defaulted here: the model supplies the default on
+        // the way in, and a decode that invented one would hide a field nobody
+        // is writing — which is the failure this suite exists for.
+        #expect(decoded.tapMuteBehavior == nil)
+        #expect(decoded.midiBindings == nil)
+    }
+}
