@@ -2025,7 +2025,7 @@ enum UIFlowCheck {
         // reaches neither the code that reads it nor the disk. So each one is
         // asserted twice — that it changed what it claims to change, and that
         // it survived being written down.
-        print("\nsettings")
+        section("settings")
         let originalLanguage = YunTheme.shared.language
         let originalAppearance = YunTheme.shared.appearance
         let originalAccent = YunTheme.shared.accent

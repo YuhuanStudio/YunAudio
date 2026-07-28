@@ -155,7 +155,7 @@ struct PathQualityTests {
         PathQuality(
             isBitExact: bitExact, hasProcessing: processing, isClockLocked: false,
             measuredRateRatio: 1, driftCorrectedDeviceUIDs: drifted,
-            bufferFrames: 128, sampleRate: 48000)
+            hasSampleRateMismatch: false, bufferFrames: 128, sampleRate: 48000)
     }
 
     @Test("buffer latency is derived from frames and rate")
@@ -170,7 +170,7 @@ struct PathQualityTests {
         let value = PathQuality(
             isBitExact: false, hasProcessing: false, isClockLocked: false,
             measuredRateRatio: 1, driftCorrectedDeviceUIDs: [],
-            bufferFrames: 128, sampleRate: 0)
+            hasSampleRateMismatch: false, bufferFrames: 128, sampleRate: 0)
         #expect(value.bufferLatencyMilliseconds == 0)
     }
 }
