@@ -234,6 +234,8 @@
 "Monitor" = "監聽";
 "Hear yourself, %@ ms behind." = "聽見自己，延遲 %@ 毫秒。";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "這個輸出看起來不是耳機。用喇叭監聽會把麥克風的聲音送回它正在收音的房間裡。";
+"%@ would not start as a monitor; the mix is carrying on without it." = "%@ 無法作為監聽輸出啟動；混音已在沒有它的情況下繼續。";
+"%1$@ could not be used for monitoring. %2$@" = "%1$@ 無法用於監聽。%2$@";
 "Hold this level automatically" = "自動維持這個響度";
 "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "只在 Apple 的裝置端模型聽見說話時才調整增益，所以停頓和打字不會把音量越推越高。";
 "out of range" = "已達調整上限";
