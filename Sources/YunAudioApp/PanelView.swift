@@ -154,9 +154,13 @@ struct PanelView: View {
     private var live: some View {
         YunCard {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
+                // Short names here and only here. The panel is 340 points wide
+                // and both ends share it, so a full name is truncated in the
+                // middle — "Razer…en V2 X", which keeps the word every Razer
+                // device has and eats the one that says which device it is.
                 YunSignalPath(
-                    source: model.selectedSource?.name ?? loc("No input"),
-                    destination: model.selectedDestination?.name ?? loc("No output"),
+                    source: model.selectedSource?.shortName ?? loc("No input"),
+                    destination: model.selectedDestination?.shortName ?? loc("No output"),
                     level: model.peakLevel,
                     isActive: model.isRunning)
 

@@ -1452,3 +1452,47 @@ struct StatusMarkTests {
         #expect(StatusItemController.statusImage(level: nil, isMuted: true) != nil)
     }
 }
+
+/// Device names in the places narrow enough to truncate.
+///
+/// A middle truncation of "Razer Seiren V2 X" produces "Razer…en V2 X" — it
+/// keeps the word every Razer device shares and eats the one that says which
+/// device it is. This is the rule that stops it, and it is asserted rather than
+/// eyeballed because the failure mode is a name that says nothing.
+@Suite("Shortening a device name")
+struct ShortDeviceNameTests {
+
+    @Test("the manufacturer's own prefix comes off")
+    func dropsTheBrand() {
+        #expect(
+            AudioDevice.shortName(of: "Razer Seiren V2 X", manufacturer: "Razer Inc")
+                == "Seiren V2 X")
+        #expect(
+            AudioDevice.shortName(of: "Razer Barracuda 2.4", manufacturer: "Razer Inc")
+                == "Barracuda 2.4")
+    }
+
+    @Test("a name that does not begin with it is left alone")
+    func leavesOthersAlone() {
+        #expect(
+            AudioDevice.shortName(of: "BlackHole 16ch", manufacturer: "Existential Audio")
+                == "BlackHole 16ch")
+        #expect(
+            AudioDevice.shortName(of: "MacBook Pro的麥克風", manufacturer: "Apple Inc.")
+                == "MacBook Pro的麥克風")
+    }
+
+    /// The case that matters most, because it is the one that would make the
+    /// interface worse rather than better.
+    @Test("a name that would be left too short keeps its prefix")
+    func keepsShortNamesWhole() {
+        #expect(AudioDevice.shortName(of: "Razer X", manufacturer: "Razer Inc") == "Razer X")
+        #expect(AudioDevice.shortName(of: "Razer", manufacturer: "Razer Inc") == "Razer")
+    }
+
+    @Test("no manufacturer means nothing to take off")
+    func noManufacturer() {
+        #expect(AudioDevice.shortName(of: "Some Device", manufacturer: nil) == "Some Device")
+        #expect(AudioDevice.shortName(of: "Some Device", manufacturer: "") == "Some Device")
+    }
+}

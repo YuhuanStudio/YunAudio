@@ -214,6 +214,33 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 
     /// Presentation latency in frames for a scope, combining the device's own
     /// latency with the safety offset the HAL keeps ahead of the IO cycle.
+    /// The name with the manufacturer's own prefix taken off.
+    ///
+    /// For the places that are narrow enough to truncate. A middle truncation
+    /// of "Razer Seiren V2 X" produces "Razer…en V2 X", which keeps the word
+    /// every Razer device shares and eats the one that says which device it is.
+    /// Dropping the prefix gives "Seiren V2 X", which fits and is the part
+    /// anybody was reading.
+    ///
+    /// Driven by what the device publishes rather than by a list of brands: the
+    /// manufacturer is a property, and a name that begins with it is repeating
+    /// something the interface either shows elsewhere or does not need. A name
+    /// that would be left too short to recognise keeps its prefix — "Razer" on
+    /// its own is a better label than nothing.
+    public var shortName: String { Self.shortName(of: name, manufacturer: manufacturer) }
+
+    /// The rule on its own, so it can be asserted without a device.
+    public static func shortName(of name: String, manufacturer: String?) -> String {
+        guard let manufacturer, !manufacturer.isEmpty else { return name }
+        // The first word only. Manufacturers publish "Razer Inc" and
+        // "Apple Inc." and name their devices after the bare brand.
+        guard let brand = manufacturer.split(separator: " ").first, brand.count >= 3,
+            name.hasPrefix(brand + " ")
+        else { return name }
+        let remainder = name.dropFirst(brand.count + 1).trimmingCharacters(in: .whitespaces)
+        return remainder.count >= 3 ? remainder : name
+    }
+
     public func latencyFrames(scope: AudioObjectPropertyScope) -> Int {
         let latency = id.optionalValue(of: AudioProperty<UInt32>.latency.scoped(to: scope)) ?? 0
         let safety =
