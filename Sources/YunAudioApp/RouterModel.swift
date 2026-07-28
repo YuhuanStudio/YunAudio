@@ -2546,6 +2546,35 @@ final class RouterModel {
     /// The routes actually running, including any built from application taps.
     private(set) var activeRoutes: [Route] = []
 
+    /// Whether the running route has taken the driver's clock. Not
+    /// `isClockLocked`, which is whether the anchor has converged yet.
+    var holdsClockLock: Bool { engine.holdsClockLock }
+
+    /// Provokes the clock-lock recovery, for the flow check.
+    ///
+    /// Only that: the recovery happens when the driver misses an anchor
+    /// deadline, and nothing in this application can arrange for it. What it
+    /// leaves behind was wrong for as long as it could not be asked for — the
+    /// route came back with no processing chain at all — so it is worth being
+    /// able to ask.
+    ///
+    /// Off the main actor, like the real thing: the recovery is a full teardown
+    /// and rebuild, which takes seconds, and it happens behind the model's back
+    /// rather than through `isBusy`. Running it inline would block the interface
+    /// for the length of it and would also stop being a fair imitation.
+    ///
+    /// - Returns: False when this route is not clock-locked, so the caller can
+    ///   report that nothing was exercised rather than that something passed.
+    @discardableResult
+    func forceClockLockRecovery() async -> Bool {
+        let engine = engine
+        return await withCheckedContinuation { continuation in
+            engineQueue.async {
+                continuation.resume(returning: engine.forceClockLockRecovery())
+            }
+        }
+    }
+
     /// Global mute, applied through the lock-free command queue so it takes
     /// effect on the next IO cycle without rebuilding anything.
     private(set) var hotkeyFailures: [String] = []

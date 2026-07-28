@@ -172,11 +172,36 @@ public final class RoutingEngine: @unchecked Sendable {
     public private(set) var sampleRateMismatch = false
     /// Sample rates as they were before routing touched them.
     private var originalSampleRates: [String: Double] = [:]
-    /// Enough of the last start() to bring the route back up unaided.
-    private var lastConfiguration:
-        (
-            source: String, destination: String, routes: [Route], bufferFrames: UInt32
-        )?
+    /// Every argument the route was last brought up with.
+    ///
+    /// A whole snapshot rather than a few named fields, because the clock-lock
+    /// recovery restarts the route from this and anything missing is silently
+    /// dropped. It used to hold the two devices, the routes and the buffer size
+    /// alone, so a lock that gave way took the entire processing chain with it —
+    /// along with the monitor mix, the captured applications, the requested
+    /// sample rate and the echo canceller — while the model went on holding all
+    /// of them and the interface went on showing them. `activeEffectStages` came
+    /// back empty and nothing anywhere said why.
+    private var lastConfiguration: StartConfiguration?
+
+    /// One start's worth of arguments, so that replaying a start cannot quietly
+    /// replay less than one.
+    struct StartConfiguration {
+        var sourceDeviceUID: String
+        var destinationDeviceUID: String
+        var routes: [Route]
+        var taps: [ProcessTap]
+        var additionalDestinationUIDs: [String]
+        var monitorDeviceUID: String?
+        var effects: [EffectKind]
+        var plugins: [AudioUnitPlugin]
+        var preferredSampleRate: Double?
+        var bufferFrames: UInt32
+        var voiceIsolation: VoiceIsolationSettings?
+        var echoCancellation: EchoCancellationSettings?
+        var outputLatencyTrim: [String: Int]
+        var selftest: Bool
+    }
     /// Set once a lock failure has forced drift correction back on, so the
     /// recovery cannot loop.
     private var clockLockAbandoned = false
@@ -343,6 +368,46 @@ public final class RoutingEngine: @unchecked Sendable {
     ) throws {
         stateLock.lock()
         defer { stateLock.unlock() }
+        try startLocked(
+            StartConfiguration(
+                sourceDeviceUID: sourceDeviceUID,
+                destinationDeviceUID: destinationDeviceUID,
+                routes: routes,
+                taps: taps,
+                additionalDestinationUIDs: additionalDestinationUIDs,
+                monitorDeviceUID: monitorDeviceUID,
+                effects: effects,
+                plugins: plugins,
+                preferredSampleRate: preferredSampleRate,
+                bufferFrames: bufferFrames,
+                voiceIsolation: voiceIsolation,
+                echoCancellation: echoCancellation,
+                outputLatencyTrim: outputLatencyTrim,
+                selftest: selftest))
+    }
+
+    /// The whole of a start, from one snapshot.
+    ///
+    /// Taking the configuration as a value rather than as fourteen parameters is
+    /// the point: the clock-lock recovery replays exactly what the caller gave,
+    /// and a field it forgets is one it cannot forget silently — there is only
+    /// one of it.
+    private func startLocked(_ configuration: StartConfiguration) throws {
+        let sourceDeviceUID = configuration.sourceDeviceUID
+        let destinationDeviceUID = configuration.destinationDeviceUID
+        let routes = configuration.routes
+        let taps = configuration.taps
+        let additionalDestinationUIDs = configuration.additionalDestinationUIDs
+        let monitorDeviceUID = configuration.monitorDeviceUID
+        let effects = configuration.effects
+        let plugins = configuration.plugins
+        let preferredSampleRate = configuration.preferredSampleRate
+        let bufferFrames = configuration.bufferFrames
+        let voiceIsolation = configuration.voiceIsolation
+        let echoCancellation = configuration.echoCancellation
+        let outputLatencyTrim = configuration.outputLatencyTrim
+        let selftest = configuration.selftest
+
         stopLocked()
 
         guard let source = try AudioDevices.device(uid: sourceDeviceUID) else {
@@ -423,9 +488,7 @@ public final class RoutingEngine: @unchecked Sendable {
             && (ClockAnchorPublisher(driverDeviceUID: destinationDeviceUID)?
                 .driverSupportsClockLocking ?? false)
         requiresClockLock = clockLockAvailable
-        lastConfiguration = (
-            sourceDeviceUID, destinationDeviceUID, routes, bufferFrames
-        )
+        lastConfiguration = configuration
 
         // Echo cancellation takes the microphone away from this aggregate:
         // AUVoiceProcessingIO can only cancel a speaker it is itself driving, so
@@ -783,6 +846,13 @@ public final class RoutingEngine: @unchecked Sendable {
         aggregate = nil
         destinationDevice = nil
 
+        // Dropped with the route it describes, and specifically because it now
+        // holds the process taps: a tap kept alive past the stop goes on muting
+        // the application it captured, with nothing routing its audio anywhere.
+        // Nothing needs it once the route is down — the recovery it exists for
+        // only runs against a route that is up.
+        lastConfiguration = nil
+
         // Safe now: the IOProc has been destroyed, so nothing can be reading
         // the graph any more.
         if let graph { RTGraph.deallocate(graph) }
@@ -841,12 +911,50 @@ public final class RoutingEngine: @unchecked Sendable {
         else { return }
         clockLockAbandoned = true
 
-        try? start(
-            sourceDeviceUID: configuration.source,
-            destinationDeviceUID: configuration.destination,
-            routes: configuration.routes,
-            bufferFrames: configuration.bufferFrames)
+        // The whole configuration, not the devices alone. This used to name four
+        // fields, and the other ten went to their defaults — so a lock that gave
+        // way an hour into a call brought the route back with no processing
+        // chain, no monitor mix, no captured applications and whatever sample
+        // rate the two devices happened to share. Nothing said so: the model
+        // still held every one of those settings, so the interface was still
+        // showing them, and only `activeEffectStages` disagreed.
+        //
+        // `clockLockAbandoned` is already set, so the rebuild computes
+        // `clockLockAvailable` as false and the HAL takes drift correction back.
+        // That is the point of the rebuild and the one thing that must differ.
+        try? startLocked(configuration)
         onClockLockFailure?()
+    }
+
+    /// Carries out the clock-lock recovery as though the driver had just
+    /// reported the lock gone, and says whether there was one to carry out.
+    ///
+    /// Reachable only so that the flow check can assert what the route comes
+    /// back as. The recovery is otherwise driven by the driver missing an anchor
+    /// deadline, which nothing on this side can arrange, and its one interesting
+    /// property — that the route returns carrying everything it was carrying —
+    /// is exactly the property that was wrong and invisible for as long as it
+    /// could not be provoked.
+    ///
+    /// - Returns: False when this route was never locked to begin with, so a
+    ///   caller can say "not exercised" rather than "passed".
+    @discardableResult
+    public func forceClockLockRecovery() -> Bool {
+        guard holdsClockLock else { return false }
+        recoverFromClockLockLoss()
+        return true
+    }
+
+    /// Whether this route has taken the driver's clock, and so has a lock it
+    /// could lose.
+    ///
+    /// Not `isClockLocked`, which says whether the anchor has converged yet: a
+    /// route can require the lock and not have reached it, and the recovery is
+    /// about the first of those rather than the second.
+    public var holdsClockLock: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return requiresClockLock && !clockLockAbandoned && lastConfiguration != nil
     }
 
     /// Applies a processing parameter to whatever is actually rendering.
@@ -1500,7 +1608,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // as at start. With the canceller in front that source is not in this
         // aggregate at all, so an absent map entry is expected there rather
         // than fatal.
-        let microphoneUID = lastConfiguration?.source
+        let microphoneUID = lastConfiguration?.sourceDeviceUID
         let isolatedSource = activeRoutes.first?.source
         let fromCancelled = echoBridge != nil && isolatedSource?.deviceUID == microphoneUID
         let mapped = isolatedSource.flatMap { inputMap[$0] }

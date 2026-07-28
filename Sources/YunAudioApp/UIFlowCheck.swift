@@ -1645,6 +1645,87 @@ enum UIFlowCheck {
         await waitUntil("the batch settled", { !model.isBusy }, timeout: 10)
         check("routing survived both", model.isRunning)
 
+        section("what survives the clock lock giving way")
+        // The one rebuild nobody asks for. When the driver misses an anchor
+        // deadline the engine brings the route back with drift correction on,
+        // and it used to bring it back from four remembered fields — the two
+        // devices, the routes and the buffer size — with every other argument
+        // of `start` going to its default. So the entire processing chain
+        // disappeared, and with it the monitor mix, the captured applications
+        // and the requested sample rate.
+        //
+        // Nothing said so, and nothing could: the model still held all of them,
+        // so the interface went on showing a chain that was no longer rendering,
+        // and `isRunning` was still true because the model was never told. It
+        // turned up as a scene that "put its stages in the model" and then built
+        // none of them, which reads like the scene being at fault.
+        model.apply(.noisyRoom)
+        await waitUntil("a scene with a chain settled", { !model.isBusy }, timeout: 15)
+        await bringRoutingBack(model)
+        // Whether the route came up holding the driver's clock is not decided by
+        // this application: the anchor property is read from the driver, and a
+        // driver another copy of this app is talking to can answer that it does
+        // not lock. That is worth one retry rather than a silently skipped
+        // check — `allowClockLockRetry` runs at every start, so a fresh one is
+        // a fresh chance at the lock.
+        var armed = model.holdsClockLock
+        if !armed {
+            model.stop()
+            await waitUntil("it went down to try again", { !model.isBusy }, timeout: 10)
+            model.start()
+            await waitUntil("and came back", { model.isRunning && !model.isBusy }, timeout: 15)
+            armed = model.holdsClockLock
+        }
+        if model.isRunning {
+            let stagesBefore = Set(model.activeEffectStages)
+            let latencyBefore = model.addedLatencyMilliseconds
+            let routesBefore = model.activeRoutes.count
+            // Said out loud because none of it was reported anywhere before, and
+            // the three answers mean three different runs: a driver that cannot
+            // anchor never locks and never recovers; a lock already lost has
+            // already done whatever it was going to do; and a lock held is the
+            // only state in which the assertions below mean anything.
+            let anchoring =
+                ClockAnchorPublisher(driverDeviceUID: ClockAnchorPublisher.driverDeviceUID)?
+                .driverSupportsClockLocking ?? false
+            note(
+                "driver anchors: \(anchoring), holds the lock: \(armed), "
+                    + "locked now: \(model.isClockLocked), "
+                    + "lock already lost: \(model.clockLockFailed)")
+            check("there is a chain to lose", !stagesBefore.isEmpty)
+            if stagesBefore.isEmpty {
+                note("no chain came up at all — the recovery had nothing to preserve")
+            } else if await model.forceClockLockRecovery() {
+                // The recovery does not go through `isBusy` — it happens behind
+                // the model's back — so there is nothing to wait for except the
+                // poll that refreshes the reported rate.
+                await pause(1.5)
+                check("the route is still up", model.isRunning)
+                check(
+                    "the chain came back with it",
+                    Set(model.activeEffectStages) == stagesBefore)
+                check(
+                    "carrying the same latency",
+                    abs(model.addedLatencyMilliseconds - latencyBefore) < 0.05)
+                check("and the same routes", model.activeRoutes.count == routesBefore)
+                // The rebuild is only worth doing because it changes this, so a
+                // recovery that left the lock claimed would be the other failure.
+                check("the lock is reported as lost", model.clockLockFailed)
+                note(
+                    model.activeEffectStages.map(\.rawValue).joined(separator: " → ")
+                        + String(format: ", %.1f ms", model.addedLatencyMilliseconds))
+            } else {
+                note("this route is not clock-locked — the recovery was not exercised")
+            }
+        }
+        // Handed on locked again. The recovery deliberately gives the clock back
+        // to the HAL, and every measurement below — bit-exactness most of all —
+        // would otherwise be made against a resampled path.
+        model.stop()
+        await waitUntil("it went down", { !model.isRunning && !model.isBusy }, timeout: 10)
+        model.start()
+        await waitUntil("and came back", { model.isRunning && !model.isBusy }, timeout: 15)
+
         section("processing chain")
         // Every stage has to build against the real Audio Unit. A knob wired to
         // a parameter the unit does not have fails silently — the slider moves
@@ -3405,7 +3486,6 @@ enum UIFlowCheck {
         model.monitorDeviceUID = monitorBefore
         await waitUntil("monitoring went back as it was", { !model.isBusy }, timeout: 15)
     }
-
 
     /// The system's own voice detector.
     ///
