@@ -1,2 +1,0 @@
-module.exports={enumProtocol25Status:{newCommand:0,busy:1,success:2,failed:3,timeout:4,notSupported:5,custom_command_mismatch:225},enumProtocol25Command:{getFirmwareVersion:[0,129],getEdition:[0,134],getDeviceMode:[0,132],setDeviceMode:[0,4],setLedMatrixRGBEffect:[3,10],setChromaEffect:[15,2]}};
-//# sourceMappingURL=protocol25Const.js.map

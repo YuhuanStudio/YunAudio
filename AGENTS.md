@@ -222,7 +222,8 @@ Sources/
   yunaudio-cli/     the verification harness
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly, toolchain selection, string check
-seiren-v3-pro-reverse/   the Windows captures the Razer protocol came from
+DEVICES.md          what the hardware actually is, per device, and how each
+                    fact was checked
 ```
 
 `RouterModel.swift` is large and is the centre of everything the interface does.

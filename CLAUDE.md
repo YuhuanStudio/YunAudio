@@ -24,4 +24,5 @@ The short version, none of which is a substitute for reading it:
 
 `README.md` is for people evaluating or using the project; `AGENTS.md` is for
 people changing it; **[TODO.md](TODO.md)** is what to change next and what has
-already been ruled out.
+already been ruled out; **[DEVICES.md](DEVICES.md)** is what the hardware
+actually is, per device, and how each fact was checked.

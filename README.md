@@ -398,8 +398,10 @@ them.
 
 The Seiren V3 Pro's light ring is implemented. Getting there took a capture of
 Synapse driving the device on Windows — polling the same feature report every
-three milliseconds while the lighting was changed — and the result is in
-`seiren-v3-pro-reverse/`.
+three milliseconds while the lighting was changed — and everything that came
+out of it, along with the manufacturer's own figures for the Barracuda and two
+conclusions that measurement later overturned, is written up in
+**[DEVICES.md](DEVICES.md)**.
 
 What that established, in order of how much time it saves anyone else:
 
