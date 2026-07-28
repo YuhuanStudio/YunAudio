@@ -4588,3 +4588,145 @@ struct SelftestWaitTests {
         #expect(engine.evaluateSelftest() == nil)
     }
 }
+
+// MARK: - Key detection
+
+/// Every karaoke machine has a transpose button because a song is written in
+/// the key its original singer could reach. The pitch shifter to fix that is
+/// already here; what was missing was knowing how far to shift, and guessing is
+/// not an answer.
+///
+/// Tested against synthesised chromas rather than recordings: what is being
+/// checked is the profile match, and a recording would be checking the FFT as
+/// well as the arithmetic while proving neither.
+@Suite("Key detection")
+struct KeyDetectorTests {
+
+    /// A chroma built by playing the notes of a scale, each as loud as
+    /// Krumhansl's listeners weighted it. If the match cannot find the key it
+    /// was built from, nothing else in this file matters.
+    private func chroma(for tonic: Int, minor: Bool) -> [Double] {
+        let profile = minor ? KeyDetector.minorProfile : KeyDetector.majorProfile
+        return (0..<12).map { profile[($0 - tonic + 12) % 12] }
+    }
+
+    @Test("it finds the key its own profile describes", arguments: 0..<12)
+    func findsMajor(tonic: Int) throws {
+        let key = try #require(KeyDetector.key(from: chroma(for: tonic, minor: false)))
+        #expect(key.pitchClass == tonic)
+        #expect(key.isMinor == false)
+    }
+
+    @Test("and the minor one too", arguments: 0..<12)
+    func findsMinor(tonic: Int) throws {
+        let key = try #require(KeyDetector.key(from: chroma(for: tonic, minor: true)))
+        #expect(key.pitchClass == tonic)
+        #expect(key.isMinor == true)
+    }
+
+    /// Nothing that does this is infallible, and the interface has to know
+    /// when to say so. A chroma with every pitch class equally present is not
+    /// in a key, and the confidence must collapse rather than a letter being
+    /// printed with a straight face.
+    @Test("an even chroma is not a key")
+    func flatChromaHasNoKey() {
+        // Perfectly flat correlates with nothing: no variance, no answer.
+        #expect(KeyDetector.key(from: [Double](repeating: 1, count: 12)) == nil)
+        #expect(KeyDetector.key(from: [Double](repeating: 0, count: 12)) == nil)
+    }
+
+    @Test("a nearly even chroma is reported as a guess")
+    func ambiguousIsLowConfidence() throws {
+        var almostFlat = [Double](repeating: 1, count: 12)
+        almostFlat[0] += 0.02
+        let key = try #require(KeyDetector.key(from: almostFlat))
+        #expect(key.confidence < 0.3)
+        // Where a real scale is not a guess.
+        let clear = try #require(KeyDetector.key(from: chroma(for: 0, minor: false)))
+        #expect(clear.confidence > key.confidence)
+    }
+
+    @Test("the wrong number of pitch classes is refused")
+    func refusesMalformed() {
+        #expect(KeyDetector.key(from: [1, 2, 3]) == nil)
+        #expect(KeyDetector.key(from: []) == nil)
+    }
+
+    /// The distance between two keys takes the shorter way round: a singer
+    /// asked to move eleven semitones up will move one down instead, and it is
+    /// the same key.
+    @Test("the distance between keys goes the short way")
+    func shortestDistance() {
+        let c = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 1)
+        let b = KeyDetector.Key(pitchClass: 11, isMinor: false, confidence: 1)
+        let g = KeyDetector.Key(pitchClass: 7, isMinor: false, confidence: 1)
+        #expect(c.semitones(to: b) == -1)
+        #expect(b.semitones(to: c) == 1)
+        #expect(c.semitones(to: g) == -5)
+        #expect(c.semitones(to: c) == 0)
+    }
+
+    /// The shift is arithmetic, not a preference: the song's middle and the
+    /// singer's middle, subtracted.
+    @Test("the suggested shift moves a song towards the voice")
+    func suggestsAShift() {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 1)
+        // A voice centred on C4 (MIDI 60) needs no help with a song in C.
+        #expect(KeyDetector.suggestedShift(songKey: cMajor, comfortableMidi: 60) == 0)
+        // Centred a fourth lower, it wants the song brought down.
+        #expect(KeyDetector.suggestedShift(songKey: cMajor, comfortableMidi: 55) < 0)
+        // And a fourth higher, up.
+        #expect(KeyDetector.suggestedShift(songKey: cMajor, comfortableMidi: 64) > 0)
+    }
+
+    /// More than six semitones is a different song rather than an easier one,
+    /// so the suggestion is bounded whatever the arithmetic says.
+    @Test("no suggestion moves a song more than half an octave")
+    func shiftIsBounded() {
+        let key = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 1)
+        for midi in stride(from: 30.0, through: 90.0, by: 1) {
+            let shift = KeyDetector.suggestedShift(songKey: key, comfortableMidi: midi)
+            #expect(shift >= -6 && shift <= 6)
+        }
+    }
+
+    @Test("semitones become the cents the pitch stage wants")
+    func cents() {
+        #expect(KeyDetector.cents(fromSemitones: 0) == 0)
+        #expect(KeyDetector.cents(fromSemitones: 5) == 500)
+        #expect(KeyDetector.cents(fromSemitones: -3) == -300)
+    }
+
+    /// The chroma has to fold octaves together — that is the whole idea — and
+    /// it has to land the fold on the right pitch class.
+    @Test("a tone lands in its own pitch class, whichever octave it is in")
+    func chromaFoldsOctaves() {
+        let binCount = 2048
+        let rate = 48000.0
+        let hertzPerBin = rate / Double(binCount * 2)
+        for hertz in [220.0, 440.0, 880.0] {  // three As
+            var magnitudes = [Float](repeating: 0, count: binCount)
+            magnitudes[Int((hertz / hertzPerBin).rounded())] = 1
+            let bins = KeyDetector.chroma(
+                magnitudes: magnitudes, sampleRate: rate, binCount: binCount)
+            let loudest = bins.firstIndex(of: bins.max() ?? 0)
+            #expect(loudest == 9)  // A
+        }
+    }
+
+    /// Rumble below a bass guitar and cymbals above where pitch stops being
+    /// pitch are not notes, and letting them in makes every song's key the
+    /// key of its kick drum.
+    @Test("what is not a note is left out")
+    func chromaIgnoresTheEdges() {
+        let binCount = 2048
+        let rate = 48000.0
+        let hertzPerBin = rate / Double(binCount * 2)
+        var magnitudes = [Float](repeating: 0, count: binCount)
+        magnitudes[Int((30.0 / hertzPerBin).rounded())] = 1  // below 55 Hz
+        magnitudes[Int((9000.0 / hertzPerBin).rounded())] = 1  // above 5 kHz
+        let bins = KeyDetector.chroma(
+            magnitudes: magnitudes, sampleRate: rate, binCount: binCount)
+        #expect(bins.reduce(0, +) == 0)
+    }
+}

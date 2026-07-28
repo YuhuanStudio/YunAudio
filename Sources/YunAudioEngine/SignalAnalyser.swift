@@ -186,6 +186,13 @@ public final class SignalAnalyser {
     /// entirely rather than copying audio nobody will look at.
     public var isIdle: Bool { needs.isEmpty }
 
+    /// The current chroma, when the spectrum is being computed at all.
+    ///
+    /// Not part of `Reading`: a chroma is twelve doubles and the reading is
+    /// rebuilt on every poll, twenty times a second, for an interface that
+    /// wants this once a second at most.
+    public func chroma() -> [Double]? { spectrum?.chroma(sampleRate: sampleRate) }
+
     public func reading() -> Reading {
         Reading(
             momentary: loudness.momentary,

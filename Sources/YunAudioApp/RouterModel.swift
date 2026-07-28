@@ -268,7 +268,58 @@ final class RouterModel {
     var isSingingVisible = false {
         didSet {
             guard oldValue != isSingingVisible else { return }
-            if isSingingVisible { refreshNowPlaying() } else { clearSinging() }
+            if isSingingVisible { refreshNowPlaying(); updateSinging() } else { clearSinging() }
+        }
+    }
+
+    /// What key the backing track is in, once enough of it has been heard.
+    private(set) var songKey: KeyDetector.Key?
+    /// How far the song would have to move for this singer, in semitones.
+    private(set) var suggestedShift: Int?
+    /// Every note sung since the panel was opened, as MIDI numbers.
+    ///
+    /// Kept as a running sum rather than a list: what is wanted is the middle
+    /// of somebody's range, and a mean over a few thousand frames is that.
+    @ObservationIgnored private var sungTotal: Double = 0
+    @ObservationIgnored private var sungCount: Int = 0
+    /// The middle of the singer's measured range, or nil before they have sung.
+    var comfortableMidi: Double? {
+        // Twenty frames is about a second of actual singing, which is the least
+        // that can be called a range rather than a note.
+        sungCount >= 20 ? sungTotal / Double(sungCount) : nil
+    }
+
+    /// Folds the current chroma into the key estimate.
+    ///
+    /// Accumulated rather than judged frame by frame: a single window of a song
+    /// is a chord, and a chord is in several keys at once. A few seconds of
+    /// them is a key.
+    @ObservationIgnored private var chromaTotal = [Double](repeating: 0, count: 12)
+
+    private func updateSinging() {
+        // The singer, from the pitch tracker that is already running.
+        let hertz = analysis.pitchHertz
+        if hertz > 0 {
+            sungTotal += 69 + 12 * log2(Double(hertz) / 440)
+            sungCount += 1
+        }
+
+        guard let chroma = analyser?.chroma(), chroma.count == 12 else { return }
+        for index in 0..<12 { chromaTotal[index] += chroma[index] }
+        guard let key = KeyDetector.key(from: chromaTotal) else { return }
+        songKey = key
+        suggestedShift = comfortableMidi.map {
+            KeyDetector.suggestedShift(songKey: key, comfortableMidi: $0)
+        }
+    }
+
+    /// Applies the suggested shift to the pitch stage, which is what the
+    /// transpose button on a karaoke machine does.
+    func applySuggestedShift() {
+        guard let semitones = suggestedShift, semitones != 0 else { return }
+        setEffect(.pitch, enabled: true)
+        if let parameter = EffectKind.pitch.parameters.first(where: { $0.id == "shift" }) {
+            setValue(KeyDetector.cents(fromSemitones: semitones), of: parameter, in: .pitch)
         }
     }
 
@@ -278,6 +329,11 @@ final class RouterModel {
     var heardNote: String? { PitchTracker.noteName(analysis.pitchHertz) }
 
     private func clearSinging() {
+        songKey = nil
+        suggestedShift = nil
+        sungTotal = 0
+        sungCount = 0
+        chromaTotal = [Double](repeating: 0, count: 12)
         nowPlaying = nil
         lyrics = nil
         lyricLine = nil
@@ -3748,7 +3804,9 @@ final class RouterModel {
         // Singing needs the pitch and nothing else — no FFT, no sound model.
         // The lazy needs are the reason a lyrics panel does not cost what the
         // analysis panel costs.
-        if isSingingVisible { wanted.formUnion([.pitch]) }
+        // Singing needs the pitch, and the spectrum for the key of what is
+        // playing — no sound model, which is the expensive one.
+        if isSingingVisible { wanted.formUnion([.pitch, .spectrum]) }
         if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
         if isDucking { wanted.formUnion([.classification]) }
 

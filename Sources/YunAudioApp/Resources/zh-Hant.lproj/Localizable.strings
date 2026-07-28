@@ -477,3 +477,7 @@
 "You are singing" = "你唱的音";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "麥克風自己的零延遲監聽，在裝置內部完成。回來的是未經處理的原始訊號 —— 這個應用程式做的任何處理都不在裡面。";
 "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "這個輸出裝置沒有輸入端可以把序列讀回來，所以沒有東西可以評分。要跑這個檢查，請路由到一個 loopback 裝置。";
+"The song is in" = "這首歌的調是";
+"a guess" = "推測";
+"Move it %+d" = "移調 %+d";
+"Sing for a moment and it will work out how far to move it." = "先唱一下，它會算出要移多少。";

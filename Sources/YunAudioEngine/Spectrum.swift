@@ -173,6 +173,16 @@ public final class SpectrumAnalyser {
         return bands[index] * 72 - 72
     }
 
+    /// A chroma of the last window: twelve numbers, one per pitch class.
+    ///
+    /// Folded from the raw bins rather than from the twenty-four display bands,
+    /// which are log-spaced for reading and would put several semitones in one
+    /// bar exactly where the notes are.
+    public func chroma(sampleRate: Double) -> [Double] {
+        KeyDetector.chroma(
+            magnitudes: magnitudes, sampleRate: sampleRate, binCount: magnitudes.count)
+    }
+
     public func reset() {
         pending.removeAll(keepingCapacity: true)
         for index in bands.indices { bands[index] = 0 }

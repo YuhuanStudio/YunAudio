@@ -1261,6 +1261,46 @@ struct MainWindow: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
+            // The key of what is playing, and how far it would have to move.
+            // Every karaoke machine has a transpose button because a song is
+            // written in the key its original singer could reach; the pitch
+            // stage to fix that is already here, and this is the number it
+            // needed.
+            if let key = model.songKey {
+                YunDivider()
+                HStack(spacing: Yun.Space.sm) {
+                    Text(loc("The song is in"))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                    Text(key.name)
+                        .font(Yun.Text.title)
+                        .foregroundStyle(
+                            key.confidence > 0.3
+                                ? Yun.Palette.textPrimary : Yun.Palette.textMuted)
+                    // Said out loud when it is a guess. Relative major and
+                    // minor share every note, so a weak match is common and
+                    // printing a letter with a straight face would be a lie.
+                    if key.confidence <= 0.3 {
+                        YunBadge(loc("a guess"))
+                    }
+                    Spacer()
+                    if let shift = model.suggestedShift, shift != 0 {
+                        Button(
+                            String(format: loc("Move it %+d"), shift)
+                        ) {
+                            model.applySuggestedShift()
+                        }
+                        .buttonStyle(YunButtonStyle(.secondary, small: true))
+                    }
+                }
+                if model.comfortableMidi == nil {
+                    Text(loc("Sing for a moment and it will work out how far to move it."))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             // Whether you are on the note. The tracker was already here; what
             // it lacked was a reason to be looked at.
             HStack(spacing: Yun.Space.sm) {

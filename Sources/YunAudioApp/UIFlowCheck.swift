@@ -2058,6 +2058,29 @@ enum UIFlowCheck {
             check("a song with no file finds nothing", missing == nil)
             try? FileManager.default.removeItem(at: file)
         }
+        // The key of what is playing, and how far it would have to move. The
+        // profile match is unit-tested against synthesised chromas; what only
+        // this can show is that a real spectrum reaches it at all.
+        await pause(2.0)
+        if let key = model.songKey {
+            note(
+                String(
+                    format: "heard %@ at %.0f%% confidence", key.name, key.confidence * 100))
+            check("the key is one of the twelve", (0..<12).contains(key.pitchClass))
+            check(
+                "and its confidence is a fraction", key.confidence >= 0 && key.confidence <= 1)
+            if let shift = model.suggestedShift {
+                note("suggested shift \(shift) semitones")
+                // More than half an octave is a different song rather than an
+                // easier one.
+                check("no suggestion moves it more than half an octave", abs(shift) <= 6)
+            } else {
+                note("nobody has sung yet, so there is nothing to move it towards")
+            }
+        } else {
+            note("nothing musical is playing — the key was not measured")
+        }
+
         // Pitch is switched on only while somebody is looking, which is what
         // makes a lyrics panel cheaper than the analysis panel.
         check("looking at it asks for the pitch", !model.analysisIsIdle)
