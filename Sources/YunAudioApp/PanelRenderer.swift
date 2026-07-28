@@ -55,7 +55,11 @@ enum PanelRenderer {
                 PreferencesWindow(model: model, initialSection: section, isRendering: true),
                 basename: "prefs-\(section.rawValue)\(suffix)",
                 directory: directory,
-                size: CGSize(width: 620, height: 440))
+                // Wide as the window's minimum, so a control that does not fit
+                // is seen here; taller than it, because the panes scroll in the
+                // running app and a capture that crops hides the last card in
+                // every section from the only check that looks at colour.
+                size: CGSize(width: 620, height: 700))
         }
     }
 

@@ -403,3 +403,34 @@
 "%d filters, %.1f dB of headroom taken." = "%d 個濾波器，讓出了 %.1f dB 的餘裕。";
 "Nothing is being corrected until routing starts." = "要開始路由之後才會實際套用補償。";
 "Open the folder" = "打開資料夾";
+
+/* Settings: language, theme and accent. */
+"Language" = "語言";
+"Follow the system" = "跟隨系統";
+"Takes effect at once. Kept separately from the system's own language, so this application can be read in one language on a Mac set up in another." = "立即生效。這個設定和系統語言分開記住，所以在一台以另一種語言設定的 Mac 上，這個應用程式仍然可以用你要的語言閱讀。";
+"At launch" = "啟動時";
+"Where it lives" = "它出現在哪裡";
+"Show in the Dock" = "顯示在 Dock";
+"Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it." = "關閉時，這是一個選單列附屬程式：沒有 Dock 圖示，也沒有應用程式選單。開啟後它就是一般的應用程式，⌘-tab 也切得到。";
+"Theme" = "外觀主題";
+"System" = "跟隨系統";
+"Light" = "淺色";
+"Dark" = "深色";
+"Set on the application rather than on the window, so the menu bar panel follows it too." = "這是設定在應用程式上而不是視窗上，所以選單列面板也會跟著變。";
+"Surfaces" = "表面材質";
+"Accent colour" = "強調色";
+"Monochrome" = "單色";
+"Blue" = "藍";
+"Green" = "綠";
+"Amber" = "琥珀";
+"Red" = "紅";
+"Custom" = "自訂";
+"Preview" = "預覽";
+"Audio" = "音訊";
+"Buffer size" = "緩衝區大小";
+"One IO cycle" = "一個 IO 週期";
+"Frames the engine is handed at a time. Smaller is less delay and less room to do the work in; a route that is running restarts to take the new size." = "引擎每次拿到的取樣數。越小延遲越低，能用來做事的時間也越少；正在執行的路由會重新啟動以套用新的大小。";
+"Loudness target" = "響度目標";
+"What the loudness readout is compared against, and what automatic levelling aims for. Every platform normalises to its own number." = "響度讀數要拿來比對的對象，也是自動調平要瞄準的值。每個平台都會正規化到自己的數字。";
+"Write a file per source as well as the mix" = "除了混音之外，每個來源各寫一個檔案";
+"Stems are taken before the fader, so each one is what that source produced rather than a record of this session's mix decisions." = "分軌是在推桿之前取的，所以每一軌都是那個來源實際發出的聲音，而不是這一場混音決策的紀錄。";

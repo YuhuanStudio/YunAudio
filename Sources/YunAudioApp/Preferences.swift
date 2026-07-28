@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import ServiceManagement
 import YunAudioEngine
@@ -139,6 +140,39 @@ enum PreferencesStore {
     static func save(_ preferences: Preferences) {
         guard let data = try? JSONEncoder().encode(preferences) else { return }
         UserDefaults.standard.set(data, forKey: key)
+    }
+}
+
+/// Where the application puts itself.
+///
+/// Not in `Preferences`: that blob is decoded when the model is built, and the
+/// activation policy has to be right before the first window is ordered in or
+/// the Dock icon appears a beat late and then vanishes. `UserDefaults` answers
+/// with nothing else having run.
+@MainActor
+enum InterfaceOptions {
+    private static let dockKey = "com.yuhuanstudio.yunaudio.showsDockIcon"
+
+    /// `LSUIElement` makes this an accessory by default: menu bar only, no Dock
+    /// icon and no application menu. That is right for a router that is mostly
+    /// left alone, and wrong for somebody who works in the window and wants to
+    /// reach it with ⌘-tab like anything else.
+    static var showsDockIcon: Bool {
+        get { UserDefaults.standard.bool(forKey: dockKey) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: dockKey)
+            apply()
+        }
+    }
+
+    /// Puts the policy on the running application.
+    ///
+    /// Returns whether it took: `setActivationPolicy` reports failure, and a
+    /// toggle that silently did nothing is the kind of defect this project
+    /// keeps finding.
+    @discardableResult
+    static func apply() -> Bool {
+        NSApp?.setActivationPolicy(showsDockIcon ? .regular : .accessory) ?? false
     }
 }
 

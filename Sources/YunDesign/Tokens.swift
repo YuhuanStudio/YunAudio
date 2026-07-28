@@ -55,13 +55,59 @@ public enum Yun {
         public static let textMuted = adaptive(
             light: Color(hex: 0x71717A), dark: Color(hex: 0x52525B))
 
-        /// Inverted between themes, as in the source system.
-        public static let accent = adaptive(
+        /// Inverted between themes, as in the source system: near-black on
+        /// light, near-white on dark. What every accent falls back to.
+        public static let monochromeAccent = adaptive(
             light: Color(hex: 0x18181B), dark: Color(hex: 0xFAFAFA))
+
+        /// The accent in force.
+        ///
+        /// Computed rather than constant so that choosing a colour reaches
+        /// every surface at once. Reading the theme here is also what makes
+        /// the change visible: the read is registered with Observation from
+        /// inside whatever view body asked for the colour, so the fader, the
+        /// meter and the selected tab all repaint together rather than
+        /// whenever each next happens to be rebuilt.
+        @MainActor public static var accent: Color {
+            YunTheme.shared.accent.colour(hue: YunTheme.shared.accentHue)
+        }
+
+        /// What is drawn on top of a filled accent. Unchanged by the choice:
+        /// every accent this offers is dark on a light appearance and light on
+        /// a dark one, so the contrasting side is the same both ways.
         public static let accentForeground = adaptive(
             light: Color(hex: 0xFAFAFA), dark: Color(hex: 0x18181B))
-        public static let accentSubtle = adaptive(
+
+        /// The quiet fill behind a selected row.
+        ///
+        /// Neutral for the monochrome accent, which is the source system's own
+        /// behaviour, and a wash of the accent otherwise — a coloured accent
+        /// that left every selection grey would only be visible on a fader.
+        @MainActor public static var accentSubtle: Color {
+            YunTheme.shared.accent == .monochrome
+                ? neutralSubtle : accent.opacity(0.16)
+        }
+
+        static let neutralSubtle = adaptive(
             light: Color(hex: 0xF4F4F5), dark: Color(hex: 0x27272A))
+
+        /// The accent resolved to sRGB, for checks that have to assert a colour
+        /// rather than look at one.
+        ///
+        /// A swatch drawn from a setting that never reached the palette looks
+        /// exactly like one that did, and the offscreen render is a picture
+        /// nobody diffs. Numbers are the only way to know the choice arrived.
+        @MainActor public static func accentComponents() -> (
+            red: Double, green: Double, blue: Double
+        ) {
+            guard let resolved = NSColor(accent).usingColorSpace(.sRGB) else {
+                return (0, 0, 0)
+            }
+            return (
+                Double(resolved.redComponent), Double(resolved.greenComponent),
+                Double(resolved.blueComponent)
+            )
+        }
 
         // Status. The only place hue is allowed.
         public static let success = adaptive(
@@ -108,6 +154,62 @@ public enum Yun {
         /// Numbers that change in place — meters, rates, ratios — so digits do
         /// not shuffle sideways as the value updates.
         public static let mono = Font.system(size: 11, weight: .medium, design: .monospaced)
+    }
+}
+
+/// The accents on offer.
+///
+/// The source system reserves hue entirely for status and inverts its accent
+/// between themes instead, and that restraint is why `monochrome` is both the
+/// default and first in the list. But a design system that cannot be made
+/// somebody's own is a design system they work around, so the alternatives are
+/// the system's *own* status hues rather than new colours invented for the
+/// purpose — every one of these values already appears in the palette above —
+/// plus one free hue for anybody who wants their own.
+public enum YunAccent: String, CaseIterable, Identifiable, Sendable {
+    case monochrome
+    case blue
+    case green
+    case amber
+    case red
+    case custom
+
+    public var id: String { rawValue }
+
+    public var title: String {
+        switch self {
+        case .monochrome: loc("Monochrome")
+        case .blue: loc("Blue")
+        case .green: loc("Green")
+        case .amber: loc("Amber")
+        case .red: loc("Red")
+        case .custom: loc("Custom")
+        }
+    }
+
+    /// The pair, light appearance first. Both are needed: a colour picked to
+    /// read against white is invisible against near-black, which is exactly
+    /// the defect the two-appearance render exists to catch.
+    public func colour(hue: Double) -> Color {
+        switch self {
+        case .monochrome: Yun.Palette.monochromeAccent
+        case .blue:
+            Yun.Palette.adaptive(light: Color(hex: 0x1D4ED8), dark: Color(hex: 0x60A5FA))
+        case .green:
+            Yun.Palette.adaptive(light: Color(hex: 0x065F46), dark: Color(hex: 0x34D399))
+        case .amber:
+            Yun.Palette.adaptive(light: Color(hex: 0x92400E), dark: Color(hex: 0xFBBF24))
+        case .red:
+            Yun.Palette.adaptive(light: Color(hex: 0xB91C1C), dark: Color(hex: 0xF87171))
+        case .custom:
+            // Darker and more saturated on light, lighter and less saturated
+            // on dark, in the same proportion as the pairs above. Taking the
+            // hue at full strength both ways would give a colour that glares
+            // in one appearance and vanishes in the other.
+            Yun.Palette.adaptive(
+                light: Color(hue: hue, saturation: 0.85, brightness: 0.55),
+                dark: Color(hue: hue, saturation: 0.55, brightness: 0.95))
+        }
     }
 }
 
