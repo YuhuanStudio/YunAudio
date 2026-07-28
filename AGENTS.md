@@ -157,6 +157,41 @@ you genuinely want to wait. A run that did not happen is a fact somebody can
 act on; a run that silently started fifteen minutes late is a mystery about why
 the machine was unusable.
 
+### A targeted run is not evidence about anything else
+
+`check()` returns without recording when the section is outside the filter.
+That is deliberate — a skimmed section has not been waited for, so what it
+observes is not evidence either way — but it has a consequence worth stating
+plainly: **a filtered run that ends "every flow behaved" means the named
+section behaved.** It says nothing about the other seventy-seven, whose
+assertions did not run at all.
+
+Measured: a full run reports `audio kept flowing` failing in `input trim and
+master`; the same binary filtered to another section reports every flow
+behaved.
+
+### First, check the machine can start audio at all
+
+Before believing any failure that says a signal did not arrive, establish that
+one could have. CoreAudio can reach a state where **nothing on the machine can
+start IO** — not this application, not `afplay`, which fails with
+`AudioQueueStart failed (-66681)`. Every reading is then zero, and every check
+that measures a signal fails with a message about its own subject, which is how
+an afternoon goes into a feature that was never broken.
+
+```bash
+.build/debug/yunaudio-cli soak      # cycle rate 0.0/s means nothing is running
+```
+
+Fixing it needs a human, because it takes the audio away from every application
+on the machine for a few seconds:
+
+```bash
+sudo killall coreaudiod
+```
+
+Print that; do not run it.
+
 ### What to run instead, most of the time
 
 The compiler is not the slow part, and it is worth knowing the numbers before
