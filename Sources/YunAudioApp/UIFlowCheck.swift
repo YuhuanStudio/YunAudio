@@ -3362,6 +3362,19 @@ enum UIFlowCheck {
             "the player was captured", { model.isRunning && !model.isBusy }, timeout: 10)
         note("capturing \(captured.name) — \(model.activeRoutes.count) route(s)")
 
+        // The capture has to have become routes before anything downstream of
+        // it means anything. It does not always: `start` resolves the bundle
+        // identifier against the processes running at that moment, and a player
+        // that has stopped playing is no longer one of them — so the tap is
+        // silently not built and the mix carries the microphone alone.
+        //
+        // Without this the section went on to blame the analysis tap for
+        // hearing no music, having never established that any music had been
+        // put on the bus. Measured: two routes where the microphone alone is
+        // two routes, and `tapOwners` empty.
+        let tapped = model.activeRoutes.contains { model.application(of: $0) != nil }
+        check("the capture became routes on the bus", tapped)
+
         // With the chain running, because that is the case anybody karaokes in
         // and it is the one that was in doubt. Voice isolation is a speech
         // model and the equaliser is a high-pass at 80 Hz, and both of them
@@ -3389,7 +3402,15 @@ enum UIFlowCheck {
 
         // Then until there is an answer at all, which now means until enough of
         // the piece has been heard for one to be offered.
+        let cyclesBeforeTheKey = model.cycleCountForDiagnostics
         await pause(upTo: 10.0, until: { model.songKey != nil })
+        // Whether anything was measured at all, which is a different question
+        // from what was measured and has to be asked first. A route can be up,
+        // report no error and carry nothing: `AudioDeviceStart` returns noErr
+        // and the IO proc is then simply never called, and every meter in the
+        // application reads a truthful zero.
+        let flowed = model.cycleCountForDiagnostics > cyclesBeforeTheKey
+        check("audio was flowing while the key was measured", flowed)
 
         if let key = model.songKey {
             note(
@@ -3411,7 +3432,25 @@ enum UIFlowCheck {
             }
         } else {
             check("real playing music produced a key at all", false)
-            note("the analysis tap saw nothing musical — check the capture reached the bus")
+            // Which of the four it was. The section used to say the last of
+            // them whichever had actually happened, and that sent the next
+            // person reading the analysers and the processing chain — neither
+            // of which had been reached. The signal has four places to stop and
+            // they want four different things done about them.
+            if !flowed {
+                note("no IO cycle ran — nothing on this machine was measured")
+            } else if !tapped {
+                note("the capture never joined the mix, so no music was on the bus")
+            } else if model.analysis.duration <= 0 {
+                note("audio is flowing but the analysis ring handed over none of it")
+            } else if !player.isRunning {
+                note("the player stopped before enough of it had been heard")
+            } else {
+                note(
+                    String(
+                        format: "the analysis tap heard %.1f s and found no key in it",
+                        model.analysis.duration))
+            }
         }
 
         // Two sources are on the bus now — the microphone and the player — so

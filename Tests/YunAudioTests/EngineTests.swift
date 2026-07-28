@@ -1117,6 +1117,59 @@ struct IOProcTests {
         #expect(drained[0..<taken].allSatisfy { abs($0 - 0.5) < 0.0001 })
     }
 
+    /// A captured application arrives on a second input buffer of the same
+    /// aggregate, and its routes name the same destination the microphone's do.
+    /// So it is on the analysis path by construction — the fold is taken off
+    /// the destination bus after everything has been summed into it.
+    ///
+    /// Asserted rather than reasoned about, because the whole karaoke feature
+    /// rests on it: the key detector, the loudness meter and the spectrum all
+    /// read the one ring, and if a tapped application were missing from it they
+    /// would every one of them be measuring the microphone alone while the
+    /// interface said otherwise. The microphone is muted here so that anything
+    /// arriving can only have come from the tap — the input mute is the
+    /// microphone's own, and a captured application is deliberately exempt from
+    /// it.
+    @Test("a captured application reaches the analysis ring")
+    func analysisHearsACapturedApplication() throws {
+        let graph = RTGraph.allocate(
+            routes: [
+                // The microphone, which `start` builds with the input trim.
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    appliesInputTrim: true),
+                // The process tap, which it deliberately does not.
+                RTRoute(
+                    sourceBuffer: 1, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0),
+                RTRoute(
+                    sourceBuffer: 1, sourceChannel: 1,
+                    destinationBuffer: 0, destinationChannel: 1),
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.analysisEnabled = 1
+        graph.pointee.inputMuted = 1
+
+        let input = Bus(channelCounts: [1, 2], frames: 64)
+        input.set(0, 0, to: 0.9)
+        input.set(1, 0, to: 0.5)
+        input.set(1, 1, to: 0.5)
+        let output = Bus(channelCounts: [2], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+
+        let ring = try #require(graph.pointee.analysisRing)
+        var drained = [Float](repeating: 0, count: 128)
+        let taken = drained.withUnsafeMutableBufferPointer {
+            Int(yun_rt_ring_read(ring, $0.baseAddress!, UInt32($0.count)))
+        }
+        #expect(taken == 64)
+        // 0.5 on both destination channels, averaged — the tap's level exactly,
+        // with none of the muted microphone's 0.9 in it.
+        #expect(drained[0..<taken].allSatisfy { abs($0 - 0.5) < 0.0001 })
+    }
+
     /// Several routes into one destination channel sum. That is what makes an
     /// application's audio and a microphone arrive as one mix.
     @Test("routes sharing a destination are summed")
