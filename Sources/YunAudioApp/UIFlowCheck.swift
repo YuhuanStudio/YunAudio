@@ -1166,6 +1166,26 @@ enum UIFlowCheck {
                     format: "speech present, offset %+.1f dB", model.autoLevelOffset))
             check("the correction stayed inside its limit", !model.autoLevelIsAtLimit)
         }
+        // The trim has to remain a control while the loop is running. Its base
+        // was captured once, when the loop was switched on, and every tick sets
+        // the trim to base plus the loop's offset — so a drag was overwritten
+        // on the next tick, and in a quiet room, where the offset is zero, it
+        // went back to exactly where it had been. The slider sprang.
+        //
+        // Held across several ticks rather than sampled once: the loop runs at
+        // the poll rate, and a reading taken before its next tick would pass
+        // against the broken version too.
+        let chosen = model.inputDecibels - 4
+        model.inputDecibels = chosen
+        await pause(1.0)
+        note(
+            String(
+                format: "trim set to %+.1f dB by hand, reads %+.1f dB after a second",
+                chosen, model.inputDecibels))
+        check(
+            "a trim moved by hand is not pulled back by the loop",
+            abs(model.inputDecibels - chosen) < 0.5)
+
         // Switching it off keeps whatever level it settled on rather than
         // snapping back: the point was to find a good trim, and throwing that
         // away the moment somebody disengages would undo the work.
@@ -1174,6 +1194,7 @@ enum UIFlowCheck {
         await pause(0.3)
         check("switching it off keeps the level it settled on", model.inputDecibels == settled)
         check("routing continues without it", model.isRunning && !model.isBusy)
+        model.inputDecibels = trimBefore
 
         try section("push to talk")
         // The property that matters is that arming it is safe: silence has to

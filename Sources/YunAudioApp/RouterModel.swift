@@ -1245,6 +1245,20 @@ final class RouterModel {
             guard oldValue != inputDecibels else { return }
             applyInputGain()
             persist()
+            // Somebody moving this by hand is restating where the loop should
+            // work from. Without that, the base was captured once — when
+            // automatic levelling was switched on — and every later drag was
+            // overwritten on the next tick: in a quiet room the offset is zero,
+            // so the trim sprang straight back to where it had been, and the
+            // control simply did not work while the feature was on.
+            //
+            // Rebased so the total stays where it was put. Setting the base to
+            // the new value instead would make the trim jump by the offset the
+            // moment the drag ended, which is the same defect wearing a hat.
+            if isAutoLevelling, !isAutoAdjusting {
+                autoLevelBase = Self.autoLevelBase(
+                    afterManual: inputDecibels, offset: autoLevelOffset)
+            }
         }
     }
     var isInputMuted = false {
@@ -4616,6 +4630,15 @@ final class RouterModel {
     /// The trim as the user left it. The loop works relative to this rather
     /// than absolutely, so switching it off leaves them where they started.
     @ObservationIgnored private var autoLevelBase: Float = 0
+
+    /// Where the loop works from after the trim is moved by hand.
+    ///
+    /// The invariant is that the total does not move: the loop's next tick sets
+    /// the trim to `base + offset`, and that has to come out as the number the
+    /// user just chose.
+    static func autoLevelBase(afterManual trim: Float, offset: Double) -> Float {
+        trim - Float(offset)
+    }
     @ObservationIgnored private var autoLevelTick = Date()
     /// True while the loop is driving the trim, so the trim's own persistence
     /// does not write to disk twenty times a second.

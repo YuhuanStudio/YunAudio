@@ -1643,3 +1643,36 @@ struct VerticalSliderFillTests {
         #expect(YunVerticalSlider.fill(for: -1, height: height).base == 0)
     }
 }
+
+/// Moving the input trim by hand while automatic levelling is running.
+///
+/// The loop works relative to a base captured when it was switched on, and sets
+/// the trim to `base + offset` on every tick. Nothing updated that base when
+/// somebody moved the trim themselves, so the next tick put it straight back —
+/// and in a quiet room the offset is zero, so it went back to exactly where it
+/// had been. The control did not work at all while the feature was on, and it
+/// looked like a slider that springs.
+@MainActor
+@Suite("Moving the trim under automatic levelling")
+struct AutoLevelRebaseTests {
+
+    /// The invariant: whatever the user chose is what the next tick produces.
+    @Test("the total does not move, whatever the loop had added")
+    func totalIsPreserved() {
+        for offset in [0.0, 3.5, -6.0, 12.0] {
+            for trim in [0, -8, 4.5, 20] as [Float] {
+                let base = RouterModel.autoLevelBase(afterManual: trim, offset: offset)
+                // This is what `stepAutoLevel` computes on its next tick.
+                #expect(abs(base + Float(offset) - trim) < 0.001, "\(trim) dB, \(offset) off")
+            }
+        }
+    }
+
+    /// With the loop having done nothing yet — a quiet room, which is the case
+    /// that made this look like a slider that springs back — the base is simply
+    /// what was chosen.
+    @Test("with no offset the base is what was chosen")
+    func quietRoom() {
+        #expect(RouterModel.autoLevelBase(afterManual: -6, offset: 0) == -6)
+    }
+}
