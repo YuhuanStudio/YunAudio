@@ -307,20 +307,36 @@ enum UIFlowCheck {
         // Settings existed only on the menu bar item's right-click menu, so the
         // whole of the preferences window — language, buffer size, shortcuts,
         // the MIDI map — was unreachable from the application's own window.
-        // The header sends this; so does the menu item. What is asserted is that
-        // a responder takes it, because with no `Settings` scene installed the
-        // send is a silent no-op and the button would look exactly the same.
+        // The header's gear sends this; so does the menu item, through the same
+        // function. What is asserted is that a responder takes the action: with
+        // no `Settings` scene installed the send is a silent no-op and the
+        // button would look exactly the same.
         check("the window's settings button reaches a handler", SettingsWindow.open())
-        let settingsWindow = NSApp.windows.first {
-            $0.identifier?.rawValue.contains("Settings") == true
-                || $0.title.localizedCaseInsensitiveContains("settings")
-                || $0.title.contains("設定")
+        // The negative control, and it is what makes the line above mean
+        // anything. `sendAction` returns true for a selector somebody handles
+        // and false for one nobody does — measured here rather than assumed,
+        // because "true" from a call that always returns true would be a check
+        // that passes with the Settings scene deleted.
+        check(
+            "and an action nobody handles is refused",
+            !NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil))
+        // What this cannot check, said out loud rather than left as a gap.
+        // SwiftUI's settings window only comes up for an active application,
+        // and a process launched from a terminal cannot make itself one:
+        // measured here as `NSApp.isActive == false` and no key window at all,
+        // after both `NSApp.activate` and `NSRunningApplication.activate`. So
+        // the action is asserted and the window it opens is not. A person
+        // clicking the gear is active by definition; this run never is.
+        note(
+            "the settings window itself was not opened — this process is not active "
+                + "(isActive=\(NSApp.isActive), key window: "
+                + "\(NSApp.keyWindow?.title ?? "none"))")
+        if let stray = PreferencesWindow.openWindow() {
+            // Shut again if it did come up, or every screenshot after this is
+            // taken with a settings window over the one being photographed.
+            stray.close()
+            NSApp.windows.first { $0.title == "YunAudio" }?.makeKeyAndOrderFront(nil)
         }
-        check("and a settings window came up", settingsWindow != nil)
-        // Shut again, or every screenshot after this is taken with a settings
-        // window sitting over the one being photographed.
-        settingsWindow?.close()
-        NSApp.windows.first { $0.title == "YunAudio" }?.makeKeyAndOrderFront(nil)
 
         // The menu bar glyph is the only part of this application most people
         // look at, and it showed nothing at all while muted — which is exactly

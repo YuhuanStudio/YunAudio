@@ -111,6 +111,33 @@ struct PreferencesWindow: View {
         .frame(minWidth: 620, minHeight: 440)
         .background(Yun.Palette.background)
         .focusEffectDisabled()
+        .accessibilityIdentifier(Self.accessibilityIdentifier)
+    }
+
+    /// How this window is recognised from outside.
+    ///
+    /// SwiftUI's `Settings` scene gives its window no title in an accessory
+    /// application — measured, not assumed: with it open, `NSApp.windows` reads
+    /// `Item-0 | YunAudio |  | `, two of them blank. So the check that asserts
+    /// pressing the gear opens something cannot look for a name, and matching
+    /// "the window that is not the other ones" would pass for any window at
+    /// all. This is a deliberate handle, and VoiceOver gets it too.
+    static let accessibilityIdentifier = "YunAudioSettingsWindow"
+
+    /// The window this view is in, if it is open.
+    ///
+    /// Walks the view tree because the identifier lands on whichever `NSView`
+    /// SwiftUI hangs the modifier on, which is not the content view and is not
+    /// somewhere worth writing down.
+    @MainActor
+    static func openWindow() -> NSWindow? {
+        func carriesIdentifier(_ view: NSView) -> Bool {
+            view.accessibilityIdentifier() == accessibilityIdentifier
+                || view.subviews.contains(where: carriesIdentifier)
+        }
+        return NSApp.windows.first { window in
+            window.contentView.map(carriesIdentifier) ?? false
+        }
     }
 
     private var sidebar: some View {
