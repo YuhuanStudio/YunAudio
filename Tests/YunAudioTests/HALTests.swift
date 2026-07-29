@@ -3433,3 +3433,99 @@ struct ChannelNameOwnershipTests {
         #expect(!canvas.contains("model.sourceChannelLabel(channel)"))
     }
 }
+
+/// Every remembered setting is actually written down.
+///
+/// This defect has happened three times, always the same way and always to the
+/// field added most recently: `tapMuteBehavior`, then `recordingFormat`, then
+/// `residentScript`. `persist()` builds a `Preferences` with the memberwise
+/// initialiser, every field is an optional `var`, and a field the call forgets
+/// to name is filled in as nil — silently. `save` then overwrites the whole
+/// blob, so the setting is not merely un-saved, it is *erased*, including by
+/// the very edit that set it.
+///
+/// Nothing catches it. The type compiles, the file is well-formed, the
+/// interface shows the value for the rest of the session, and it is gone at the
+/// next launch. Both round-trip tests pass, because they encode and decode a
+/// `Preferences` rather than watching one being built.
+///
+/// So this reads the source. Crude, and it is the only thing that would have
+/// caught any of the three: what is wrong is a missing line, and a missing line
+/// has no runtime behaviour to assert on.
+@Suite("Every setting reaches the file")
+struct PreferencesCompletenessTests {
+
+    private static var sourceRoot: String {
+        GraphLockDisciplineTests.enginePath
+            .replacingOccurrences(of: "Sources/YunAudioEngine/RoutingEngine.swift", with: "")
+    }
+
+    /// The stored properties of `Preferences`, in declaration order.
+    private func declaredFields() throws -> [String] {
+        let source = try String(
+            contentsOfFile: Self.sourceRoot + "Sources/YunAudioApp/Preferences.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "struct Preferences"))
+        let end = try #require(source.range(of: "static let `default`"))
+        let body = source[start.upperBound..<end.lowerBound]
+        return body.components(separatedBy: "\n").compactMap { line in
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("var ") else { return nil }
+            return trimmed.dropFirst(4).prefix { $0 != ":" && $0 != " " }.description
+        }
+    }
+
+    /// The argument labels `persist()` actually passes.
+    private func persistedFields() throws -> Set<String> {
+        let source = try String(
+            contentsOfFile: Self.sourceRoot + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "private func persist()"))
+        let body = source[start.upperBound...].prefix(6000)
+        var found: Set<String> = []
+        for line in body.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            guard let colon = trimmed.firstIndex(of: ":") else { continue }
+            let label = String(trimmed[trimmed.startIndex..<colon])
+            guard !label.isEmpty, label.allSatisfy({ $0.isLetter || $0.isNumber }) else {
+                continue
+            }
+            found.insert(label)
+        }
+        return found
+    }
+
+    @Test("every field of Preferences is named where it is saved")
+    func everyFieldIsPersisted() throws {
+        let declared = try declaredFields()
+        // The scan has to find the fields, or an empty list passes trivially —
+        // which is the failure mode of every check that reads a file.
+        #expect(declared.count > 40, "only found \(declared.count) fields")
+        let persisted = try persistedFields()
+        let forgotten = declared.filter { !persisted.contains($0) }
+        #expect(
+            forgotten.isEmpty,
+            "these are remembered in Preferences and never written: \(forgotten)")
+    }
+
+    /// And the defaults name them too, or a fresh install starts with a nil
+    /// where the type promised a value.
+    @Test("and the default names them as well")
+    func defaultsNameThem() throws {
+        let source = try String(
+            contentsOfFile: Self.sourceRoot + "Sources/YunAudioApp/Preferences.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "static let `default`"))
+        let body = source[start.upperBound...].prefix(4000)
+        let declared = try declaredFields()
+        // Optionals may be left out of the default — nil is a real answer for a
+        // device that has not been chosen. What must not be left out is a field
+        // with no sensible nil, and those are the non-optional ones.
+        let required = declared.filter { field in
+            source.contains("var \(field): ") && !source.contains("var \(field): String?")
+                && !source.contains("var \(field): Bool?") && !source.contains("var \(field): Float?")
+        }
+        let missing = required.filter { !body.contains("\($0):") }
+        #expect(missing.isEmpty, "not in Preferences.default: \(missing)")
+    }
+}

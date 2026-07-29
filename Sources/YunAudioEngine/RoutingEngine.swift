@@ -2054,7 +2054,16 @@ public final class RoutingEngine: @unchecked Sendable {
             throw RoutingError.aggregateUnavailable
         }
 
-        let byUID = Dictionary(uniqueKeysWithValues: members.map { ($0.uid, $0) })
+        // Duplicates kept rather than trapped. `members` is source, destination
+        // and extras, and those can name the same device — the application
+        // guards against it for a route, but nothing does for a tap, and
+        // `yunaudio-cli tap` with the YunAudio device as the system input died
+        // in `Dictionary(uniqueKeysWithValues:)` with "Duplicate values for key".
+        // A device listed twice is still that device, so there is nothing to
+        // decide between; trapping on it is the one wrong answer.
+        let byUID = Dictionary(members.map { ($0.uid, $0) }, uniquingKeysWith: { first, _ in
+            first
+        })
 
         // Taps are appended after the sub-devices on the input side, in the
         // order they were listed, and contribute no output channels. A tap's
@@ -2062,9 +2071,8 @@ public final class RoutingEngine: @unchecked Sendable {
         // route can name an application exactly as it names a microphone.
         let inputUIDs = aggregate.subDevices.map(\.uid) + taps.map(\.uid)
         let tapChannels = Dictionary(
-            uniqueKeysWithValues: taps.map {
-                ($0.uid, Int($0.format?.mChannelsPerFrame ?? 2))
-            })
+            taps.map { ($0.uid, Int($0.format?.mChannelsPerFrame ?? 2)) },
+            uniquingKeysWith: { first, _ in first })
 
         inputMap = Self.map(
             streams: aggregateDevice.inputStreams,

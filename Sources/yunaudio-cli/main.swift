@@ -682,7 +682,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
 
     print("\nprocesses holding audio devices:")
     let devices = (try? AudioDevices.all()) ?? []
-    let byID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0.name) })
+    // Uniqued rather than trapped, for the same reason as the engine's own map:
+    // a device object ID is not guaranteed unique across a list somebody else
+    // assembled, and a diagnostic that crashes is worse than one that repeats
+    // a name.
+    let byID = Dictionary(
+        devices.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
     for process in (try? AudioProcesses.all(includingSilent: true)) ?? [] {
         let inputs = process.devices(scope: kAudioObjectPropertyScopeInput)
         let outputs = process.devices(scope: kAudioObjectPropertyScopeOutput)
