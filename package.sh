@@ -39,7 +39,13 @@ if [[ -n "${IDENTITY}" ]]; then
 	SIGN_ARGS=(--sign "${IDENTITY}" --timestamp --options runtime)
 else
 	echo "no Developer ID Application identity found — signing ad-hoc."
-	echo "The image will work on this machine only; Gatekeeper will block it elsewhere."
+	# Said precisely, because the old wording — "will work on this machine
+	# only" — is not what was measured. An ad-hoc signed, quarantined build
+	# assesses as `rejected` by `spctl` and still launches on macOS 27; what
+	# somebody actually meets is the first-launch refusal, which they get past
+	# in System Settings. That is the ordinary way unnotarised open-source
+	# software is distributed on this platform, not a reason not to ship.
+	echo "Gatekeeper will refuse it on first launch elsewhere; READ ME FIRST.txt says how."
 	SIGN_ARGS=(--sign - --options runtime)
 	NOTARIZE=0
 fi
@@ -97,6 +103,53 @@ sudo killall coreaudiod
 echo "Removed."
 SCRIPT
 chmod +x "${STAGING}/Uninstall Audio Device.command"
+
+# What somebody meets before they meet the application.
+#
+# A disk image that opens onto four icons and a refusal is one people close
+# again. The refusal is not a fault and it has a fixed remedy, so the remedy
+# travels with the thing that causes it — in the window they are already
+# looking at, rather than on a page they would have to go and find.
+cat >"${STAGING}/READ ME FIRST.txt" <<'NOTE'
+YunAudio — first launch
+
+macOS will refuse to open this the first time, and say the developer
+cannot be verified. That is expected. It is not a warning about this
+application in particular: it is what macOS says about anything that has
+not been through Apple's paid notarisation service, and this project has
+no paid Apple developer account.
+
+To open it anyway:
+
+  1. Drag YunAudio.app onto the Applications folder here.
+  2. Open it once. macOS refuses.
+  3. Open System Settings, go to Privacy & Security, scroll to the
+     bottom, and click "Open Anyway" beside YunAudio.
+  4. Open it again. It will ask once more; agree.
+
+You only do this once.
+
+If you would rather not, build it yourself instead — it is one command
+and it carries no quarantine flag, so none of the above applies. The
+README in the source repository has it.
+
+---
+
+The virtual audio device (optional)
+
+YunAudio does most of its work without it: capturing other applications,
+the effect chain, recording, transcription, monitoring, OBS, MIDI and
+scripting all need nothing installed.
+
+What the device buys is the other half — other applications being able to
+choose "YunAudio" as their microphone, over a path that is bit-exact.
+
+To install it, run "Install Audio Device.command". It asks for your
+administrator password and restarts coreaudiod, so all audio on the
+machine stops for a moment.
+
+To remove it, run "Uninstall Audio Device.command". The same applies.
+NOTE
 
 ln -s /Applications "${STAGING}/Applications"
 

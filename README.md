@@ -257,13 +257,20 @@ App/                bundle assembly for YunAudio.app
 
 ## Building
 
-**Build it yourself. There is no download, and that is deliberate rather than
-unfinished.** Notarising an application and a HAL plug-in needs a paid Apple
-developer account; without one, anything you download is quarantined and
-Gatekeeper refuses it — and a driver that will not load is worse than no driver.
-A binary you built on your own machine carries no quarantine flag, so none of
-that applies. This is how open-source macOS audio software has always been
-distributed and it costs you one command.
+There are two ways in, and the difference between them is one dialog.
+
+**A disk image.** `./package.sh` builds `build/YunAudio-<version>.dmg`, which
+carries the application, the virtual device, and a script each for installing
+and removing it. macOS will refuse to open the application the first time and
+say the developer cannot be verified — that is what it says about anything that
+has not been through Apple's paid notarisation service, which this project has
+no account for. Privacy & Security in System Settings has an "Open Anyway"
+beside it, and once is enough. The image says so in a `READ ME FIRST.txt` you
+see before you see anything else, because a refusal with no explanation beside
+it is where most people stop.
+
+**Or build it yourself**, below. A binary you built carries no quarantine flag,
+so none of the above applies, and it is one command.
 
 Building needs an Xcode carrying the **macOS 27 SDK**, because live
 transcription uses `AnalyzerInputConverter`. The scripts find one and select it
