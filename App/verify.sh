@@ -26,9 +26,11 @@ cd "$(dirname "$0")/.."
 source ./App/toolchain.sh
 
 FULL=0
+FRESH=0
 for argument in "$@"; do
 	case "${argument}" in
 	--full) FULL=1 ;;
+	--fresh) FRESH=1 ;;
 	esac
 done
 
@@ -232,6 +234,37 @@ if [[ "${FULL}" == "1" ]]; then
 	fi
 else
 	SKIPPED+=("flow check — not asked for; run with --full")
+fi
+
+# ------------------------------------------------- somebody else can build it
+#
+# A clone into a directory of its own, built with nothing of this working tree
+# to lean on. It is the only check that can catch the class of thing that works
+# here and nowhere else: a file that was never added, a path that happens to
+# exist, a build product that is not actually reproduced by the script.
+#
+# Behind a flag because it is a fresh clone and a full build. Worth running
+# before anybody is told to try it — which, without a paid developer account to
+# notarise anything, is the *primary* way this gets to people. A locally built
+# binary carries no quarantine flag, so Gatekeeper never enters into it.
+builds_from_a_fresh_clone() {
+	local where
+	where="${WORK}/fresh"
+	rm -rf "${where}"
+	git clone --quiet . "${where}" || return 1
+	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && ./App/build-app.sh ) ||
+		return 1
+	[[ -x "${where}/build/YunAudio.app/Contents/MacOS/YunAudioApp" ]] || {
+		echo "the clone built without producing a binary"
+		return 1
+	}
+	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && swift test ) || return 1
+}
+
+if [[ "${FRESH}" == "1" ]]; then
+	step "builds from a fresh clone" builds_from_a_fresh_clone
+else
+	SKIPPED+=("a fresh clone — not asked for; run with --fresh before telling anybody to try it")
 fi
 
 # ------------------------------------------------------------------ the truth

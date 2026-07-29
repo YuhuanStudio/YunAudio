@@ -260,6 +260,14 @@ App/                bundle assembly for YunAudio.app
 
 ## Building
 
+**Build it yourself. There is no download, and that is deliberate rather than
+unfinished.** Notarising an application and a HAL plug-in needs a paid Apple
+developer account; without one, anything you download is quarantined and
+Gatekeeper refuses it — and a driver that will not load is worse than no driver.
+A binary you built on your own machine carries no quarantine flag, so none of
+that applies. This is how open-source macOS audio software has always been
+distributed and it costs you one command.
+
 Building needs an Xcode carrying the **macOS 27 SDK**, because live
 transcription uses `AnalyzerInputConverter`. The scripts find one and select it
 themselves; a hand-run `swift build` may need `source ./App/toolchain.sh` first,
@@ -284,6 +292,26 @@ sudo killall coreaudiod
 ```
 
 ## Verifying
+
+One command runs everything, and says what it did **not** run:
+
+```bash
+./App/verify.sh                 # everything that does not need the audio hardware
+./App/verify.sh --full          # and the flow check, which takes it for about two minutes
+./App/verify.sh --fresh         # and a clone into a directory of its own, built from nothing
+```
+
+It compiles, runs the tests, checks every user-facing string goes through a
+translator, assembles the bundle, renders every panel offscreen, photographs the
+real window in every tab, and — with `--full` — proves the path is bit-exact and
+the realtime thread allocates nothing, in a release build. A run that skipped
+something says so in as many words, because a green summary that quietly omitted
+the only check touching real hardware is worse than a red one.
+
+Then look at `build/screenshots`. The gate can tell you a photograph was taken;
+it cannot tell you the layout in it is wrong.
+
+The individual tools, when you want one of them on its own:
 
 ```bash
 swift run -c release yunaudio-cli                     # probe every device

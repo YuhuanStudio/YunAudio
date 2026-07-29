@@ -576,8 +576,14 @@ struct ControlSocketTests {
             box.outcome = Result { try client.send(request) }
             done.signal()
         }
-        guard done.wait(timeout: .now() + 5) == .success else {
-            throw ControlError.transport("the reply did not arrive within five seconds")
+        // Generous on purpose. The deadline is here to turn a deadlock into a
+        // failure rather than a hung run, and a deadlock never completes — so
+        // there is nothing to gain from a short one and something real to lose.
+        // At five seconds these two cases failed whenever the machine was busy
+        // with a flow check, which teaches people to re-run rather than to look,
+        // and a check that is sometimes right is worse than one that is slow.
+        guard done.wait(timeout: .now() + 60) == .success else {
+            throw ControlError.transport("the reply did not arrive within a minute")
         }
         return try #require(box.outcome).get()
     }
