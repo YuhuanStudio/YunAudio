@@ -3,6 +3,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
+import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunDesign
@@ -3853,6 +3854,21 @@ enum UIFlowCheck {
         check(
             "and back again",
             PreferencesStore.load().tapMuteBehavior == originalBehaviour.storageKey)
+
+        // The same shape, found the same way. The recording format had a
+        // picker, an engine that read it and a preset that carried it, and no
+        // `didSet` and no field — so somebody who chose AAC to save disk got
+        // WAV files the next morning.
+        let originalFormat = model.recordingFormat
+        let otherFormat: Recorder.Format = originalFormat == .aac ? .wav : .aac
+        model.recordingFormat = otherFormat
+        check(
+            "the recording format reached the file",
+            PreferencesStore.load().recordingFormat == otherFormat.rawValue)
+        model.recordingFormat = originalFormat
+        check(
+            "and back again",
+            PreferencesStore.load().recordingFormat == originalFormat.rawValue)
     }
 
     /// The monitor mix, which is carried by route *indices* rather than by

@@ -1,5 +1,6 @@
 import Foundation
 import JavaScriptCore
+import YunAudioControl
 import YunAudioRT
 import YunDesign
 
@@ -20,6 +21,13 @@ protocol ScriptTarget: AnyObject {
     /// rather than guessing at names.
     var scriptPresetNames: [String] { get }
     var scriptConfigNames: [String] { get }
+    /// Whether the last `perform` did what it was asked.
+    ///
+    /// `perform` answers in a sentence, which is exactly right for a menu bar
+    /// and useless to a shell: `yunaudio-cli script` printed the interpreter's
+    /// error and exited 0, so a script that had stopped working looked from
+    /// outside like one that was working. Read immediately after `perform`.
+    var lastCommandFailed: Bool { get }
 }
 
 /// Runs a script against the application.

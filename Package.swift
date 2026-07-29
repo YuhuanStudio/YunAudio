@@ -29,10 +29,17 @@ let package = Package(
 
         .target(name: "YunAudioRazer"),
 
+        // The vocabulary two executables share. A URL, a MIDI note, a line of
+        // script and a command line are four front ends onto one list of verbs,
+        // and one executable target cannot read a type defined in another — so
+        // the list lives here rather than being copied into the tool.
+        .target(name: "YunAudioControl"),
+
         .executableTarget(
             name: "YunAudioApp",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
+                "YunAudioControl",
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.
@@ -40,12 +47,17 @@ let package = Package(
             ],
             resources: [.process("Resources")]),
 
-        .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
+        .executableTarget(
+            name: "yunaudio-cli",
+            dependencies: [
+                "YunAudioHAL", "YunAudioEngine", "YunAudioRazer", "YunAudioControl",
+            ]),
 
         .testTarget(
             name: "YunAudioTests",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer",
+                "YunAudioControl",
                 // The app is an executable target, and a test target can depend
                 // on one since Swift 5.5. It is here so the MIDI message
                 // decoding and soft-takeover arithmetic can be tested without a

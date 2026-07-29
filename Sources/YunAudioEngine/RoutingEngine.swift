@@ -236,6 +236,17 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Reports a route that had to be rebuilt because the clock lock failed.
     public var onClockLockFailure: (@Sendable () -> Void)?
 
+    /// Why voice isolation is not running, when it was asked for.
+    ///
+    /// Named constants rather than sentences written out at each site: the
+    /// application turns these into something a person can read, and matching
+    /// on a phrase that somebody later rewords would silently put the raw
+    /// English back in front of the user.
+    public enum IsolationFailure {
+        public static let chainNotBuilt = "the processing chain could not be built"
+        public static let unitNotInstantiated = "AUSoundIsolation could not be instantiated"
+    }
+
     public private(set) var lastIsolationError: String?
 
     /// A monitor output that would not come up, and what it said.
@@ -293,6 +304,14 @@ public final class RoutingEngine: @unchecked Sendable {
         effectChain?.set(parameter, ofPlugin: id, to: value)
     }
     /// Why the echo canceller is not running, when it was asked for.
+    /// Why the echo canceller is not running, when it was asked for. Named for
+    /// the reason `IsolationFailure` is: the application turns these into
+    /// something a person can read.
+    public enum EchoFailure {
+        public static let notBuilt = "the echo canceller could not be built"
+        public static let wouldNotStart = "the echo canceller would not start"
+    }
+
     public private(set) var lastEchoCancellationError: String?
 
     /// The canceller, while it is in the path. Retained here so it outlives the
@@ -323,9 +342,24 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     /// What the canceller is doing, for the diagnostics view. Nil when it is
-    /// not in the path.
+    /// not in the path — and nil, rather than a wait, while the route is being
+    /// built.
+    ///
+    /// `try` rather than `lock`, and it is not an optimisation. This is read
+    /// from `StatusPills`, which is evaluated on every pass of the SwiftUI view
+    /// graph, on the main thread. `startAttempt` holds this lock across
+    /// `AudioDeviceCreateIOProcID`, which is a synchronous message to
+    /// `coreaudiod` — normally a few milliseconds, and unbounded when
+    /// `coreaudiod` is wedged, which it can be. Taking the lock the ordinary
+    /// way therefore froze the entire interface for as long as the audio server
+    /// took to answer: measured here with the whole main thread parked in
+    /// `__psynch_mutexwait` under this getter while the engine queue sat in
+    /// `mach_msg`, with nothing on screen redrawing and no menu responding.
+    ///
+    /// A diagnostic row that is briefly blank while the route comes up is not
+    /// worth a frozen application.
     public var echoCancellationStatus: EchoCancellationStatus? {
-        stateLock.lock()
+        guard stateLock.try() else { return nil }
         defer { stateLock.unlock() }
         guard let bridge = echoBridge else { return nil }
         return EchoCancellationStatus(
@@ -583,7 +617,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 microphoneUID: sourceDeviceUID, settings: settings,
                 maximumFrames: Int(bufferFrames) * 4)
             if bridge == nil {
-                lastEchoCancellationError = "the echo canceller could not be built"
+                lastEchoCancellationError = EchoFailure.notBuilt
             }
         }
         let cancelsEcho = bridge != nil
@@ -675,7 +709,7 @@ public final class RoutingEngine: @unchecked Sendable {
                     effects.contains(.voiceIsolation) ? chain.latencyFrames : 0
             } else {
                 isolatedSource = nil
-                lastIsolationError = "the processing chain could not be built"
+                lastIsolationError = IsolationFailure.chainNotBuilt
             }
         } else if let settings = voiceIsolation, let first = routes.first {
             isolatedSource = first.source
@@ -689,7 +723,7 @@ public final class RoutingEngine: @unchecked Sendable {
             } else {
                 // Not fatal: the route still carries audio, just unprocessed.
                 isolatedSource = nil
-                lastIsolationError = "AUSoundIsolation could not be instantiated"
+                lastIsolationError = IsolationFailure.unitNotInstantiated
             }
         }
 
@@ -833,7 +867,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // running with nothing to consume it.
         if let bridge {
             guard bridge.start() else {
-                lastEchoCancellationError = "the echo canceller would not start"
+                lastEchoCancellationError = EchoFailure.wouldNotStart
                 throw RoutingError.echoCancellerFailed
             }
             echoBridge = bridge
@@ -1078,6 +1112,17 @@ public final class RoutingEngine: @unchecked Sendable {
     public var recordingURL: URL? { recorder?.url }
     public var recordingDuration: TimeInterval { recorder?.duration ?? 0 }
 
+    /// Why the writer stopped, when it stopped itself.
+    ///
+    /// The recorder has recorded the file-system error since it was written and
+    /// there was no way to ask for it from out here — so the application
+    /// substituted "the file could not be written" for a message the engine
+    /// already had, and disk-full, permission-denied and a codec refusing the
+    /// format all read the same. Worse, the writer failing does not release the
+    /// recorder, so `isRecording` stays true and the only symptom was a
+    /// duration that stopped counting.
+    public var recordingError: String? { recorder?.lastError }
+
     /// Starts writing the routed signal to a file.
     ///
     /// - Throws: Whatever creating the file throws — a directory that does not
@@ -1167,33 +1212,6 @@ public final class RoutingEngine: @unchecked Sendable {
             RTGraph.clearCorrection(onBuffer: slot, of: graph)
         }
         return installed
-    }
-
-    /// Puts a headphone correction on one output, or takes it off.
-    ///
-    /// The special case of `setCorrections(_:)` where there is exactly one
-    /// correction in the whole router, which is what this was before buses had
-    /// their own. The correction belongs on what the person wearing the
-    /// headphones hears and nowhere else, so naming the device is not optional.
-    ///
-    /// - Parameters:
-    ///   - curve: The correction, or nil to run none.
-    ///   - deviceUID: Which output it applies to.
-    /// - Returns: True when the correction was installed. False means the named
-    ///   device is not in this route, which is the ordinary case of a headphone
-    ///   profile left selected after the headphones were unplugged.
-    @discardableResult
-    public func setHeadphoneCorrection(
-        _ curve: ParametricEQ?, forDeviceUID deviceUID: String?
-    )
-        -> Bool
-    {
-        guard let curve, let deviceUID else {
-            setCorrections([:])
-            // Silence is not a failure when there was nothing to install.
-            return curve == nil
-        }
-        return setCorrections([deviceUID: curve]) == 1
     }
 
     /// Which output buffer carries a device, if any of them do.
@@ -1644,14 +1662,14 @@ public final class RoutingEngine: @unchecked Sendable {
         if !kinds.isEmpty || !plugins.isEmpty, !isolationOnly {
             chain = EffectChain(
                 kinds: kinds, plugins: plugins, sampleRate: rate, maximumFrames: frames)
-            if chain == nil { lastIsolationError = "the processing chain could not be built" }
+            if chain == nil { lastIsolationError = IsolationFailure.chainNotBuilt }
         } else if isolationOnly, let settings = voiceIsolation {
             unit = VoiceIsolationUnit(sampleRate: rate, maximumFrames: frames)
             if let unit {
                 unit.setMix(settings.mixPercent)
                 unit.setHighQuality(settings.isHighQuality)
             } else {
-                lastIsolationError = "AUSoundIsolation could not be instantiated"
+                lastIsolationError = IsolationFailure.unitNotInstantiated
             }
         }
 

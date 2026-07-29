@@ -246,7 +246,10 @@ Sources/
                     voice isolation, self test
   YunDesign/        the YunUI design system translated to SwiftUI
   YunAudioApp/      the menu bar app
-  yunaudio-cli/     verification harness
+  YunAudioControl/  the remote-control vocabulary, shared by the app and
+                    the tool so that there is one list of verbs
+  yunaudio-cli/     verification harness, and the command line that
+                    drives the running app
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly for YunAudio.app
 ```
@@ -290,6 +293,7 @@ swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
 swift run -c release yunaudio-cli aec-route           # route through the canceller
 swift run -c release yunaudio-cli volume 0.5         # move the device's own level
 swift run -c release yunaudio-cli soak 30            # hold a route for half an hour
+swift run -c release yunaudio-cli capture 10         # write the routed signal to a file
 ```
 
 `soak` is the only check that runs long enough to see what a call actually does
@@ -387,6 +391,38 @@ driven by a script should prefer the definite form, which is idempotent —
 `mute/on` twice is muted, not unmuted. An unrecognised verb is refused rather
 than guessed at, since the failure mode being avoided is a mistyped mute that
 turns into a stop.
+
+### From a terminal
+
+The same verbs, with an answer coming back — which is the part a URL cannot do.
+`yunaudio-cli` talks to the copy of the application that is already running
+rather than opening any hardware itself.
+
+```bash
+yunaudio-cli status                  # what it is doing, one fact per line
+yunaudio-cli start                   # also stop, toggle
+yunaudio-cli mute on                 # also off, and bare for toggle
+yunaudio-cli record off
+yunaudio-cli transcribe on
+yunaudio-cli preset Voice call       # no quotes needed; a name is joined
+yunaudio-cli config Podcast
+yunaudio-cli script "yun.mute(true); yun.log(yun.status().running)"
+yunaudio-cli mute --url              # print the URL instead of sending it
+```
+
+`status` prints what a script sees through `yun.status()`, plus the scenes and
+setups that exist. Naming one that does not gets the list of ones that do, which
+is more use than "not found". A command that could not be carried out exits 1
+and a line the tool could not parse exits 2, so a shell script can tell the
+difference between "the application refused" and "you typed it wrong".
+
+`status` deliberately is not one of the verbs a URL or a MIDI note can send:
+asking what is happening must not be able to change it. Everything else is one
+vocabulary — `RemoteCommand` — with four front ends, so a verb added once is
+available from a URL, a pad, a line of JavaScript and a shell.
+
+`record` here means the application's recorder. The measuring verb that captures
+a few seconds of the routed signal to a file is `capture`.
 
 Not App Intents, and not for want of trying: the entries in a Shortcuts library
 are discovered from metadata Xcode's own build phase extracts, and an

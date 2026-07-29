@@ -1,6 +1,7 @@
 import CoreMIDI
 import Foundation
 import Observation
+import YunAudioControl
 import YunDesign
 
 /// Physical control surfaces.

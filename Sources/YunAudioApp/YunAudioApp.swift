@@ -1,4 +1,5 @@
 import SwiftUI
+import YunAudioControl
 import YunDesign
 
 /// Watches for the application quitting.
@@ -56,6 +57,10 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     }
 
     var flowCheckModel: RouterModel?
+
+    /// Owned here for the reason the status item is: it has to outlive the
+    /// scene body that installed it.
+    let remote = RemoteListener()
 
     /// Where a URL handed to the application ends up.
     ///
@@ -154,6 +159,10 @@ struct YunAudioApp: App {
             FileHandle.standardError.write(Data("yunaudio: \(url) — \(outcome)\n".utf8))
         }
         termination.installURLHandler()
+        // The same verbs, from a terminal, with an answer coming back. A URL
+        // cannot carry one, which is why `yunaudio-cli` needs this and
+        // Shortcuts does not.
+        termination.remote.start(target: model)
     }
 
     /// Creates the menu bar presence once, on whichever scene is evaluated

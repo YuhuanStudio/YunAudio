@@ -512,3 +512,14 @@
 "Script ran." = "腳本執行完畢。";
 "The interpreter could not be started." = "直譯器無法啟動。";
 "The application is no longer there." = "應用程式已經不在了。";
+"Recording stopped: %@" = "錄音已停止：%@";
+"Voice isolation is not running: %@." = "人聲隔離未啟用：%@。";
+"this system does not offer it" = "此系統未提供";
+"the processing chain could not be built" = "無法建立處理鏈";
+"The echo canceller could not be built." = "無法建立回音消除器。";
+"The echo canceller would not start." = "回音消除器無法啟動。";
+"Canceller" = "回音消除器";
+"Truncated" = "截斷區塊";
+"%ds ago" = "%d 秒前";
+"Recording could not be started." = "無法開始錄音。";
+"Transcription could not be started." = "無法開始轉錄。";

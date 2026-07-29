@@ -68,6 +68,12 @@ struct Preferences: Codable, Equatable, Sendable {
     var voicePreset: String?
     /// Write a separate file per source alongside the mix.
     var recordsStems: Bool?
+    /// The container recordings are written in.
+    ///
+    /// Stored by raw value rather than as `Recorder.Format` for the reason
+    /// `tapMuteBehavior` is: the type belongs to the engine, and a preferences
+    /// file is a promise to a version that has not been built yet.
+    var recordingFormat: String?
     /// How much of each source goes to the monitor, by source UID.
     var monitorSends: [String: Float]?
     /// Extra delay per output device UID, in milliseconds, for lining up two
@@ -149,6 +155,7 @@ struct Preferences: Codable, Equatable, Sendable {
         pluginValues: [:],
         voicePreset: VoicePreset.none.rawValue,
         recordsStems: false,
+        recordingFormat: Recorder.Format.wav.rawValue,
         monitorSends: [:],
         outputDelays: [:],
         headphoneProfileName: nil,

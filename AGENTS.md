@@ -318,7 +318,11 @@ Sources/
                     controls, localisation
   YunAudioApp/      the menu bar app; RouterModel is the single source of
                     truth and MainWindow is the tabbed inspector
-  yunaudio-cli/     the verification harness
+  YunAudioControl/  RemoteCommand and the command-line parser — the one
+                    vocabulary the URL scheme, MIDI, scripts and the terminal
+                    all speak, in a module two executables can both read
+  yunaudio-cli/     the verification harness, and the half that drives the
+                    running application rather than the hardware
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly, toolchain selection, string check
 DEVICES.md          what the hardware actually is, per device, and how each

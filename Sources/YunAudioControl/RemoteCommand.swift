@@ -1,5 +1,4 @@
 import Foundation
-import YunDesign
 
 /// Something another program can ask this one to do.
 ///
@@ -15,7 +14,15 @@ import YunDesign
 /// not unmuted. Toggles exist because a physical button has no way to know the
 /// current state, but anything driving this from a script should prefer the
 /// definite form.
-enum RemoteCommand: Equatable, Sendable {
+///
+/// This lives in its own module rather than in the application because
+/// `yunaudio-cli` is a fourth front end onto the same verbs, and one executable
+/// target cannot read a type defined in another. The alternative was a second
+/// copy of the list inside the tool, which is the thing the whole arrangement
+/// exists to avoid. One member could not come with it: `title` needs `loc()`,
+/// and pulling the design system into a command-line tool to reach it costs
+/// more than the extension in `RemoteCommand+Title.swift` does.
+public enum RemoteCommand: Equatable, Sendable {
     /// Nil means toggle: what a button without a light has to ask for.
     case routing(Bool?)
     case mute(Bool?)
@@ -31,14 +38,14 @@ enum RemoteCommand: Equatable, Sendable {
     case script(String)
 
     /// The scheme this application answers to.
-    static let scheme = "yunaudio"
+    public static let scheme = "yunaudio"
 
     /// Reads a command out of a URL, or nothing if it is not one.
     ///
     /// Deliberately strict. A URL arriving from outside is somebody else's
     /// string, and guessing what an unrecognised one meant is how a mute
     /// becomes a stop.
-    static func parse(_ url: URL) -> RemoteCommand? {
+    public static func parse(_ url: URL) -> RemoteCommand? {
         guard url.scheme?.lowercased() == scheme else { return nil }
 
         // The host is the noun and the first path component the verb:
@@ -81,7 +88,7 @@ enum RemoteCommand: Equatable, Sendable {
     /// The inverse of `parse`, and it is here so that anything wanting to
     /// *store* a command — a MIDI binding, for one — can keep the URL rather
     /// than a second encoding of the same list.
-    var url: URL {
+    public var url: URL {
         switch self {
         case .routing(let state): Self.url("routing", state)
         case .mute(let state): Self.url("mute", state)
@@ -106,33 +113,24 @@ enum RemoteCommand: Equatable, Sendable {
         return URL(string: "\(scheme)://\(noun)/\(escaped)")!
     }
 
-    /// What to call this where somebody is choosing something to automate.
-    var title: String {
-        switch self {
-        case .routing: loc("Start / stop routing")
-        case .mute: loc("Mute / unmute")
-        case .record: loc("Record")
-        case .transcribe: loc("Transcribe")
-        case .config(let name): name
-        case .preset(let name): loc(name)
-        case .script: loc("Run a script")
-        }
-    }
-
     /// The commands worth putting a physical button on, in the toggle form a
     /// button without a light has to ask for.
     ///
     /// Scenes and setups are deliberately not here: they are named by the user
     /// and there can be any number of them, so they belong in a list built from
     /// what is actually saved rather than in a fixed one.
-    static let bindable: [RemoteCommand] = [
+    public static let bindable: [RemoteCommand] = [
         .routing(nil), .mute(nil), .record(nil), .transcribe(nil),
     ]
 
     /// Turns a verb into on, off, or toggle. Double-optional: the outer level
     /// says whether the verb was understood at all, the inner one carries the
     /// toggle.
-    private static func state(_ verb: String?) -> Bool?? {
+    ///
+    /// Shared with the command line, which accepts the same words for the same
+    /// reason: somebody who has typed `yunaudio://mute/on` should not have to
+    /// learn that the terminal spells it differently.
+    static func state(_ verb: String?) -> Bool?? {
         switch verb {
         case nil, "toggle": .some(nil)
         case "on", "start", "1", "true", "yes": .some(true)
