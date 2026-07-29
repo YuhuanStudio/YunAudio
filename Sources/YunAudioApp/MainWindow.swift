@@ -131,7 +131,15 @@ struct MainWindow: View {
         // The analysers keep running either way — the ring has to be drained or
         // it overflows — but publishing a reading twenty times a second to a
         // window nobody has open is work for nothing.
-        .onAppear { model.isAnalysisVisible = true }
+        .onAppear {
+            model.isAnalysisVisible = true
+            // The gain sliders and the volume-key notice are read from a stored
+            // copy rather than off the device, and the timer that keeps it
+            // fresh only runs while this window is up. Ask once on the way in,
+            // or the first frame draws the reading from whenever the window was
+            // last closed.
+            model.refreshDeviceControls()
+        }
         .onDisappear { model.isAnalysisVisible = false }
     }
 

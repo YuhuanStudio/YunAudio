@@ -46,6 +46,12 @@ final class RouterModel: ScriptTarget {
                 displacedSourceName = nil
             }
             applyChannelDefaults()
+            // The gain and the monitor belong to whichever microphone this now
+            // is, and a stale reading would put the last device's slider under
+            // the new device's name until the next poll.
+            pendingHardwareGain = nil
+            pendingHardwareMonitor = nil
+            refreshDeviceControls()
             persist()
             restartIfRunning()
         }
@@ -59,6 +65,7 @@ final class RouterModel: ScriptTarget {
                 displacedDestinationUID = nil
                 displacedDestinationName = nil
             }
+            refreshDeviceControls()
             persist()
             restartIfRunning()
         }
@@ -338,8 +345,54 @@ final class RouterModel: ScriptTarget {
     /// application's master fader reaches the output regardless, so the answer
     /// is to say so — which is worth more than the keys would have been.
     var volumeKeysAreDead: Bool {
-        guard let destination = selectedDestination else { return false }
-        return !destination.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+        selectedDestination != nil && !destinationHasVolumeControl
+    }
+
+    // MARK: What the devices themselves publish
+
+    /// The three answers a window body used to ask `coreaudiod` for directly.
+    ///
+    /// Measured from a real window body on this machine: `hardwareGain` 431 µs,
+    /// `hasHardwareMonitoring` 416 µs, `volumeKeysAreDead` 188 µs — **a
+    /// millisecond of synchronous round trips to the audio server per
+    /// evaluation**, and a body is evaluated on every hover, every drag frame
+    /// and every step of a resize. That millisecond is not this process's to
+    /// spend: `coreaudiod` is the one process every other application's audio is
+    /// also waiting on, so a view body doing this is one way a menu bar
+    /// application makes a whole machine feel slow.
+    ///
+    /// Kept rather than asked for, on the same reasoning as
+    /// `destinationLatencyFrames`. Not cached and forgotten, though: these
+    /// belong to the device rather than to us and Audio MIDI Setup can move
+    /// them, so they are re-read beside the path verdict — twice a second — and
+    /// whenever the selection or the device list changes.
+    private(set) var hardwareGainReading: AudioDevice.HardwareGain?
+    private(set) var hardwareMonitorReading: AudioDevice.HardwareGain?
+    /// True until something says otherwise, so a window drawn before the first
+    /// read does not accuse the volume keys of being dead.
+    private(set) var destinationHasVolumeControl = true
+
+    /// True when a window that draws any of them is on screen.
+    ///
+    /// The menu bar panel reads none of these and the inspector reads all of
+    /// them, so with the window shut this is a round trip to the audio server
+    /// on behalf of nobody — and shut is how a menu bar application spends most
+    /// of its life. Measured: refreshing them on every poll regardless put
+    /// 166 µs on each one, which is more than the entire poll costs with
+    /// nothing open.
+    private var inspectorIsOnScreen: Bool {
+        NSApp?.windows.contains { $0.isVisible && $0.title == "YunAudio" } ?? false
+    }
+
+    func refreshDeviceControls() {
+        publish(
+            selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
+            to: \.hardwareGainReading)
+        publish(selectedSource?.playThrough(), to: \.hardwareMonitorReading)
+        publish(
+            selectedDestination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+                ?? true,
+            to: \.destinationHasVolumeControl)
     }
 
     /// True when two device UIDs are two faces of one piece of hardware.
@@ -364,25 +417,36 @@ final class RouterModel: ScriptTarget {
     // MARK: The microphone's own monitoring
 
     /// True when the selected microphone can feed itself back in hardware.
-    var hasHardwareMonitoring: Bool { selectedSource?.playThrough()?.isSettable ?? false }
+    var hasHardwareMonitoring: Bool { hardwareMonitorReading?.isSettable ?? false }
 
     /// Where that feedback level sits, 0 to 1.
     ///
-    /// Read from the device every time rather than cached: it is the device's
-    /// state, not ours, and Audio MIDI Setup can move it.
+    /// Read through a stored copy rather than off the device on every look, for
+    /// the reason `hardwareMonitorReading` gives — and through the pending
+    /// value while it is being dragged, so the thumb does not snap back to
+    /// whatever the device rounded the last set to.
     var hardwareMonitorScalar: Float {
-        get { selectedSource?.playThrough()?.scalar ?? 0 }
+        get { pendingHardwareMonitor ?? hardwareMonitorReading?.scalar ?? 0 }
         set {
+            pendingHardwareMonitor = newValue
             try? selectedSource?.setPlayThrough(scalar: max(0, min(1, newValue)))
         }
     }
+    private var pendingHardwareMonitor: Float?
 
     var hardwareMonitorLabel: String {
-        guard let level = selectedSource?.playThrough() else { return "—" }
-        guard let decibels = level.decibels, decibels.isFinite else {
-            return String(format: "%.0f%%", level.scalar * 100)
+        guard let level = hardwareMonitorReading else { return "—" }
+        // Re-derived from the range against the value on the slider, like
+        // `hardwareGainLabel`: the stored reading is up to half a second old
+        // while somebody is dragging, and a readout that lags the thumb it sits
+        // beside reads as a control that is not working.
+        let scalar = hardwareMonitorScalar
+        guard let range = level.decibelRange, range.upperBound > range.lowerBound else {
+            return String(format: "%.0f%%", scalar * 100)
         }
-        return String(format: "%+.1f dB", decibels)
+        let value = range.lowerBound + scalar * (range.upperBound - range.lowerBound)
+        guard value.isFinite else { return String(format: "%.0f%%", scalar * 100) }
+        return String(format: "%+.1f dB", value)
     }
 
     // MARK: Singing
@@ -1743,9 +1807,7 @@ final class RouterModel: ScriptTarget {
     /// before the converter, so turning it up costs no headroom; the trim
     /// happens afterwards and can only amplify what the converter already
     /// decided, noise and all. The right order is this first.
-    var hardwareGain: AudioDevice.HardwareGain? {
-        selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
-    }
+    var hardwareGain: AudioDevice.HardwareGain? { hardwareGainReading }
 
     /// Read through a stored copy so the slider does not fight the device: a
     /// bare read every frame would snap the thumb back while it is being
@@ -3347,6 +3409,9 @@ final class RouterModel: ScriptTarget {
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
         for device in all { deviceNames[device.uid] = device.name }
+        // A new device list can mean a new selected device, and what that
+        // device publishes is what the window draws.
+        refreshDeviceControls()
     }
 
     func selectDefaults() {
@@ -4551,6 +4616,9 @@ final class RouterModel: ScriptTarget {
     private static let pathQualityEveryNPolls = 10
 
     @ObservationIgnored private var pollsSincePathQuality = 0
+    /// Counted in path-quality rounds rather than in polls, because that is
+    /// where the refresh hangs.
+    @ObservationIgnored private var pollsSinceDeviceControls = 0
 
     /// Assigns only when the value actually moved.
     ///
@@ -4603,6 +4671,18 @@ final class RouterModel: ScriptTarget {
                     selectedDestination?.latencyFrames(
                         scope: kAudioObjectPropertyScopeOutput) ?? 0,
                     to: \.destinationLatencyFrames)
+            }
+            // For the same reason, and far less often. Everything this
+            // application does to these refreshes them on the spot — a
+            // selection, a device arriving, the window opening — so the only
+            // thing the timer is for is somebody moving the gain in Audio MIDI
+            // Setup behind our back, and five seconds is soon enough for that.
+            // At the path verdict's own rate it put 53 µs on every poll, which
+            // is a quarter of what the whole poll costs with nothing open.
+            pollsSinceDeviceControls += 1
+            if pollsSinceDeviceControls >= 10 {
+                pollsSinceDeviceControls = 0
+                lap("deviceControls") { if inspectorIsOnScreen { refreshDeviceControls() } }
             }
         }
         lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }

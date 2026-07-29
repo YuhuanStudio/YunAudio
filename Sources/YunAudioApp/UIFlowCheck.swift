@@ -3888,6 +3888,24 @@ enum UIFlowCheck {
                 format: "pathLatencyMilliseconds %.1f µs, transcriptText %.1f µs",
                 microseconds(200) { _ = model.pathLatencyMilliseconds },
                 microseconds(200) { _ = model.transcriptText }))
+
+        // And the reads that leave the process. Each of these is reached from
+        // `MainWindow.body` or from `StatusPills`, both of which the meters
+        // re-evaluate, so whatever they cost is paid at the poll rate — and it
+        // is not only paid here. Every one is a synchronous round trip to
+        // `coreaudiod`, which is the one process every other application's
+        // audio is also waiting on, so a body doing this is how one menu bar
+        // application makes a whole machine feel slow.
+        note(
+            String(
+                format: "headsetInCallQuality %.0f µs, hardwareGain %.0f µs, "
+                    + "hasHardwareMonitoring %.0f µs, volumeKeysAreDead %.0f µs, "
+                    + "monitorLatency %.0f µs",
+                microseconds(20) { _ = model.headsetInCallQuality },
+                microseconds(20) { _ = model.hardwareGain },
+                microseconds(20) { _ = model.hasHardwareMonitoring },
+                microseconds(20) { _ = model.volumeKeysAreDead },
+                microseconds(20) { _ = model.monitorLatencyMilliseconds }))
     }
 
     /// What survives a graph being rebuilt underneath a running route.
