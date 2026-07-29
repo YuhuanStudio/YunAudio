@@ -750,6 +750,47 @@ struct AudioApplicationGroupingTests {
         #expect(!apps.contains { $0.name == "silent daemon" })
     }
 
+    /// The defect that followed from the rule above, and cost more than it did.
+    ///
+    /// A bundle-less process is listed only while the HAL says it is running
+    /// output, and that property blinks. Measured against afplay playing one
+    /// continuous 60-second tone, audible throughout: 0 for 22 of 24 samples a
+    /// quarter of a second apart in one run, 1 for all 60 in another. The router
+    /// re-reads this list from inside the restart that adds the tap, so a player
+    /// the user had just ticked resolved to nothing, no tap was built, and the
+    /// mix carried the microphone alone with nothing said about it.
+    @Test("something already captured survives a moment of silence")
+    func capturedProcessSurvivesTheBlink() {
+        let identity = AudioApplications.identity(forPID: 638)
+        let processes = [
+            // The same player, one blink later: still there, still alive, and
+            // reported as making nothing.
+            process(7, pid: 638, bundle: nil, name: "afplay", playing: false),
+            process(9, pid: 640, bundle: nil, name: "silent daemon"),
+        ]
+        // Without the tick it is indistinguishable from the daemon, and that is
+        // still right: the list is not a process monitor.
+        #expect(
+            AudioApplications.group(processes: processes, foreground: [:], named: [:]).isEmpty)
+
+        let apps = AudioApplications.group(
+            processes: processes, foreground: [:], named: [:], keeping: [identity])
+        #expect(apps.count == 1)
+        #expect(apps[0].bundleID == identity)
+        // The object the tap is built from is the whole point of keeping it.
+        #expect(apps[0].processIDs == [7])
+        // Honest about what it is doing, which is nothing at this instant.
+        #expect(!apps[0].isPlaying)
+        // Whatever name the entry arrived with is carried through. The live
+        // half of that is in `entry(for:)`, which now resolves an executable
+        // name for any process with no bundle rather than only an audible one —
+        // otherwise this row would read "afplay" one second and "PID 638" the
+        // next, which is the same blink wearing a different hat.
+        #expect(apps[0].name == "afplay")
+        // Keeping one does not keep the tail with it.
+        #expect(!apps.contains { $0.name == "silent daemon" })
+    }
+
     /// The `pid:` prefix is what keeps a synthetic identity out of the prefix
     /// matching. If one could be swallowed by a real bundle identifier, or
     /// swallow one, a tap would end up on the wrong process.
@@ -1404,6 +1445,37 @@ struct ChannelDefaultTests {
         }
         #expect(
             RouterModel.defaultChannelChoice(inputChannels: 2, names: names).mode == SourceChannelMode.stereo)
+    }
+}
+
+/// How wide a captured application's tap arrives, which decides how many routes
+/// it contributes — and therefore whether it is on the bus at all.
+@MainActor
+@Suite("How much of a tap gets routed")
+struct TapChannelTests {
+
+    @Test("a tap is as wide as it says, up to the destination")
+    func widthFollowsTheTap() {
+        #expect(RouterModel.channelsToRoute(published: 2, destination: 2) == 2)
+        #expect(RouterModel.channelsToRoute(published: 1, destination: 2) == 1)
+        // A wider tap than the destination can take is narrowed, not refused.
+        #expect(RouterModel.channelsToRoute(published: 6, destination: 2) == 2)
+    }
+
+    /// The trap: absent and present-but-zero are different answers, and `?? 2`
+    /// only sees the first. A published zero produced no routes and no message,
+    /// which reads from every meter as a tap that is merely quiet.
+    @Test("a tap that publishes nothing, or nothing useful, is taken as stereo")
+    func silenceAboutTheFormatIsStereo() {
+        #expect(RouterModel.channelsToRoute(published: nil, destination: 2) == 2)
+        #expect(RouterModel.channelsToRoute(published: 0, destination: 2) == 2)
+    }
+
+    /// A destination with nowhere to put it is the one case that is honestly
+    /// nothing, and it must not be confused with the two above.
+    @Test("a destination with no channels carries none of it")
+    func noDestinationCarriesNothing() {
+        #expect(RouterModel.channelsToRoute(published: 2, destination: 0) == 0)
     }
 }
 
