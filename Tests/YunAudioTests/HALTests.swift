@@ -3,6 +3,8 @@ import Foundation
 import Testing
 
 import AppKit
+import SwiftUI
+
 @testable import YunAudioApp
 @testable import YunAudioEngine
 @testable import YunAudioControl
@@ -3241,5 +3243,84 @@ struct DriverRemovalTests {
         try #require(removal.count == 2)
         let body = String(removal[1].prefix(400))
         #expect(body.contains("if isRunning { stop() }"))
+    }
+}
+
+/// The fade at the bottom of a scrolling column.
+///
+/// It says "this carries on past here", and macOS gives no other sign — the
+/// system scrollers are hidden until something touches them. So the fade is the
+/// whole cue, and the depth of it is the whole design.
+///
+/// It used to be a *fraction* of the height: the mask's last six per cent. That
+/// is a different depth at every window size, and at the sizes people actually
+/// work at it stopped reading as a fade and started reading as content that had
+/// been rubbed out. Nothing caught it, and nothing could: `MainWindow` takes an
+/// `isRendering` branch that skips the scroll view entirely, so the offscreen
+/// design check never builds the mask, and the window photographs are looked at
+/// rather than measured.
+///
+/// This measures it. Two heights, one number.
+@MainActor
+@Suite("The scroll fade")
+struct ScrollFadeTests {
+
+    /// Renders a solid block through the real modifier and returns, for each
+    /// row from the bottom, how opaque the block still is there.
+    private func alphaUpFromTheBottom(height: CGFloat) throws -> [Double] {
+        let width: CGFloat = 40
+        let renderer = ImageRenderer(
+            content: Rectangle()
+                .fill(Color.black)
+                .frame(width: width, height: height)
+                .yunScrollFade())
+        renderer.scale = 1
+        let image = try #require(renderer.nsImage)
+        let tiff = try #require(image.tiffRepresentation)
+        let rep = try #require(NSBitmapImageRep(data: tiff))
+        // Row 0 is the bottom of the picture; bitmaps count from the top.
+        return (0..<rep.pixelsHigh).reversed().map { row in
+            Double(rep.colorAt(x: rep.pixelsWide / 2, y: row)?.alphaComponent ?? 0)
+        }
+    }
+
+    /// How many points from the bottom the block is fully opaque again.
+    private func fadeDepth(height: CGFloat) throws -> Int {
+        let column = try alphaUpFromTheBottom(height: height)
+        // The first row, counting up, that is essentially solid.
+        return column.firstIndex { $0 > 0.99 } ?? column.count
+    }
+
+    @Test("it is the same depth whatever the column's height")
+    func depthDoesNotFollowTheHeight() throws {
+        // The window's minimum content height and a full-screen one, which is
+        // the range somebody actually resizes through.
+        let short = try fadeDepth(height: 440)
+        let tall = try fadeDepth(height: 820)
+        #expect(
+            abs(short - tall) <= 2,
+            "the fade is \(short) points on a short column and \(tall) on a tall one")
+        // And it is the depth it says it is. A fraction-based mask would have
+        // measured about 26 here and about 49 there — the numbers this replaced.
+        #expect(abs(Double(short) - YunScrollFade.depth) <= 2, "short column: \(short)")
+        #expect(abs(Double(tall) - YunScrollFade.depth) <= 2, "tall column: \(tall)")
+    }
+
+    /// A cue that covers a row is not a cue. The rows in this application start
+    /// at 28 points, so a fade deeper than that would hide one outright rather
+    /// than hint that it is there.
+    @Test("and it never swallows a whole row")
+    func doesNotCoverARow() {
+        #expect(YunScrollFade.depth < 28)
+        #expect(YunScrollFade.depth > 8, "a fade this shallow reads as a clipping bug")
+    }
+
+    @Test("the bottom edge really does reach transparent")
+    func theBottomIsClear() throws {
+        let column = try alphaUpFromTheBottom(height: 440)
+        let bottom = try #require(column.first)
+        let top = try #require(column.last)
+        #expect(bottom < 0.05)
+        #expect(top > 0.99)
     }
 }

@@ -66,14 +66,11 @@ struct MainWindow: View {
             // three columns there would be three of them, laid over the content
             // rather than beside it. The fade below is the cue instead.
             .scrollIndicators(.never)
-            .mask(
-                LinearGradient(
-                    stops: [
-                        .init(color: .black, location: 0),
-                        .init(color: .black, location: 0.94),
-                        .init(color: .black.opacity(0), location: 1),
-                    ],
-                    startPoint: .top, endPoint: .bottom))
+            // Fixed depth. This was the mask's last six per cent, which is a
+            // different depth at every window size — and nothing could catch
+            // that, because the offscreen design render takes the `isRendering`
+            // branch above and never builds the scroll view at all.
+            .yunScrollFade()
         }
     }
 

@@ -103,6 +103,14 @@ YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp  # real 
   to look at them was to install the app, which meant nobody did.
 - **Screenshot** photographs the actual window at its minimum size, including
   the title bar. An offscreen render structurally cannot show that.
+  Note what neither of them covers: `MainWindow.column` takes an `isRendering`
+  branch that **skips the scroll view entirely**, so nothing the scroll view
+  contributes — the fade at the bottom of a column, where the clip lands — is
+  ever built offscreen, and the photographs are looked at rather than measured.
+  A mask that was six per cent of the height lived there: 26 points deep at the
+  window's minimum and 49 at full screen, rubbing out a whole row at the size
+  people actually work at. If you add something to that branch's shadow, assert
+  it directly — `ScrollFadeTests` renders the modifier itself at two heights.
 - **`--verify`** copies the app elsewhere, moves the build tree out of reach and
   runs it. `Bundle.module` falls back to the build directory, so an app that
   never copied its resource bundle in works perfectly on the machine that built

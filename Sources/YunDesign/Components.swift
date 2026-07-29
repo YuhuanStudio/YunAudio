@@ -595,3 +595,57 @@ public struct YunProgressBar: View {
         .accessibilityValue(Text("\(Int(fraction * 100))%"))
     }
 }
+
+/// The cue that a column carries on past the bottom of its frame.
+///
+/// macOS hides its scrollers until something touches them, so a column that is
+/// taller than its frame gives no sign of it at rest: the clip edge lands
+/// wherever it lands, and a line of text sliced in half a few points above the
+/// footer reads as broken rather than as scrolled. A short fade says it instead.
+///
+/// **A fixed number of points, not a fraction of the height.** It was a
+/// fraction — the mask's last six per cent — and a fraction is a different
+/// thing at every window size: about 26 points at the window's minimum and
+/// about 49 at full screen on this display, where it stops reading as a fade
+/// and starts reading as content someone has rubbed out. A cue is a constant;
+/// only what it is a cue *about* varies.
+///
+/// This lives in the design system rather than beside the one caller so the
+/// number, the reasoning and the test have somewhere to be together.
+public struct YunScrollFade: ViewModifier {
+    /// Deep enough to read as deliberate at a glance, shallow enough that it
+    /// never covers a whole row: the rows in this application are 28 points and
+    /// up, so the fade cannot swallow one.
+    public static let depth: CGFloat = 22
+
+    private let depth: CGFloat
+
+    public init(depth: CGFloat = YunScrollFade.depth) {
+        self.depth = depth
+    }
+
+    public func body(content: Content) -> some View {
+        content.mask(
+            VStack(spacing: 0) {
+                // Opaque for everything but the last `depth` points, whatever
+                // the height is.
+                Rectangle().fill(Color.black)
+                LinearGradient(
+                    colors: [.black, .black.opacity(0)],
+                    startPoint: .top, endPoint: .bottom
+                )
+                .frame(height: depth)
+            }
+            // The mask must not itself be an obstacle to hit testing; it is
+            // only ever alpha.
+            .allowsHitTesting(false))
+    }
+}
+
+extension View {
+    /// Fades the bottom `depth` points of a scrolling column. See
+    /// `YunScrollFade` for why the depth is a constant.
+    public func yunScrollFade(depth: CGFloat = YunScrollFade.depth) -> some View {
+        modifier(YunScrollFade(depth: depth))
+    }
+}
