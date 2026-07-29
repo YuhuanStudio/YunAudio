@@ -764,6 +764,26 @@ struct PreferencesWindow: View {
                             .foregroundStyle(Yun.Palette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
+                    // Outside the routing branch on purpose: "can this
+                    // microphone do it at all" is a question worth answering
+                    // before anybody starts a route, and it is the one the two
+                    // model properties were written for. Both of them said in
+                    // their own doc comments that the interface had to show
+                    // this — "an interface that showed an indicator which could
+                    // never light would be worse than one that says the device
+                    // cannot do it" — and neither had a single reader outside
+                    // the flow check. Without it, "muted, but you are talking"
+                    // simply never appearing is indistinguishable from a
+                    // detector that is switched off, absent, or broken.
+                    YunDetailRow(
+                        loc("Voice detector"),
+                        value: Self.voiceDetectorState(
+                            isAvailable: model.canDetectVoiceActivity,
+                            isRunning: model.isDetectingVoiceActivity),
+                        tone: model.canDetectVoiceActivity
+                            ? (model.isDetectingVoiceActivity ? .success : .neutral)
+                            : .warning)
                 }
             }
 
@@ -1018,6 +1038,19 @@ struct PreferencesWindow: View {
             .foregroundStyle(Yun.Palette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// What the system's own voice detector is doing, in a sentence.
+    ///
+    /// Static and taking its inputs rather than reading the model, so the flow
+    /// check can put it in every state and read back what a person would see.
+    /// The three states are genuinely different problems: a device that cannot
+    /// do it is somebody's hardware, a detector that is not running is a route
+    /// that has not started, and a detector that is running and silent is a
+    /// room with nobody in it.
+    static func voiceDetectorState(isAvailable: Bool, isRunning: Bool) -> String {
+        guard isAvailable else { return loc("this microphone does not publish one") }
+        return isRunning ? loc("running") : loc("available, not running")
     }
 
     private func heading(_ text: String) -> some View {

@@ -209,7 +209,7 @@ struct LoudnessReadout: View {
                 Text(autoLevelState)
                     .font(Yun.Text.mono)
                     .foregroundStyle(
-                        model.autoLevelIsAtLimit
+                        model.autoLevelIsAtLimit || model.autoLevelIsHeldByHeadroom
                             ? Yun.Palette.warning : Yun.Palette.textTertiary
                     )
                     .monospacedDigit()
@@ -218,9 +218,34 @@ struct LoudnessReadout: View {
     }
 
     private var autoLevelState: String {
-        if model.autoLevelIsAtLimit { return loc("out of range") }
-        if model.autoLevelIsWaiting { return loc("waiting for speech") }
-        return String(format: "%+.1f dB", model.autoLevelOffset)
+        Self.autoLevelState(
+            offset: model.autoLevelOffset, isWaiting: model.autoLevelIsWaiting,
+            isAtLimit: model.autoLevelIsAtLimit,
+            isHeldByHeadroom: model.autoLevelIsHeldByHeadroom)
+    }
+
+    /// What the loop's state reads as, as a pure function of the loop's state.
+    ///
+    /// Static and taking its inputs rather than reading the model, so the flow
+    /// check can put it in every state and read back what a person would see.
+    /// A state the loop publishes and the interface never renders is the defect
+    /// this is guarding: `isHeldByHeadroom` was computed on every tick and had
+    /// no reader anywhere in the repository, while its two siblings were drawn
+    /// side by side in this very line.
+    static func autoLevelState(
+        offset: Double, isWaiting: Bool, isAtLimit: Bool, isHeldByHeadroom: Bool
+    ) -> String {
+        if isAtLimit { return loc("out of range") }
+        if isWaiting { return loc("waiting for speech") }
+        // Without this the loop looks stuck: it is hearing speech, it is under
+        // target, it is not at its limit, and it is deliberately refusing to go
+        // up because the peak would clip. "Nothing is happening" and "the peaks
+        // are what is stopping it" look identical otherwise, and only one of
+        // them is something a person can act on.
+        if isHeldByHeadroom {
+            return String(format: loc("%+.1f dB · held by peaks"), offset)
+        }
+        return String(format: "%+.1f dB", offset)
     }
 
     /// What the classifier hears, as a small badge.
@@ -230,6 +255,15 @@ struct LoudnessReadout: View {
                 .font(.system(size: 10))
             Text(title(for: model.heardVerdict))
                 .font(Yun.Text.caption)
+            // The number behind the word. It was computed and shown nowhere,
+            // which leaves the badge saying "Typing" with the same authority
+            // whether the classifier is certain or guessing between two things
+            // — and it is the guessing case that explains why the automatic
+            // trim just stopped moving.
+            Text(String(format: "%.0f%%", model.heardConfidence * 100))
+                .font(Yun.Text.mono)
+                .monospacedDigit()
+                .opacity(0.65)
         }
         .foregroundStyle(tint(for: model.heardVerdict))
         .padding(.horizontal, Yun.Space.sm)

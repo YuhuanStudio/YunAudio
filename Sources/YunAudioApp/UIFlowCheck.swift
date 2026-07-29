@@ -1243,6 +1243,27 @@ enum UIFlowCheck {
         try await checkPollCost(model: model)
 
         try section("automatic levelling")
+        // Every state the loop can publish has to read as something different
+        // on screen. `isHeldByHeadroom` was computed on every tick and had no
+        // reader anywhere — not the interface, not the CLI, not this check —
+        // while the two flags declared beside it were drawn side by side in the
+        // same line. Held back by the peak looked exactly like doing nothing.
+        let readings = [
+            LoudnessReadout.autoLevelState(
+                offset: 0, isWaiting: true, isAtLimit: false, isHeldByHeadroom: false),
+            LoudnessReadout.autoLevelState(
+                offset: 12, isWaiting: false, isAtLimit: true, isHeldByHeadroom: false),
+            LoudnessReadout.autoLevelState(
+                offset: 3.5, isWaiting: false, isAtLimit: false, isHeldByHeadroom: true),
+            LoudnessReadout.autoLevelState(
+                offset: 3.5, isWaiting: false, isAtLimit: false, isHeldByHeadroom: false),
+        ]
+        check("every levelling state reads as something", readings.allSatisfy { !$0.isEmpty })
+        check("and no two of them read the same", Set(readings).count == readings.count)
+        check(
+            "being held back by the peak says so, and still says where it got to",
+            readings[2] != readings[3] && readings[2].contains("3.5"))
+
         let trimBefore = model.inputDecibels
         model.isAutoLevelling = true
         await pause(upTo: 1.5, until: { model.isRunning && !model.isBusy })
@@ -4304,6 +4325,29 @@ enum UIFlowCheck {
         model.isInputMuted = false
         check("nothing to warn about while the microphone is live", !model.isSpeakingWhileMuted)
         model.isInputMuted = wasMuted
+
+        // Both properties above were written so the interface could say which
+        // of three situations this is, and both doc comments say so — and
+        // neither had a reader outside this check. The Diagnostics page shows
+        // it now, and what is asserted is that the three states read as three
+        // different things: a device that cannot do it, a detector that is not
+        // running, and one that is.
+        let detectorStates = [
+            PreferencesWindow.voiceDetectorState(isAvailable: false, isRunning: false),
+            PreferencesWindow.voiceDetectorState(isAvailable: true, isRunning: false),
+            PreferencesWindow.voiceDetectorState(isAvailable: true, isRunning: true),
+        ]
+        check(
+            "every detector state reads as something", detectorStates.allSatisfy { !$0.isEmpty }
+        )
+        check(
+            "and no two of them read the same",
+            Set(detectorStates).count == detectorStates.count)
+        check(
+            "the page describes this machine",
+            PreferencesWindow.voiceDetectorState(
+                isAvailable: model.canDetectVoiceActivity,
+                isRunning: model.isDetectingVoiceActivity) == detectorStates[2])
     }
 
     /// MIDI learn, both halves.
