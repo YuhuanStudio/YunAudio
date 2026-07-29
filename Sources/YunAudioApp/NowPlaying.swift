@@ -39,7 +39,7 @@ enum NowPlaying {
     ///
     /// Music first because a Mac has it whether or not anybody uses it, and a
     /// stopped player answers quickly.
-    private static let players = [
+    nonisolated private static let players = [
         ("Music", "com.apple.Music"),
         ("Spotify", "com.spotify.client"),
     ]
@@ -53,7 +53,7 @@ enum NowPlaying {
     /// Only running applications are asked. Sending an Apple event to a bundle
     /// identifier that is not running *launches it*, which would mean opening
     /// Spotify because somebody looked at a lyrics panel.
-    static func current() -> Track? {
+    nonisolated static func current() -> Track? {
         var paused: Track?
         for (name, bundleID) in players {
             guard
@@ -67,10 +67,41 @@ enum NowPlaying {
         return paused
     }
 
+    /// Where the asking happens.
+    ///
+    /// Serial, and only ever this one thread: `NSAppleScript` is documented as
+    /// safe to use from a single thread at a time, and one ask is in flight at
+    /// a time anyway.
+    nonisolated private static let queue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.now-playing", qos: .utility)
+
+    /// The same question, asked somewhere the interface is not waiting.
+    ///
+    /// **Measured on this machine, with Spotify running: 62 ms for one
+    /// `current()`** — essentially all of it waiting for the player to answer
+    /// an Apple event, not arithmetic here. On the main actor that is fifteen
+    /// frames; on the poll, which asked every tick, it was 1.24 seconds of work
+    /// per second of wall clock, so the interface simply stopped and the poll
+    /// fell behind everything else it had to do. It is not only this
+    /// application's problem either: the player is answering an event every
+    /// fifty milliseconds, on its own main thread, which is why the thing
+    /// somebody notices going slow is sometimes Spotify.
+    ///
+    /// - Parameter completion: Called on the main actor with what was playing,
+    ///   or nil when no player had anything loaded.
+    static func currentAsynchronously(
+        _ completion: @escaping @MainActor @Sendable (Track?) -> Void
+    ) {
+        queue.async {
+            let track = current()
+            Task { @MainActor in completion(track) }
+        }
+    }
+
     /// The script is one round trip returning a delimited string rather than
     /// six round trips returning six values: each one is an Apple event with a
     /// process hop at both ends, and a lyrics view asks about once a second.
-    private static func read(name: String) -> Track? {
+    nonisolated private static func read(name: String) -> Track? {
         // The variable names are long on purpose. `st` and `t` are both
         // reserved in AppleScript — `t` is an abbreviation the parser claims —
         // and the failure is "expected expression but found st", pointing at a

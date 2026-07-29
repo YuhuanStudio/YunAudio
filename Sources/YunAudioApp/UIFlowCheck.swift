@@ -3856,6 +3856,53 @@ enum UIFlowCheck {
         model.isAnalysisVisible = true
         await pause(0.5)
 
+        // The menu bar panel is opened and shut again first, and the counting
+        // happens with it shut.
+        //
+        // Without that this measures nothing: a popover that has never been
+        // shown has no view and no view graph, so "the closed panel drew
+        // nothing" would be true of a panel that does not exist. Shut is the
+        // state that was costing 36% of a core — the popover's window is
+        // ordered out rather than released, and SwiftUI goes on evaluating and
+        // laying out a tree nobody can see.
+        let statusItem = StatusItemController.current
+
+        /// Opens the panel, counts what it draws while it is up, and shuts it.
+        ///
+        /// - Returns: How many `PanelView` bodies ran while it was open, or nil
+        ///   when it would not open and shut here at all — in which case
+        ///   nothing below has been exercised and the caller must say so.
+        func openAndShutPanel() async -> Int? {
+            statusItem?.setPanelOpenForCheck(true)
+            BodyCount.reset()
+            BodyCount.isCounting = true
+            await pause(0.6)
+            BodyCount.isCounting = false
+            guard statusItem?.isPanelShownForCheck == true else { return nil }
+            let drawn = BodyCount.counts["PanelView"] ?? 0
+            statusItem?.setPanelOpenForCheck(false)
+            // Long enough for the close animation to finish, or the panel is
+            // still shown when this is read and the check disqualifies itself.
+            await pause(1.0)
+            return statusItem?.isPanelShownForCheck == false ? drawn : nil
+        }
+
+        // Twice. The panel is detached from the popover when it shuts, so the
+        // second open is the one that proves it goes back — and what it drew is
+        // counted rather than assumed, because an empty panel and a panel that
+        // costs nothing look exactly alike from outside.
+        let firstOpen = await openAndShutPanel()
+        let secondOpen = firstOpen == nil ? nil : await openAndShutPanel()
+        let panelClosed = secondOpen != nil
+        if let drawn = secondOpen {
+            check("the menu bar panel still draws when it is opened again", drawn > 0)
+        } else {
+            note(
+                statusItem == nil
+                    ? "no status item, so the menu bar panel was not exercised"
+                    : "the menu bar panel would not open and shut here — not exercised")
+        }
+
         // Whole-process processor time across the same window. Body counts say
         // what is being re-derived; this says what it costs, which is the only
         // figure that settles whether any of it was worth changing. It includes
@@ -3914,6 +3961,16 @@ enum UIFlowCheck {
         check(
             "the meters are still redrawing",
             Double(counts["RouteStrip"] ?? 0) > poll / 4)
+        // And the one nobody was looking at. The window is on screen here and
+        // the panel is not, so a body count for the panel at all is the whole
+        // finding: measured at 20.0 Hz — one full evaluation of the header, the
+        // pickers, the mixer and the processing section per poll — for a
+        // popover that had been closed an hour.
+        if panelClosed {
+            check(
+                "nor the menu bar panel, which is shut",
+                counts["PanelView"] ?? 0 == 0)
+        }
 
         // Two reads the window body was making on every one of those
         // evaluations. Timed rather than guessed: one of them turned out to
@@ -3955,6 +4012,24 @@ enum UIFlowCheck {
                 format: "pathLatencyMilliseconds %.1f µs, transcriptText %.1f µs",
                 microseconds(200) { _ = model.pathLatencyMilliseconds },
                 microseconds(200) { _ = model.transcriptText }))
+
+        // And the reads that leave the process. Each of these is reached from
+        // `MainWindow.body` or from `StatusPills`, both of which the meters
+        // re-evaluate, so whatever they cost is paid at the poll rate — and it
+        // is not only paid here. Every one is a synchronous round trip to
+        // `coreaudiod`, which is the one process every other application's
+        // audio is also waiting on, so a body doing this is how one menu bar
+        // application makes a whole machine feel slow.
+        note(
+            String(
+                format: "headsetInCallQuality %.0f µs, hardwareGain %.0f µs, "
+                    + "hasHardwareMonitoring %.0f µs, volumeKeysAreDead %.0f µs, "
+                    + "monitorLatency %.0f µs",
+                microseconds(20) { _ = model.headsetInCallQuality },
+                microseconds(20) { _ = model.hardwareGain },
+                microseconds(20) { _ = model.hasHardwareMonitoring },
+                microseconds(20) { _ = model.volumeKeysAreDead },
+                microseconds(20) { _ = model.monitorLatencyMilliseconds }))
     }
 
     /// What survives a graph being rebuilt underneath a running route.
@@ -4615,7 +4690,35 @@ enum UIFlowCheck {
                 analysing.cost.polls, analysing.microseconds,
                 analysing.microseconds / 50_000 * 100))
         model.isAnalysisVisible = visible
+
+        // And the state that used to cost an Apple event on every tick. The
+        // singing panel asks a music player where it is in the song, and it is
+        // Spotify or Music that answers, on its own main thread, when it gets
+        // round to it — measured at **62 ms a time on this machine**, asked
+        // twenty times a second, synchronously, on this application's main
+        // actor. The poll could not run at all, and neither could the window.
+        let singing = model.isSingingVisible
+        model.isSingingVisible = true
+        await pause(0.6)
+        let lyrics = await measure()
+        note(
+            String(
+                format: "singing open: %d polls, %.0f µs each — %.2f%% of one core",
+                lyrics.cost.polls, lyrics.microseconds,
+                lyrics.microseconds / 50_000 * 100))
+        // Said out loud, because it decides what the number above is worth: with
+        // no player running there is nothing to wait for and the poll would look
+        // innocent however it was written.
+        note(
+            model.nowPlaying == nil
+                ? "no music player answered, so that is a floor rather than a measurement"
+                : "a music player answered, so the round trip is in that number")
+        model.isSingingVisible = singing
         model.measuresPollBreakdown = false
+        // An order of magnitude below one round trip. What it has to catch is a
+        // poll that waits on another application — measured at 62000 µs a tick
+        // — rather than a poll that is a little slower than it was.
+        check("the poll does not wait on a music player", lyrics.microseconds < 5000)
 
         // The verdict is re-read twice a second rather than twenty times, so it
         // has to be shown to still be there — a stale pill claiming a clean

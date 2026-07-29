@@ -49,6 +49,12 @@ final class RouterModel: ScriptTarget {
             // What was chosen for *this* device, and only otherwise the
             // default worked out from its topology.
             if !restoreChannelChoice() { applyChannelDefaults() }
+            // The gain and the monitor belong to whichever microphone this now
+            // is, and a stale reading would put the last device's slider under
+            // the new device's name until the next poll.
+            pendingHardwareGain = nil
+            pendingHardwareMonitor = nil
+            refreshDeviceControls()
             persist()
             rerouteAfterDeviceChange()
         }
@@ -62,6 +68,7 @@ final class RouterModel: ScriptTarget {
                 displacedDestinationUID = nil
                 displacedDestinationName = nil
             }
+            refreshDeviceControls()
             persist()
             rerouteAfterDeviceChange()
         }
@@ -341,8 +348,54 @@ final class RouterModel: ScriptTarget {
     /// application's master fader reaches the output regardless, so the answer
     /// is to say so — which is worth more than the keys would have been.
     var volumeKeysAreDead: Bool {
-        guard let destination = selectedDestination else { return false }
-        return !destination.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+        selectedDestination != nil && !destinationHasVolumeControl
+    }
+
+    // MARK: What the devices themselves publish
+
+    /// The three answers a window body used to ask `coreaudiod` for directly.
+    ///
+    /// Measured from a real window body on this machine: `hardwareGain` 431 µs,
+    /// `hasHardwareMonitoring` 416 µs, `volumeKeysAreDead` 188 µs — **a
+    /// millisecond of synchronous round trips to the audio server per
+    /// evaluation**, and a body is evaluated on every hover, every drag frame
+    /// and every step of a resize. That millisecond is not this process's to
+    /// spend: `coreaudiod` is the one process every other application's audio is
+    /// also waiting on, so a view body doing this is one way a menu bar
+    /// application makes a whole machine feel slow.
+    ///
+    /// Kept rather than asked for, on the same reasoning as
+    /// `destinationLatencyFrames`. Not cached and forgotten, though: these
+    /// belong to the device rather than to us and Audio MIDI Setup can move
+    /// them, so they are re-read beside the path verdict — twice a second — and
+    /// whenever the selection or the device list changes.
+    private(set) var hardwareGainReading: AudioDevice.HardwareGain?
+    private(set) var hardwareMonitorReading: AudioDevice.HardwareGain?
+    /// True until something says otherwise, so a window drawn before the first
+    /// read does not accuse the volume keys of being dead.
+    private(set) var destinationHasVolumeControl = true
+
+    /// True when a window that draws any of them is on screen.
+    ///
+    /// The menu bar panel reads none of these and the inspector reads all of
+    /// them, so with the window shut this is a round trip to the audio server
+    /// on behalf of nobody — and shut is how a menu bar application spends most
+    /// of its life. Measured: refreshing them on every poll regardless put
+    /// 166 µs on each one, which is more than the entire poll costs with
+    /// nothing open.
+    private var inspectorIsOnScreen: Bool {
+        NSApp?.windows.contains { $0.isVisible && $0.title == "YunAudio" } ?? false
+    }
+
+    func refreshDeviceControls() {
+        publish(
+            selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
+            to: \.hardwareGainReading)
+        publish(selectedSource?.playThrough(), to: \.hardwareMonitorReading)
+        publish(
+            selectedDestination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+                ?? true,
+            to: \.destinationHasVolumeControl)
     }
 
     /// True when two device UIDs are two faces of one piece of hardware.
@@ -367,25 +420,36 @@ final class RouterModel: ScriptTarget {
     // MARK: The microphone's own monitoring
 
     /// True when the selected microphone can feed itself back in hardware.
-    var hasHardwareMonitoring: Bool { selectedSource?.playThrough()?.isSettable ?? false }
+    var hasHardwareMonitoring: Bool { hardwareMonitorReading?.isSettable ?? false }
 
     /// Where that feedback level sits, 0 to 1.
     ///
-    /// Read from the device every time rather than cached: it is the device's
-    /// state, not ours, and Audio MIDI Setup can move it.
+    /// Read through a stored copy rather than off the device on every look, for
+    /// the reason `hardwareMonitorReading` gives — and through the pending
+    /// value while it is being dragged, so the thumb does not snap back to
+    /// whatever the device rounded the last set to.
     var hardwareMonitorScalar: Float {
-        get { selectedSource?.playThrough()?.scalar ?? 0 }
+        get { pendingHardwareMonitor ?? hardwareMonitorReading?.scalar ?? 0 }
         set {
+            pendingHardwareMonitor = newValue
             try? selectedSource?.setPlayThrough(scalar: max(0, min(1, newValue)))
         }
     }
+    private var pendingHardwareMonitor: Float?
 
     var hardwareMonitorLabel: String {
-        guard let level = selectedSource?.playThrough() else { return "—" }
-        guard let decibels = level.decibels, decibels.isFinite else {
-            return String(format: "%.0f%%", level.scalar * 100)
+        guard let level = hardwareMonitorReading else { return "—" }
+        // Re-derived from the range against the value on the slider, like
+        // `hardwareGainLabel`: the stored reading is up to half a second old
+        // while somebody is dragging, and a readout that lags the thumb it sits
+        // beside reads as a control that is not working.
+        let scalar = hardwareMonitorScalar
+        guard let range = level.decibelRange, range.upperBound > range.lowerBound else {
+            return String(format: "%.0f%%", scalar * 100)
         }
-        return String(format: "%+.1f dB", decibels)
+        let value = range.lowerBound + scalar * (range.upperBound - range.lowerBound)
+        guard value.isFinite else { return String(format: "%.0f%%", scalar * 100) }
+        return String(format: "%+.1f dB", value)
     }
 
     // MARK: Singing
@@ -501,6 +565,9 @@ final class RouterModel: ScriptTarget {
         melody = nil
         lyricLine = nil
         lyricProgress = 0
+        // Due again, so re-opening the panel asks straight away rather than
+        // showing whatever the clock has extrapolated from an old answer.
+        pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
     }
 
     // MARK: Scoring, and duets
@@ -587,7 +654,10 @@ final class RouterModel: ScriptTarget {
         scoringNames = groups.map {
             representative(of: $0).map(routeTitle) ?? loc("Source")
         }
-        let anchor = nowPlaying?.position ?? 0
+        // The extrapolated position rather than the last answer: the player is
+        // asked twice a second now, and anchoring a singer's clock to an answer
+        // up to half a second old would put every score that far out.
+        let anchor = trackPosition
         singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
         for track in singerTracks { track.reset(at: anchor) }
         rebuildScoringReference()
@@ -675,27 +745,74 @@ final class RouterModel: ScriptTarget {
     /// while nobody is looking would be paying for a feature nobody asked for.
     func refreshNowPlaying() {
         guard isSingingVisible else { return }
-        let track = NowPlaying.current()
+        pollsSinceNowPlaying += 1
+        if pollsSinceNowPlaying >= Self.nowPlayingEveryNPolls, !isAskingNowPlaying {
+            pollsSinceNowPlaying = 0
+            isAskingNowPlaying = true
+            NowPlaying.currentAsynchronously { [weak self] track in
+                self?.receiveNowPlaying(track)
+            }
+        }
+        updateLyricPosition()
+    }
+
+    /// How often a music player is actually asked, in polls of the
+    /// twenty-a-second timer.
+    ///
+    /// See `NowPlaying.currentAsynchronously`: one ask is 62 ms of somebody
+    /// else's process, and it was on every poll. Twice a second is faster than
+    /// anybody changes a track, and what the panel needs at the meter's rate —
+    /// where in the song we are — is carried by the clock in between.
+    private static let nowPlayingEveryNPolls = 10
+
+    /// Starts due, so opening the panel asks at once rather than in half a
+    /// second. Not `Int.max`, which the increment below would trap on.
+    @ObservationIgnored private var pollsSinceNowPlaying = RouterModel.nowPlayingEveryNPolls
+    /// Set while an ask is in flight, so a player that answers slowly cannot
+    /// have a second question put to it before it has answered the first.
+    @ObservationIgnored private var isAskingNowPlaying = false
+    /// When the answer being carried arrived, on the monotonic clock.
+    @ObservationIgnored private var nowPlayingAnsweredAt: TimeInterval = 0
+
+    private func receiveNowPlaying(_ track: NowPlaying.Track?) {
+        isAskingNowPlaying = false
         if track?.title != nowPlaying?.title || track?.artist != nowPlaying?.artist {
             lyrics = track.flatMap(Self.findLyrics)
             melody = track.flatMap(Self.findMelody)
             if isScoringSinging { rebuildScoringReference() }
         }
         nowPlaying = track
+        nowPlayingAnsweredAt = ProcessInfo.processInfo.systemUptime
+        if let track { reanchorIfSeeked(to: track) }
+        updateLyricPosition()
+    }
 
-        guard let track else {
+    /// Where in the song the panel thinks we are.
+    ///
+    /// The player's last answer plus the time since it arrived, while it is
+    /// playing. Asking again would be truer by a few tens of milliseconds, cost
+    /// 62 of them, and arrive with the jitter of an Apple event round trip on
+    /// it — and a lyric line is about a second wide.
+    var trackPosition: Double {
+        guard let track = nowPlaying else { return 0 }
+        guard track.isPlaying else { return track.position }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - nowPlayingAnsweredAt)
+        guard track.duration > 0 else { return track.position + elapsed }
+        return min(track.duration, track.position + elapsed)
+    }
+
+    private func updateLyricPosition() {
+        guard nowPlaying != nil, let lyrics else {
             lyricLine = nil
             lyricProgress = 0
             return
         }
-        reanchorIfSeeked(to: track)
-        guard let lyrics else {
-            lyricLine = nil
-            lyricProgress = 0
-            return
-        }
-        lyricLine = lyrics.index(at: track.position)
-        lyricProgress = lyrics.progress(at: track.position)
+        let position = trackPosition
+        // Through `publish` for the reason every other poll write is: these are
+        // read by the lyrics view, and assigning the same line number twenty
+        // times a second would invalidate it twenty times a second.
+        publish(lyrics.index(at: position), to: \.lyricLine)
+        publish(lyrics.progress(at: position), to: \.lyricProgress)
     }
 
     /// Finds an `.lrc` for a track by name.
@@ -1750,9 +1867,7 @@ final class RouterModel: ScriptTarget {
     /// before the converter, so turning it up costs no headroom; the trim
     /// happens afterwards and can only amplify what the converter already
     /// decided, noise and all. The right order is this first.
-    var hardwareGain: AudioDevice.HardwareGain? {
-        selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
-    }
+    var hardwareGain: AudioDevice.HardwareGain? { hardwareGainReading }
 
     /// Read through a stored copy so the slider does not fight the device: a
     /// bare read every frame would snap the thumb back while it is being
@@ -3430,6 +3545,9 @@ final class RouterModel: ScriptTarget {
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
         for device in all { deviceNames[device.uid] = device.name }
+        // A new device list can mean a new selected device, and what that
+        // device publishes is what the window draws.
+        refreshDeviceControls()
     }
 
     func selectDefaults() {
@@ -4722,6 +4840,9 @@ final class RouterModel: ScriptTarget {
     private static let pathQualityEveryNPolls = 10
 
     @ObservationIgnored private var pollsSincePathQuality = 0
+    /// Counted in path-quality rounds rather than in polls, because that is
+    /// where the refresh hangs.
+    @ObservationIgnored private var pollsSinceDeviceControls = 0
 
     /// Assigns only when the value actually moved.
     ///
@@ -4774,6 +4895,18 @@ final class RouterModel: ScriptTarget {
                     selectedDestination?.latencyFrames(
                         scope: kAudioObjectPropertyScopeOutput) ?? 0,
                     to: \.destinationLatencyFrames)
+            }
+            // For the same reason, and far less often. Everything this
+            // application does to these refreshes them on the spot — a
+            // selection, a device arriving, the window opening — so the only
+            // thing the timer is for is somebody moving the gain in Audio MIDI
+            // Setup behind our back, and five seconds is soon enough for that.
+            // At the path verdict's own rate it put 53 µs on every poll, which
+            // is a quarter of what the whole poll costs with nothing open.
+            pollsSinceDeviceControls += 1
+            if pollsSinceDeviceControls >= 10 {
+                pollsSinceDeviceControls = 0
+                lap("deviceControls") { if inspectorIsOnScreen { refreshDeviceControls() } }
             }
         }
         lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }
