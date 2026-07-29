@@ -4108,3 +4108,124 @@ struct RingTeardownDisciplineTests {
             "the wait no longer waits for anything")
     }
 }
+
+
+/// A row of buttons must not be able to make the column it lives in wider.
+///
+/// The window is three columns side by side. A control that refuses to
+/// compress does not clip — it pushes, and what a person sees is the middle
+/// column drawn over the top of the left one with the left one's text sliced
+/// off at the window edge. It reads as a corrupted window rather than as a
+/// layout that ran out of room.
+///
+/// What caused it: the mono channel picker is one button per input channel,
+/// which is the *device's* number, not the window's. A BlackHole 16ch asks for
+/// sixteen. In a plain `HStack` that is about nine hundred points of minimum
+/// width in a column that has three hundred and seventy.
+///
+/// Measured rather than eyeballed, and at the two widths that actually exist:
+/// the panel is 340 points and the window's left column about 370 at the
+/// minimum window size. Every screenshot taken while this was broken had a
+/// three-channel microphone selected, which is why looking at pictures never
+/// found it.
+@Suite("A picker cannot push its column open")
+@MainActor
+struct SegmentedWidthTests {
+
+    /// The narrowest width the control will accept.
+    ///
+    /// Measured with nothing imposed. The first version of this put the view in
+    /// a `.frame(width: 340)` and read the result back, which of course said
+    /// 340 whatever was inside it — a measurement of the constraint rather than
+    /// of the thing being constrained, and it made the broken case look fine.
+    private func minimumWidth<V: View>(_ view: V) -> CGFloat {
+        let host = NSHostingView(rootView: view)
+        host.layoutSubtreeIfNeeded()
+        return host.fittingSize.width
+    }
+
+    private func channelPicker(_ count: Int, wraps: Bool) -> some View {
+        YunSegmented(
+            selection: .constant(0),
+            options: (0..<count).map { ($0, "Ch \($0 + 1)") },
+            wraps: wraps)
+    }
+
+    /// The panel's width, which is the tighter of the two.
+    private let panelWidth: CGFloat = 340
+
+    /// Height at the panel's width, which is how a row that wraps announces
+    /// itself: it takes more lines rather than more width.
+    private func heightAtPanelWidth<V: View>(_ view: V) -> CGFloat {
+        // Rendered rather than asked. `NSHostingView.fittingSize` recomputes
+        // the ideal size and ignores the frame it was given, so it answered
+        // the same number for three buttons and for sixteen; the renderer lays
+        // the view out inside the width it is handed, which is the question.
+        let renderer = ImageRenderer(content: view.frame(width: panelWidth))
+        renderer.scale = 1
+        return renderer.nsImage?.size.height ?? 0
+    }
+
+    @Test("sixteen channels take extra lines rather than extra width")
+    func sixteenWrapped() {
+        // `fittingSize` with nothing imposed is the *ideal* width, and a
+        // wrapping row's ideal is still one line — so asking it how narrow it
+        // could be does not answer this. What does: give it the panel's width
+        // and see whether it used more than one row of buttons.
+        let one = heightAtPanelWidth(channelPicker(3, wraps: true))
+        let many = heightAtPanelWidth(channelPicker(16, wraps: true))
+        #expect(
+            many > one,
+            "sixteen buttons occupied \(many) points and three occupied \(one), so the row did not wrap and is overflowing sideways instead")
+    }
+
+    @Test("and the same row without wrapping is the defect, several times over")
+    func sixteenUnwrapped() {
+        // Stated so the test is a measurement of the difference rather than an
+        // assertion that the fix is present. If a future SwiftUI compresses an
+        // HStack of buttons on its own, this fails and the wrap becomes
+        // unnecessary rather than load-bearing — which is worth being told.
+        let width = minimumWidth(channelPicker(16, wraps: false))
+        #expect(
+            width > panelWidth,
+            "an unwrapped row of sixteen fitted in \(width) points of \(panelWidth), so the wrap is no longer what is holding the layout together")
+    }
+
+    @Test("three channels were always fine, which is why nobody saw it")
+    func threeFitEitherWay() {
+        #expect(minimumWidth(channelPicker(3, wraps: false)) <= panelWidth)
+        #expect(minimumWidth(channelPicker(3, wraps: true)) <= panelWidth)
+    }
+
+    /// Every call site whose option count is not fixed by an enum.
+    ///
+    /// The measurement above proves the control can wrap; this proves the
+    /// places that need it ask for it. A new picker over something variable is
+    /// the way this comes back.
+    @Test("every picker over a variable list asks to wrap")
+    func variableListsWrap() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        var checked = 0
+        for file in ["MainWindow", "PanelView"] {
+            let source = try String(
+                contentsOfFile: root + "Sources/YunAudioApp/\(file).swift", encoding: .utf8)
+            // One chunk per call, ending where the next one begins. A fixed
+            // window does not work: a long comment above a call pushed its own
+            // `wraps:` out of view, so the scan reported a defect that was not
+            // there.
+            let calls = source.components(separatedBy: "YunSegmented(").dropFirst()
+            for call in calls {
+                let variable =
+                    call.contains("inputChannels") || call.contains("parameter.options")
+                guard variable else { continue }
+                checked += 1
+                #expect(
+                    call.prefix(600).contains("wraps: true"),
+                    "a YunSegmented over a variable list in \(file) does not wrap")
+            }
+        }
+        // Or the loop found nothing and passed by doing nothing, which is the
+        // failure mode of every check that reads a file.
+        #expect(checked >= 3, "only found \(checked) pickers over a variable list")
+    }
+}

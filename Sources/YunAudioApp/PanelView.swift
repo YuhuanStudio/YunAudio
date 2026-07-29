@@ -314,11 +314,14 @@ struct PanelView: View {
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.textTertiary)
                         .frame(width: Self.labelColumn, alignment: .leading)
+                    // The same as the window's, and the panel is 340 points
+                    // wide rather than 370, so it goes first.
                     YunSegmented(
                         selection: $model.monoChannel,
                         options: (0..<source.inputChannels).map {
                             ($0, model.sourceChannelLabel($0))
-                        })
+                        },
+                        wraps: true)
                 }
                 // The Seiren V3 Pro presents three input channels with only the
                 // first carrying the capsule, so this is not an exotic case.

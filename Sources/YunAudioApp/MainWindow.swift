@@ -474,11 +474,21 @@ struct MainWindow: View {
                                 selection: $model.channelMode,
                                 options: SourceChannelMode.allCases.map { ($0, loc($0.title)) })
                             if model.channelMode == .mono {
+                                // Wrapped, because how many of these there
+                                // are is the device's decision and not this
+                                // window's. A BlackHole 16ch puts sixteen
+                                // buttons in a 370-point column; an HStack will
+                                // not compress below their combined width, so
+                                // it made the *column* wider than its share and
+                                // the middle one was drawn over the top of it.
+                                // The whole three-column layout came apart, and
+                                // it was one picker asking for room nobody had.
                                 YunSegmented(
                                     selection: $model.monoChannel,
                                     options: (0..<source.inputChannels).map {
                                         ($0, model.sourceChannelLabel($0))
-                                    })
+                                    },
+                                    wraps: true)
                                 // Where the device's topology is known, say
                                 // what the chosen channel actually is instead
                                 // of admitting we do not know.
@@ -2364,7 +2374,10 @@ struct MainWindow: View {
                     selection: Binding(
                         get: { Int(model.value(of: parameter, in: kind).rounded()) },
                         set: { model.setValue(Float($0), of: parameter, in: kind) }),
-                    options: parameter.options.enumerated().map { ($0.offset, loc($0.element)) }
+                    options: parameter.options.enumerated().map { ($0.offset, loc($0.element)) },
+                    // How many of these there are comes from a third-party
+                    // unit, so it is not a number this window gets to assume.
+                    wraps: true
                 )
             }
         } else {
