@@ -317,6 +317,7 @@ swift run -c release yunaudio-cli route "Mic" "YunAudio" 5
 swift run -c release yunaudio-cli dsp                 # measure voice isolation
 swift run -c release yunaudio-cli apps                # list tappable processes
 swift run -c release yunaudio-cli tap Discord         # route an app's audio
+swift run -c release yunaudio-cli tap-restore Spotify # does a capture survive a relaunch
 swift run -c release yunaudio-cli tone 12 &           # a tappable noise source
 swift run -c release yunaudio-cli far-end <pid> 6     # prove the AEC reference
 swift run -c release yunaudio-cli aec-route           # route through the canceller
@@ -505,6 +506,60 @@ cannot say whether the microphone is now muted, whether the scene existed, or
 whether anything was there to hear it. That is fine for a Stream Deck key, where
 a person is looking at the result, and useless for an agent, where nobody is —
 and reading the state back is half of what an agent is for.
+
+## Talking to OBS
+
+Settings → Streaming connects to `obs-websocket` v5, which has shipped inside
+OBS since version 28. Two things go across it, and the second is the reason the
+first exists.
+
+**Muting the microphone here mutes OBS's copy of it**, if you ask it to. OBS's
+own mute for the same source is a separate switch on a separate window, and the
+failure that produces is the one nobody notices in time.
+
+**The sync offset.** Everything this application produces reaches OBS later than
+the picture does, by exactly as much as the effect chain adds — voice isolation
+alone is 56 ms. OBS has a per-source field for that and no way of working out
+what belongs in it. This does, to the frame, and until now only displayed it.
+2688 frames at 48 kHz becomes −56 ms, rounded to whole milliseconds because
+OBS's own dialog is a whole-millisecond spin box.
+
+Two things worth saying plainly:
+
+- **`obs-websocket` is switched off by default**, so the first thing most people
+  meet is a refused connection. That is answered here with the menu path rather
+  than with a status code: Tools → WebSocket Server Settings.
+- **This has not been verified against OBS.** The authentication is checked
+  against the vector in obs-websocket's protocol document, and the whole
+  handshake is checked over a real socket against a stub server that answers the
+  way that document describes — but OBS is not installed on the machine this was
+  written on, and a stub cannot be evidence about a program it is imitating.
+  `RESEARCH.md` says what running it against the real thing would take.
+
+Not built, and it is a decision rather than a gap: no native OBS plugin
+(the websocket does everything needed and a plugin binds this to OBS's build
+and ABI), no browser-source overlay yet, and no six-track recording model —
+`MAX_AUDIO_MIXES` is a compile-time constant in libobs, which makes six somebody
+else's muxer limit rather than a shape worth copying.
+
+### A capture that survives the application restarting
+
+OBS's issue #9144 — "Application Capture loses audio when application reopens on
+macOS" — has been open since June 2023, and OBS's answer to it is a button in the
+source properties labelled "Restart capture".
+
+macOS 26 added `CATapDescription.bundleIDs`, and this application sets it, so a
+captured application that quits and comes back reattaches on its own. Measuring
+that turned up something worth knowing: the neighbouring
+`processRestoreEnabled` flag **defaults to true**, so it had always been on and
+had always restored nothing, because there were no bundle identifiers to restore
+by. Setting the flag alone would have been a change with no effect that read
+exactly like a fix.
+
+```bash
+swift run -c release yunaudio-cli tap-restore Spotify           # what the HAL kept
+swift run -c release yunaudio-cli tap-restore Spotify --watch   # quit it and watch
+```
 
 ## Razer hardware control
 

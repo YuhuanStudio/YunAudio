@@ -20,11 +20,18 @@
 
 ## 已知問題
 
-### 我們沒有做延遲補償 —— 這是錯的，不是缺功能 [本機實測]
+### 延遲補償 —— **已修**，而且這一段留著是因為它的形狀值得記得 [本機實測]
 
-`EffectChain` 把每一級 AU 的延遲加總成 `latencyFrames`，`RoutingEngine` 存成
-`effectLatencyFrames` —— 而**這個值唯一的去處是 UI**（`RouterModel` 把它換算成毫秒
-顯示）。**沒有任何地方用它去延遲別的路徑。**
+當時的狀況：`EffectChain` 把每一級 AU 的延遲加總成 `latencyFrames`，`RoutingEngine`
+存成 `effectLatencyFrames` —— 而**那個值唯一的去處是 UI**。沒有任何地方用它去延遲別的
+路徑。
+
+現在：`RTGraph.alignmentFrames` 每一條沒經過鏈的 route 各有一條延遲線，
+`RoutingEngine` 在起路由與熱抽換時都把鏈的延遲寫進去，flow check 的
+`chain alignment` 一節斷言 `applied == chain`。
+
+**還沒做的那一半在外面**：OBS 自己擷取的來源（它的桌面音訊、遊戲擷取、影像）不在這條
+延遲線上，因為它們根本不經過這裡。那要靠 OBS 的同步偏移，見第 4 項。
 
 所以麥克風經過整條效果鏈（光是人聲隔離就 56 ms），而被 tap 的應用程式音訊一級都沒
 經過。兩者在混音時就差了整條鏈的延遲。**在 KTV 的情境下這正是「人聲比伴奏晚」**，
@@ -185,21 +192,29 @@ VoiceMeeter 每條匯流排都有完整的參數等化器，所以直播混音�
 耳機補償已經證明了**輸出側掛 biquad 級聯是可行且零配置的**，所以「每條匯流排一條
 鏈」現在不是新機制，而是同一個機制多開幾份。值得單獨做一次設計。
 
-### 4. OBS 對接 [V] —— 競爭者全都沒有
+### 4. OBS 對接 —— **第一版已完成，但沒有人在真的 OBS 上驗過** [本機實測 + 未驗]
 
-`RESEARCH.md` 主題 1 把實作的未知數全部清掉了：`obs-websocket` v5 的協定、認證、
-音訊相關的請求與事件、browser source 的設定鍵、vendor 推送路徑。
+`RESEARCH.md` 第 8 節是這一輪的決定與量測，完整版在那裡。摘要：
 
-三個具體的接點：
+**已做**：`Sources/YunAudioOBS/` 是一個 obs-websocket v5 客戶端
+（`URLSessionWebSocketTask` + CryptoKit，零第三方相依）；偏好設定多了「直播」分頁；
+`OBSSyncOffset` 把效果鏈的延遲換算成 OBS 的同步偏移；麥克風靜音可以鏡射過去。
 
-- **websocket 客戶端**：音量、靜音、音軌、電平表事件雙向同步。
-- **browser overlay**：歌詞、分數、電平、響度建議做成一個本機頁面讓 OBS 疊上去。
-  **直播主在看 OBS，不是在看我們的視窗** —— 這是這條路真正的理由。
-- **`SetInputAudioSyncOffset`**：沒人在用的接點，而且跟上面「延遲補償」是同一個數
-  字。我們算得出鏈的延遲，就能直接告訴 OBS 要偏移多少。
+**驗到哪裡**：認證字串對得上協定文件那組 challenge/salt（答案用 Python 與 OpenSSL
+各算一次交叉驗證）；完整握手對著一個用 `Network.framework` 架的 stub 伺服器跑通，
+六個測試全過；2688 frames @ 48 kHz 在線上是 −56 ms。
 
-而 OBS 在 macOS 上的音訊擷取那個痛還在（形狀變了但沒消失），那正是我們虛擬裝置存
-在的理由，值得寫成一句話的賣點。
+**沒驗到什麼，明講**：**這台機器上沒有裝 OBS**。上面沒有一條可以宣稱對接是通的。
+需要一個人跑 `brew install --cask obs`，步驟寫在 `RESEARCH.md` 8 節開頭。
+
+**刻意留著沒做**：browser source overlay 與自動建場景。理由不是不好，是它在這台機器
+上一個字都驗不了，而這個專案的問題正是「功能多到沒被驗證過」。等有人裝了 OBS、而且
+願意看著畫面驗收的那一次再做。
+
+**要決定的一件事**：OBS 的 websocket 密碼現在**不存檔**，每次連線要重貼。理由是
+`UserDefaults` 是家目錄裡的明文檔，而這個 app 自己的控制 socket 是 `chmod 600`。
+正確的家是 Keychain，擋路的是這個專案的散布方式：ad-hoc 簽章每次建置身分就變，
+keychain 項目會每次啟動都跳授權。**這需要使用者選一邊。**
 
 ### 5. CoreAudio 內建的語音活動偵測 —— **已完成，而且量到一件差點錯過的事** [本機實測]
 
@@ -218,9 +233,24 @@ loopback 什麼都沒帶過去，而沒有電平表的話，那看起來跟「�
 
 介面上是「**已靜音，但你在說話**」這顆藥丸，只在那一刻出現，然後自己消失。
 
-還沒做的同一趟：macOS 26 的 `CATapDescription.processRestoreEnabled` 與 `bundleIDs`
-—— 那正好是 OBS 開了三年的 issue #9144（「應用程式重開之後擷取就沒聲音」）的解法。
-**我們有，他們沒有。**
+同一趟的另一半 —— **已完成，而且量到的東西跟預期相反** [本機實測]
+
+macOS 26 的 `CATapDescription.processRestoreEnabled` 與 `bundleIDs` 現在接上了
+（`ProcessTap.init(processIDs:muteBehavior:bundleIDs:)`），而量出來的事實是：
+
+**`processRestoreEnabled` 的預設值本來就是 `true`。** 這個 app 建的每一個 tap 一直
+都開著它，也一直什麼都沒還原 —— 因為 `bundleIDs` 預設是空的，沒有東西可以記。
+**缺的一直是 `bundleIDs`。** 只設旗標會是一個零效果、看起來完全像修好了的修改。
+
+證據讀的是**系統持有的** description（`kAudioTapPropertyDescription`），不是自己手上
+那一份 —— 因為 `kAudioSubDeviceInputChannelsKey` 已經教過一次「HAL 收下然後丟掉」長
+什麼樣子。四個斷言在 `ProcessTapRestoreTests`，還有一個 `yunaudio-cli tap-restore`。
+
+順帶量到一條直接對上 #9144 的能力：**可以替一個沒在跑、甚至沒安裝的 app 建 tap**
+（只給 `bundleIDs`，`processIDs` 是空的，HAL 回 `noErr`）。
+
+**還沒驗的**：「app 重開之後音訊真的回來」。那需要有人去關掉再打開一個應用程式：
+`yunaudio-cli tap-restore <名字> --watch`。
 
 ### 6. 腳本介面 [M]
 
@@ -363,6 +393,18 @@ Rogue Amoeba 遷到 ARK 之後，Audio Hijack 的擷取**不需要改安全性�
 驅動。那個子集能不能成為一級模式、而驅動變成「買到 bit-exact 時脈鎖定路徑」的升級，
 是產品問題跟技術問題各半。
 
+### 「只監聽」表達不出來 [本機實測]
+
+OBS 有三態監聽（關／只監聽／監聽並輸出）。這裡是「每來源一個連續的 dB 送出量」到單一
+監聽裝置，所以「關」和「監聽並輸出」都表達得出來，**「只監聽」表達不出來** —— 因為
+`setMuted(_:for:)` 掐的是 route，而 route 同時餵主混音和監聽。
+
+修法很便宜，而且已經有現成的東西：監聽的 route 索引是分開存的
+（`monitorRouteIndices`），所以「靜音但保留監聽」就是**只把非監聽的那幾條 route 靜音**。
+可以斷言：靜音之後監聽匯流排的電平不變、主匯流排的變成零。
+
+沒有在 OBS 那一輪做，因為它動的是靜音的語意，而那時別的工作正在同一塊。
+
 ### VBAN 網路音訊 [V]
 
 VB-Audio 自家的 UDP 協定：8 進 8 出、規格公開有文件（不像 Dante），而且已經有一個
@@ -414,6 +456,16 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 - **路由迴圈改用 vDSP 反而更慢** [本機實測]。512 frames 兩條路由是 1501 ns 對
   954 ns：Accelerate 的 strided 入口會退回純量，而**交錯音訊永遠是 strided**。手寫
   迴圈留著，理由寫在原地。
+- **寫 OBS 原生外掛** [V]。obs-websocket v5 已經夠了 —— 音量、靜音、同步偏移、音軌、
+  建立來源、事件訂閱全都在協定裡，而且客戶端只要 `URLSessionWebSocketTask` 加
+  CryptoKit。外掛會把這個專案綁進 OBS 的建置與 ABI，換來的東西一樣也沒多。
+- **繼承 OBS 的六軌錄音模型** [本機]。`MAX_AUDIO_MIXES` 是 libobs 的編譯期常數，是
+  **別人的 muxer 上限**；這裡的 stem 是檔案，沒有那個上限。指派 OBS 的音軌是對的
+  （`OBSRequest.setTracks` 留著），照著它重新設計自己的錄音不是。
+- **鏡射 OBS 的電平表**（`InputVolumeMeters`，每 50 ms 的高流量事件）。換來的是同一
+  件事的第二個真相，而兩個電平表不一致的時候沒有人知道該信哪一個。訂閱常數留著。
+- **把 OBS 的動詞加進 `RemoteCommand`**。`RemoteCommand` 是這個 app 答應要一直支援的
+  詞彙，obs-websocket 是別人可以改的詞彙。`YunAudioOBS` 因此是獨立的 target。
 - **即時神經變聲**（fish-speech、RVC）需要遠超過一百毫秒，而這裡的期限是 2.7 ms。
   今天出貨的每一個即時變聲器做的都是我們做的這件事；差別是這個會講出來。
 
@@ -423,7 +475,8 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 
 排除清單 · 設定組（Quick Configs）· 輸出對齊 · 裝置掉線自動接手 · URL 遙控 ·
 具名 A/B 匯流排 · 耳機補償（AutoEq）· 十段輸出音色（Razer 的頻段中心）·
-即時逐字稿（每個來源分開，不靠聲紋猜）· MIDI learn · 設定視窗（語言／主題／
+即時逐字稿（每個來源分開，不靠聲紋猜）· 擷取隨 app 重開自動接回（`bundleIDs`）·
+obs-websocket v5 客戶端與同步偏移 · MIDI learn · 設定視窗（語言／主題／
 強調色／緩衝區）· 選單列面板重整 · 底部藥丸狀態列 · 應用程式清單的三個缺陷 ·
 V2 X 與 Barracuda 裝置設定檔 · 聲音分頁拆成三區 · 場景預設真的各自不同 ·
 效果鏈熱抽換 · IOProc 快 19–49% · 閒置輪詢從 1501 µs 降到 174 µs ·

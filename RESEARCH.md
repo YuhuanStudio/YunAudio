@@ -703,3 +703,155 @@ CoreAudio 那邊沒有任何對應的屬性。 [本機]
 - **換掉 SoundAnalysis 改用 Silero VAD** —— 資訊變少、相依變多，而且如果只要二元判斷，CoreAudio 自己就有（6.5）。
 - **接直播平台彈幕做點歌** —— 平台相依、會變、法遵不明，而且跟音訊沒有關係（2.5）。
 - **跟 Wave Link 3 比多混音** —— 那塊地已經被一個免費的、Corsair 支持的產品佔住了（5.4、5.7）。
+
+---
+
+## 8. OBS：這一輪把研究變成決定與程式碼
+
+前面第 1 節是「OBS 能怎麼接」。這一節是**接了什麼、沒接什麼、以及每一項的理由**，
+外加**在這台機器上量到的數字**。
+
+**這台機器上沒有裝 OBS。** 所以下面每一條都標明它被驗證到什麼程度，而且**沒有任何
+一條可以宣稱「跟 OBS 對接是通的」**。要驗到那一步，需要一個人執行：
+
+```bash
+brew install --cask obs
+```
+
+裝好之後要做的事，照順序：打開「工具 → WebSocket 伺服器設定」，勾選啟用、複製密碼；
+在偏好設定的「直播」頁填入位址與密碼、按「連線」；在 OBS 建一個
+`coreaudio_input_capture` 指向這個 app 的裝置；回來按「送給 OBS」，然後到 OBS 的
+「進階音訊屬性」看那一路的同步偏移欄位是不是變成了負的那個毫秒數。
+
+### 8.1 做了什麼
+
+**(a) `CATapDescription.processRestoreEnabled` + `bundleIDs` —— 已接上，已量測**
+
+`RESEARCH.md` 6.1(a) 與 `TODO.md` 第 5 項都把這條留著沒做。現在做了，而且**量到一件
+把整條結論翻過來的事**：
+
+```
+$ yunaudio-cli tap-restore Spotify
+tap uid          0A59DA8D-389C-4C67-BFDB-F4DADA043314
+asked to restore com.spotify.client
+HAL kept restore true
+HAL kept bundles com.spotify.client
+```
+
+而且：
+
+| 給 HAL 的東西 | HAL 讀回來的 |
+|---|---|
+| 什麼都沒設 | `processRestoreEnabled = true`、`bundleIDs = []` |
+| 明確設 `false` | `false` |
+| `bundleIDs` + `true` | 兩者都留著 |
+| 只有 `bundleIDs`、旗標設 `false` | `false`，但 bundleIDs 留著 |
+
+**`processRestoreEnabled` 的預設值就是 `true`。** 也就是說這個 app 從頭到尾建的每一個
+tap 都已經開著它，而且什麼都沒還原 —— 因為 `bundleIDs` 預設是空的，沒有東西可以記。
+**真正缺的那一半一直是 `bundleIDs`，不是那個旗標。** 只設旗標會是一個「看起來完全像
+修好了」的零效果修改。這件事寫進了 `ProcessTapRestoreTests`，所以哪天 macOS 改了預設
+值，會有人知道。
+
+還有一條直接對上 OBS #9144 的能力：**可以替一個沒有在跑、甚至沒有裝的 app 建 tap**
+（`processIDs: []` + `bundleIDs: ["com.yuhuanstudio.nothing.at.all"]`，HAL 回 `noErr`）。
+沒有 `bundleIDs` 就辦不到，因為沒有 process object 可以指。
+
+**還沒驗到的**：「app 重開之後音訊真的回來」需要有人去關掉再打開一個應用程式。
+`yunaudio-cli tap-restore <名字> --watch` 就是為此準備的，它會盯著 tap 的 process 清單
+掉下去再回來。
+
+**(b) `obs-websocket` v5 客戶端（`Sources/YunAudioOBS/`）**
+
+`URLSessionWebSocketTask` + CryptoKit，**零第三方相依**。協定是逐行讀 obs-websocket
+自己產生的 `protocol.md`，不是抄客戶端函式庫。
+
+驗證到什麼程度，分三層講清楚：
+
+1. **認證字串**：用協定文件自己那組 challenge/salt/password（`supersecretpassword`）
+   算出來的答案，**文件沒有公布答案**，所以答案是用 Python 的 `hashlib` 與 OpenSSL
+   各算一次、兩邊相同才寫進斷言的：
+   `1Ct943GAT+6YQUUX47Ia/ncufilbe6+oD6lY+5kaCu4=`。中間值（base64 secret）也單獨斷言，
+   否則兩層雜湊哪一層錯都會回報同一個失敗。
+2. **完整握手，走真的 socket**：`Tests/YunAudioTests/OBSStubServer.swift` 用
+   `Network.framework` 的 `NWProtocolWebSocket` 架了一個**會像 obs-websocket 一樣回話
+   的伺服器**，然後這個客戶端對它跑完 `Hello → Identify → Identified → Request →
+   RequestResponse`。**六個測試全過**，包括：密碼錯誤要在伺服器直接關連線的情況下變成
+   「OBS 拒絕了密碼」而不是逾時；沒有密碼的伺服器不能被強制要求密碼；OBS 說不（狀態碼
+   204）要跟傳輸失敗分開；關掉的埠要**立刻**失敗而不是轉圈。
+3. **完全沒驗**：真的 OBS。stub 是照文件寫的，文件錯了它就跟著錯。
+
+`EventSubscription::All` 是 **4095**（bit 0–11，含 macOS 版沒人提過的 `Canvases`），
+**不含** `InputVolumeMeters`（`1 << 16` = 65536）。這一條有斷言，因為把「全部」寫成
+`~0` 的客戶端會意外訂到每 50 毫秒一則的電平事件。
+
+**(c) 同步偏移 —— 這一輪唯一「別人做不到」的東西**
+
+`OBSSyncOffset.forProcessingLatency(frames:sampleRate:)`。斷言：2688 frames @ 48 kHz
+= **−56 ms**（就是人聲隔離那 56 ms）；同樣 frame 數 @ 96 kHz = −28 ms；chain 為 0 時
+是 0；超過 950 ms 夾在 −950（那是 obs-websocket 文件寫的下限）。四捨五入到整數毫秒，
+因為 OBS 的「進階音訊屬性」是整數毫秒的數字框，送一個小數進去等於送一個使用者看到
+的是別的數字、而且打不回來的值。
+
+**符號是負的**，而且理由要寫清楚：麥克風**真的**晚了那麼久，OBS 沒辦法讓它早到，但
+可以被告知「把這段聲音當成更早發生的」。這個方向**沒有在真的 OBS 上驗證過**。
+
+`stub` 測試把這條從 `RoutingEngine` 的 frame 數一路量到別人協定裡的欄位名：
+送出去的 `SetInputAudioSyncOffset.inputAudioSyncOffset` 就是 −56。
+
+**(d) 靜音鏡射與偏好設定頁**
+
+偏好設定多了一個「直播」分頁（`PreferencesWindow.Section.streaming`）。它自動被離線
+算繪檢查涵蓋（`PanelRenderer` 跑 `Section.allCases`），深淺兩色都看過了。
+文字欄位在算繪分支換成唯讀列 —— 因為 `TextField` 在 `ImageRenderer` 底下畫成一條黃色
+禁止標誌，會讓整個分頁的色彩檢查失明。
+
+### 8.2 刻意不做，以及為什麼
+
+- **OBS 原生外掛** —— 1.7 已定案，不改。
+- **browser source overlay + 自動建場景**（1.3、1.7 第 1、2 項）。**這一輪不做。**
+  理由不是它不好，是**它在這台機器上一個字都驗不了**：要驗它需要 OBS、一個場景、一個
+  瀏覽器來源，而且它的產出是一張網頁的外觀。`TODO.md` 說得很清楚，這個專案現在的問題
+  是「功能已經多到沒有全部被驗證過」，再加一個完全無法驗證的表面是往反方向走。
+  **它應該在有人裝了 OBS、而且願意看著畫面驗收的那一次做。**
+- **鏡射 OBS 的電平表**（`InputVolumeMeters`）。訂閱常數留著，但不建介面：那是每 50
+  毫秒一則的高流量事件，換來的是**同一件事的第二個真相** —— 這裡自己的電平取樣率更高
+  而且量的是處理前的訊號。兩個電平表不一致的時候，沒有人會知道該信哪一個。
+- **OBS 的六軌錄音模型。** `MAX_AUDIO_MIXES` 是 libobs 的編譯期常數，是**別人的
+  muxer 上限**。這裡的 stem 是檔案，數量沒有上限。把六軌的概念搬進來等於繼承一個
+  我們沒有的限制。`OBSRecordingTracks.count = 6` 與 `OBSRequest.setTracks` 留著，
+  因為**指派 OBS 的軌**是對的（那是 OBS 的東西），**照著它重新設計自己的錄音**不是。
+- **每個來源一條 OBS 濾鏡鏈。** 同樣是兩個真相的問題：這裡有自己的效果鏈，而且知道
+  它的延遲；OBS 的濾鏡鏈這裡量不到延遲。同時開兩條，同步偏移那個數字就不再正確。
+- **把 OBS 的動詞加進 `RemoteCommand`。** `RemoteCommand` 是這個 app **答應要一直支援**
+  的詞彙；obs-websocket 是**別人可以改**的詞彙。混在一起等於把別人的發版節奏放進自己
+  的相容性承諾裡。`YunAudioOBS` 因此是獨立的 target，只依賴 `YunAudioControl` 的
+  `JSONValue`。
+
+### 8.3 OBS 的音訊介面，逐項對照（誠實版）
+
+| OBS 有的 | 這裡有沒有 | 判斷 |
+|---|---|---|
+| 每來源推桿（dB）、靜音 | 有（`routeGains` / `routeMutes`，底 −40 dB） | 平手 |
+| 每來源 solo | OBS **沒有**；這裡有 | 這裡多 |
+| 每來源監聽三態（關／只監聽／監聽並輸出） | **部分** —— 這裡是「每來源一個連續的 dB 送出量」到單一監聽裝置。**「只監聽」表達不出來**，因為靜音會同時掐掉兩條混音 | **真的缺一格**，見 8.4 |
+| 每來源同步偏移（ms） | **沒有** —— 只有一個全域的 `alignmentFrames`，而且是自動從鏈的延遲算的 | 這裡的自動比 OBS 的手動好，但**手動覆寫沒有** |
+| 每來源平衡 / 單聲道下混 | 沒有 | 小，值得補 |
+| 每來源濾鏡鏈 | 沒有（鏈是全域的、只掛麥克風） | 已在 `TODO.md` 第 3 項 |
+| 六軌指派 | 沒有，也不要 | 見 8.2 |
+| 每匯流排處理 | **這裡有，OBS 沒有**（每個輸出一條 10 段 EQ + 耳機補償） | 這裡多 |
+| 每輸出延遲 0–500 ms | **這裡有，OBS 沒有** | 這裡多 |
+| 錄音格式／編碼器分離 | 這裡是 wav / flac / aac 三選一，沒有分開的編碼器設定 | OBS 的分離是為了它的 muxer；這裡不需要 |
+| 電平表衰減速率、峰值型式（sample / true peak） | 沒有 | **不值得**：那是 OBS 拿來省 CPU 的設定，這裡的電平表已經是 true peak 而且成本已經量過 |
+
+### 8.4 一個小而真實的缺口：「只監聽」
+
+OBS 的 `OBS_MONITORING_TYPE_MONITOR_ONLY` 是「我聽得到，對面聽不到」。這裡表達不出來，
+因為 `setMuted(_:for:)` 掐的是 route，而 route 同時餵主混音和監聽。
+
+值不值得補：**值得**，而且很便宜 —— 監聽的 route 索引已經是分開存的
+（`monitorRouteIndices`），所以「靜音但保留監聽送出量」就是**只把非監聽的那幾條 route
+靜音**。它可以被斷言：靜音之後監聽匯流排的電平不變，主匯流排的變成零。
+
+**沒有在這一輪做**，因為它動的是 `RouterModel` 的靜音語意，而那是別的 agent 正在動的
+區域。列進 `TODO.md`。
