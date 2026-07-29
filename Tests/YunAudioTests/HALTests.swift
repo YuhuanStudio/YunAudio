@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreAudio
 import Foundation
 import Testing
@@ -866,6 +867,76 @@ struct AudioApplicationGroupingTests {
             foreground: [:], named: [:])
         #expect(apps.count == 1)
         #expect(apps[0].bundleID == "com.apple.WebKit")
+    }
+
+    /// Anything the interface can name, the command line has to be able to name
+    /// too — and they disagreed. `grouped()` resolves an executable name for a
+    /// process that publishes no bundle identifier; every command that matched
+    /// on `AudioProcess.name` directly saw "PID 69200" instead. Measured with
+    /// one `afplay` playing a tone: `yunaudio-cli apps` listed "afplay",
+    /// `yunaudio-cli tap afplay` answered `no process matching "afplay"`, and
+    /// the only way to reach it was to type its process id.
+    ///
+    /// Against the real machine, because that is where the disagreement lived:
+    /// the resolution takes a `pid_t` to the kernel, so there is nothing to
+    /// hand in. The player is spawned on a file of digital silence — it has to
+    /// be a real process the HAL is tracking, and it does not have to be
+    /// audible to be one.
+    @Test("everything the interface can name, a command line can name too")
+    func matchingAgreesWithTheListedName() async throws {
+        let silence = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-silence-\(UUID().uuidString).wav")
+        let format = try #require(
+            AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1))
+        let file = try AVAudioFile(forWriting: silence, settings: format.settings)
+        let buffer = try #require(
+            AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100 * 8))
+        buffer.frameLength = buffer.frameCapacity
+        try file.write(from: buffer)
+        defer { try? FileManager.default.removeItem(at: silence) }
+
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = [silence.path]
+        try player.run()
+        defer {
+            player.terminate()
+            player.waitUntilExit()
+        }
+
+        // It appears once it has opened an output. If it never does, CoreAudio
+        // cannot start IO on this machine and every audio measurement here is
+        // meaningless — see AGENTS.md, which says to establish that first.
+        var mine: AudioProcess?
+        for _ in 0..<40 {
+            mine = try AudioProcesses.all(includingSilent: true)
+                .first { $0.pid == player.processIdentifier }
+            if mine != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        let afplay = try #require(
+            mine, "afplay never reached the HAL's process list — can this machine start IO?")
+
+        #expect(AudioApplications.displayName(of: afplay) == "afplay")
+        #expect(AudioApplications.matches("afplay", process: afplay))
+        // The process id still works, and is the only unambiguous handle when
+        // two copies of one executable are running.
+        #expect(AudioApplications.matches(String(afplay.pid), process: afplay))
+        #expect(!AudioApplications.matches("Discord", process: afplay))
+
+        // And the general form of it: every row the interface offers is
+        // reachable by the name it shows.
+        let processes = try AudioProcesses.all(includingSilent: true)
+        let byID = Dictionary(processes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in
+            first
+        })
+        for application in try AudioApplications.grouped() {
+            let members = application.processIDs.compactMap { byID[$0] }
+            guard !members.isEmpty else { continue }
+            #expect(
+                members.contains { AudioApplications.matches(application.name, process: $0) },
+                "the interface lists \"\(application.name)\" and no process matches that")
+        }
     }
 }
 

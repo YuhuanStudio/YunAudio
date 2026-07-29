@@ -226,30 +226,60 @@ extension AudioApplications {
     /// Resolves the one thing the HAL will not: a name for a process that has
     /// no bundle, and therefore no `NSRunningApplication` behind it either.
     ///
-    /// Kept out of `group(processes:foreground:named:)` so that stays a
-    /// function of its arguments. This one asks the kernel about a PID, and a
-    /// test that had to hand it real PIDs would be asserting the machine rather
-    /// than the rules.
-    private static func entry(for process: AudioProcess) -> ProcessEntry {
-        var name = process.name
-        // Recording counts as well as playing. It did not, and the one place
-        // that matters most is a process with no bundle holding the microphone:
-        // "PID 47482" is not a row anybody can act on, and it is exactly the
-        // row somebody needs when their headset has dropped to call quality and
-        // they are trying to find out what did it.
-        //
+    /// Public, and this is the reason. It used to be folded into `entry(for:)`
+    /// below, so the interface — which goes through `grouped()` — offered
+    /// "afplay" while every command that matched on `AudioProcess.name`
+    /// directly was matching "PID 69200" and finding nothing. Measured with one
+    /// `afplay` playing: `yunaudio-cli apps` listed it by name and
+    /// `yunaudio-cli tap afplay` answered `no process matching "afplay"`.
+    /// The resolution belongs where both can reach it.
+    ///
+    /// - Parameter process: The process to name.
+    /// - Returns: Its executable's name when it publishes no bundle
+    ///   identifier, and the HAL's own name otherwise.
+    public static func displayName(of process: AudioProcess) -> String {
         // Asked of every process with no bundle rather than only the audible
         // ones, because audibility flickers — see the note in `group`, and the
         // row that flickered with it read "afplay" one second and "PID 47482"
         // the next. One `proc_pidpath` per process is a syscall against an
         // enumeration that already costs 27 ms.
-        if process.bundleID?.isEmpty ?? true,
+        guard process.bundleID?.isEmpty ?? true,
             let executable = executableName(ofPID: process.pid)
-        {
-            name = executable
-        }
-        return ProcessEntry(
-            id: process.id, pid: process.pid, bundleID: process.bundleID, name: name,
+        else { return process.name }
+        return executable
+    }
+
+    /// True when what somebody typed names this process.
+    ///
+    /// The one place the rule lives, so a command line and a menu answer the
+    /// same question the same way. A bare number matches the process id, which
+    /// before the name resolution above was the only handle a bundle-less
+    /// process had — and is still the only unambiguous one when two copies of
+    /// the same executable are running.
+    ///
+    /// - Parameters:
+    ///   - wanted: What the user typed.
+    ///   - process: The process to test it against.
+    /// - Returns: True when the two are about the same thing.
+    public static func matches(_ wanted: String, process: AudioProcess) -> Bool {
+        if let pid = pid_t(wanted) { return process.pid == pid }
+        if displayName(of: process).localizedCaseInsensitiveContains(wanted) { return true }
+        return process.bundleID?.localizedCaseInsensitiveContains(wanted) ?? false
+    }
+
+    /// Kept out of `group(processes:foreground:named:)` so that stays a
+    /// function of its arguments. This one asks the kernel about a PID, and a
+    /// test that had to hand it real PIDs would be asserting the machine rather
+    /// than the rules.
+    private static func entry(for process: AudioProcess) -> ProcessEntry {
+        // Recording counts as well as playing. It did not, and the one place
+        // that matters most is a process with no bundle holding the microphone:
+        // "PID 47482" is not a row anybody can act on, and it is exactly the
+        // row somebody needs when their headset has dropped to call quality and
+        // they are trying to find out what did it.
+        ProcessEntry(
+            id: process.id, pid: process.pid, bundleID: process.bundleID,
+            name: displayName(of: process),
             isPlaying: process.isPlaying, isRecording: process.isRecording)
     }
 
