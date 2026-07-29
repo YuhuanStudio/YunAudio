@@ -843,6 +843,109 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     exit(0)
 }
 
+// Does the HAL actually keep `processRestoreEnabled` and `bundleIDs`?
+//
+// macOS 26 added both, and together they are the answer to OBS's issue #9144 —
+// "Application Capture loses audio when application reopens on macOS", open
+// since June 2023, whose workaround in OBS is a button labelled "Restart
+// capture". This project can set them; what this verb answers is whether
+// setting them means anything.
+//
+// It asks the *tap object* rather than the description that was handed over,
+// because those are two different things and this project has been caught by
+// the difference before: `kAudioSubDeviceInputChannelsKey` reads like a
+// constraint and is ignored. A field that is set, accepted and dropped looks
+// exactly like a field that works.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap-restore" {
+    let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Music"
+    do {
+        let processes = try AudioProcesses.all(includingSilent: true)
+        let matches = processes.filter { AudioApplications.matches(match, process: $0) }
+        let bundleIDs = Set(matches.compactMap(\.bundleID)).sorted()
+        print("matched \(matches.count) process(es) for \"\(match)\"")
+        for process in matches {
+            print(
+                "  · \(AudioApplications.displayName(of: process))  pid \(process.pid)"
+                    + "  \(process.bundleID ?? "no bundle id")")
+        }
+        guard !bundleIDs.isEmpty else {
+            print(
+                "\nno bundle identifier to restore by — pick an application, "
+                    + "not a helper process")
+            exit(1)
+        }
+
+        let tap = try ProcessTap(
+            processIDs: matches.map(\.id), muteBehavior: .unmuted, bundleIDs: bundleIDs)
+        print("\ntap uid          \(tap.uid)")
+        print("asked to restore \(bundleIDs.joined(separator: ", "))")
+
+        guard let held = tap.systemDescription() else {
+            print("the HAL would not give the description back — nothing can be concluded")
+            exit(1)
+        }
+        let keptBundles = held.bundleIDs.sorted()
+        print("HAL kept restore \(held.isProcessRestoreEnabled)")
+        print(
+            "HAL kept bundles "
+                + (keptBundles.isEmpty ? "—" : keptBundles.joined(separator: ", ")))
+        print("HAL kept private \(held.isPrivate)")
+
+        var failures = 0
+        // The flag on its own proves nothing: it defaults to true, so every tap
+        // this application has ever made already had it on and restored nothing.
+        // The bundle identifiers are the half that does the work.
+        if !held.isProcessRestoreEnabled {
+            print("\n✗ processRestoreEnabled did not survive the round trip")
+            failures += 1
+        }
+        if keptBundles != bundleIDs {
+            print("\n✗ bundleIDs came back as \(keptBundles), not \(bundleIDs)")
+            failures += 1
+        }
+        if failures == 0 { print("\n✓ the HAL kept both.") }
+
+        // The round trip proves the HAL *stored* the setting. It does not prove
+        // the behaviour, and those are different claims: what somebody wants to
+        // know is whether the audio comes back. That needs an application quit
+        // and relaunched, which is somebody's own application on somebody's own
+        // machine, so it is asked for rather than done.
+        if CommandLine.arguments.contains("--watch") {
+            let before = held.processes
+            print("\nwatching. Quit \(match) and launch it again.")
+            print("  processes now: \(before.count)")
+            var sawItGo = false
+            var restored = false
+            for _ in 0..<120 {
+                Thread.sleep(forTimeInterval: 0.5)
+                guard let now = ProcessTap.description(of: tap.id) else { continue }
+                let count = now.processes.count
+                if count < before.count { sawItGo = true }
+                if sawItGo, count >= before.count {
+                    restored = true
+                    print("  processes back: \(count)")
+                    break
+                }
+            }
+            if restored {
+                print("\n✓ the tap reattached on its own. OBS's #9144, not reproduced.")
+            } else if sawItGo {
+                print("\n✗ the application went away and the tap did not get it back")
+                failures += 1
+            } else {
+                print("\n· nothing quit within a minute, so nothing was learnt")
+            }
+        } else {
+            print("  For the behaviour rather than the setting:")
+            print("    yunaudio-cli tap-restore \(match) --watch")
+        }
+        exit(failures == 0 ? 0 : 1)
+    } catch {
+        print("tap-restore failed: \(error)")
+        exit(1)
+    }
+}
+
 // Routes with the echo canceller in the path, and reports what crossed.
 //
 // This is the integration the rest of the echo-cancellation work was building

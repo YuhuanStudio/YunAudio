@@ -3703,7 +3703,12 @@ final class RouterModel: ScriptTarget {
             for app in capturedApps {
                 guard
                     let tap = try? ProcessTap(
-                        processIDs: app.processIDs, muteBehavior: tapMuteBehavior)
+                        processIDs: app.processIDs, muteBehavior: tapMuteBehavior,
+                        // The bundle identifier is what makes the capture
+                        // survive the application quitting and coming back.
+                        // See `ProcessTap.init` — this is the line that answers
+                        // OBS's #9144, and it is one argument.
+                        bundleIDs: [app.bundleID])
                 else {
                     failed.append(app.name)
                     continue

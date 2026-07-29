@@ -35,6 +35,17 @@ extension AudioProperty {
     public static var tapFormat: AudioProperty<AudioStreamBasicDescription> {
         .init(kAudioTapPropertyFormat)
     }
+    /// The description the HAL is holding for a tap, as opposed to the one this
+    /// process handed it.
+    ///
+    /// Reading it back is the only way to find out whether CoreAudio *accepted*
+    /// a setting or quietly dropped it — and this project has already been
+    /// caught by exactly that once, with `kAudioSubDeviceInputChannelsKey`,
+    /// which reads like a constraint in the header and turns out to be a
+    /// description the HAL ignores.
+    public static var tapDescription: AudioProperty<CATapDescription> {
+        .init(kAudioTapPropertyDescription)
+    }
 }
 
 /// An application the HAL knows about, which can therefore be tapped.
@@ -78,14 +89,28 @@ public final class ProcessTap {
 
     private var isDestroyed = false
 
+    /// True when the tap was asked to remember its processes by bundle
+    /// identifier and reattach to them when they come back.
+    public let restoresProcesses: Bool
+    /// The bundle identifiers this tap was told to hold on to. Empty when the
+    /// tap is by process object alone.
+    public let bundleIDs: [String]
+
     /// - Parameters:
     ///   - processIDs: `AudioObjectID`s of the processes to capture.
     ///   - muteBehavior: Whether the tapped application keeps playing through
     ///     the speakers. `.mutedWhenTapped` is the useful one for streaming: the
     ///     audio reaches the mix without also reaching the room.
+    ///   - bundleIDs: Bundle identifiers of the same applications. Supplying
+    ///     them switches on `processRestoreEnabled`, so the tap survives the
+    ///     application quitting and reattaches when it launches again.
     /// - Throws: `ProcessTapError.creationFailed` when CoreAudio refuses, which
     ///   happens when the process has gone away between listing and tapping.
-    public init(processIDs: [AudioObjectID], muteBehavior: TapMuteBehavior = .unmuted) throws {
+    public init(
+        processIDs: [AudioObjectID],
+        muteBehavior: TapMuteBehavior = .unmuted,
+        bundleIDs: [String] = []
+    ) throws {
         // NS_REFINED_FOR_SWIFT turns the NSNumber array in the header into a
         // plain [AudioObjectID] on this side.
         let description = CATapDescription(stereoMixdownOfProcesses: processIDs)
@@ -95,6 +120,36 @@ public final class ProcessTap {
         description.isPrivate = true
         description.muteBehavior = muteBehavior.coreAudioValue
 
+        // A tap is bound to process *object ids*, and an object id belongs to
+        // one launch of one process. So a captured application that quits and
+        // comes back is, to the tap, gone: the audio stops and nothing says so.
+        //
+        // That is not a hypothetical defect somebody might one day hit. It is
+        // OBS's issue #9144, open since June 2023, and OBS's own answer to it
+        // is a button in the source's properties labelled "Restart capture" —
+        // a defect with a button on it.
+        //
+        // macOS 26 added the two properties that fix it: `bundleIDs` says which
+        // applications the tap is *about* rather than which processes it is
+        // attached to, and `processRestoreEnabled` tells the HAL to remember
+        // them across an exit.
+        //
+        // Measured, and it changes which line matters: **the flag defaults to
+        // true**. Every tap this application has ever made already had restore
+        // switched on and restored nothing, because `bundleIDs` defaults to
+        // empty and there was nothing to remember. So the working line here is
+        // the one above it, and setting the flag alone would have been a change
+        // with no effect that read exactly like a fix. Both are set, because
+        // the default is somebody else's and could move; the assertion for all
+        // of this is in `ProcessTapRestoreTests`.
+        let restoring = !bundleIDs.isEmpty
+        if restoring {
+            description.bundleIDs = bundleIDs
+            description.isProcessRestoreEnabled = true
+        }
+        restoresProcesses = restoring
+        self.bundleIDs = bundleIDs
+
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
         guard status == noErr, tapID != kAudioObjectUnknown else {
@@ -103,6 +158,35 @@ public final class ProcessTap {
         id = tapID
         uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
         format = tapID.optionalValue(of: .tapFormat)
+    }
+
+    /// What the HAL is actually holding for this tap, rather than what it was
+    /// handed.
+    ///
+    /// Worth the extra call at every point that cares. CoreAudio has form for
+    /// accepting a description field and then ignoring it, and the failure mode
+    /// is invisible: the tap works, the audio flows, and the one behaviour that
+    /// was asked for silently never happens.
+    public func systemDescription() -> CATapDescription? {
+        Self.description(of: id)
+    }
+
+    /// Reads `kAudioTapPropertyDescription` off any tap object.
+    ///
+    /// The header says the caller owns the returned object, which is why this
+    /// goes through `Unmanaged` rather than letting ARC guess.
+    public static func description(of tap: AudioObjectID) -> CATapDescription? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<UnsafeMutableRawPointer?>.size)
+        var unmanaged: Unmanaged<CATapDescription>?
+        let status = withUnsafeMutablePointer(to: &unmanaged) { pointer in
+            AudioObjectGetPropertyData(tap, &address, 0, nil, &size, pointer)
+        }
+        guard status == noErr, let unmanaged else { return nil }
+        return unmanaged.takeRetainedValue()
     }
 
     deinit { destroy() }
