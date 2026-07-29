@@ -544,7 +544,6 @@
 "paper" = "紙白";
 "mist" = "薄霧";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "移除會重啟 coreaudiod，所以所有音訊會中斷一下，而且需要管理員密碼。";
-<<<<<<< HEAD
 "Control socket" = "控制通訊端";
 "listening" = "正在接聽";
 "unavailable" = "無法使用";
@@ -570,7 +569,6 @@
 "%.0f ms" = "%.0f ms";
 "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier." = "這個應用程式送出去的每一樣東西，都比畫面晚到 OBS，晚的量就是效果鏈加上去的延遲。OBS 有一個欄位可以填，卻沒有辦法算出該填多少；這裡算得出來。填進去的是負值，因為它的意思是「把這段聲音當成更早發生的」。";
 "not sent yet" = "尚未送出";
-=======
 "Run it now" = "立刻執行一次";
 "Run the script above once, top to bottom" = "把上面的腳本從頭到尾執行一次";
 "Rescan" = "重新掃描";
@@ -580,4 +578,14 @@
 "this microphone does not publish one" = "這支麥克風沒有公布";
 "available, not running" = "可用，但沒有在跑";
 "running" = "正在跑";
->>>>>>> ui/no-way-in
+"Add an input" = "再加一個輸入";
+"Add an output" = "再加一個輸出";
+"Stop mixing this input in." = "不再混入這個輸入。";
+"Stop sending the mix to this output." = "不再把混音送到這個輸出。";
+"Which channels of this input are mixed in." = "這個輸入要混入哪些聲道。";
+"Mix a second microphone or line input into the same route. It gets its own fader, mute and level." = "把第二支麥克風或線路輸入混進同一條路由，它會有自己的推桿、靜音與電平。";
+"Send the same mix to another output as well. For a separate mix with its own levels, use the monitor below." = "把同一份混音一併送到另一個輸出。若要一份音量各自獨立的混音，請用下方的監聽。";
+"%@ would not join, so it is not in the route." = "%@ 無法加入，所以不在路由裡。";
+"%@ would not join the route; the mix is carrying on without it." = "%@ 無法加入路由；混音在沒有它的情況下繼續。";
+"How loud this input is in the mix." = "這個輸入在混音裡有多大聲。";
+"How loud the mix is on this output, on its own." = "混音在這個輸出上單獨有多大聲。";

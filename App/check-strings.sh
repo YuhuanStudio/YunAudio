@@ -113,12 +113,48 @@ def conversions(text):
     return sorted(match.group(2) for match in SPECIFIER.finditer(text) if match.group(2) != "%")
 
 
-tables = {
-    path.parent.name.split(".")[0]: dict(
-        re.findall(r'^"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)";', path.read_text(),
-                   re.MULTILINE))
-    for path in sorted(pathlib.Path("Sources").glob("**/*.lproj/Localizable.strings"))
-}
+# Every line of a table has to be a line a table can have.
+#
+# A whitelist rather than a search for anything in particular, because of what
+# happened without one: a merge left `<<<<<<< HEAD`, `=======` and `>>>>>>>` in
+# both files and every check here went on passing, because the checks read the
+# tables with a regular expression that simply skipped the lines it did not
+# recognise. The system's own parser does not skip them — it stops. Measured on
+# the committed file: 565 key lines present, 531 keys parsed, so the whole OBS
+# panel and eight other strings rendered in English in a Chinese interface with
+# nothing anywhere saying why.
+#
+# The rule is therefore about what a line *is*, not about markers: the next
+# thing to land in the middle of one of these files will not be a conflict
+# marker.
+KEY_VALUE = re.compile(r'^"((?:[^"\\]|\\.)*)"\s*=\s*"((?:[^"\\]|\\.)*)";\s*$')
+
+tables = {}
+for path in sorted(pathlib.Path("Sources").glob("**/*.lproj/Localizable.strings")):
+    language = path.parent.name.split(".")[0]
+    table = {}
+    in_comment = False
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        text = line.strip()
+        if in_comment:
+            if "*/" in text:
+                in_comment = False
+            continue
+        if not text or text.startswith("//"):
+            continue
+        if text.startswith("/*"):
+            if "*/" not in text:
+                in_comment = True
+            continue
+        match = KEY_VALUE.match(text)
+        if match is None:
+            failures.append(
+                f"{language}: line {number} is neither a comment nor a "
+                f'"key" = "value"; pair, and the system\'s parser stops at it, '
+                f"silently dropping every entry below — {text[:48]!r}")
+            continue
+        table[match.group(1)] = match.group(2)
+    tables[language] = table
 if "en" in tables:
     for language, table in tables.items():
         if language == "en":

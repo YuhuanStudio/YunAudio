@@ -42,7 +42,7 @@ enum NowPlaying {
     ///
     /// Music first because a Mac has it whether or not anybody uses it, and a
     /// stopped player answers quickly.
-    private static let players = [
+    nonisolated private static let players = [
         ("Music", "com.apple.Music"),
         ("Spotify", "com.spotify.client"),
     ]
@@ -56,7 +56,7 @@ enum NowPlaying {
     /// Only running applications are asked. Sending an Apple event to a bundle
     /// identifier that is not running *launches it*, which would mean opening
     /// Spotify because somebody looked at a lyrics panel.
-    static func current() -> Track? {
+    nonisolated static func current() -> Track? {
         var paused: Track?
         for (name, bundleID) in players {
             guard isRunning(bundleID) else { continue }
@@ -169,7 +169,7 @@ enum NowPlaying {
         }
     }
 
-    static func position(preferring application: String?) -> Position? {
+    nonisolated static func position(preferring application: String?) -> Position? {
         var paused: Position?
         for (name, bundleID) in ordered(preferring: application) {
             guard isRunning(bundleID) else { continue }
@@ -180,7 +180,7 @@ enum NowPlaying {
         return paused
     }
 
-    private static func readPosition(name: String) -> Position? {
+    nonisolated private static func readPosition(name: String) -> Position? {
         let source = """
             tell application "\(name)"
                 if it is running then
@@ -205,12 +205,12 @@ enum NowPlaying {
     ///
     /// Asked when the track identity changes and not otherwise. Four more
     /// property accesses, which measured 40 ms on top of the cheap read.
-    static func track(from application: String) -> Track? {
+    nonisolated static func track(from application: String) -> Track? {
         read(name: application)
     }
 
     /// Running applications first, then the rest of the list in its own order.
-    private static func ordered(preferring application: String?) -> [(String, String)] {
+    nonisolated private static func ordered(preferring application: String?) -> [(String, String)] {
         guard let application,
             let index = players.firstIndex(where: { $0.0 == application })
         else { return players }
@@ -218,12 +218,12 @@ enum NowPlaying {
             + players.enumerated().filter { $0.offset != index }.map(\.element)
     }
 
-    private static func isRunning(_ bundleID: String) -> Bool {
+    nonisolated private static func isRunning(_ bundleID: String) -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
     }
 
     /// Compiles and runs a script, or nil when it errored or answered nothing.
-    private static func run(_ source: String) -> String? {
+    nonisolated private static func run(_ source: String) -> String? {
         guard let script = NSAppleScript(source: source) else { return nil }
         var error: NSDictionary?
         let result = script.executeAndReturnError(&error)
@@ -231,7 +231,7 @@ enum NowPlaying {
         return text
     }
 
-    private static func read(name: String) -> Track? {
+    nonisolated private static func read(name: String) -> Track? {
         // The variable names are long on purpose. `st` and `t` are both
         // reserved in AppleScript — `t` is an abbreviation the parser claims —
         // and the failure is "expected expression but found st", pointing at a

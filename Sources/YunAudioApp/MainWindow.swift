@@ -417,6 +417,14 @@ struct MainWindow: View {
                                 ))
                         }
 
+                        // After the microphone's own controls rather than
+                        // between them and the picker. Put directly under the
+                        // picker it read as a heading for the three sliders
+                        // below it, so the Seiren's gain, trim and monitoring
+                        // looked like settings for a device nobody had chosen
+                        // yet. It belongs at the end of the group it extends.
+                        ExtraDeviceList(model: model, isInput: true)
+
                         YunDivider()
 
                         deviceRow(loc("Out"), symbol: "arrow.right.to.line") {
@@ -449,6 +457,8 @@ struct MainWindow: View {
                         LevelRow(
                             decibels: $model.outputDecibels, muted: $model.isOutputMuted,
                             label: loc("Output level"))
+
+                        ExtraDeviceList(model: model, isInput: false)
 
                         YunDivider()
                         pushToTalk

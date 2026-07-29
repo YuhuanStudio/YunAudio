@@ -135,6 +135,29 @@ struct Preferences: Codable, Equatable, Sendable {
     /// source change put the choice back to the default.
     var sourceChannelChoices: [String: String]?
 
+    /// Further inputs and outputs beyond the primary pair.
+    ///
+    /// Stored separately from `sourceDeviceUID` and `destinationDeviceUID`
+    /// rather than turning those into arrays, so that a preferences file
+    /// written by a version that had one of each still opens — and because the
+    /// first of each is the aggregate's clock master, which is a fact about the
+    /// route rather than an ordering convenience.
+    var additionalSourceUIDs: [String]?
+    var additionalDestinationUIDs: [String]?
+
+    /// A level for each additional output, in decibels, by device UID.
+    ///
+    /// Separate from `outputDelays` although both are per output: one is
+    /// alignment and the other is loudness, and a single map would make a file
+    /// somebody opens by hand ambiguous about which is which.
+    var outputTrims: [String: Float]?
+
+    /// Each source's fader position, in decibels, by source UID.
+    ///
+    /// A fader used to exist only as the gain of a route the engine had built,
+    /// so every restart put the whole mixer back to unity and nothing said so.
+    var sourceLevels: [String: Float]?
+
     /// Where OBS is, and which of its inputs reads this application.
     ///
     /// The password is deliberately absent. `UserDefaults` is a plain file in
@@ -195,6 +218,10 @@ struct Preferences: Codable, Equatable, Sendable {
         tapMuteBehavior: TapMuteBehavior.unmuted.storageKey,
         residentScript: nil,
         sourceChannelChoices: [:],
+        additionalSourceUIDs: [],
+        additionalDestinationUIDs: [],
+        outputTrims: [:],
+        sourceLevels: [:],
         obsHost: "127.0.0.1",
         obsPort: 4455,
         obsInputName: "",

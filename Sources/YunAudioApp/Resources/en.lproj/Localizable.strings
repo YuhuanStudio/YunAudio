@@ -544,7 +544,6 @@
 "paper" = "Paper";
 "mist" = "Mist";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password.";
-<<<<<<< HEAD
 "Control socket" = "Control socket";
 "listening" = "listening";
 "unavailable" = "unavailable";
@@ -570,7 +569,6 @@
 "%.0f ms" = "%.0f ms";
 "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier." = "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier.";
 "not sent yet" = "not sent yet";
-=======
 "Run it now" = "Run it now";
 "Run the script above once, top to bottom" = "Run the script above once, top to bottom";
 "Rescan" = "Rescan";
@@ -580,4 +578,14 @@
 "this microphone does not publish one" = "this microphone does not publish one";
 "available, not running" = "available, not running";
 "running" = "running";
->>>>>>> ui/no-way-in
+"Add an input" = "Add an input";
+"Add an output" = "Add an output";
+"Stop mixing this input in." = "Stop mixing this input in.";
+"Stop sending the mix to this output." = "Stop sending the mix to this output.";
+"Which channels of this input are mixed in." = "Which channels of this input are mixed in.";
+"Mix a second microphone or line input into the same route. It gets its own fader, mute and level." = "Mix a second microphone or line input into the same route. It gets its own fader, mute and level.";
+"Send the same mix to another output as well. For a separate mix with its own levels, use the monitor below." = "Send the same mix to another output as well. For a separate mix with its own levels, use the monitor below.";
+"%@ would not join, so it is not in the route." = "%@ would not join, so it is not in the route.";
+"%@ would not join the route; the mix is carrying on without it." = "%@ would not join the route; the mix is carrying on without it.";
+"How loud this input is in the mix." = "How loud this input is in the mix.";
+"How loud the mix is on this output, on its own." = "How loud the mix is on this output, on its own.";

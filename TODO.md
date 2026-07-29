@@ -44,6 +44,79 @@
 **而且它可以被斷言**：送一個脈衝進麥克風路徑與一個 tap 路徑，量兩邊在目的地的到達
 幀差，斷言它是 0。修之前那個斷言會失敗，那正是它存在的證據。
 
+### 擷取沒有套件識別碼的行程，會間歇性地靜默失敗 —— **未解，但已經量到形狀** [本機實測]
+
+`AudioHardwareCreateProcessTap` **回傳 `noErr`，同時給回一個空的物件 ID**。擷取因此
+沒有發生，而任何一層都不是錯誤。
+
+以前這被報成 `creationFailed(0)`，印出來是「failed with 0」—— `noErr` —— 讀起來像
+自相矛盾，把上一個看到它的人送去查「HAL 是不是 tap 用完了」。現在它是獨立的一種結
+果，而且**把當時傳進去的兩個參數印出來**，因為原因還不知道，而那兩個參數是唯一能
+用來辨認它的東西：
+
+```
+AudioHardwareCreateProcessTap returned noErr and no tap for
+  pid(s) 803, bundle(s) pid:64291
+```
+
+已經確定的：
+
+- **不是資源耗盡。** 失敗當下 `kAudioHardwarePropertyTapList` 是 **0 個 tap**。
+- **不是行程已經退出。** flow check 的播放器跑 24 秒，建 tap 大約在第 3 秒。
+- **有套件識別碼的應用程式沒事。** Discord / Spotify 那一節一直是過的；出問題的只有
+  `afplay` 這種命令列工具，它沒有套件，所以被列在合成的 `pid:1234` 身分底下。
+- **它是間歇的。** 同一個執行檔連續兩次跑，一次成功（調性 F、信心 100%、afplay 出現
+  在 singers 裡）、一次失敗。
+
+順手修掉的一件事，即使它不是這裡的原因也該修：那個合成身分**本來會被當成套件識別碼
+交給 HAL**。`AudioApplications.identity(forPID:)` 旁邊的註解說「這種行程照樣可以被
+擷取，只有這份清單需要一個 key」—— 那句話在加入跨重啟還原（`bundleIDs` +
+`processRestoreEnabled`）之後就不再成立了，而沒有任何地方發現。`ProcessTap` 現在把
+`pid:` 開頭的識別碼濾掉：沒有套件的行程本來就不可能有「還原」，因為沒有任何穩定的東
+西可以記住它。
+
+**下一步**：在 HAL 層加儀器 —— 建 tap 前後各讀一次 `kAudioHardwarePropertyProcessObjectList`，
+確認那個 process object 在那個瞬間還在，並把 `CATapDescription` 讀回來比對。
+
+### 停止錄音會在即時執行緒裡 segfault —— **已修**，而且是先前就存在的 [本機實測]
+
+`stopRecordingLocked()` 把 `graph.pointee.recordRing` 設成 nil，然後就釋放錄音器。
+但**把 nil 寫進活著的圖，並不會把 IO 執行緒已經讀走的那份指標拿掉** —— 讀取和使用
+是兩道指令，中間隔著整個緩衝區的工作。在那個窗口裡釋放，就是在唯一不准出錯的那條
+執行緒上 use-after-free。
+
+不是理論：`~/Library/Logs/DiagnosticReports/YunAudioApp-2026-07-29-212916.ips`，
+`SIGSEGV` 在 `yun_rt_ring_write`，呼叫者是 `HALC_ProxyIOContext::IOWorkLoop`，位址
+帶著 pointer authentication failure 的樣子 —— 已釋放記憶體的長相。
+
+引擎對圖的交換本來就有對的規矩（「等即時執行緒跑完兩個週期，因為可能有一個週期還
+握著舊指標」），只是**三個環的拆除都沒套用**：錄音、stem、逐字稿 tap。逐字稿那個最
+直接 —— `yun_rt_ring_free` 就緊接在把指標設 nil 之後。
+
+現在三處都走 `letTheRealtimeThreadPast()`。順帶一提，`yun_rt_cell_wait_for_swap` 的
+名字是誤導的：它只數週期，不看任何 swap 旗標。
+
+**測試是讀原始碼的**，因為這個窗口只有幾微秒寬，跑了一整輪 flow check 才踩中一次；
+想主動觸發的測試會在每一台沒踩中的機器上通過，什麼也證明不了。
+
+### 把問答挪到背景執行緒，帶出兩個缺陷 —— **都已修** [本機實測]
+
+問播放器「唱到哪」以前是在 main actor 上同步做的，量到 20.7 ms 一次、20 Hz，所以
+改成 `NowPlaying.positionAsynchronously`。改完之後有兩件事沒跟上：
+
+1. **整個 `NowPlaying` 是 `@MainActor`，而背景佇列去呼叫它。** Swift 6 會在執行期
+   檢查，於是應用程式在 `dispatch_assert_queue` 裡 trap —— 唱歌面板第一次問位置就
+   當掉。單元測試抓不到這種東西（trap 不可捕捉），所以測試就是**真的從背景佇列去
+   呼叫一次**：不是回來，就是把整個測試跑掛掉。相關成員現在都標了 `nonisolated`。
+
+2. **答案會晚到。** 輪詢那邊本來就有「手動載入歌詞時不要問播放器」的防護，但問題送
+   出去之後才手動載入 `.lrc` 的話，二十毫秒後那個答案還是會落下來，把歌詞、旋律和
+   時鐘一起換成播放器的。實測：手動時鐘讀到 **75.15 秒**、而檔案只有 9 秒，然後不
+   動了 —— 因為採納的是一個**暫停中**播放器的位置。同步版本沒有這個窗口。
+   `receivePosition` 現在也擋 `isHandRun`。
+
+形狀值得記得：**把一件事變成非同步，等於替每一個「現在還算不算數」的判斷開一扇窗**。
+
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
 路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在
@@ -161,6 +234,29 @@ C=5.38 C♯=0.46 D=0.02 D♯=0.05 E=2.83 F=0.12 F♯=0.01 G=2.90 …
 ## 接下來做
 
 依這個專案會得到什麼排序，不是依大小。
+
+### 0. 多輸入多輸出 —— **第一半已完成，第二半是 N 條獨立匯流排** [提案] [本機實測]
+
+**已做**：`additionalSourceUIDs` / `additionalDestinationUIDs`。額外的輸入是聚合裝
+置的一般成員，通道進得了 `inputMap`，所以每一支都拿到自己的 `SourceGroup` —— 推
+桿、靜音、獨奏、角色、監聽送出全部是白拿的。額外的輸出收到與主要輸出**同一份**混
+音，各自有自己的音量（`outputTrims`，疊在來源推桿之上，因為引擎的 master 是整個混
+音的單一全域增益，表達不出「這個輸出比那個小聲」）。起不來的額外裝置會被丟掉、路
+由存活、而且在界面上具名 —— 和監聽同一套規矩。
+
+flow check 的「more than one input and one output」一節在真實硬體上量過：第二個輸
+出 −6.0 dBFS 有訊號、第二個輸入拿到自己的 strip、推桿只動自己、clock master 沒被
+搶走、trim 動的時候沒有任何來源推桿跟著動。
+
+**還沒做的**：**每個輸出各自一份獨立的混音**。現在只有兩份（主要 + 監聽），額外的
+輸出是主要那份的複本。要做到 N 份，得把 `monitorSends` / `monitorRouteIndices` 從
+「監聽」推廣成「任一條匯流排」，`RouteStrip` 那一條監聽推桿變成對 `buses` 的
+`ForEach`。這是對的終點，但它會動到監聽在引擎裡的特殊失敗語意（起不來就丟掉、路由
+存活），所以是單獨一次改動，不是順手。
+
+**順帶查到並修掉的**：每個來源的推桿以前只活在引擎建出來的 route 增益裡，所以
+**每次重開應用程式整個混音器都回到 unity，而且沒有任何地方說過**。現在是
+`sourceLevels`，按來源 UID 存。
 
 ### 1. KTV 的下半 [提案]
 

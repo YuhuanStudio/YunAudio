@@ -74,6 +74,183 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    // MARK: More than one of each
+
+    /// Further hardware inputs, mixed in alongside the one above.
+    ///
+    /// Kept beside the primary rather than folded into a list with it because
+    /// the aggregate has a clock master and that is what `selectedSourceUID`
+    /// is: every other member is drift corrected against it. Presenting them
+    /// as equals in the model would be presenting them as equals in the
+    /// interface, and they are not — which of them the route is clocked from
+    /// decides which one cannot be resampled.
+    ///
+    /// Until this existed a second microphone could only be had by making an
+    /// aggregate device in Audio MIDI Setup and routing that, which loses the
+    /// per-source fader, the per-source mute and the role, because to this
+    /// application the whole aggregate was one source.
+    private(set) var additionalSourceUIDs: [String] = []
+
+    /// Further outputs, each receiving the same mix as the main one.
+    ///
+    /// The same mix, deliberately. A bus with sends of its own is the monitor,
+    /// and there is exactly one of those; these are copies — speakers and a
+    /// recorder and a stream device all carrying the send. Somebody who wants
+    /// a third *independent* mix is asking for something this does not claim
+    /// to do, and quietly giving them a copy under that name would be worse
+    /// than not offering it.
+    private(set) var additionalDestinationUIDs: [String] = []
+
+    /// Every input in the route, the clock master first.
+    var activeSourceUIDs: [String] {
+        (selectedSourceUID.map { [$0] } ?? []) + additionalSourceUIDs
+    }
+
+    /// Every output the send is written to, the primary first.
+    var activeDestinationUIDs: [String] {
+        (selectedDestinationUID.map { [$0] } ?? []) + additionalDestinationUIDs
+    }
+
+    /// Inputs that could still be added: present, with channels, and not
+    /// already an end of the route.
+    ///
+    /// The physical-device test is the same one `start()` applies to the main
+    /// pair, for the same reason: a headset presents as two CoreAudio devices
+    /// with one name, and adding its input while its output carries the mix is
+    /// routing it into itself. Offering the choice and then refusing it at
+    /// start is worse than not offering it.
+    var addableSourceDevices: [AudioDevice] {
+        inputDevices.filter { device in
+            device.inputChannels > 0
+                && !activeSourceUIDs.contains(device.uid)
+                && !activeDestinationUIDs.contains { isSamePhysicalDevice($0, device.uid) }
+                && !(monitorDeviceUID.map { isSamePhysicalDevice($0, device.uid) } ?? false)
+        }
+    }
+
+    /// And outputs, on the same terms.
+    var addableDestinationDevices: [AudioDevice] {
+        outputDevices.filter { device in
+            device.outputChannels > 0
+                && !activeDestinationUIDs.contains(device.uid)
+                && device.uid != monitorDeviceUID
+                && !activeSourceUIDs.contains { isSamePhysicalDevice($0, device.uid) }
+        }
+    }
+
+    /// Chooses how one of the extra inputs is taken.
+    ///
+    /// The primary source has two visible controls for this; the extras share
+    /// the same per-device memory through one call, because a second full set
+    /// of controls per input is how a mixer with four inputs becomes a window
+    /// nobody can read.
+    func setChannelChoice(
+        mode: SourceChannelMode, channel: Int, forSourceUID uid: String
+    ) {
+        guard uid != selectedSourceUID else {
+            channelMode = mode
+            if mode == .mono { monoChannel = channel }
+            return
+        }
+        let stored = mode == .stereo ? "stereo" : "mono:\(channel)"
+        guard sourceChannelChoices[uid] != stored else { return }
+        sourceChannelChoices[uid] = stored
+        persist()
+        // Only the channel map moves, so this can be swapped in silently — the
+        // same treatment the primary source's own picker gets.
+        if !reconfigureIfPossible() { restartIfRunning() }
+    }
+
+    func addSource(_ uid: String) {
+        guard !activeSourceUIDs.contains(uid) else { return }
+        // A new choice is a new question, so the last refusal stops being an
+        // answer to it — the same rule the monitor picker follows.
+        droppedExtraInputNames = []
+        droppedExtraOutputNames = []
+        // No primary yet means this is the primary. Adding a second input to a
+        // route with no first one would leave the clock master unset and the
+        // start refused, with the interface showing an input that is there.
+        guard selectedSourceUID != nil else {
+            selectedSourceUID = uid
+            return
+        }
+        additionalSourceUIDs.append(uid)
+        persist()
+        rerouteAfterDeviceChange()
+    }
+
+    func removeSource(_ uid: String) {
+        // Removing the clock master promotes the first of the others rather
+        // than emptying the route: somebody taking away one of two microphones
+        // meant to keep the other, and which of them the aggregate happened to
+        // be clocked from is not a distinction they were asked to make.
+        if uid == selectedSourceUID {
+            guard !additionalSourceUIDs.isEmpty else { return }
+            let promoted = additionalSourceUIDs.removeFirst()
+            substituting { selectedSourceUID = promoted }
+            persist()
+            rerouteAfterDeviceChange()
+            return
+        }
+        guard let index = additionalSourceUIDs.firstIndex(of: uid) else { return }
+        additionalSourceUIDs.remove(at: index)
+        persist()
+        rerouteAfterDeviceChange()
+    }
+
+    func addDestination(_ uid: String) {
+        guard !activeDestinationUIDs.contains(uid) else { return }
+        droppedExtraInputNames = []
+        droppedExtraOutputNames = []
+        guard selectedDestinationUID != nil else {
+            selectedDestinationUID = uid
+            return
+        }
+        additionalDestinationUIDs.append(uid)
+        persist()
+        rerouteAfterDeviceChange()
+    }
+
+    func removeDestination(_ uid: String) {
+        if uid == selectedDestinationUID {
+            guard !additionalDestinationUIDs.isEmpty else { return }
+            let promoted = additionalDestinationUIDs.removeFirst()
+            substituting { selectedDestinationUID = promoted }
+            persist()
+            rerouteAfterDeviceChange()
+            return
+        }
+        guard let index = additionalDestinationUIDs.firstIndex(of: uid) else { return }
+        additionalDestinationUIDs.remove(at: index)
+        persist()
+        rerouteAfterDeviceChange()
+    }
+
+    /// Drops anything additional that has become an end of the main route or
+    /// has gone away.
+    ///
+    /// Called after the device list changes and after either primary moves.
+    /// Without it, choosing as the main output a device that was already an
+    /// extra one leaves it in both lists — which the engine deduplicates, so
+    /// nothing breaks audibly and the interface shows the same speakers twice
+    /// for as long as anybody leaves it.
+    private func pruneAdditionalDevices() {
+        let inputs = Set(inputDevices.map(\.uid))
+        let outputs = Set(outputDevices.map(\.uid))
+        let sources = additionalSourceUIDs.filter {
+            $0 != selectedSourceUID && $0 != selectedDestinationUID && inputs.contains($0)
+        }
+        let destinations = additionalDestinationUIDs.filter {
+            $0 != selectedDestinationUID && $0 != selectedSourceUID && $0 != monitorDeviceUID
+                && outputs.contains($0)
+        }
+        guard sources != additionalSourceUIDs || destinations != additionalDestinationUIDs
+        else { return }
+        additionalSourceUIDs = sources
+        additionalDestinationUIDs = destinations
+        persist()
+    }
+
     // MARK: Per-bus processing
 
     /// Corrections found on disk, by name.
@@ -1023,6 +1200,20 @@ final class RouterModel: ScriptTarget {
     private func receivePosition(
         _ position: NowPlaying.Position?, track: NowPlaying.Track?, trueAt middle: Double
     ) {
+        // An answer to a question that stopped mattering while it was in the
+        // air. The poll only asks when a player is the authority, but the ask
+        // now happens on another thread and takes about twenty milliseconds, so
+        // somebody who opens the panel and chooses an `.lrc` in that window
+        // gets the player's reply landing on top of their file: the words, the
+        // tune and the clock all replaced by whatever Spotify happens to be
+        // paused at.
+        //
+        // Measured: the hand-run clock read 75.15 s of a nine-second file and
+        // never moved, because the position adopted was a paused player's and a
+        // paused clock does not advance. Twelve assertions in the flow check
+        // say so, and every one of them had been passing before — the
+        // synchronous version had no window for a late answer to arrive in.
+        guard !isHandRun else { return }
         guard let position else {
             lastPlayer = nil
             trackClock.stop()
@@ -1946,6 +2137,48 @@ final class RouterModel: ScriptTarget {
         lastError = String(
             format: loc("%@ would not start as a monitor; the mix is carrying on without it."),
             name)
+    }
+
+    /// Extra inputs and outputs the engine gave up on, by name.
+    ///
+    /// The same argument as `droppedMonitorName`: an extra device that will not
+    /// join must not cost somebody the route, and must not vanish from the
+    /// interface with nothing said either. Held rather than only put in
+    /// `lastError`, because the error is cleared by the next thing that goes
+    /// right and a device that was dropped stays dropped.
+    /// Split by end rather than kept as one list, so the notice can appear
+    /// beside the picker somebody is actually looking at. A message about a
+    /// microphone under the output list is a message nobody reads.
+    private(set) var droppedExtraInputNames: [String] = []
+    private(set) var droppedExtraOutputNames: [String] = []
+
+    /// Takes the extras the engine could not bring up out of the interface, and
+    /// names them.
+    private func extrasWereDropped(_ dropped: [RoutingEngine.DroppedMonitor]) {
+        guard !dropped.isEmpty else { return }
+        let gone = Set(dropped.map(\.uid))
+        // Read before the removals below, or every dropped device looks like
+        // neither an input nor an output.
+        droppedExtraInputNames =
+            additionalSourceUIDs.filter { gone.contains($0) }.map { deviceName($0) ?? $0 }
+        droppedExtraOutputNames =
+            additionalDestinationUIDs.filter { gone.contains($0) }.map { deviceName($0) ?? $0 }
+        let names = droppedExtraInputNames + droppedExtraOutputNames
+        additionalSourceUIDs.removeAll { gone.contains($0) }
+        additionalDestinationUIDs.removeAll { gone.contains($0) }
+        persist()
+        // Same reason as the monitor: the engine built a shorter route list
+        // than this model handed it, and only the engine knows what it built.
+        let installed = engine.currentRoutes
+        if installed != activeRoutes {
+            activeRoutes = installed
+            routeGains = installed.map(\.gain)
+            routeMutes = installed.map(\.isMuted)
+        }
+        remapMonitorRoutes()
+        lastError = String(
+            format: loc("%@ would not join the route; the mix is carrying on without it."),
+            names.joined(separator: ", "))
     }
 
     /// How loud the monitor is, independent of everything else.
@@ -2890,14 +3123,81 @@ final class RouterModel: ScriptTarget {
     }
 
     /// A route's fader position in decibels.
+    ///
+    /// The output's own trim comes back off, so the fader shows what somebody
+    /// set for that source rather than what the wire ends up carrying. Without
+    /// it, turning a second pair of speakers down moved every fader on the
+    /// strip and the two controls fought each other.
     func faderDecibels(forRouteAt index: Int) -> Float {
         guard index < routeGains.count else { return 0 }
         let gain = routeGains[index]
-        return gain <= 0 ? -40 : 20 * log10(gain)
+        guard gain > 0 else { return -40 }
+        return 20 * log10(gain) - outputTrimDecibels(forRouteAt: index)
     }
 
     func setFaderDecibels(_ decibels: Float, forRouteAt index: Int) {
-        setGain(yunGainMultiplier(decibels: decibels), forRouteAt: index)
+        setGain(
+            yunGainMultiplier(decibels: decibels + outputTrimDecibels(forRouteAt: index)),
+            forRouteAt: index)
+    }
+
+    // MARK: What each output is worth on its own
+
+    /// A level per additional output, in decibels.
+    ///
+    /// The primary output has the master and the monitor has its own level;
+    /// these are the outputs that had neither. Applied as a trim on top of each
+    /// source's fader rather than as a stage of its own, because the engine's
+    /// master is a single global gain over the whole mix and cannot say "this
+    /// output quieter than that one" — the per-route gain is the only place
+    /// where the difference between two outputs can be expressed at all.
+    ///
+    /// Keyed by device UID for the reason `busGraphicEQ` is: the bus letters
+    /// are positional, and a level dialled in for a pair of speakers must not
+    /// migrate to a recorder because a picker changed.
+    private(set) var outputTrims: [String: Float] = [:]
+
+    func outputTrim(of uid: String) -> Float { outputTrims[uid] ?? 0 }
+
+    /// Twelve decibels up is as much as a trim should be able to add before it
+    /// is doing the master's job; the bottom of the travel is silence.
+    static let maximumOutputTrim: Float = 12
+
+    func setOutputTrim(_ decibels: Float, for uid: String) {
+        let clamped = max(Self.minimumDecibels, min(Self.maximumOutputTrim, decibels))
+        guard outputTrim(of: uid) != clamped else { return }
+        // The fader positions as they read now, taken before the trim moves.
+        // Re-applied afterwards, they keep the balance somebody set between
+        // the sources while the whole output moves together.
+        let indices = activeRoutes.indices.filter {
+            activeRoutes[$0].destination.deviceUID == uid
+        }
+        let positions = indices.map { faderDecibels(forRouteAt: $0) }
+        if clamped == 0 { outputTrims[uid] = nil } else { outputTrims[uid] = clamped }
+        persist()
+        for (index, position) in zip(indices, positions) {
+            setFaderDecibels(position, forRouteAt: index)
+        }
+    }
+
+    private func outputTrimDecibels(forRouteAt index: Int) -> Float {
+        guard index < activeRoutes.count else { return 0 }
+        return outputTrim(of: activeRoutes[index].destination.deviceUID)
+    }
+
+    /// Puts the trims back on a route that has just been built.
+    ///
+    /// The engine builds every route at the gain the model handed it, which is
+    /// the fader and not the fader plus the trim — so without this a restart
+    /// silently put every trimmed output back to unity, and the slider went on
+    /// showing the value nobody was hearing.
+    private func applyOutputTrims() {
+        guard !outputTrims.isEmpty else { return }
+        for index in activeRoutes.indices where index < routeGains.count {
+            let trim = outputTrimDecibels(forRouteAt: index)
+            guard trim != 0 else { continue }
+            setGain(routeGains[index] * Self.gain(fromDecibels: trim), forRouteAt: index)
+        }
     }
 
     /// Human label for a route.
@@ -2995,7 +3295,51 @@ final class RouterModel: ScriptTarget {
     }
 
     func setFaderDecibels(_ decibels: Float, for group: SourceGroup) {
-        for index in group.routes { setFaderDecibels(decibels, forRouteAt: index) }
+        setSourceLevel(decibels, for: group.uid)
+    }
+
+    // MARK: What each source is worth, whether or not it is running
+
+    /// Each source's fader position, in decibels, by source UID.
+    ///
+    /// Written down for two reasons, both of which were defects. A fader lived
+    /// only as the gain of a route the engine had built, so it went back to
+    /// unity on every restart of the application and nothing said it had — and
+    /// while the route is down there are no routes at all, so a device's own
+    /// level had nowhere to be shown next to the device.
+    ///
+    /// Keyed by source UID rather than by route index because that is what it
+    /// is a fact about: the indices are positional and change whenever an
+    /// output is added, a capture appears, or the monitor comes and goes.
+    private(set) var sourceLevels: [String: Float] = [:]
+
+    func sourceLevel(of uid: String) -> Float { sourceLevels[uid] ?? 0 }
+
+    func setSourceLevel(_ decibels: Float, for uid: String) {
+        let clamped = max(Self.minimumDecibels, min(Self.maximumOutputTrim, decibels))
+        if clamped == 0 { sourceLevels[uid] = nil } else { sourceLevels[uid] = clamped }
+        persist()
+        // Only the main mix. The monitor's routes are governed by that source's
+        // own send, and moving both from one control is what the second mix
+        // exists not to do.
+        let monitored = Set(monitorRouteIndices[uid] ?? [])
+        for index in activeRoutes.indices
+        where activeRoutes[index].source.deviceUID == uid && !monitored.contains(index) {
+            setFaderDecibels(clamped, forRouteAt: index)
+        }
+    }
+
+    /// Puts the levels back on routes the engine has just built, for the reason
+    /// `applyOutputTrims` does.
+    private func applySourceLevels() {
+        guard !sourceLevels.isEmpty else { return }
+        for (uid, decibels) in sourceLevels {
+            let monitored = Set(monitorRouteIndices[uid] ?? [])
+            for index in activeRoutes.indices
+            where activeRoutes[index].source.deviceUID == uid && !monitored.contains(index) {
+                setFaderDecibels(decibels, forRouteAt: index)
+            }
+        }
     }
 
     /// What a source is called in the mixer: its name, and how many channels
@@ -3003,8 +3347,16 @@ final class RouterModel: ScriptTarget {
     func sourceLabel(for group: SourceGroup) -> String {
         guard let route = representative(of: group) else { return "" }
         let name = routeTitle(route)
-        guard group.routes.count > 1 else { return name }
-        return "\(name)  \(group.routes.count)ch"
+        // Distinct source channels, not routes. With a second output in the
+        // path every source has twice the routes and carries exactly as many
+        // channels as before, so counting wires said a mono microphone was
+        // "2ch" the moment somebody added speakers.
+        let channels = Set(
+            group.routes.compactMap {
+                $0 < activeRoutes.count ? activeRoutes[$0].source.channel : nil
+            })
+        guard channels.count > 1 else { return name }
+        return "\(name)  \(channels.count)ch"
     }
 
     func label(for route: Route) -> String {
@@ -3696,6 +4048,12 @@ final class RouterModel: ScriptTarget {
         // during a restore would be looking at half an arrangement.
         residentScript = saved.residentScript ?? ""
         sourceChannelChoices = saved.sourceChannelChoices ?? [:]
+        // Before the primaries are set, so that `pruneAdditionalDevices` on the
+        // first device refresh sees the whole route and not a half of it.
+        outputTrims = saved.outputTrims ?? [:]
+        sourceLevels = saved.sourceLevels ?? [:]
+        additionalSourceUIDs = saved.additionalSourceUIDs ?? []
+        additionalDestinationUIDs = saved.additionalDestinationUIDs ?? []
         preferredSampleRate = saved.preferredSampleRate
         bufferFrames =
             Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
@@ -3791,6 +4149,10 @@ final class RouterModel: ScriptTarget {
                 // triggers — wrote the script away as nothing.
                 residentScript: residentScript,
                 sourceChannelChoices: sourceChannelChoices,
+                additionalSourceUIDs: additionalSourceUIDs,
+                additionalDestinationUIDs: additionalDestinationUIDs,
+                outputTrims: outputTrims,
+                sourceLevels: sourceLevels,
                 obsHost: obsLink.host,
                 obsPort: obsLink.port,
                 obsInputName: obsLink.inputName,
@@ -3804,6 +4166,9 @@ final class RouterModel: ScriptTarget {
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
         for device in all { deviceNames[device.uid] = device.name }
+        // An extra input or output that has been unplugged, or has since become
+        // an end of the main route, is not one any more.
+        pruneAdditionalDevices()
         // A new device list can mean a new selected device, and what that
         // device publishes is what the window draws.
         refreshDeviceControls()
@@ -3992,6 +4357,24 @@ final class RouterModel: ScriptTarget {
     /// AppleUSBAudioEngine:Razer:…" is not.
     @ObservationIgnored private var deviceNames: [String: String] = [:]
 
+    /// What a device is called.
+    ///
+    /// The live lists first and the remembered names only as a fallback: the
+    /// cache is deliberately outside observation, so a view that read it alone
+    /// would not redraw when a device was renamed or replugged.
+    func deviceName(_ uid: String) -> String? {
+        inputDevices.first { $0.uid == uid }?.name
+            ?? outputDevices.first { $0.uid == uid }?.name
+            ?? deviceNames[uid]
+    }
+
+    /// The same, with the manufacturer's own prefix off where that leaves
+    /// something to read. For rows that share their width with controls.
+    func shortDeviceName(_ uid: String) -> String {
+        let device = inputDevices.first { $0.uid == uid } ?? outputDevices.first { $0.uid == uid }
+        return device?.shortName ?? deviceName(uid) ?? uid
+    }
+
     /// True when either end of the route is not in the device list.
     private var isMissingDevice: Bool {
         let sourceGone =
@@ -4124,30 +4507,108 @@ final class RouterModel: ScriptTarget {
 
     // MARK: Routing
 
-    var routes: [Route] {
-        guard let source = selectedSource, let destination = selectedDestination else {
-            return []
+    /// How one source's channels are taken.
+    ///
+    /// The primary source's answer is the two controls somebody can see; every
+    /// other input answers from what was remembered against it, and otherwise
+    /// from its own topology. There is deliberately no second pair of controls:
+    /// `sourceChannelChoices` is already per device, so the extra inputs get
+    /// the same memory the primary one has without a second place to store it.
+    func channelChoice(forSourceUID uid: String) -> (mode: SourceChannelMode, channel: Int) {
+        let inputChannels = inputDevices.first { $0.uid == uid }?.inputChannels ?? 0
+        if uid == selectedSourceUID {
+            return (channelMode, min(monoChannel, max(0, inputChannels - 1)))
         }
-        let destinationChannels = min(2, destination.outputChannels)
-        guard destinationChannels > 0, source.inputChannels > 0 else { return [] }
+        if let stored = sourceChannelChoices[uid] {
+            if stored == "stereo" { return (.stereo, 0) }
+            if stored.hasPrefix("mono:"), let channel = Int(stored.dropFirst(5)),
+                channel < inputChannels
+            {
+                return (.mono, channel)
+            }
+        }
+        return Self.defaultChannelChoice(
+            inputChannels: inputChannels, names: channelNames(ofDeviceUID: uid))
+    }
 
-        switch channelMode {
-        case .mono:
-            let channel = min(monoChannel, source.inputChannels - 1)
-            return (0..<destinationChannels).map { destinationChannel in
-                Route(
-                    source: ChannelRef(deviceUID: source.uid, channel: channel),
-                    destination: ChannelRef(
-                        deviceUID: destination.uid, channel: destinationChannel))
-            }
-        case .stereo:
-            let pairs = min(destinationChannels, source.inputChannels)
-            return (0..<pairs).map { channel in
-                Route(
-                    source: ChannelRef(deviceUID: source.uid, channel: channel),
-                    destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    /// What to say when an application could not be tapped.
+    ///
+    /// Pure so it can be asserted, and so the sentence is written once: the
+    /// name is what somebody recognises and the status is the only part they
+    /// can look up or quote at anybody.
+    nonisolated static func captureFailure(_ name: String, _ error: Error) -> String {
+        "\(name) (\(String(describing: error)))"
+    }
+
+    /// Every input in the route wired to every output, before the taps and the
+    /// monitor are added.
+    ///
+    /// Sources outermost so the clock master's routes come first: the effect
+    /// chain reads `routes.first.source` to decide what it is processing, and a
+    /// second microphone appearing ahead of the first would silently move the
+    /// gate, the compressor and the isolator onto it.
+    var routes: [Route] {
+        let sources = activeSourceUIDs.compactMap { uid in
+            inputDevices.first { $0.uid == uid }
+        }
+        let destinations = activeDestinationUIDs.compactMap { uid in
+            outputDevices.first { $0.uid == uid }
+        }
+        return Self.routes(
+            from: sources.map {
+                let choice = channelChoice(forSourceUID: $0.uid)
+                return SourceWiring(
+                    uid: $0.uid, channels: $0.inputChannels,
+                    mode: choice.mode, monoChannel: choice.channel)
+            },
+            to: destinations.map { ($0.uid, $0.outputChannels) })
+    }
+
+    /// One source, as the wiring rule needs to see it.
+    nonisolated struct SourceWiring: Sendable, Hashable {
+        var uid: String
+        var channels: Int
+        var mode: SourceChannelMode
+        var monoChannel: Int
+    }
+
+    /// The wiring rule itself, with no devices around it.
+    ///
+    /// Pure so it can be asserted. Which wires exist between two inputs and two
+    /// outputs is exactly the sort of thing that is obviously right until
+    /// somebody adds a second of either, and the model above cannot be run
+    /// without the machine's real hardware — so the rule that decides it is
+    /// kept where a test can reach it, the same way `defaultChannelChoice` is.
+    nonisolated static func routes(
+        from sources: [SourceWiring], to destinations: [(uid: String, channels: Int)]
+    ) -> [Route] {
+        var list: [Route] = []
+        for source in sources where source.channels > 0 {
+            for destination in destinations {
+                let destinationChannels = min(2, destination.channels)
+                guard destinationChannels > 0 else { continue }
+                switch source.mode {
+                case .mono:
+                    let channel = min(source.monoChannel, source.channels - 1)
+                    for destinationChannel in 0..<destinationChannels {
+                        list.append(
+                            Route(
+                                source: ChannelRef(deviceUID: source.uid, channel: channel),
+                                destination: ChannelRef(
+                                    deviceUID: destination.uid, channel: destinationChannel)))
+                    }
+                case .stereo:
+                    for channel in 0..<min(destinationChannels, source.channels) {
+                        list.append(
+                            Route(
+                                source: ChannelRef(deviceUID: source.uid, channel: channel),
+                                destination: ChannelRef(
+                                    deviceUID: destination.uid, channel: channel)))
+                    }
+                }
             }
         }
+        return list
     }
 
     func start() { start(selftest: false) }
@@ -4211,34 +4672,50 @@ final class RouterModel: ScriptTarget {
         tapOwners = [:]
         refusedCaptures = []
         if !capturedApps.isEmpty {
-            let destinationChannels = min(2, selectedDestination?.outputChannels ?? 0)
+            // Every output the send goes to, so a captured application is heard
+            // wherever the microphone is. An extra output that carried the
+            // microphone and not the music would be a copy of the mix that is
+            // not a copy of the mix, which is the one thing it promises to be.
+            let sendDevices = activeDestinationUIDs.compactMap { uid in
+                outputDevices.first { $0.uid == uid }
+            }
             var failed: [String] = []
             for app in capturedApps {
-                guard
-                    let tap = try? ProcessTap(
+                let attempt: ProcessTap
+                do {
+                    attempt = try ProcessTap(
                         processIDs: app.processIDs, muteBehavior: tapMuteBehavior,
                         // The bundle identifier is what makes the capture
                         // survive the application quitting and coming back.
                         // See `ProcessTap.init` — this is the line that answers
                         // OBS's #9144, and it is one argument.
                         bundleIDs: [app.bundleID])
-                else {
-                    failed.append(app.name)
+                } catch {
+                    // With the status, which `try?` used to throw away. "OBS
+                    // could not be captured" is a sentence; the OSStatus is the
+                    // only part of it anybody can look up, and it is the
+                    // difference between a permission that was never granted
+                    // and a HAL that has run out of taps.
+                    failed.append(Self.captureFailure(app.name, error))
                     continue
                 }
+                let tap = attempt
                 taps.append(tap)
                 tapOwners[tap.uid] = app.bundleID
-                let tapChannels = Self.channelsToRoute(
-                    published: tap.format?.mChannelsPerFrame, destination: destinationChannels)
-                for channel in 0..<tapChannels {
-                    routeList.append(
-                        Route(
-                            source: ChannelRef(deviceUID: tap.uid, channel: channel),
-                            destination: ChannelRef(
-                                deviceUID: destination, channel: channel),
-                            // Only application audio gets out of the way. The
-                            // microphone never does.
-                            isDuckable: true))
+                for sendDevice in sendDevices {
+                    let tapChannels = Self.channelsToRoute(
+                        published: tap.format?.mChannelsPerFrame,
+                        destination: min(2, sendDevice.outputChannels))
+                    for channel in 0..<tapChannels {
+                        routeList.append(
+                            Route(
+                                source: ChannelRef(deviceUID: tap.uid, channel: channel),
+                                destination: ChannelRef(
+                                    deviceUID: sendDevice.uid, channel: channel),
+                                // Only application audio gets out of the way.
+                                // The microphone never does.
+                                isDuckable: true))
+                    }
                 }
             }
             refusedCaptures = failed
@@ -4269,11 +4746,23 @@ final class RouterModel: ScriptTarget {
             let monitorChannels = min(2, monitor.outputChannels)
             // Every source already in the main mix, each at its own send.
             // Grouped by source so a stereo source keeps its sides.
+            //
+            // Collected as distinct source *channels* rather than as routes:
+            // with a second output in the path each source channel appears in
+            // the list once per output, and taking the second route by position
+            // handed the right ear whatever happened to be there — the same
+            // channel again on a mono source going to two outputs, which is
+            // correct by accident, and would stop being correct the moment the
+            // build order changed.
             var bySource: [String: [Route]] = [:]
             var order: [String] = []
             for route in routeList {
                 let uid = route.source.deviceUID
                 if bySource[uid] == nil { order.append(uid) }
+                guard
+                    !(bySource[uid]?.contains { $0.source.channel == route.source.channel }
+                        ?? false)
+                else { continue }
                 bySource[uid, default: []].append(route)
             }
 
@@ -4281,7 +4770,8 @@ final class RouterModel: ScriptTarget {
                 let level = monitorSendDecibels(forSource: uid)
                 guard level > Self.minimumDecibels else { continue }
                 let gain = Self.gain(fromDecibels: level)
-                let members = bySource[uid] ?? []
+                let members = (bySource[uid] ?? []).sorted { $0.source.channel < $1.source.channel }
+                guard !members.isEmpty else { continue }
                 var indices: [Int] = []
                 for channel in 0..<monitorChannels {
                     // A mono source feeds both ears; a stereo one keeps its
@@ -4348,6 +4838,8 @@ final class RouterModel: ScriptTarget {
                 .filter { $0.isPlaying && !excludedAppBundleIDs.contains($0.bundleID) }
                 .flatMap(\.processIDs))
         let monitor = monitorDeviceUID
+        let extraSources = additionalSourceUIDs
+        let extraDestinations = additionalDestinationUIDs
         let trim = outputLatencyFrames
         // Copied so the queue closure and the main actor are not reading and
         // writing the same array. Route is a value type, so this is a real copy.
@@ -4362,6 +4854,8 @@ final class RouterModel: ScriptTarget {
                     destinationDeviceUID: destination,
                     routes: routes,
                     taps: handle.taps,
+                    additionalSourceUIDs: extraSources,
+                    additionalDestinationUIDs: extraDestinations,
                     monitorDeviceUID: monitor,
                     effects: effects,
                     plugins: pluginList,
@@ -4441,6 +4935,11 @@ final class RouterModel: ScriptTarget {
                 if let dropped = self.engine.droppedMonitor {
                     self.monitorWasDropped(dropped)
                 }
+                // After the monitor, so that a start which lost both reports
+                // the extras last and does not have its message overwritten.
+                self.extrasWereDropped(self.engine.droppedExtras)
+                self.applySourceLevels()
+                self.applyOutputTrims()
                 // Voice isolation asked for and not attached.
                 //
                 // The engine has written down why since the day it was

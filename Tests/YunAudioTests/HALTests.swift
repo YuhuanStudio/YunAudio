@@ -3455,6 +3455,9 @@ struct ChannelNameOwnershipTests {
 @Suite("Every setting reaches the file")
 struct PreferencesCompletenessTests {
 
+    /// Reachable from the other suites that read the same tree.
+    static var sourceRootForTests: String { sourceRoot }
+
     private static var sourceRoot: String {
         GraphLockDisciplineTests.enginePath
             .replacingOccurrences(of: "Sources/YunAudioEngine/RoutingEngine.swift", with: "")
@@ -3771,5 +3774,337 @@ struct TrackClockTests {
         let end = lyrics.progress(at: clock.position(at: 100.95))
         #expect(abs(start) < 1e-9)
         #expect(abs(end - 0.2375) < 1e-6, "a second across a four-second line reached \(end)")
+    }
+}
+
+
+/// More than one input and more than one output.
+///
+/// Until this existed a second microphone could only be had by building an
+/// aggregate device in Audio MIDI Setup and routing that, which to this
+/// application is one source — so the per-source fader, mute, solo and role all
+/// applied to both microphones at once, which is to say to neither.
+///
+/// The wiring rule is asserted rather than the model, because the model cannot
+/// be run without the machine's real hardware and the thing that goes wrong
+/// here is arithmetic: which wires exist between N inputs and M outputs.
+@Suite("Two of each")
+struct MultiDeviceRoutingTests {
+
+    private func mono(_ uid: String, channels: Int = 1, at channel: Int = 0)
+        -> RouterModel.SourceWiring
+    {
+        RouterModel.SourceWiring(
+            uid: uid, channels: channels, mode: .mono, monoChannel: channel)
+    }
+
+    private func stereo(_ uid: String) -> RouterModel.SourceWiring {
+        RouterModel.SourceWiring(uid: uid, channels: 2, mode: .stereo, monoChannel: 0)
+    }
+
+    @Test("one mono input to one stereo output is the pair it always was")
+    func theOldCaseIsUnchanged() {
+        let routes = RouterModel.routes(from: [mono("mic")], to: [("out", 2)])
+        #expect(routes.count == 2)
+        #expect(routes.allSatisfy { $0.source == ChannelRef(deviceUID: "mic", channel: 0) })
+        #expect(routes.map(\.destination.channel) == [0, 1])
+    }
+
+    @Test("a second input is mixed in rather than replacing the first")
+    func twoInputsBothArrive() {
+        let routes = RouterModel.routes(from: [mono("mic"), mono("line")], to: [("out", 2)])
+        #expect(routes.count == 4)
+        let sources = Set(routes.map(\.source.deviceUID))
+        #expect(sources == ["mic", "line"])
+        // Both reach both sides of the output, or one microphone is in the
+        // left ear only.
+        for uid in ["mic", "line"] {
+            let mine = routes.filter { $0.source.deviceUID == uid }
+            #expect(Set(mine.map(\.destination.channel)) == [0, 1])
+        }
+    }
+
+    @Test("the clock master's routes come first")
+    func theMasterIsFirst() {
+        // Not cosmetic. The engine reads `routes.first.source` to decide what
+        // the effect chain is processing, so a second microphone appearing
+        // ahead of the first would silently move the gate, the compressor and
+        // the isolator onto it.
+        let routes = RouterModel.routes(from: [mono("mic"), mono("line")], to: [("out", 2)])
+        #expect(routes.first?.source.deviceUID == "mic")
+    }
+
+    @Test("a second output carries the same mix, not half of it")
+    func twoOutputsBothCarryEverything() {
+        let routes = RouterModel.routes(
+            from: [mono("mic"), stereo("music")], to: [("speakers", 2), ("stream", 2)])
+        for destination in ["speakers", "stream"] {
+            let mine = routes.filter { $0.destination.deviceUID == destination }
+            #expect(Set(mine.map(\.source.deviceUID)) == ["mic", "music"])
+            #expect(mine.count == 4, "\(destination) got \(mine.count) wires, not 4")
+        }
+    }
+
+    @Test("a stereo source keeps its sides on every output")
+    func stereoStaysStereo() {
+        let routes = RouterModel.routes(
+            from: [stereo("music")], to: [("speakers", 2), ("stream", 2)])
+        // Left to left and right to right, on both — a copy of the mix that
+        // swapped the sides on the second output would be inaudible on speech
+        // and obvious on music.
+        #expect(routes.allSatisfy { $0.source.channel == $0.destination.channel })
+        #expect(routes.count == 4)
+    }
+
+    @Test("each input keeps its own channel choice")
+    func choicesAreNotShared() {
+        // The Seiren's third tap and a plain mono line input, together. Sharing
+        // one channel setting between them is what a single global picker
+        // would do, and it would take the line input's only channel out of
+        // range.
+        let routes = RouterModel.routes(
+            from: [mono("seiren", channels: 3, at: 2), mono("line")], to: [("out", 2)])
+        let seiren = routes.filter { $0.source.deviceUID == "seiren" }
+        let line = routes.filter { $0.source.deviceUID == "line" }
+        #expect(seiren.allSatisfy { $0.source.channel == 2 })
+        #expect(line.allSatisfy { $0.source.channel == 0 })
+    }
+
+    @Test("a mono channel past the end of its device is clamped, not trusted")
+    func staleChannelIsClamped() {
+        // A choice remembered when the interface had eight inputs, against a
+        // microphone that now has one. Reading channel 6 of a one-channel
+        // device is a read past the end of the buffer, so this is not a
+        // tidiness matter.
+        let routes = RouterModel.routes(from: [mono("mic", channels: 1, at: 6)], to: [("out", 2)])
+        #expect(routes.allSatisfy { $0.source.channel == 0 })
+    }
+
+    @Test("a device with no channels contributes nothing rather than crashing")
+    func emptyDevicesAreSkipped() {
+        #expect(RouterModel.routes(from: [mono("mic", channels: 0)], to: [("out", 2)]).isEmpty)
+        #expect(RouterModel.routes(from: [mono("mic")], to: [("out", 0)]).isEmpty)
+        #expect(RouterModel.routes(from: [], to: [("out", 2)]).isEmpty)
+    }
+
+    @Test("more than two output channels are not used")
+    func widerOutputsAreNotFannedOut() {
+        // An eight-channel interface is two channels of mix and six of silence,
+        // not eight copies. The limit was there for one output and had to
+        // survive being applied per output.
+        let routes = RouterModel.routes(from: [mono("mic")], to: [("interface", 8)])
+        #expect(routes.count == 2)
+    }
+}
+
+
+/// An extra device that will not start must not cost somebody the route.
+///
+/// The same argument the dropped monitor already answers, one level out. It is
+/// asserted on the configuration rather than on a running engine because the
+/// failure it guards against takes twelve seconds of real hardware to produce:
+/// a display's audio endpoint answering `AudioDeviceStart failed with 'stop'`.
+@Suite("Giving up on an extra device")
+struct AdditionalDeviceFallbackTests {
+
+    private func configuration(
+        sources: [String] = [], destinations: [String] = [], monitor: String? = nil
+    ) -> RoutingEngine.StartConfiguration {
+        var routes = [
+            Route(
+                source: ChannelRef(deviceUID: "mic", channel: 0),
+                destination: ChannelRef(deviceUID: "out", channel: 0))
+        ]
+        for uid in sources {
+            routes.append(
+                Route(
+                    source: ChannelRef(deviceUID: uid, channel: 0),
+                    destination: ChannelRef(deviceUID: "out", channel: 0)))
+        }
+        for uid in destinations {
+            routes.append(
+                Route(
+                    source: ChannelRef(deviceUID: "mic", channel: 0),
+                    destination: ChannelRef(deviceUID: uid, channel: 0)))
+        }
+        if let monitor {
+            routes.append(
+                Route(
+                    source: ChannelRef(deviceUID: "mic", channel: 0),
+                    destination: ChannelRef(deviceUID: monitor, channel: 0)))
+        }
+        return RoutingEngine.StartConfiguration(
+            sourceDeviceUID: "mic", destinationDeviceUID: "out", routes: routes, taps: [],
+            additionalSourceUIDs: sources, additionalDestinationUIDs: destinations,
+            monitorDeviceUID: monitor, effects: [], plugins: [], preferredSampleRate: nil,
+            bufferFrames: 128, voiceIsolation: nil, echoCancellation: nil,
+            outputLatencyTrim: [:], selftest: false)
+    }
+
+    @Test("with nothing extra there is nothing to give up")
+    func nothingToDrop() {
+        #expect(configuration().withoutAdditionalDevices() == nil)
+    }
+
+    @Test("the extras go and the main route stays")
+    func extrasGoAndTheMixSurvives() throws {
+        let reduced = try #require(
+            configuration(sources: ["line"], destinations: ["stream"])
+                .withoutAdditionalDevices())
+        #expect(reduced.routes.count == 1)
+        #expect(reduced.routes.first?.source.deviceUID == "mic")
+        #expect(reduced.routes.first?.destination.deviceUID == "out")
+        #expect(reduced.additionalSourceUIDs.isEmpty)
+        #expect(reduced.additionalDestinationUIDs.isEmpty)
+    }
+
+    @Test("the monitor is left for its own rung")
+    func theMonitorIsNotTakenTooEarly() {
+        // Two independent faults. Dropping the monitor as well the first time
+        // would take a working sidetone away to answer for a microphone.
+        let reduced = configuration(sources: ["line"], monitor: "headphones")
+            .withoutAdditionalDevices()
+        #expect(reduced?.monitorDeviceUID == "headphones")
+        #expect(reduced?.routes.contains { $0.destination.deviceUID == "headphones" } == true)
+    }
+
+    @Test("an extra that is also an end of the main route is not dropped")
+    func anExtraThatIsTheRouteIsRefused() {
+        // Reducing here would delete the mix itself, and the failure is not
+        // the extra's to answer for.
+        #expect(configuration(destinations: ["out"]).withoutAdditionalDevices() == nil)
+    }
+
+    @Test("the devices it would give up are the ones it names")
+    func namedAndDroppedAgree() {
+        let configuration = configuration(sources: ["line"], destinations: ["stream"])
+        #expect(configuration.additionalDeviceUIDs == ["line", "stream"])
+        // The primary pair is never on the list, however it is named.
+        #expect(!configuration.additionalDeviceUIDs.contains("mic"))
+        #expect(!configuration.additionalDeviceUIDs.contains("out"))
+    }
+}
+
+
+/// Asking a player where it is, from the thread that is allowed to wait.
+///
+/// The whole point of `NowPlaying`'s asynchronous half is that the Apple event
+/// costs tens of milliseconds and must not be paid on the main actor. What was
+/// shipped did the dispatch correctly and then called main-actor-isolated code
+/// from the background queue, which Swift 6 checks at runtime: the application
+/// trapped in `dispatch_assert_queue` inside `NowPlaying.ordered(preferring:)`
+/// the first time the singing panel asked where the song had got to.
+///
+/// It is asserted by *doing* it. A trap is not catchable, so a test that
+/// reaches these from off the main actor either returns or takes the whole run
+/// down with it — which is exactly the signal wanted, and is the only kind of
+/// assertion this failure mode admits.
+@Suite("Asking the player from off the main actor")
+struct NowPlayingIsolationTests {
+
+    @Test("the cheap read runs on a background queue without trapping")
+    func positionOffTheMainActor() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                // The answer is whatever this machine's players say, including
+                // nothing at all. What is being asserted is that asking is
+                // survivable.
+                _ = NowPlaying.position(preferring: nil)
+                _ = NowPlaying.position(preferring: "Spotify")
+                continuation.resume()
+            }
+        }
+    }
+
+    @Test("and so does the expensive one")
+    func trackOffTheMainActor() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                _ = NowPlaying.current()
+                _ = NowPlaying.track(from: "Music")
+                continuation.resume()
+            }
+        }
+    }
+
+    /// The declaration, so the reason survives somebody tidying the file above.
+    @Test("the members the background queue reaches say so in the source")
+    func markedInTheSource() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/NowPlaying.swift", encoding: .utf8)
+        for member in [
+            "static func current()", "static func position(preferring",
+            "static func track(from", "static func ordered(preferring",
+            "static func run(", "static func read(name:",
+        ] {
+            guard let range = source.range(of: member) else { continue }
+            let line = source[source.lineRange(for: range)]
+            #expect(
+                line.contains("nonisolated"),
+                "\(member) is reached from the queue and is not marked nonisolated")
+        }
+    }
+}
+
+
+/// Nothing the IO thread can be holding is freed without letting it past.
+///
+/// Writing nil into a field of the live graph does not unload the copy the
+/// realtime thread may already hold — the read and the use are two
+/// instructions with a buffer's work between them. Freeing inside that window
+/// faults in the one thread that must never fault, and it did: a `SIGSEGV` in
+/// `yun_rt_ring_write` from `HALC_ProxyIOContext::IOWorkLoop`, while a
+/// recording was being stopped.
+///
+/// Read from the source because there is no way to provoke it on demand. The
+/// window is a few microseconds wide and it took a full flow-check run to land
+/// in it once; a test that tried to hit it would pass on every machine that
+/// missed and prove nothing.
+@Suite("Freeing a ring the realtime thread might still hold")
+struct RingTeardownDisciplineTests {
+
+    private func body(of function: String) throws -> String {
+        let source = try String(
+            contentsOfFile: GraphLockDisciplineTests.enginePath, encoding: .utf8)
+        let start = try #require(
+            source.range(of: "private func \(function)"), "no \(function) in the engine")
+        // To the next declaration at the same indentation, which is where a
+        // function ends in this file's style.
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    }\n")
+        return String(rest[..<(end?.upperBound ?? rest.endIndex)])
+    }
+
+    @Test("stopping a recording waits before the recorder is released")
+    func recording() throws {
+        let text = try body(of: "stopRecordingLocked")
+        #expect(text.contains("recordRing = nil"), "the detach itself has gone")
+        #expect(
+            text.contains("letTheRealtimeThreadPast()"),
+            "the ring is freed without letting the IO thread past the pointer it holds")
+    }
+
+    @Test("and so does stopping the stems")
+    func stems() throws {
+        let text = try body(of: "stopStemRecordingLocked")
+        #expect(text.contains("stemRings[stem] = nil"))
+        #expect(text.contains("letTheRealtimeThreadPast()"))
+    }
+
+    @Test("and the transcript taps, which free their rings outright")
+    func transcripts() throws {
+        let text = try body(of: "stopTranscriptTapsLocked")
+        #expect(text.contains("transcriptRings[slot] = nil"))
+        #expect(text.contains("letTheRealtimeThreadPast()"))
+    }
+
+    /// The wait itself, so that somebody tidying it into a no-op is caught.
+    @Test("the wait is a real wait on the cycle counter")
+    func theWaitIsReal() throws {
+        let text = try body(of: "letTheRealtimeThreadPast")
+        #expect(
+            text.contains("yun_rt_cell_wait_for_swap"),
+            "the wait no longer waits for anything")
     }
 }

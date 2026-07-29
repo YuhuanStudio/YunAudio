@@ -142,18 +142,56 @@ public final class ProcessTap {
         // with no effect that read exactly like a fix. Both are set, because
         // the default is somebody else's and could move; the assertion for all
         // of this is in `ProcessTapRestoreTests`.
-        let restoring = !bundleIDs.isEmpty
+        // Only identifiers that are actually bundle identifiers.
+        //
+        // A process with no bundle — every command-line tool, and more Electron
+        // helpers than one would like — is listed under a synthetic `pid:1234`
+        // identity, because the application list needs *something* to key on.
+        // The note where that identity is made says such a process "can be
+        // captured perfectly well", and it was true right up until this
+        // initialiser started forwarding the identity to the HAL as a bundle
+        // identifier.
+        //
+        // What the HAL does with `pid:61380` is the worst of the options: it
+        // returns `noErr` and no tap object, so the capture does not happen and
+        // nothing anywhere is an error. Measured against `afplay`, which is why
+        // the flow check's key detection heard the room instead of the music it
+        // had just put on — intermittently, because whether the process had a
+        // bundle depended on which process the list happened to offer.
+        //
+        // Dropped rather than refused. Restoring across a relaunch is the only
+        // thing these identifiers buy, and a process with no bundle could never
+        // have had it: there is nothing stable to remember it by.
+        let realBundleIDs = bundleIDs.filter {
+            !$0.hasPrefix(AudioApplications.pidIdentityPrefix) && !$0.isEmpty
+        }
+        let restoring = !realBundleIDs.isEmpty
         if restoring {
-            description.bundleIDs = bundleIDs
+            description.bundleIDs = realBundleIDs
             description.isProcessRestoreEnabled = true
         }
         restoresProcesses = restoring
-        self.bundleIDs = bundleIDs
+        self.bundleIDs = realBundleIDs
 
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
-        guard status == noErr, tapID != kAudioObjectUnknown else {
-            throw ProcessTapError.creationFailed(status)
+        guard status == noErr else { throw ProcessTapError.creationFailed(status) }
+        // Succeeded, and handed back nothing.
+        //
+        // Reported until now as `creationFailed(0)`, which prints as "failed
+        // with 0" — `noErr` — and reads as a contradiction. It is a distinct
+        // outcome and it is the one seen on this machine: the HAL accepts the
+        // description, returns success, and produces no object.
+        //
+        // Deliberately not given a cause here. The obvious guess — that the
+        // process had gone — is wrong in the case it was measured in: the flow
+        // check's player runs for twenty-four seconds and the tap is attempted
+        // about three seconds in. What the two arguments were is recorded
+        // instead, because that is what the next person needs and it is a fact
+        // rather than a theory.
+        guard tapID != kAudioObjectUnknown else {
+            throw ProcessTapError.noTapReturned(
+                processIDs: processIDs, bundleIDs: bundleIDs)
         }
         id = tapID
         uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
@@ -226,11 +264,19 @@ public enum TapMuteBehavior: Sendable, CaseIterable {
 
 public enum ProcessTapError: Error, CustomStringConvertible {
     case creationFailed(OSStatus)
+    /// The HAL accepted the description, returned `noErr`, and produced no tap
+    /// object. The arguments it was given, because the cause is not known and
+    /// they are what would identify it.
+    case noTapReturned(processIDs: [AudioObjectID], bundleIDs: [String])
 
     public var description: String {
         switch self {
         case let .creationFailed(status):
             "AudioHardwareCreateProcessTap failed with \(fourCharDescription(status))"
+        case let .noTapReturned(processIDs, bundleIDs):
+            "AudioHardwareCreateProcessTap returned noErr and no tap for "
+                + "pid(s) \(processIDs.map(String.init).joined(separator: ", ")), "
+                + "bundle(s) \(bundleIDs.isEmpty ? "none" : bundleIDs.joined(separator: ", "))"
         }
     }
 }

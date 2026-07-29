@@ -1532,6 +1532,7 @@ struct MonitorDropTests {
             destinationDeviceUID: destination,
             routes: routes,
             taps: [],
+            additionalSourceUIDs: [],
             additionalDestinationUIDs: [],
             monitorDeviceUID: monitor,
             effects: [],

@@ -881,6 +881,7 @@ enum UIFlowCheck {
         check("unity reads back as exactly unity", model.faderDecibels(forRouteAt: 0) == 0)
 
         try await checkLiveDeviceSwitch(model: model)
+        try await checkMoreThanOneOfEach(model: model)
 
         try section("input trim and master")
         // The two controls anybody looks for first, and the app had neither —
@@ -3594,7 +3595,20 @@ enum UIFlowCheck {
         // hearing no music, having never established that any music had been
         // put on the bus. Measured: two routes where the microphone alone is
         // two routes, and `tapOwners` empty.
+        // Waited for rather than read once.
+        //
+        // `isRunning && !isBusy` above is satisfied by the *first* start, and
+        // adding a capture can take more than one: a tap that is refused leaves
+        // a route that is up and carrying the microphone alone, and the rebuild
+        // that finally includes the tap comes after. Read at the first quiet
+        // moment, this said the capture had failed while it was still on its
+        // way — and everything downstream then measured a bus with no music on
+        // it and blamed the analyser.
+        await pause(
+            upTo: 6.0,
+            until: { model.activeRoutes.contains { model.application(of: $0) != nil } })
         let tapped = model.activeRoutes.contains { model.application(of: $0) != nil }
+        note("\(model.activeRoutes.count) route(s) once the capture had settled")
         check("the capture became routes on the bus", tapped)
         // Which of them failed. Resolving to no process, a tap CoreAudio
         // refused, and a tap that published no channels to route all end as no
@@ -3700,8 +3714,17 @@ enum UIFlowCheck {
         // that each source gets its own pitch track keyed on its own ring
         // rather than one tracker over the mix.
         if model.sourceGroups.count > 1 {
+            // Off and on again. The switch only starts the scoring on a change,
+            // so arriving here with it already on from an earlier section left
+            // the trackers pointing at routes that section had since torn down
+            // — and the failure was an empty list of singers with nothing
+            // anywhere saying why.
+            model.isScoringSinging = false
+            await pause(0.2)
             model.isScoringSinging = true
             await pause(1.5)
+            if let reason = model.singingError { note("scoring refused: \(reason)") }
+            note("\(model.sourceGroups.count) source group(s) on the bus")
             check("a second source is a second singer", model.singers.count > 1)
             check(
                 "and they are different sources",
@@ -3866,6 +3889,17 @@ enum UIFlowCheck {
             while Date().timeIntervalSince(started) < moment, player.isRunning {
                 await pause(0.02)
             }
+            // Pumped once, so the three values below come from one instant.
+            //
+            // `songPosition` is arithmetic on the monotonic clock and is
+            // therefore live; `lyricLine` and `lyricProgress` are whatever the
+            // last poll worked out, up to a fiftieth of a second ago. Compared
+            // against the wall clock without this, the sweep is asserted a poll
+            // stale — five per cent of a one-second line — which sits inside
+            // the tolerance on an idle machine and outside it on a busy one.
+            // That is a flaky check rather than a real one, and it failed
+            // exactly once in a full gate run and never on its own.
+            model.refreshNowPlaying()
             let elapsed = Date().timeIntervalSince(started)
             let line = model.lyricLine
             check(
@@ -5820,6 +5854,234 @@ enum UIFlowCheck {
         model.channelMode = originalMode
         model.monoChannel = originalChannel
         model.inputDecibels = originalTrim
+        model.selectedDestinationUID = originalDestination
+        model.selectedSourceUID = originalSource
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route is left as it was found",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+    }
+
+    /// A second input and a second output, on the live machine.
+    ///
+    /// The unit tests assert the wiring rule, which is arithmetic. What they
+    /// cannot see is whether the aggregate will actually take a fourth member,
+    /// whether the extra input's channels turn up in its channel map, and
+    /// whether the signal comes out of the second output — three questions that
+    /// only real hardware answers, and each of which has a plausible-looking
+    /// wrong answer.
+    ///
+    /// The extra output is measured rather than counted. A route pointing at a
+    /// device is not a device carrying audio, and this project has already been
+    /// caught by exactly that distinction once, on the monitor.
+    private static func checkMoreThanOneOfEach(model: RouterModel) async throws {
+        try section("more than one input and one output")
+
+        let originalSource = model.selectedSourceUID
+        let originalDestination = model.selectedDestinationUID
+        let originalExtraSources = model.additionalSourceUIDs
+        let originalExtraDestinations = model.additionalDestinationUIDs
+
+        // Loopbacks only, for the reason the switching section gives: a
+        // display's audio endpoint takes twelve seconds to refuse a start, and
+        // a microphone into speakers is the feedback loop the defaults exist to
+        // avoid. A loopback also lets the second output be *read back*, which
+        // is the only way to tell a route from a signal.
+        let loopbacks = model.outputDevices.filter {
+            $0.transport == .virtual && $0.outputChannels > 0 && $0.inputChannels > 0
+        }
+        let toneDevice = loopbacks.first { $0.uid != originalDestination }
+        guard let toneDevice else {
+            note("no spare loopback to put a known signal into — not exercised")
+            return
+        }
+        let tone = LoopbackTone(deviceUID: toneDevice.uid)
+        defer { tone?.stop() }
+        guard let tone else {
+            note("could not put a tone into \(toneDevice.name) — not exercised")
+            return
+        }
+        note("feeding \(toneDevice.name) a \(Int(LoopbackTone.hertz)) Hz tone at half scale")
+
+        model.selectedSourceUID = toneDevice.uid
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route came up on the loopback carrying the tone",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+        await pause(upTo: 3.0, until: { model.outputPeak > toneFloor })
+        let oneOfEach = model.activeRoutes.count
+        note("\(oneOfEach) routes with one input and one output")
+
+        // MARK: A second output
+
+        let spareOutputs = model.addableDestinationDevices.filter {
+            $0.transport == .virtual && $0.uid != toneDevice.uid
+        }
+        if let second = spareOutputs.first {
+            note("adding \(second.name) as a second output")
+            model.addDestination(second.uid)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the route came back up with two outputs",
+                { model.isRunning && !model.isBusy }, timeout: 20)
+            check(
+                "the second output is in the route",
+                model.activeDestinationUIDs.contains(second.uid))
+            check(
+                "and it is nowhere near being dropped",
+                model.droppedExtraOutputNames.isEmpty)
+            let both = model.activeRoutes.count
+            note("\(both) routes with two outputs")
+            check("there are more wires than before, not the same ones moved", both > oneOfEach)
+            check(
+                "the first output still has every source it had",
+                originalDestination.map { uid in
+                    model.activeRoutes.contains { $0.destination.deviceUID == uid }
+                } ?? false)
+            check(
+                "and the second one is carrying the same sources, not a subset",
+                Set(
+                    model.activeRoutes.filter { $0.destination.deviceUID == second.uid }
+                        .map(\.source.deviceUID))
+                    == Set(
+                        model.activeRoutes.filter {
+                            $0.destination.deviceUID == originalDestination
+                        }.map(\.source.deviceUID)))
+
+            // The measurement. A second output that is wired and silent looks
+            // exactly like one that works, from everywhere except here.
+            await pause(upTo: 3.0, until: { model.outputPeak > toneFloor })
+            let level = await loudest(model, over: 0.6)
+            note(String(format: "destination bus %.1f dBFS with two outputs", decibels(level)))
+            check("the tone still reaches the destination bus", level > toneFloor)
+
+            // The second output's own level.
+            //
+            // A trim and a source fader are two controls over one number — the
+            // route's gain — so the thing that goes wrong is that moving one
+            // appears to move the other. Asserted rather than looked at: the
+            // fader would read a different value and still sound right, and
+            // nobody would notice until they tried to balance two sources.
+            let groups = model.sourceGroups
+            let before = groups.map { model.faderDecibels(of: $0) }
+            model.setOutputTrim(-9, for: second.uid)
+            await pause(0.4)
+            check(
+                "the second output's level is remembered",
+                abs(model.outputTrim(of: second.uid) + 9) < 0.01)
+            let after = model.sourceGroups.map { model.faderDecibels(of: $0) }
+            check(
+                "and turning it down does not move any source's fader",
+                before.count == after.count
+                    && zip(before, after).allSatisfy { abs($0 - $1) < 0.05 })
+            // What the wire actually carries, which is the pair multiplied.
+            //
+            // Read from `routeGains` and not from `activeRoutes`: the latter is
+            // the snapshot the engine handed back when it built the route, so
+            // its gains never move afterwards. Asserting against it is how the
+            // first version of this check passed a claim about the *first*
+            // output that nothing could have made fail.
+            let trimmed = model.activeRoutes.indices.filter {
+                model.activeRoutes[$0].destination.deviceUID == second.uid
+            }
+            check(
+                "the routes into it really are nine decibels down",
+                !trimmed.isEmpty
+                    && trimmed.allSatisfy { index in
+                        let carried = model.routeGains[index]
+                        let expected =
+                            RouterModel.gain(
+                                fromDecibels: model.faderDecibels(forRouteAt: index) - 9)
+                        return abs(carried - expected) < 0.01
+                    })
+            // And the first output is untouched, or a level for one output is
+            // a level for all of them and the control means nothing.
+            let untrimmed = model.activeRoutes.indices.filter {
+                model.activeRoutes[$0].destination.deviceUID == originalDestination
+            }
+            check(
+                "while the first output's routes are where they were",
+                !untrimmed.isEmpty
+                    && untrimmed.allSatisfy { abs(model.routeGains[$0] - 1) < 0.01 })
+            model.setOutputTrim(0, for: second.uid)
+            await pause(0.4)
+
+            model.removeDestination(second.uid)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "and taking it away leaves the route up",
+                { model.isRunning && !model.isBusy }, timeout: 20)
+            check(
+                "with the wires it started with",
+                model.activeRoutes.count == oneOfEach)
+        } else {
+            note("no spare loopback output to add — the second output is not exercised")
+        }
+
+        // MARK: A second input
+
+        let spareInputs = model.addableSourceDevices.filter {
+            $0.transport == .virtual && $0.inputChannels > 0
+        }
+        if let second = spareInputs.first {
+            note("adding \(second.name) as a second input")
+            let groupsBefore = model.sourceGroups.count
+            model.addSource(second.uid)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the route came back up with two inputs",
+                { model.isRunning && !model.isBusy }, timeout: 20)
+            check("the second input is in the route", model.activeSourceUIDs.contains(second.uid))
+            check("and it was not dropped", model.droppedExtraInputNames.isEmpty)
+            check(
+                "its channels resolved inside the aggregate",
+                model.activeRoutes.contains { $0.source.deviceUID == second.uid })
+            // The whole reason for not telling somebody to build an aggregate
+            // device in Audio MIDI Setup: there its two microphones are one
+            // source, so one fader moves both.
+            check(
+                "it gets a strip of its own rather than joining the first one's",
+                model.sourceGroups.count == groupsBefore + 1)
+            check(
+                "the clock master is still the first route's source",
+                model.activeRoutes.first?.source.deviceUID == toneDevice.uid)
+
+            if let group = model.sourceGroups.first(where: { $0.uid == second.uid }) {
+                let before = model.faderDecibels(of: group)
+                model.setFaderDecibels(-12, for: group)
+                await pause(0.3)
+                check(
+                    "and its fader moves it alone",
+                    abs(model.faderDecibels(of: group) + 12) < 0.01
+                        && model.sourceGroups.filter { $0.uid != second.uid }.allSatisfy {
+                            abs(model.faderDecibels(of: $0) + 12) > 0.01
+                        })
+                model.setFaderDecibels(before, for: group)
+            }
+
+            model.removeSource(second.uid)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "and taking it away leaves the route up",
+                { model.isRunning && !model.isBusy }, timeout: 20)
+            check(
+                "with the source it started with",
+                model.selectedSourceUID == toneDevice.uid
+                    && model.additionalSourceUIDs.isEmpty)
+        } else {
+            note("no spare loopback input to add — the second input is not exercised")
+        }
+
+        // MARK: Left as found
+
+        tone.stop()
+        for uid in model.additionalSourceUIDs where !originalExtraSources.contains(uid) {
+            model.removeSource(uid)
+        }
+        for uid in model.additionalDestinationUIDs
+        where !originalExtraDestinations.contains(uid) {
+            model.removeDestination(uid)
+        }
         model.selectedDestinationUID = originalDestination
         model.selectedSourceUID = originalSource
         await settle(model, timeout: 15)

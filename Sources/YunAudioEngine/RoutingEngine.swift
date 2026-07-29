@@ -203,6 +203,15 @@ public final class RoutingEngine: @unchecked Sendable {
         var destinationDeviceUID: String
         var routes: [Route]
         var taps: [ProcessTap]
+        /// Further hardware inputs, joining the aggregate alongside the
+        /// microphone so their channels can be routed like any other.
+        ///
+        /// Separate from `sourceDeviceUID` rather than folded into a list with
+        /// it because the two are not interchangeable: the primary source is
+        /// the aggregate's clock master, and every other member is drift
+        /// corrected against it. A flat list would hide that one of them is
+        /// the one thing here that cannot be resampled.
+        var additionalSourceUIDs: [String]
         var additionalDestinationUIDs: [String]
         var monitorDeviceUID: String?
         var effects: [EffectKind]
@@ -237,6 +246,46 @@ public final class RoutingEngine: @unchecked Sendable {
                 return nil
             }
             return reduced
+        }
+
+        /// The same start with every additional device given up on, and every
+        /// route into or out of one gone.
+        ///
+        /// The monitor is deliberately left alone: it has its own rung, because
+        /// an extra input that will not join the aggregate and an output that
+        /// takes twelve seconds to refuse are independent faults and a machine
+        /// with both must still get its call.
+        ///
+        /// - Returns: Nil when there is nothing additional to give up, or when
+        ///   giving it up would leave nothing to route — in which case the
+        ///   extras were the route, and the failure is not theirs to answer
+        ///   for.
+        func withoutAdditionalDevices() -> Self? {
+            let extras = Set(additionalSourceUIDs + additionalDestinationUIDs)
+                .subtracting([sourceDeviceUID, destinationDeviceUID])
+            guard !extras.isEmpty else { return nil }
+            var reduced = self
+            reduced.additionalSourceUIDs = []
+            reduced.additionalDestinationUIDs = additionalDestinationUIDs.filter {
+                !extras.contains($0)
+            }
+            reduced.routes = routes.filter {
+                !extras.contains($0.source.deviceUID)
+                    && !extras.contains($0.destination.deviceUID)
+            }
+            guard !reduced.routes.isEmpty else { return nil }
+            return reduced
+        }
+
+        /// Which additional devices `withoutAdditionalDevices` would give up.
+        var additionalDeviceUIDs: [String] {
+            var seen = Set([sourceDeviceUID, destinationDeviceUID])
+            var list: [String] = []
+            for uid in additionalSourceUIDs + additionalDestinationUIDs
+            where seen.insert(uid).inserted {
+                list.append(uid)
+            }
+            return list
         }
     }
     /// Set once a lock failure has forced drift correction back on, so the
@@ -281,6 +330,15 @@ public final class RoutingEngine: @unchecked Sendable {
     /// person turning their headphones up and wondering why they are still
     /// deaf.
     public private(set) var droppedMonitor: DroppedMonitor?
+
+    /// Additional inputs and outputs the last start had to give up on, with the
+    /// failure that made it give up.
+    ///
+    /// The same argument as `droppedMonitor`, one level out: an extra
+    /// microphone that will not join the aggregate must not cost somebody the
+    /// route they already had, and it must not do so quietly either. Empty
+    /// when the route came up exactly as asked.
+    public private(set) var droppedExtras: [DroppedMonitor] = []
 
     /// Third-party units that were asked for and would not load, each with the
     /// step that refused and the status it returned.
@@ -448,6 +506,7 @@ public final class RoutingEngine: @unchecked Sendable {
         destinationDeviceUID: String,
         routes: [Route],
         taps: [ProcessTap] = [],
+        additionalSourceUIDs: [String] = [],
         additionalDestinationUIDs: [String] = [],
         monitorDeviceUID: String? = nil,
         effects: [EffectKind] = [],
@@ -467,6 +526,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 destinationDeviceUID: destinationDeviceUID,
                 routes: routes,
                 taps: taps,
+                additionalSourceUIDs: additionalSourceUIDs,
                 additionalDestinationUIDs: additionalDestinationUIDs,
                 monitorDeviceUID: monitorDeviceUID,
                 effects: effects,
@@ -490,23 +550,52 @@ public final class RoutingEngine: @unchecked Sendable {
     /// is unusable and a route that is.
     private func startLocked(_ configuration: StartConfiguration) throws {
         droppedMonitor = nil
+        droppedExtras = []
+        let failure: Error
         do {
             try startAttempt(configuration)
-        } catch let failure {
-            guard let uid = configuration.monitorDeviceUID,
-                let withoutMonitor = configuration.withoutMonitor()
-            else { throw failure }
-            do {
-                try startAttempt(withoutMonitor)
-            } catch {
-                // The monitor was not what was wrong. The first failure is the
-                // one that describes the route the caller actually asked for,
-                // so that is the one they are told about; the retry was this
-                // layer's own idea.
-                throw failure
-            }
-            droppedMonitor = DroppedMonitor(uid: uid, reason: String(describing: failure))
+            return
+        } catch let thrown {
+            failure = thrown
         }
+
+        // What the route can afford to lose, in the order it can afford to lose
+        // it, each rung cumulative with the last. The main mix is never on the
+        // list: it is the thing all of this is additional to.
+        //
+        // Extras go first because they are the more numerous and the more
+        // likely to be what somebody just changed. When there are none the
+        // ladder is exactly the single monitor retry it has always been.
+        var ladder: [(configuration: StartConfiguration, drops: [String])] = []
+        let withoutExtras = configuration.withoutAdditionalDevices()
+        let extraUIDs = configuration.additionalDeviceUIDs
+        if let withoutExtras { ladder.append((withoutExtras, extraUIDs)) }
+        if let monitor = configuration.monitorDeviceUID {
+            if let withoutMonitor = configuration.withoutMonitor() {
+                ladder.append((withoutMonitor, [monitor]))
+                if let both = withoutExtras?.withoutMonitor() {
+                    ladder.append((both, extraUIDs + [monitor]))
+                }
+            }
+        }
+
+        let reason = String(describing: failure)
+        for rung in ladder {
+            guard (try? startAttempt(rung.configuration)) != nil else { continue }
+            for uid in rung.drops {
+                let dropped = DroppedMonitor(uid: uid, reason: reason)
+                if uid == configuration.monitorDeviceUID {
+                    droppedMonitor = dropped
+                } else {
+                    droppedExtras.append(dropped)
+                }
+            }
+            return
+        }
+        // Nothing additional was what was wrong. The first failure is the one
+        // that describes the route the caller actually asked for, so that is
+        // the one they are told about; the retries were this layer's own idea.
+        throw failure
     }
 
     /// The whole of a start, from one snapshot.
@@ -520,6 +609,7 @@ public final class RoutingEngine: @unchecked Sendable {
         let destinationDeviceUID = configuration.destinationDeviceUID
         let routes = configuration.routes
         let taps = configuration.taps
+        let additionalSourceUIDs = configuration.additionalSourceUIDs
         let additionalDestinationUIDs = configuration.additionalDestinationUIDs
         let monitorDeviceUID = configuration.monitorDeviceUID
         let effects = configuration.effects
@@ -548,10 +638,24 @@ public final class RoutingEngine: @unchecked Sendable {
         // 96 kHz, which only buys a resample back to 48 kHz at the far end.
         // Extra destinations let a tapped application be sent somewhere other
         // than the microphone's destination — one app to the headphones while
-        // the rest of the mix goes to the virtual device.
+        // the rest of the mix goes to the virtual device. Extra sources are the
+        // same idea on the other side: a second microphone, or a line input,
+        // whose channels appear in the aggregate and are addressable exactly
+        // like the first one's.
+        //
+        // Both kinds go in the same list because from the aggregate's point of
+        // view they are the same thing — a member that is not the clock master
+        // — and the distinction that matters is drawn by the routes, not here.
+        // Deduplicated, because the same device can honestly be both: a
+        // headset's two halves share nothing but a name, but an interface with
+        // inputs and outputs is one device and must be added once.
         let extras =
-            (additionalDestinationUIDs + (monitorDeviceUID.map { [$0] } ?? []))
+            (additionalSourceUIDs + additionalDestinationUIDs
+                + (monitorDeviceUID.map { [$0] } ?? []))
             .filter { $0 != sourceDeviceUID && $0 != destinationDeviceUID }
+            .reduce(into: [String]()) { seen, uid in
+                if !seen.contains(uid) { seen.append(uid) }
+            }
             .compactMap { try? AudioDevices.device(uid: $0) }
         // Every device involved is aligned, including the microphone even when
         // it is about to belong to the canceller rather than to this aggregate:
@@ -637,6 +741,10 @@ public final class RoutingEngine: @unchecked Sendable {
 
         let members = cancelsEcho ? [destination] + extras : [source, destination] + extras
 
+        // Every member that is not the clock master, drift corrected against
+        // the one that is. That covers both kinds of extra: an output the mix
+        // is copied to, and a second input whose channels are read.
+        //
         // A member the router only ever writes to would ideally not have its
         // input side opened at all — on Bluetooth that is a correctness matter
         // rather than a saving, because opening a headset's input negotiates
@@ -648,7 +756,11 @@ public final class RoutingEngine: @unchecked Sendable {
         // descriptive. The flow check asserts that, so a future macOS honouring
         // it will be noticed rather than never looked at again — and until then
         // the Bluetooth problem has no fix at this layer.
-        func writeOnly(_ device: AudioDevice) -> AggregateDevice.SubDevice {
+        //
+        // That the key is descriptive is what makes extra *inputs* work at all:
+        // their channels arrive in the aggregate's input map whether or not
+        // anybody asked for them, so routing from them needs nothing here.
+        func follower(_ device: AudioDevice) -> AggregateDevice.SubDevice {
             AggregateDevice.SubDevice(
                 uid: device.uid, driftCompensation: true,
                 extraOutputLatencyFrames: outputLatencyTrim[device.uid])
@@ -656,14 +768,14 @@ public final class RoutingEngine: @unchecked Sendable {
 
         let routedSubDevices: [AggregateDevice.SubDevice] =
             cancelsEcho
-            ? [writeOnly(destination)] + extras.map(writeOnly)
+            ? [follower(destination)] + extras.map(follower)
             : [
                 .init(uid: sourceDeviceUID, driftCompensation: false),
                 .init(
                     uid: destinationDeviceUID,
                     driftCompensation: !clockLockAvailable,
                     extraOutputLatencyFrames: outputLatencyTrim[destinationDeviceUID]),
-            ] + extras.map(writeOnly)
+            ] + extras.map(follower)
 
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying
@@ -1016,7 +1128,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // Restore last: the aggregate has to be gone first, or the HAL will
         // simply set the rate back to whatever the aggregate wanted.
         if !originalSampleRates.isEmpty {
-            timed("restore sample rates") {
+            _ = timed("restore sample rates") {
                 AggregateDevice.restoreSampleRates(originalSampleRates)
             }
             originalSampleRates.removeAll()
@@ -1372,6 +1484,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 graph.pointee.routes[route].stemIndex = -1
             }
         }
+        letTheRealtimeThreadPast()
         for recorder in stemRecorders { recorder.stop() }
         stemRecorders.removeAll()
     }
@@ -1434,6 +1547,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 graph.pointee.routes[route].transcriptIndex = -1
             }
         }
+        letTheRealtimeThreadPast()
         for ring in transcriptRings { yun_rt_ring_free(ring) }
         transcriptRings.removeAll()
     }
@@ -1482,12 +1596,37 @@ public final class RoutingEngine: @unchecked Sendable {
         stopRecordingLocked()
     }
 
+    /// Lets the realtime thread past any pointer it loaded before a detach.
+    ///
+    /// Writing nil into a field of the live graph does not unload the copy the
+    /// IO thread may already be holding: the read and the use are two
+    /// instructions with a whole buffer's work between them. Freeing on the
+    /// other side of that window is a use-after-free in the one thread that
+    /// must never fault, and it is not theoretical — measured here as a
+    /// `SIGSEGV` inside `yun_rt_ring_write`, called from
+    /// `HALC_ProxyIOContext::IOWorkLoop`, while the flow check stopped a
+    /// recording. The address had the shape of a freed allocation.
+    ///
+    /// The same wait the graph swap uses, for the same reason it gives: one
+    /// cycle may already be in flight, so two is the first count that cannot
+    /// be. Despite its name `yun_rt_cell_wait_for_swap` counts cycles and
+    /// nothing else, which is exactly what is wanted here — there is no swap,
+    /// only a field that has changed underneath a reader.
+    ///
+    /// A false return means the device is producing no cycles, in which case
+    /// nothing can be holding anything and freeing is safe regardless.
+    private func letTheRealtimeThreadPast() {
+        guard let graphCell else { return }
+        _ = yun_rt_cell_wait_for_swap(graphCell, 200)
+    }
+
     private func stopRecordingLocked() {
         guard let recorder else { return }
         // Detach from the graph first: the writer thread must not be draining a
         // ring the IO thread is still filling while it is being torn down.
         graph?.pointee.recordRing = nil
         graph?.pointee.recordChannels = 0
+        letTheRealtimeThreadPast()
         recorder.stop()
         self.recorder = nil
     }
