@@ -877,55 +877,36 @@ struct AudioApplicationGroupingTests {
     /// `yunaudio-cli tap afplay` answered `no process matching "afplay"`, and
     /// the only way to reach it was to type its process id.
     ///
-    /// Against the real machine, because that is where the disagreement lived:
-    /// the resolution takes a `pid_t` to the kernel, so there is nothing to
-    /// hand in. The player is spawned on a file of digital silence — it has to
-    /// be a real process the HAL is tracking, and it does not have to be
-    /// audible to be one.
+    /// Stated against this very process. `proc_pidpath` answers for any live
+    /// process id, so the case needs no player and no waiting: the test runner
+    /// publishes no bundle identifier, which is exactly the shape that was
+    /// going wrong. The first version did spawn a player and wait for the HAL
+    /// to notice it, and failed two runs in four inside a full test run — a
+    /// flaky gate is worse than no gate.
     @Test("everything the interface can name, a command line can name too")
-    func matchingAgreesWithTheListedName() async throws {
-        let silence = FileManager.default.temporaryDirectory
-            .appendingPathComponent("yunaudio-silence-\(UUID().uuidString).wav")
-        let format = try #require(
-            AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1))
-        let file = try AVAudioFile(forWriting: silence, settings: format.settings)
-        let buffer = try #require(
-            AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 44100 * 8))
-        buffer.frameLength = buffer.frameCapacity
-        try file.write(from: buffer)
-        defer { try? FileManager.default.removeItem(at: silence) }
-
-        let player = Process()
-        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
-        player.arguments = [silence.path]
-        try player.run()
-        defer {
-            player.terminate()
-            player.waitUntilExit()
-        }
-
-        // It appears once it has opened an output. If it never does, CoreAudio
-        // cannot start IO on this machine and every audio measurement here is
-        // meaningless — see AGENTS.md, which says to establish that first.
-        var mine: AudioProcess?
-        for _ in 0..<40 {
-            mine = try AudioProcesses.all(includingSilent: true)
-                .first { $0.pid == player.processIdentifier }
-            if mine != nil { break }
-            try await Task.sleep(for: .milliseconds(100))
-        }
-        let afplay = try #require(
-            mine, "afplay never reached the HAL's process list — can this machine start IO?")
-
-        #expect(AudioApplications.displayName(of: afplay) == "afplay")
-        #expect(AudioApplications.matches("afplay", process: afplay))
+    func matchingAgreesWithTheListedName() throws {
+        let mine = getpid()
+        let halName = "PID \(mine)"
+        let executable = AudioApplications.displayName(
+            bundleID: nil, pid: mine, halName: halName)
+        #expect(executable != halName)
+        #expect(!executable.isEmpty)
+        #expect(
+            AudioApplications.matches(executable, bundleID: nil, pid: mine, halName: halName))
         // The process id still works, and is the only unambiguous handle when
         // two copies of one executable are running.
-        #expect(AudioApplications.matches(String(afplay.pid), process: afplay))
-        #expect(!AudioApplications.matches("Discord", process: afplay))
+        #expect(
+            AudioApplications.matches(String(mine), bundleID: nil, pid: mine, halName: halName))
+        #expect(
+            !AudioApplications.matches("Discord", bundleID: nil, pid: mine, halName: halName))
+        // A process that does publish one keeps the name that was resolved from
+        // the running-application list, which is the one a person recognises.
+        #expect(
+            AudioApplications.displayName(
+                bundleID: "com.hnc.Discord", pid: mine, halName: "Discord") == "Discord")
 
-        // And the general form of it: every row the interface offers is
-        // reachable by the name it shows.
+        // And the general form of it, against whatever is running: every row
+        // the interface offers is reachable by the name it shows.
         let processes = try AudioProcesses.all(includingSilent: true)
         var byID: [AudioObjectID: AudioProcess] = [:]
         for process in processes where byID[process.id] == nil { byID[process.id] = process }

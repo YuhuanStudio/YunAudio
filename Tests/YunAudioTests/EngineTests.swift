@@ -4334,12 +4334,24 @@ struct TranscriberTests {
     }
 
     /// In the blocks the interface's poll hands over, rather than in one lump.
-    private static func feed(_ audio: SpokenAudio, to transcriber: Transcriber) {
+    ///
+    /// - Returns: When the first block was handed over, which is where the
+    ///   analyser's own timeline starts and therefore the answer this is
+    ///   measured against.
+    @discardableResult
+    private static func feed(_ audio: SpokenAudio, to transcriber: Transcriber) -> Double {
         let block = Int(audio.rate / 100)
+        var firstAt = Date().timeIntervalSince1970
+        var isFirst = true
         for start in stride(from: 0, to: audio.samples.count, by: block) {
             let end = min(start + block, audio.samples.count)
             transcriber.add(Array(audio.samples[start..<end]), sampleRate: audio.rate)
+            if isFirst {
+                firstAt = Date().timeIntervalSince1970
+                isFirst = false
+            }
         }
+        return firstAt
     }
 
     /// `Line.start` says it is seconds from the start of the session, and it
@@ -4365,13 +4377,13 @@ struct TranscriberTests {
 
         let early = Transcriber(speaker: "First")
         try await early.start(now: session)
-        Self.feed(audio, to: early)
+        let earlyOrigin = Self.feed(audio, to: early) - session
 
         // Two seconds of the session pass before the second source is open.
         try await Task.sleep(for: .seconds(2))
         let late = Transcriber(speaker: "Second")
         try await late.start(now: session)
-        Self.feed(audio, to: late)
+        let lateOrigin = Self.feed(audio, to: late) - session
 
         // `stop` finalises through the end of input, so the lines are there
         // when it returns — measured at 0.16 s, which is why nothing here
@@ -4380,9 +4392,19 @@ struct TranscriberTests {
         await late.stop()
         let first = try #require(await early.lines.first)
         let second = try #require(await late.lines.first)
-        #expect(first.start < 1.0)
-        #expect(second.start > 1.5)
-        // And so the merge across sources is a record of the conversation.
+
+        // Against when each source's audio actually began rather than against a
+        // fixed number. How long a model takes to open is not this test's
+        // subject and it is not bounded — the first version asserted the first
+        // line landed under a second and failed inside a full test run, where
+        // opening took longer than that with five hundred other tests on the
+        // machine. What is being claimed is that a line says where in the
+        // session it happened, and that is a comparison.
+        #expect(abs(first.start - earlyOrigin) < 0.6)
+        #expect(abs(second.start - lateOrigin) < 0.6)
+        // And the case is actually stated: the two origins really are apart.
+        #expect(lateOrigin - earlyOrigin > 1.5)
+        // So the merge across sources is a record of the conversation.
         let merged = [second, first].sorted { $0.start < $1.start }
         #expect(merged.map(\.speaker) == ["First", "Second"])
     }

@@ -238,14 +238,24 @@ extension AudioApplications {
     /// - Returns: Its executable's name when it publishes no bundle
     ///   identifier, and the HAL's own name otherwise.
     public static func displayName(of process: AudioProcess) -> String {
+        displayName(bundleID: process.bundleID, pid: process.pid, halName: process.name)
+    }
+
+    /// The pieces rather than the process, so a test can state the case.
+    ///
+    /// `AudioProcess` can only be made by reading the HAL, and the first
+    /// version of the test for this spawned a player and waited for the HAL to
+    /// notice it — which failed two runs in four inside a full test run. The
+    /// rule is about a bundle identifier, a process id and a name; it takes
+    /// those.
+    static func displayName(bundleID: String?, pid: pid_t, halName: String) -> String {
         // Asked of every process with no bundle rather than only the audible
         // ones, because audibility flickers — see the note in `group`, and the
         // row that flickered with it read "afplay" one second and "PID 47482"
         // the next. One `proc_pidpath` per process is a syscall against an
         // enumeration that already costs 27 ms.
-        guard process.bundleID?.isEmpty ?? true,
-            let executable = executableName(ofPID: process.pid)
-        else { return process.name }
+        guard bundleID?.isEmpty ?? true, let executable = executableName(ofPID: pid)
+        else { return halName }
         return executable
     }
 
@@ -262,9 +272,17 @@ extension AudioApplications {
     ///   - process: The process to test it against.
     /// - Returns: True when the two are about the same thing.
     public static func matches(_ wanted: String, process: AudioProcess) -> Bool {
-        if let pid = pid_t(wanted) { return process.pid == pid }
-        if displayName(of: process).localizedCaseInsensitiveContains(wanted) { return true }
-        return process.bundleID?.localizedCaseInsensitiveContains(wanted) ?? false
+        matches(wanted, bundleID: process.bundleID, pid: process.pid, halName: process.name)
+    }
+
+    /// The pieces rather than the process, for the reason above.
+    static func matches(
+        _ wanted: String, bundleID: String?, pid: pid_t, halName: String
+    ) -> Bool {
+        if let wantedPID = pid_t(wanted) { return pid == wantedPID }
+        let name = displayName(bundleID: bundleID, pid: pid, halName: halName)
+        if name.localizedCaseInsensitiveContains(wanted) { return true }
+        return bundleID?.localizedCaseInsensitiveContains(wanted) ?? false
     }
 
     /// Kept out of `group(processes:foreground:named:)` so that stays a
