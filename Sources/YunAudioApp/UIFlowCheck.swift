@@ -832,6 +832,8 @@ enum UIFlowCheck {
         model.setFaderDecibels(0, forRouteAt: 0)
         check("unity reads back as exactly unity", model.faderDecibels(forRouteAt: 0) == 0)
 
+        try await checkLiveDeviceSwitch(model: model)
+
         try section("input trim and master")
         // The two controls anybody looks for first, and the app had neither —
         // only the per-route strips, which balance sources against each other
@@ -4785,6 +4787,450 @@ enum UIFlowCheck {
         let deadline = Date().addingTimeInterval(inWantedSection ? timeout : min(timeout, 6))
         while Date() < deadline, model.isBusy {
             await pause(0.01)
+        }
+    }
+
+    /// Changing an end of the route while it is running, measured rather than
+    /// looked at.
+    ///
+    /// This is the one thing the application is for, and nothing asserted it.
+    /// Several sections already move a device mid-route — the decoy, the
+    /// awkward sample rate, the fall-back — and every one of them stops at
+    /// `isRunning`, which a route that rebuilt itself into silence satisfies
+    /// perfectly. The interface shows the new device, the meters sit still, and
+    /// no check anywhere notices.
+    ///
+    /// Two numbers, then. The IO cycle counter has to advance — sampled *after*
+    /// the change rather than across it, since the counter lives in the RCU
+    /// cell and a rebuild frees that cell and makes another, so restarting from
+    /// zero means "it rebuilt" and not "the audio stopped". And a known signal
+    /// has to arrive on the destination bus, which is metered after the
+    /// multiply.
+    ///
+    /// The signal is a tone written into a loopback rather than the room,
+    /// because the room is not a signal. Measured across three runs of this
+    /// section, the same microphone in the same study read −53 dBFS, −86 dBFS
+    /// and digital silence inside forty seconds — a gated condenser doing
+    /// exactly what it is for — so a level from before a change and one from
+    /// after it differ by sixty decibels for reasons that have nothing to do
+    /// with the route. Comparing against a fresh start of the same pair does
+    /// not rescue it either: that reading comes out of the same room.
+    ///
+    /// - Parameter model: The live model, with the route already up.
+    /// - Throws: `NothingLeftToRun`, when a filtered run has had everything it
+    ///   asked for and the rest of the check is not worth the hardware.
+    private static func checkLiveDeviceSwitch(model: RouterModel) async throws {
+        try section("switching devices while running")
+
+        let originalSource = model.selectedSourceUID
+        let originalDestination = model.selectedDestinationUID
+        let originalMode = model.channelMode
+        let originalChannel = model.monoChannel
+        let originalTrim = model.inputDecibels
+
+        // Every loopback rather than the first one, and loopbacks only. A
+        // display's audio endpoint takes twelve seconds to refuse a start and
+        // says nothing about switching; routing a microphone into the speakers
+        // is the acoustic feedback loop `selectDefaults` exists to avoid. What
+        // is being exercised is a channel count changing underneath a running
+        // route, and two, sixteen and twenty channels covers that amply.
+        let loopbacks = model.outputDevices.filter {
+            $0.transport == .virtual && $0.outputChannels > 0 && $0.inputChannels > 0
+        }
+
+        // The tone goes into the loopback the route will read from. Everything
+        // else this section moves has to stay clear of it: a source that is
+        // also the destination is refused outright, which is right and is not
+        // what is being tested.
+        let toneDevice = loopbacks.first { $0.uid != originalDestination }
+        let tone = toneDevice.flatMap { LoopbackTone(deviceUID: $0.uid) }
+        defer { tone?.stop() }
+        guard let tone, let toneDevice else {
+            note("no spare loopback to put a known signal into — not exercised")
+            return
+        }
+        let destinations = loopbacks.filter {
+            $0.uid != originalDestination && $0.uid != toneDevice.uid
+        }
+        note("feeding \(toneDevice.name) a \(Int(LoopbackTone.hertz)) Hz tone at half scale")
+
+        // Unity through the whole chain, so what lands on the destination bus
+        // is the tone and not a number this section invented.
+        model.inputDecibels = 0
+        model.selectedSourceUID = toneDevice.uid
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route came up on the loopback carrying the tone",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+        await pause(upTo: 3.0, until: { model.outputPeak > toneFloor })
+        let baseline = await loudest(model, over: 0.6)
+        note(
+            "\(model.channelMode.rawValue) ch \(model.monoChannel) — \(sourceChannels(model))")
+        note(String(format: "destination bus %.1f dBFS with the tone", decibels(baseline)))
+        check("the tone reaches the destination bus at all", baseline > toneFloor)
+
+        if destinations.isEmpty { note("no other loopback output — not exercised") }
+        for other in destinations {
+            let from = model.selectedDestination
+            note(
+                "output \(from?.name ?? "—") (\(from?.outputChannels ?? 0) ch) → "
+                    + "\(other.name) (\(other.outputChannels) ch)")
+            await switchAndMeasure(model, end: "output to \(other.name)") {
+                model.selectedDestinationUID = other.uid
+            }
+            check(
+                "the routes point at \(other.name)",
+                !model.activeRoutes.isEmpty
+                    && model.activeRoutes.allSatisfy {
+                        $0.destination.deviceUID == other.uid
+                    })
+            model.selectedDestinationUID = originalDestination
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "and it goes back from \(other.name)",
+                { model.isRunning && !model.isBusy }, timeout: 15)
+        }
+
+        // Away to a real microphone and back to the tone. Only the return leg
+        // can be measured — a microphone carries whatever the room is doing —
+        // and the return leg is the whole complaint: an input changed while the
+        // route was up, and then nothing comes out.
+        //
+        // A differing channel count is the case that goes wrong quietly, since
+        // `channelMode` and `monoChannel` were chosen for the device being
+        // left; sixteen channels to one and back is as far apart as this
+        // machine goes.
+        let microphones = model.inputDevices.filter {
+            $0.uid != toneDevice.uid && $0.inputChannels > 0 && !$0.transport.isVirtual
+                && !model.isSamePhysicalDevice($0.uid, model.selectedDestinationUID ?? "")
+        }
+        if microphones.isEmpty { note("no real input on this machine — not exercised") }
+        for other in microphones {
+            note(
+                "input \(toneDevice.name) (\(toneDevice.inputChannels) ch, "
+                    + "\(model.channelMode.rawValue) ch \(model.monoChannel)) → "
+                    + "\(other.name) (\(other.inputChannels) ch) and back")
+            model.selectedSourceUID = other.uid
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the route came up on \(other.name)",
+                { model.isRunning && !model.isBusy }, timeout: 15)
+            check(
+                "the routes read from \(other.name)",
+                !model.activeRoutes.isEmpty
+                    && model.activeRoutes.contains { $0.source.deviceUID == other.uid })
+            // A channel remembered from the device being left has to be one the
+            // new device actually has, or the route resolves against a channel
+            // that is not in the aggregate at all.
+            note(
+                "on \(other.name): \(model.channelMode.rawValue) ch \(model.monoChannel) — "
+                    + sourceChannels(model))
+            check(
+                "the channel it kept exists on \(other.name)",
+                model.monoChannel < other.inputChannels)
+
+            await switchAndMeasure(model, end: "input back from \(other.name)") {
+                model.selectedSourceUID = toneDevice.uid
+            }
+            note(
+                "back on \(toneDevice.name): \(model.channelMode.rawValue) "
+                    + "ch \(model.monoChannel) — \(sourceChannels(model))")
+        }
+
+        // Stereo carried onto a device that has one channel. The mode is
+        // remembered from the device being left, and one channel cannot present
+        // a pair.
+        if let mono = microphones.first(where: { $0.inputChannels == 1 }) {
+            model.channelMode = .stereo
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "stereo came up on the loopback", { model.isRunning && !model.isBusy },
+                timeout: 15)
+            note("stereo, then \(mono.name), which has one channel, and back")
+            model.selectedSourceUID = mono.uid
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the route came up on \(mono.name)", { model.isRunning && !model.isBusy },
+                timeout: 15)
+            await switchAndMeasure(model, end: "input back from \(mono.name) in stereo") {
+                model.selectedSourceUID = toneDevice.uid
+            }
+            model.channelMode = originalMode
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "and the mode goes back", { model.isRunning && !model.isBusy }, timeout: 15)
+        }
+
+        // The same round trip with the route in the states somebody actually
+        // leaves it in. A rebuild carries state across, and every one of the
+        // things it has been caught not carrying — the effect chain, the
+        // headphone correction, the monitor sends — was silent rather than
+        // noisy, so the plain case coming back is no evidence about these.
+        if let microphone = microphones.first {
+            if let monitor = model.monitorOptions.first(where: {
+                $0.uid != toneDevice.uid && $0.uid != model.selectedDestinationUID
+            }) {
+                model.monitorDeviceUID = monitor.uid
+                await settle(model, timeout: 15)
+                await waitUntil(
+                    "the monitor came up on \(monitor.name)",
+                    { model.isRunning && !model.isBusy }, timeout: 15)
+                note("with a monitor on \(monitor.name)")
+                await roundTrip(
+                    model, from: toneDevice, via: microphone, label: "with a monitor")
+                model.monitorDeviceUID = nil
+                await settle(model, timeout: 15)
+                await waitUntil(
+                    "the monitor came back off", { model.isRunning && !model.isBusy },
+                    timeout: 15)
+            } else {
+                note("no spare output to monitor through — not exercised")
+            }
+
+            // A chain in the path means the routes read the chain's output
+            // buffer rather than the device's, and which route does that is
+            // decided from the *first* route's source — which is exactly what a
+            // source change moves.
+            let effectsBefore = model.enabledEffects
+            model.setEffect(.gate, enabled: true)
+            model.setEffect(.compressor, enabled: true)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the chain came up", { model.isRunning && !model.isBusy }, timeout: 15)
+            note("with a gate and a compressor in the path")
+            await roundTrip(model, from: toneDevice, via: microphone, label: "with a chain")
+            for kind in EffectKind.allCases where !effectsBefore.contains(kind) {
+                model.setEffect(kind, enabled: false)
+            }
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the chain came back out", { model.isRunning && !model.isBusy }, timeout: 15)
+        }
+
+        // Changing a device after one that would not start.
+        //
+        // Every device this application can be pointed at is in the list,
+        // including the ones that will not work: the source is in the output
+        // list too, and picking it is refused with a sentence saying so. That
+        // refusal leaves the route down, which is right. What happens next is
+        // the whole of this check — somebody reads the sentence and picks
+        // something that works.
+        //
+        // Deliberately the refusal that needs no timing. A start that fails
+        // slowly and one that fails at once leave the same state behind, and a
+        // check that depends on catching a window is a check that passes on a
+        // fast machine and reports a defect on a slow one.
+        note("picking the source as the output, which is refused, and then correcting it")
+        model.selectedDestinationUID = toneDevice.uid
+        await waitUntil(
+            "the route came down on a destination that cannot work",
+            { !model.isRunning && !model.isBusy }, timeout: 20)
+        if let error = model.lastError { note("the route said: \(error)") }
+        model.selectedDestinationUID = originalDestination
+        await waitUntil(
+            "and choosing one that works brings it back",
+            { model.isRunning && !model.isBusy }, timeout: 20)
+        check(
+            "on the device that was chosen second",
+            model.selectedDestinationUID == originalDestination)
+        await pause(upTo: 3.0, until: { model.outputPeak > toneFloor })
+        let recovered = await loudest(model, over: 0.6)
+        note(
+            String(
+                format: "destination bus %.1f dBFS after correcting the choice",
+                decibels(recovered)))
+        check("the tone reaches the destination bus again", recovered > toneFloor)
+
+        tone.stop()
+        model.channelMode = originalMode
+        model.monoChannel = originalChannel
+        model.inputDecibels = originalTrim
+        model.selectedDestinationUID = originalDestination
+        model.selectedSourceUID = originalSource
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route is left as it was found",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+    }
+
+    /// Half scale is −6 dBFS; twenty decibels below it is a margin no working
+    /// route falls through and no broken one climbs to.
+    private static let toneFloor: Float = 0.05
+
+    /// Which source channels the installed routes are reading, as a sentence.
+    ///
+    /// The number the level cannot tell you: a route reading a channel that
+    /// carries nothing looks exactly like a route reading a channel that is
+    /// quiet, and the difference is the whole of what a stale channel map does.
+    private static func sourceChannels(_ model: RouterModel) -> String {
+        let taken = model.activeRoutes.map { "ch\($0.source.channel)" }
+        return taken.isEmpty ? "no routes" : "reading " + taken.joined(separator: ", ")
+    }
+
+    /// Off to another microphone and back to the one carrying the tone.
+    ///
+    /// Only the return leg can be measured, because a microphone carries
+    /// whatever the room is doing — and the return leg is the complaint: an
+    /// input changed while the route was up, and then nothing comes out.
+    private static func roundTrip(
+        _ model: RouterModel, from tone: AudioDevice, via other: AudioDevice, label: String
+    ) async {
+        model.selectedSourceUID = other.uid
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route came up on \(other.name) \(label)",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+        await switchAndMeasure(model, end: "input back from \(other.name) \(label)") {
+            model.selectedSourceUID = tone.uid
+        }
+    }
+
+    /// Makes a change that restarts the route and asserts the tone survives it.
+    ///
+    /// - Parameters:
+    ///   - model: The live model, reading the loopback that carries the tone.
+    ///   - end: Which end is moving, for the assertion text.
+    ///   - change: The assignment itself.
+    private static func switchAndMeasure(
+        _ model: RouterModel, end: String, _ change: () -> Void
+    ) async {
+        change()
+        await settle(model, timeout: 15)
+        await waitUntil(
+            "the route came back up on the new \(end)",
+            { model.isRunning && !model.isBusy }, timeout: 15)
+        if let error = model.lastError { note("the route said: \(error)") }
+        check("no error was reported after the \(end) changed", model.lastError == nil)
+
+        // The highest of several reads rather than one. `cycleCount` is taken
+        // under a lock it will not wait for — the alternative being an
+        // interface that freezes for as long as `coreaudiod` takes — so a
+        // single read lands on zero whenever the engine queue happens to hold
+        // it, and a baseline of zero read that way made this fail on a route
+        // that was running perfectly well.
+        var cyclesAfter: UInt64 = 0
+        for _ in 0..<5 {
+            cyclesAfter = max(cyclesAfter, model.cycleCountForDiagnostics)
+            await pause(0.02)
+        }
+        await pause(upTo: 2.0, until: { model.cycleCountForDiagnostics > cyclesAfter })
+        note(
+            "cycles \(cyclesAfter) just after the \(end) changed, "
+                + "\(model.cycleCountForDiagnostics) a moment later")
+        check(
+            "the IO cycle counter advances after the \(end) changed",
+            model.cycleCountForDiagnostics > cyclesAfter)
+
+        // The counter says the IOProc is being called. It says nothing about
+        // whether anything is being carried, which is exactly the failure being
+        // hunted: a graph that runs every cycle over a route map carrying
+        // nothing reads as healthy everywhere else.
+        await pause(upTo: 3.0, until: { model.outputPeak > toneFloor })
+        let after = await loudest(model, over: 0.6)
+        note(
+            String(
+                format: "destination bus %.1f dBFS after the %@ changed", decibels(after), end))
+        check(
+            "the tone still reaches the destination bus after the \(end) changed",
+            after > toneFloor)
+    }
+
+    /// The loudest the destination bus gets over a window.
+    ///
+    /// A single reading is not enough: the peak decays at a fixed rate per
+    /// cycle, so what it says depends on when it was asked as much as on what
+    /// arrived. The maximum over a window is a property of the signal.
+    private static func loudest(_ model: RouterModel, over seconds: TimeInterval) async -> Float
+    {
+        var peak: Float = 0
+        let deadline = Date().addingTimeInterval(
+            inWantedSection ? seconds : min(seconds, 0.05))
+        while Date() < deadline {
+            peak = max(peak, model.outputPeak)
+            await pause(0.05)
+        }
+        return peak
+    }
+
+    private static func decibels(_ amplitude: Float) -> Double {
+        amplitude > 0 ? Double(20 * log10(amplitude)) : -200
+    }
+
+    /// A steady tone written into a loopback device, so that the input end of
+    /// the route is a known number rather than whatever the room is doing.
+    ///
+    /// A loopback carries its output back to its own input, so this is the only
+    /// way to give the router a signal it can be held to without anybody having
+    /// to make a noise — and since the device is virtual, nobody hears it.
+    ///
+    /// An IOProc of its own rather than `AVAudioEngine` pointed at the device.
+    /// The engine negotiates a format with whatever it is attached to, and
+    /// against a sixteen-channel loopback it produced silence: a mono source
+    /// upmixed into a mixer whose output layout the engine had chosen. An
+    /// IOProc writes the channels the device actually has, which is the only
+    /// thing this needs to be sure of.
+    private final class LoopbackTone {
+        static let hertz = 440.0
+
+        private let deviceID: AudioDeviceID
+        private var procID: AudioDeviceIOProcID?
+
+        /// Shared with the IO thread, so it is a pointer rather than a
+        /// property: the block cannot capture `self` mutably and the phase has
+        /// to survive between callbacks.
+        private let phase: UnsafeMutablePointer<Double>
+
+        init?(deviceUID: String) {
+            guard let device = try? AudioDevices.device(uid: deviceUID) ?? nil,
+                let rate = device.currentSampleRate, rate > 0
+            else { return nil }
+            deviceID = device.id
+            phase = UnsafeMutablePointer<Double>.allocate(capacity: 1)
+            phase.initialize(to: 0)
+
+            // Half scale rather than full: the limiter is in the path, and a
+            // signal it has to work on would be measuring the limiter.
+            let increment = 2 * Double.pi * Self.hertz / rate
+            let phase = self.phase
+            let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, nil) {
+                _, _, _, outputData, _ in
+                let buffers = UnsafeMutableAudioBufferListPointer(outputData)
+                for index in 0..<buffers.count {
+                    guard let data = buffers[index].mData else { continue }
+                    let channels = Int(buffers[index].mNumberChannels)
+                    let samples = data.assumingMemoryBound(to: Float.self)
+                    let frames =
+                        Int(buffers[index].mDataByteSize) / MemoryLayout<Float>.size
+                        / max(channels, 1)
+                    var running = phase.pointee
+                    for frame in 0..<frames {
+                        let value = Float(sin(running) * 0.5)
+                        running += increment
+                        if running > 2 * Double.pi { running -= 2 * Double.pi }
+                        for channel in 0..<channels {
+                            samples[frame * channels + channel] = value
+                        }
+                    }
+                    // Every buffer is the same block of time, so the phase
+                    // advances once rather than once per buffer.
+                    if index == buffers.count - 1 { phase.pointee = running }
+                }
+            }
+            guard status == noErr, let procID, AudioDeviceStart(device.id, procID) == noErr
+            else {
+                phase.deallocate()
+                if let procID { AudioDeviceDestroyIOProcID(device.id, procID) }
+                self.procID = nil
+                return nil
+            }
+        }
+
+        func stop() {
+            guard let procID else { return }
+            AudioDeviceStop(deviceID, procID)
+            AudioDeviceDestroyIOProcID(deviceID, procID)
+            self.procID = nil
+            phase.deallocate()
         }
     }
 
