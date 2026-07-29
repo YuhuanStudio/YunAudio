@@ -3301,6 +3301,7 @@ enum UIFlowCheck {
 
         try await checkMIDI(model: model)
         try await checkScoring(model: model)
+        try await checkTheWholeChain(model: model)
         try await checkVoiceActivity(model: model)
         try await checkScripting(model: model)
         try await checkRedrawCost(model: model)
@@ -3389,6 +3390,10 @@ enum UIFlowCheck {
         model.isScoringSinging = true
         await pause(upTo: 1.0, until: { model.isScoringSinging })
         check("scoring started", model.isScoringSinging)
+        if let problem = model.singingError { note(problem) }
+        note(
+            "\(model.singers.count) singer(s) on \(model.engineTranscriptTaps) tap(s) "
+                + "for \(model.sourceGroups.count) source(s)")
         if let problem = model.singingError { note(problem) }
         check("one singer per source", model.singers.count == model.sourceGroups.count)
         note(
@@ -3613,6 +3618,522 @@ enum UIFlowCheck {
         model.isSingingVisible = false
         if player.isRunning { player.terminate() }
         await waitUntil("the capture was released", { !model.isBusy }, timeout: 10)
+    }
+
+    // MARK: The whole singing chain, on real audio
+
+    /// The notes the chain is exercised with, one second each.
+    ///
+    /// In the fifth octave rather than a bass singer's, for the same reason the
+    /// key progression is: the tracker is reliable there, and a semitone at
+    /// 130 Hz is small enough against the analysis resolution that a
+    /// disagreement would be about arithmetic rather than about the chain.
+    private static let chainNotes = [69, 71, 72, 74, 76, 74]
+    private static let chainNoteSeconds = 1.0
+    /// The gap between passes of the tune in the scoring take, and how many
+    /// passes there are.
+    ///
+    /// The tune is played over and over rather than once after a long lead-in,
+    /// and both numbers were arrived at by measurement.
+    ///
+    /// *Several passes*, because the capture is slow — resolving the process,
+    /// building the tap and rebuilding the routes is several seconds of real
+    /// device work — and afplay exits the moment its file ends. A single
+    /// lead-in long enough to cover the worst of that lost the race:
+    /// `resolved to no running process`.
+    ///
+    /// *A short gap*, because a process tap built while the process is
+    /// rendering silence publishes no channels, so there is nothing to route
+    /// and the capture never becomes a source. With eight-second gaps that hit
+    /// on more runs than not — the tap was built, CoreAudio refused nothing,
+    /// the process was alive, and the bus carried the microphone alone. At a
+    /// second and a half against six seconds of tune the capture lands in
+    /// audio five times out of six, and the retry covers the sixth.
+    ///
+    /// The gap still has to be long enough to be seen as one, because the take
+    /// is anchored on a gap ending rather than on the file starting: the poll
+    /// is 50 ms and a tracker frame is 43.
+    private static let chainSilence = 1.5
+    private static let chainPasses = 8
+
+    /// The words and the score, end to end, on audio a real process is playing.
+    ///
+    /// Every piece of this was already asserted and the chain between them
+    /// never was. `Lyrics` is parsed in the unit tests, `KaraokeScore` is a pure
+    /// function asserted to death, and in between sat the two things nobody had
+    /// measured: which clock the highlight is on, and whether a tune, a tap and
+    /// a tracker ever produce a number about a performance.
+    ///
+    /// Nothing here depends on a music service being in any particular state.
+    /// The words, the tune and the audio are built in this file, and the clock
+    /// is run by hand — which is not a fixture but the feature somebody singing
+    /// to a browser, a hardware player or a file on the desktop needs, and did
+    /// not have.
+    private static func checkTheWholeChain(model: RouterModel) async throws {
+        let directory = URL(fileURLWithPath: "/tmp", isDirectory: true)
+        let words = directory.appendingPathComponent("yunaudio-chain.lrc")
+        let tune = directory.appendingPathComponent("yunaudio-chain.mid")
+        let audio = directory.appendingPathComponent("yunaudio-chain.wav")
+        let leadIn = directory.appendingPathComponent("yunaudio-chain-lead.wav")
+        defer {
+            for file in [words, tune, audio, leadIn] {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+        // One line a note, so "which line is current" and "which note is
+        // sounding" are the same question asked of two different clocks.
+        let lyricText = chainNotes.indices
+            .map { String(format: "[00:%02d.00]line %d", $0, $0) }
+            .joined(separator: "\n")
+        let written =
+            (try? lyricText.write(to: words, atomically: true, encoding: .utf8)) != nil
+            && (try? tuneFile(notes: chainNotes, secondsEach: chainNoteSeconds)
+                .write(to: tune)) != nil
+            && (try? toneWave(notes: chainNotes, secondsEach: chainNoteSeconds)
+                .write(to: audio)) != nil
+            && (try? toneWave(
+                notes: chainNotes, secondsEach: chainNoteSeconds, leadIn: chainSilence,
+                passes: chainPasses
+            ).write(to: leadIn)) != nil
+
+        // Nine seconds of audio takes nine seconds, and a section nobody asked
+        // for is carried along for the state it leaves behind. These two leave
+        // none — every file they write they remove, every mode they set they
+        // put back — so skimming them is skipping them rather than shortening
+        // them.
+        try section("the words follow the song")
+        if inWantedSection {
+            if written {
+                await checkTheWords(model: model, words: words, audio: audio)
+            } else {
+                note("could not write the test files — skipped")
+            }
+        }
+
+        try section("scoring what was actually sung")
+        if inWantedSection {
+            if written {
+                await checkTheScore(model: model, words: words, audio: leadIn)
+            } else {
+                note("could not write the test files — skipped")
+            }
+        }
+    }
+
+    /// Which line is current, at which moment, against real audio.
+    private static func checkTheWords(
+        model: RouterModel, words: URL, audio: URL
+    ) async {
+        await bringRoutingBack(model)
+        model.isSingingVisible = true
+        defer {
+            model.closeWords()
+            model.isSingingVisible = false
+        }
+
+        let opened = model.openWords(at: words)
+        check("an .lrc chosen by hand is read", opened)
+        check("with a line a note", model.lyrics?.lines.count == chainNotes.count)
+        check("and the tune beside it", model.melody?.melody.count == chainNotes.count)
+        check("nothing is current before it starts", model.lyricLine == nil)
+        // Where the words run out: the last line plus the four seconds
+        // `Lyrics.progress(at:)` gives it, which is longer than the tune here.
+        let ends = Double(chainNotes.count - 1) * chainNoteSeconds + 4
+        check("and the panel knows where they end", model.nowPlaying?.duration == ends)
+
+        // A real process, playing the audio those words are written against.
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        player.arguments = [audio.path]
+        guard (try? player.run()) != nil else {
+            note("afplay would not start — skipped")
+            return
+        }
+        defer { if player.isRunning { player.terminate() } }
+        // The clock starts when the music does, which is exactly what somebody
+        // pressing this button is doing.
+        let started = Date()
+        model.runWords(from: 0)
+
+        // The claim, as a number: at 1.4 s the second line is the one being
+        // sung, at 3.4 s the fourth, at 5.4 s the sixth. Read off the model the
+        // panel draws from, on the same poll a person watches.
+        let last = chainNotes.count - 1
+        for wanted in [1, 3, last] {
+            let moment = Double(wanted) * chainNoteSeconds + 0.4
+            while Date().timeIntervalSince(started) < moment, player.isRunning {
+                await pause(0.02)
+            }
+            let elapsed = Date().timeIntervalSince(started)
+            let line = model.lyricLine
+            check(
+                "at \(String(format: "%.1f", moment)) s the line being sung is \(wanted)",
+                line == wanted)
+            note(
+                String(
+                    format: "line %@ at %.2f s of wall clock, the clock says %.2f s",
+                    line.map(String.init) ?? "none", elapsed, model.songPosition))
+            // The clock against the wall it was started by. There is nothing
+            // between them but arithmetic, so anything here is a defect rather
+            // than a tolerance.
+            check(
+                "and the clock is where the wall clock is",
+                abs(model.songPosition - elapsed) < 0.05)
+            // How far across the line the sweep is. Every line runs a second
+            // except the last, which `Lyrics.progress(at:)` gives four — so
+            // 0.4 s in is 40% of an ordinary line and 10% of the final one, and
+            // asserting one band for both would be asserting nothing.
+            let span = wanted == last ? 4.0 : chainNoteSeconds
+            check(
+                "and the sweep is \(Int(0.4 / span * 100))% across it",
+                abs(model.lyricProgress - 0.4 / span) < 0.1)
+        }
+
+        // afplay holds the device for a second or two either side of the audio
+        // — measured at 6.98, 7.08 and 8.34 s for this six-second file — so its
+        // own lifetime is not a measurement of anything. What is asserted is
+        // that the words stopped at the end of themselves rather than sweeping
+        // on past a song that had already finished.
+        while player.isRunning, Date().timeIntervalSince(started) < ends + 4 {
+            await pause(0.05)
+        }
+        while Date().timeIntervalSince(started) < ends + 1.5 { await pause(0.05) }
+        let onTheClock = model.songPosition
+        note(
+            String(
+                format: "%.2f s of wall clock later the words' clock reads %.2f s of %.1f s",
+                Date().timeIntervalSince(started), onTheClock, ends))
+        check("the words stop at the end of themselves", abs(onTheClock - ends) < 0.05)
+
+        model.runWords(from: 0)
+        await pause(0.4)
+        check("and starting them again puts them back at the top", model.lyricLine == 0)
+        model.stopWords()
+        await pause(0.3)
+        let stopped = model.songPosition
+        await pause(0.4)
+        check("stopping the words stops the clock", abs(model.songPosition - stopped) < 0.01)
+
+        // Moving the words against the recording, which is the control every
+        // downloaded `.lrc` eventually needs and the panel did not have.
+        model.runWords(from: 2.0)
+        await pause(0.2)
+        let before = model.lyricLine
+        model.nudgeLyrics(by: 1.0)
+        check("the words can be pulled a second earlier", model.lyricNudge == 1.0)
+        check("which moves the highlight on by a line", model.lyricLine == (before ?? 0) + 1)
+        for _ in 0..<40 { model.nudgeLyrics(by: 1.0) }
+        check("and it stops at two seconds either way", model.lyricNudge == 2.0)
+        model.stopWords()
+
+        // What asking a player costs, which is the whole reason the clock
+        // exists. The panel used to send the full six-property Apple event on
+        // every poll: 61.4 ms measured against a 50 ms poll period, so it spent
+        // more than the whole of the main thread finding out something that
+        // advances at one second per second, and the sweep above could not have
+        // moved however the animation had been written.
+        model.closeWords()
+        model.resetPollCost()
+        model.measuresPollBreakdown = true
+        await pause(3.0)
+        model.measuresPollBreakdown = false
+        let polls = max(1, model.pollCost.polls)
+        let asking = (model.pollBreakdown["nowPlaying"] ?? 0) / Double(polls) * 1000
+        note(
+            String(
+                format: "asking where the song is costs %.2f ms a poll over %d polls",
+                asking, polls))
+        check("which is a fraction of the 50 ms poll period", asking < 10)
+        if NowPlaying.current() == nil {
+            note("no player is running, so this is not the saving it is worth in use")
+        }
+    }
+
+    /// The tune, the tap, the tracker and a number, on audio a process played.
+    ///
+    /// The player is captured as a process, which makes it a source with its
+    /// own ring — the same ring a second singer would have — so what is scored
+    /// has been through the tap, the pitch tracker and the pairing window
+    /// rather than handed to the scorer as an array.
+    private static func checkTheScore(
+        model: RouterModel, words: URL, audio: URL
+    ) async {
+        await bringRoutingBack(model)
+        guard model.isRunning else {
+            note("routing would not start — the live half was not exercised")
+            return
+        }
+        model.isSingingVisible = true
+        defer {
+            model.isScoringSinging = false
+            model.closeWords()
+            model.isSingingVisible = false
+        }
+        let opened = model.openWords(at: words)
+        check("the words and the tune are loaded", opened && model.melody != nil)
+
+        let take = Process()
+        take.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        take.arguments = [audio.path]
+        guard (try? take.run()) != nil else {
+            note("afplay would not start — skipped")
+            return
+        }
+        defer { if take.isRunning { take.terminate() } }
+
+        // Matched on this process rather than on the name. Another section of
+        // this check plays through afplay too, and the HAL lists a process for
+        // a moment after it has gone — so picking "the one called afplay"
+        // picked a dying one, and `ProcessTap` refused it. That failed on
+        // alternate runs and read as a defect in the capture path.
+        let identity = AudioApplications.identity(forPID: take.processIdentifier)
+        await pause(upTo: 5.0) {
+            model.refreshApps()
+            return model.availableApps.contains { $0.bundleID == identity }
+        }
+        guard let captured = model.availableApps.first(where: { $0.bundleID == identity })
+        else {
+            note("afplay did not appear as a tappable process — skipped")
+            return
+        }
+        let alreadyCaptured = model.capturedAppBundleIDs
+        defer { model.capturedAppBundleIDs = alreadyCaptured }
+        // Waited for on the thing that has to be true, not on the model being
+        // idle: `isBusy` is false for the moment between asking and the rebuild
+        // starting, and reading the sources there is reading the state before
+        // the change. Measured: the capture arrived, the routes were the
+        // microphone alone, and the section blamed the tap.
+        func backingSource() -> RouterModel.SourceGroup? {
+            model.sourceGroups.first {
+                model.representative(of: $0).flatMap(model.application(of:)) != nil
+            }
+        }
+        // And retried, because `AudioHardwareCreateProcessTap` refuses one
+        // outright on roughly every other attempt on this machine — measured
+        // over six consecutive runs, alternating, on a process that was
+        // definitely alive and definitely the one asked for. A second attempt
+        // has always taken. Whether that is a rate limit inside coreaudiod or a
+        // tap from the run before still being torn down is not something this
+        // check can see; what it must not do is report a defect in the singing
+        // path for it.
+        var attempts = 0
+        while attempts < 2, backingSource() == nil {
+            attempts += 1
+            if attempts > 1 {
+                model.capturedAppBundleIDs.remove(captured.bundleID)
+                await settle(model, timeout: 5)
+            }
+            model.capturedAppBundleIDs.insert(captured.bundleID)
+            await pause(upTo: 12, until: { backingSource() != nil })
+        }
+        if attempts > 1, backingSource() != nil {
+            note("the tap would not build \(attempts - 1) time(s) before it took")
+        }
+        if !model.unresolvedCaptures.isEmpty {
+            note(
+                "resolved to no running process: "
+                    + model.unresolvedCaptures.joined(separator: ", "))
+        }
+        if !model.refusedCaptures.isEmpty {
+            note("CoreAudio refused the tap: " + model.refusedCaptures.joined(separator: ", "))
+        }
+        // A note rather than a check. Whether CoreAudio will build a process
+        // tap on this machine at this moment is not evidence about the singing
+        // path either way, and the section that does assert it is "the key of
+        // music that is actually playing". What this one must not do is go on
+        // to score silence and call the number a result.
+        guard let backing = backingSource() else {
+            note(
+                "no capture on the bus, so the live half was not exercised — destination "
+                    + "\(model.selectedDestination?.outputChannels ?? 0) channel(s)")
+            return
+        }
+        note("the backing track is on the bus as \(model.sourceGroups.count) source(s)")
+        model.isScoringSinging = true
+        await pause(upTo: 1.0, until: { model.isScoringSinging })
+        check("scoring started", model.isScoringSinging)
+        if let problem = model.singingError { note(problem) }
+        note(
+            "\(model.singers.count) singer(s) on \(model.engineTranscriptTaps) tap(s) "
+                + "for \(model.sourceGroups.count) source(s)")
+
+        // Anchored on the audio rather than on a stopwatch. afplay takes an
+        // unknown couple of hundred milliseconds to open a device and the
+        // scorer's pairing window is 60 ms, so starting the clock when the
+        // process was launched would be measuring that latency rather than the
+        // chain.
+        //
+        // The gap first, then the note after it. Waiting only for a pitch would
+        // catch whichever note the file happened to be in the middle of when
+        // the capture finally came up, and score a tune against itself shifted
+        // by however far in that was.
+        func backingHertz() -> Float {
+            model.singers.first { $0.uid == backing.uid }?.hertz ?? 0
+        }
+        let tuneSeconds = Double(chainNotes.count) * chainNoteSeconds
+        await pause(upTo: tuneSeconds + 2, until: { backingHertz() == 0 })
+        await waitUntil(
+            "the captured player reached the tap",
+            { backingHertz() > 0 }, timeout: chainSilence + tuneSeconds + 2)
+        model.runWords(from: 0)
+
+        // Read while the tune is actually sounding. The three numbers below are
+        // all zero once it has stopped, and three zeroes agree with each other
+        // perfectly — which is how a check that compares them says nothing at
+        // all and looks like it said something.
+        await pause(tuneSeconds / 2)
+        let mixHertz = model.analysis.pitchHertz
+        let bandHertz = model.singers.first { $0.uid == backingSource()?.uid }?.hertz ?? 0
+        let voiceHertz = model.singerHertz
+        // The whole tune, plus a moment for the last frame to be paired.
+        await pause(tuneSeconds / 2 + 1.0)
+
+        guard let scored = model.singers.first(where: { $0.uid == backingSource()?.uid })
+        else {
+            note(
+                "singers: "
+                    + model.singers.map { "\($0.name) [\($0.uid)]" }.joined(separator: ", "))
+            note(
+                "the backing track was [\(backing.uid)] and is now "
+                    + "[\(backingSource()?.uid ?? "gone")], scoring "
+                    + "\(model.isScoringSinging ? "on" : "off")")
+            note("the captured source produced no singer — nothing to score")
+            return
+        }
+        note(
+            String(
+                format: "%@ scored %.0f%% over %.1f s of tune: %.1f s on the note, "
+                    + "%.1f s near it, %.1f s silent",
+                scored.name, scored.score.percentage, scored.score.referenceSeconds,
+                scored.score.onPitchSeconds, scored.score.nearPitchSeconds,
+                scored.score.silentSeconds))
+        check("there was enough of the tune to judge", scored.score.isMeaningful)
+        // The tune sung back at itself through the whole path. Not a hundred:
+        // the anchor is a poll and a tracker frame late, which is about ninety
+        // milliseconds out of six seconds, and the note boundaries are what
+        // that costs. Under sixty means a link in the chain is broken rather
+        // than merely late.
+        check(
+            "singing the tune back through the chain scores well",
+            scored.score.percentage > 60)
+        if let error = scored.score.meanErrorSemitones {
+            note(String(format: "mean error %.2f semitones", error))
+            check("and the pitch it heard is the pitch that was played", abs(error) < 0.5)
+        }
+        check(
+            "the per-line breakdown covers the words",
+            scored.score.lines.count == chainNotes.count)
+
+        // The number at the top of the panel is the singer's own tap, not the
+        // mixed bus. It used to be the bus — every source, folded to mono after
+        // the master — so with music playing, which is the one case this panel
+        // exists for, "you are singing" named the backing track and the
+        // transpose suggestion was built on the song's own range.
+        note(
+            String(
+                format: "mid-tune: the mix was at %.0f Hz, the backing track's own tap at "
+                    + "%.0f Hz, the singer's at %.0f Hz",
+                mixHertz, bandHertz, voiceHertz))
+        check("the backing track's own tap heard the tune", bandHertz > 0)
+        check("and the mixed bus heard it too", mixHertz > 0)
+        check("but the panel's note is neither of them", voiceHertz != bandHertz)
+        check("nor the mix", voiceHertz != mixHertz)
+
+        model.isScoringSinging = false
+        if take.isRunning { take.terminate() }
+        await waitUntil("the capture was released", { !model.isBusy }, timeout: 10)
+    }
+
+    /// A monophonic tune as a Standard MIDI File, one chunk, 120 bpm.
+    private static func tuneFile(notes: [Int], secondsEach: Double) -> Data {
+        func variableLength(_ value: Int) -> [UInt8] {
+            var buffer = [UInt8(value & 0x7F)]
+            var rest = value >> 7
+            while rest > 0 {
+                buffer.insert(UInt8(rest & 0x7F | 0x80), at: 0)
+                rest >>= 7
+            }
+            return buffer
+        }
+        func big32(_ value: Int) -> [UInt8] {
+            [
+                UInt8(value >> 24 & 0xFF), UInt8(value >> 16 & 0xFF),
+                UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF),
+            ]
+        }
+        func big16(_ value: Int) -> [UInt8] {
+            [UInt8(value >> 8 & 0xFF), UInt8(value & 0xFF)]
+        }
+        // 480 ticks a quarter at 120 bpm is 960 a second.
+        let ticks = Int((secondsEach * 960).rounded())
+        var body: [UInt8] = []
+        for note in notes {
+            body += variableLength(0) + [0x90, UInt8(note), 100]
+            body += variableLength(ticks) + [0x80, UInt8(note), 0]
+        }
+        body += [0x00, 0xFF, 0x2F, 0x00]
+        let chunk = Array("MTrk".utf8) + big32(body.count) + body
+        return Data(Array("MThd".utf8) + big32(6) + big16(0) + big16(1) + big16(480) + chunk)
+    }
+
+    /// The same tune as audio somebody can play, as a 16-bit mono WAV.
+    ///
+    /// Each note is ramped in and out over ten milliseconds. A step change in a
+    /// sine is a click with energy at every frequency, and a pitch tracker
+    /// asked about the frame containing one has every right to answer something
+    /// else — which would be measuring the fixture rather than the chain.
+    private static func toneWave(
+        notes: [Int], secondsEach: Double, leadIn: Double = 0, passes: Int = 1
+    ) -> Data {
+        let rate = 44100.0
+        var samples: [Int16] = []
+        let ramp = Int(0.01 * rate)
+        for _ in 0..<max(1, passes) {
+            samples += [Int16](repeating: 0, count: Int(leadIn * rate))
+            for note in notes {
+                let hertz = 440 * pow(2, (Double(note) - 69) / 12)
+                let count = Int(secondsEach * rate)
+                for frame in 0..<count {
+                    let envelope = min(
+                        1.0, min(Double(frame), Double(count - 1 - frame)) / Double(ramp))
+                    let value = sin(2 * .pi * hertz * Double(frame) / rate) * envelope
+                    samples.append(Int16(value * 12000))
+                }
+            }
+        }
+        return wave(samples, rate: rate)
+    }
+
+    /// Wraps 16-bit mono samples in a RIFF header.
+    private static func wave(_ samples: [Int16], rate: Double) -> Data {
+        var bytes: [UInt8] = []
+        func little32(_ value: Int) {
+            bytes += [
+                UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF), UInt8(value >> 16 & 0xFF),
+                UInt8(value >> 24 & 0xFF),
+            ]
+        }
+        func little16(_ value: Int) {
+            bytes += [UInt8(value & 0xFF), UInt8(value >> 8 & 0xFF)]
+        }
+        let dataBytes = samples.count * 2
+        bytes += Array("RIFF".utf8)
+        little32(36 + dataBytes)
+        bytes += Array("WAVEfmt ".utf8)
+        little32(16)
+        little16(1)  // PCM
+        little16(1)  // mono
+        little32(Int(rate))
+        little32(Int(rate) * 2)
+        little16(2)
+        little16(16)
+        bytes += Array("data".utf8)
+        little32(dataBytes)
+        for sample in samples {
+            let raw = UInt16(bitPattern: sample)
+            bytes += [UInt8(raw & 0xFF), UInt8(raw >> 8)]
+        }
+        return Data(bytes)
     }
 
     /// A bass line under a four-note melody, as a Standard MIDI File.

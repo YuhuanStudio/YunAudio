@@ -1339,28 +1339,41 @@ struct MainWindow: View {
                             .foregroundStyle(Yun.Palette.textTertiary)
                             .lineLimit(1)
                         Spacer()
-                        Text(Self.clock(track.position) + " / " + Self.clock(track.duration))
-                            .font(Yun.Text.mono)
-                            .foregroundStyle(Yun.Palette.textTertiary)
-                            .monospacedDigit()
+                        // From the model's own clock rather than from the
+                        // track: the player is asked once a second and this
+                        // ticks between, which is what makes it a clock rather
+                        // than a number that lurches.
+                        Text(
+                            Self.clock(Double(model.songSecond)) + " / "
+                                + Self.clock(track.duration)
+                        )
+                        .font(Yun.Text.mono)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .monospacedDigit()
                         YunBadge(track.application)
                     }
                 }
             } else {
                 Text(
                     NowPlaying.hasAPlayer
-                        ? loc("Play something in Music or Spotify.")
-                        : loc("Neither Music nor Spotify is installed.")
+                        ? loc(
+                            "Play something in Music or Spotify, or choose the words yourself.")
+                        : loc(
+                            "Neither Music nor Spotify is installed — choose the words yourself."
+                        )
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             }
 
+            handRun
+
             YunDivider()
 
             if let lyrics = model.lyrics {
                 lyricView(lyrics)
+                lyricNudge
             } else if model.nowPlaying != nil {
                 Text(
                     loc(
@@ -1440,6 +1453,72 @@ struct MainWindow: View {
         }
     }
 
+    /// Words with no player to ask.
+    ///
+    /// Music and Spotify have scripting dictionaries; a browser, a hardware
+    /// player, a file on the desktop and a karaoke machine on the line input
+    /// have none — and to every one of those the panel used to say "play
+    /// something in Music or Spotify" and stop there, which is most of the ways
+    /// anybody actually plays a backing track. Choosing the words and starting
+    /// them when the music starts is what a karaoke machine has always done.
+    @ViewBuilder
+    private var handRun: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Button(model.isHandRun ? loc("Choose another") : loc("Choose the words…")) {
+                chooseWords()
+            }
+            .buttonStyle(YunButtonStyle(.ghost, small: true))
+            if model.isHandRun {
+                Button(model.isRunningWords ? loc("Stop") : loc("Start")) {
+                    if model.isRunningWords { model.stopWords() } else { model.runWords() }
+                }
+                .buttonStyle(YunButtonStyle(.secondary, small: true))
+                Button(loc("Back to the player")) { model.closeWords() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func chooseWords() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.init(filenameExtension: "lrc") ?? .plainText]
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = RouterModel.lyricsDirectory
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        model.openWords(at: url)
+    }
+
+    /// Moving the words against the recording.
+    ///
+    /// The one control everybody who has ever sung to a downloaded `.lrc` has
+    /// wanted. The format carries an `[offset:]` and it is wrong as often as it
+    /// is right — the file was written against a different master, or a stream
+    /// with a different silent lead-in — and without this the only remedy was
+    /// editing the file between verses.
+    @ViewBuilder
+    private var lyricNudge: some View {
+        HStack(spacing: Yun.Space.sm) {
+            Text(loc("Words"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            Button(loc("Earlier")) { model.nudgeLyrics(by: 0.1) }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+            Button(loc("Later")) { model.nudgeLyrics(by: -0.1) }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+            Spacer()
+            Text(
+                model.lyricNudge == 0
+                    ? loc("as written") : String(format: "%+.1f s", model.lyricNudge)
+            )
+            .font(Yun.Text.mono)
+            .foregroundStyle(
+                model.lyricNudge == 0 ? Yun.Palette.textMuted : Yun.Palette.textSecondary
+            )
+            .monospacedDigit()
+        }
+    }
+
     /// How much of the tune each person actually sang.
     ///
     /// Two microphones is two scores rather than one, and it costs nothing to
@@ -1464,6 +1543,13 @@ struct MainWindow: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
+            // The other button every karaoke machine has. Without it the only
+            // way to start the attempt again was the switch, which also throws
+            // away the tune, the taps and the words.
+            if model.isScoringSinging {
+                Button(loc("Start again")) { model.restartScore() }
+                    .buttonStyle(YunButtonStyle(.secondary, small: true))
+            }
         }
         if let problem = model.singingError {
             Text(problem)
@@ -1669,7 +1755,9 @@ struct MainWindow: View {
                             .foregroundStyle(Yun.Palette.textSecondary)
                         ScrollView {
                             VStack(alignment: .leading, spacing: 2) {
-                                ForEach(Array(model.scriptLog.suffix(12).enumerated()), id: \.offset) {
+                                ForEach(
+                                    Array(model.scriptLog.suffix(12).enumerated()), id: \.offset
+                                ) {
                                     _, line in
                                     Text(line)
                                         .font(.system(size: 11, design: .monospaced))
@@ -1691,10 +1779,11 @@ struct MainWindow: View {
                     // thing somebody needs is the list.
                     Text(
                         ScriptHost.Event.allCases.map(\.rawValue).sorted()
-                            .joined(separator: "   "))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Yun.Palette.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                            .joined(separator: "   ")
+                    )
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

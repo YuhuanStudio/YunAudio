@@ -484,9 +484,13 @@
 "%d band(s)" = "%d band(s)";
 "%d band(s), %@" = "%d band(s), %@";
 "Sing" = "Sing";
-"Play something in Music or Spotify." = "Play something in Music or Spotify.";
-"Neither Music nor Spotify is installed." = "Neither Music nor Spotify is installed.";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
+"Play something in Music or Spotify, or choose the words yourself." = "Play something in Music or Spotify, or choose the words yourself.";
+"Neither Music nor Spotify is installed — choose the words yourself." = "Neither Music nor Spotify is installed — choose the words yourself.";
+"Choose the words…" = "Choose the words…";
+"Choose another" = "Choose another";
+"Back to the player" = "Back to the player";
+"By hand" = "By hand";
 "You are singing" = "You are singing";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it.";
 "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check.";
@@ -494,6 +498,11 @@
 "a guess" = "a guess";
 "Move it %+d" = "Move it %+d";
 "Sing for a moment and it will work out how far to move it." = "Sing for a moment and it will work out how far to move it.";
+"Words" = "Words";
+"Earlier" = "Earlier";
+"Later" = "Later";
+"as written" = "as written";
+"Start again" = "Start again";
 "Score the singing" = "Score the singing";
 "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name.";
 "No tune for this one, so there is nothing to score against — the note below is still live." = "No tune for this one, so there is nothing to score against — the note below is still live.";

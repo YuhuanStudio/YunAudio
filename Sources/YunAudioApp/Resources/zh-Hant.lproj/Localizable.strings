@@ -484,9 +484,13 @@
 "%d band(s)" = "%d 個頻段";
 "%d band(s), %@" = "%d 個頻段、%@";
 "Sing" = "唱歌";
-"Play something in Music or Spotify." = "在 Music 或 Spotify 播點東西。";
-"Neither Music nor Spotify is installed." = "這台機器沒有安裝 Music 或 Spotify。";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "這首沒有歌詞。把 .lrc 放進下面那個資料夾，會依名稱自動找到。";
+"Play something in Music or Spotify, or choose the words yourself." = "在 Music 或 Spotify 放點東西，或者自己選歌詞檔。";
+"Neither Music nor Spotify is installed — choose the words yourself." = "這台機器沒有安裝 Music 或 Spotify —— 自己選歌詞檔吧。";
+"Choose the words…" = "選歌詞檔…";
+"Choose another" = "換一個";
+"Back to the player" = "交還給播放器";
+"By hand" = "手動";
 "You are singing" = "你唱的音";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "麥克風自己的零延遲監聽，在裝置內部完成。回來的是未經處理的原始訊號 —— 這個應用程式做的任何處理都不在裡面。";
 "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "這個輸出裝置沒有輸入端可以把序列讀回來，所以沒有東西可以評分。要跑這個檢查，請路由到一個 loopback 裝置。";
@@ -494,6 +498,11 @@
 "a guess" = "推測";
 "Move it %+d" = "移調 %+d";
 "Sing for a moment and it will work out how far to move it." = "先唱一下，它會算出要移多少。";
+"Words" = "歌詞";
+"Earlier" = "早一點";
+"Later" = "晚一點";
+"as written" = "照檔案寫的";
+"Start again" = "重新開始";
 "Score the singing" = "幫唱的打分數";
 "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "每支麥克風分開聽，所以兩個人唱就是兩份分數，不是一份。旋律來自放在 .lrc 旁邊、同名的 .mid。";
 "No tune for this one, so there is nothing to score against — the note below is still live." = "這首沒有旋律檔，所以沒有東西可以對照著打分 —— 下面的音高還是即時的。";

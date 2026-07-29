@@ -5381,6 +5381,49 @@ struct KeyDetectorTests {
         }
     }
 
+    /// The claim the bound was hiding.
+    ///
+    /// Being within half an octave is not the same as being *right*, and the
+    /// previous arithmetic satisfied the first while failing the second in 341
+    /// of these 732 cases: it chose an octave from the voice alone — round the
+    /// voice to the nearest twelve — and then added the song's pitch class to
+    /// it, which lands the tonic anywhere within eleven semitones of where the
+    /// voice actually is. The clamp then turned every one of those into a
+    /// plausible number.
+    ///
+    /// The thing to assert is what the shift is *for*: after moving the song by
+    /// it, the song's tonic must be where the singer's middle is.
+    @Test("the shift really does put the tonic under the voice")
+    func shiftLandsTheTonicOnTheVoice() {
+        for pitchClass in 0..<12 {
+            let key = KeyDetector.Key(pitchClass: pitchClass, isMinor: false, confidence: 1)
+            for midi in stride(from: 30.0, through: 90.0, by: 1) {
+                let shift = KeyDetector.suggestedShift(songKey: key, comfortableMidi: midi)
+                let raw = midi - Double(pitchClass + shift)
+                let distance = raw - 12 * (raw / 12).rounded()
+                let name = KeyDetector.noteNames[pitchClass]
+                #expect(
+                    abs(distance) < 1e-9,
+                    "\(name) against a voice at \(Int(midi)) moved \(shift), leaving the tonic \(distance) semitones away"
+                )
+            }
+        }
+    }
+
+    /// The worst of them, named, so a regression says which case broke.
+    @Test("a tonic just above the voice is not chased half an octave downwards")
+    func shiftTakesTheNearerTonic() {
+        // C♯ against a voice centred on MIDI 30: the nearest C♯ is 5 semitones
+        // above it. The old arithmetic rounded 30/12 to 3, put the tonic at 37,
+        // computed −7 and clamped it to −6 — eleven semitones the wrong way.
+        let cSharp = KeyDetector.Key(pitchClass: 1, isMinor: false, confidence: 1)
+        #expect(KeyDetector.suggestedShift(songKey: cSharp, comfortableMidi: 30) == 5)
+        // B against a voice centred on D3: the nearest B is 3 below, so the
+        // song comes up. The old arithmetic said −6.
+        let b = KeyDetector.Key(pitchClass: 11, isMinor: false, confidence: 1)
+        #expect(KeyDetector.suggestedShift(songKey: b, comfortableMidi: 50) == 3)
+    }
+
     @Test("semitones become the cents the pitch stage wants")
     func cents() {
         #expect(KeyDetector.cents(fromSemitones: 0) == 0)
@@ -6025,6 +6068,29 @@ struct SingerPitchTests {
         #expect(abs(lowMidi - 45) < 0.3)  // A2
         #expect(abs(highMidi - 64) < 0.3)  // E4
         #expect(highMidi - lowMidi > 18)
+    }
+
+    /// The panel keeps one of these open per source the whole time it is
+    /// looked at, so that the note it shows is the singer and not the mixed
+    /// bus. That is hours rather than one song, and the list of every sample is
+    /// only wanted for a score — twenty-three a second is eighty thousand an
+    /// hour per source. The range has to survive the list not being kept.
+    @Test("the range is measured whether or not every sample is kept")
+    func rangeWithoutHistory() throws {
+        let keeping = try #require(SingerPitch(sampleRate: 48000))
+        let notKeeping = try #require(SingerPitch(sampleRate: 48000))
+        notKeeping.keepsHistory = false
+        for singer in [keeping, notKeeping] {
+            singer.reset(at: 0)
+            singer.add(tone(hertz: 220, seconds: 2))
+        }
+        #expect(keeping.samples.count > 40)
+        #expect(notKeeping.samples.isEmpty)
+        let kept = try #require(keeping.comfortableMidi)
+        let unkept = try #require(notKeeping.comfortableMidi)
+        #expect(abs(kept - unkept) < 1e-9, "\(kept) against \(unkept)")
+        #expect(abs(unkept - 57) < 0.2)  // A3
+        #expect(abs(notKeeping.hertz - keeping.hertz) < 0.01)
     }
 }
 

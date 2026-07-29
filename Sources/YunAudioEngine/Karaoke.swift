@@ -299,11 +299,32 @@ extension KaraokeScore {
 /// averaged. This is one per source, fed from the ring that source already had.
 public final class SingerPitch {
 
-    /// Everything sung since the last reset, in time order.
+    /// Everything sung since the last reset, in time order. Empty unless
+    /// `keepsHistory` is set.
     public private(set) var samples: [PitchSample] = []
     /// The most recent estimate in hertz, or zero when there is no pitch to
     /// find. What the interface shows.
     public private(set) var hertz: Float = 0
+
+    /// Whether every sample is kept, or only the running range.
+    ///
+    /// The singing panel runs one of these per source the whole time it is
+    /// open, so that the note it shows is the singer rather than the mixed bus
+    /// — and that is minutes or hours. The list of every sample is wanted for a
+    /// score, which is one song. Twenty-three samples a second is eighty
+    /// thousand an hour per source for a list nobody reads, so the panel turns
+    /// this off unless somebody has asked to be scored. The default is on,
+    /// because a tracker whose samples silently went missing is a scorer that
+    /// reads zero for a reason nobody can see.
+    public var keepsHistory = true
+
+    /// The range, accumulated rather than reduced over the list.
+    ///
+    /// Read at the interface's own rate against a list that grows all song, so
+    /// the obvious `samples.reduce` is a walk of thousands of elements twenty
+    /// times a second — and it has to work when nothing is being kept at all.
+    private var rangeTotal: Double = 0
+    private var rangeCount = 0
 
     private let tracker: PitchTracker?
     private let sampleRate: Double
@@ -326,6 +347,8 @@ public final class SingerPitch {
         hertz = 0
         frames = 0
         anchor = seconds
+        rangeTotal = 0
+        rangeCount = 0
     }
 
     /// Takes what the source's ring produced.
@@ -351,8 +374,10 @@ public final class SingerPitch {
                     anchor
                     + (Double(frames) * Double(PitchTracker.frameSize)
                         + Double(PitchTracker.frameSize) / 2) / sampleRate
-                samples.append(
-                    PitchSample(time: centre, midi: PitchSample.midi(fromHertz: Double(found))))
+                let midi = PitchSample.midi(fromHertz: Double(found))
+                rangeTotal += midi
+                rangeCount += 1
+                if keepsHistory { samples.append(PitchSample(time: centre, midi: midi)) }
             }
             pending.removeFirst(PitchTracker.frameSize)
             frames += 1
@@ -369,7 +394,7 @@ public final class SingerPitch {
     ///
     /// Twenty frames is about a second of actual singing.
     public var comfortableMidi: Double? {
-        guard samples.count >= 20 else { return nil }
-        return samples.reduce(0) { $0 + $1.midi } / Double(samples.count)
+        guard rangeCount >= 20 else { return nil }
+        return rangeTotal / Double(rangeCount)
     }
 }
