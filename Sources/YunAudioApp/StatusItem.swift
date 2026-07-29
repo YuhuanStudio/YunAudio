@@ -230,22 +230,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private static let markHeight: CGFloat = 15
     private static let markCentre = NSPoint(x: 9, y: 9)
 
-    /// What is left of the mark above the waterline.
+    /// The mark at rest: a stopped router, and everything above the waterline
+    /// of a running one.
     ///
-    /// Not nothing: an empty meter has to still be a mark, or a quiet room
-    /// empties the menu bar of the icon somebody is watching. Not much either,
-    /// or the fill has nothing to be brighter than.
-    private static let emptyStrength: CGFloat = 0.3
-
-    /// A stopped router draws a dimmed mark.
+    /// One value for both, deliberately. Two were tried — a dimmer empty meter
+    /// than idle mark — and it put the brightness the wrong way round: starting
+    /// a route made the icon *fainter* until somebody spoke, measured at 0.196
+    /// against 0.210 for a stopped one. With a single resting level the fill is
+    /// the only thing that ever adds light, so more sound is more mark and the
+    /// scale runs the way every meter runs.
     ///
-    /// Because otherwise idle and full scale are the same picture: both are the
-    /// mark, solid, and nothing tells them apart. Capping the fill so a sliver
-    /// stays dim was tried first and measured — it moved 3.7% of the ink, which
-    /// at eighteen points is not a difference anybody sees. Dimming the whole
-    /// thing moves all of it, and "inactive is grey" is what the rest of the
-    /// menu bar already says.
-    private static let idleStrength: CGFloat = 0.6
+    /// Not nothing, because an empty meter has to still be a mark, or a quiet
+    /// room empties the menu bar of the icon somebody is watching. And a
+    /// stopped router being lighter than a running one is what the rest of the
+    /// menu bar already says about anything inactive.
+    private static let restingStrength: CGFloat = 0.5
 
     /// The fill never quite empties while a route is up, so a silent room still
     /// shows the bright tail that says the route is there at all.
@@ -405,14 +404,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             context.setBlendMode(.destinationOut)
             // `destinationOut` scales what is already there, so this is the
             // amount to *remove* to leave the empty part at `emptyStrength`.
-            NSColor.black.withAlphaComponent(1 - emptyStrength).setFill()
+            NSColor.black.withAlphaComponent(1 - restingStrength).setFill()
             NSRect(x: 0, y: line, width: canvas.width, height: canvas.height - line).fill()
             context.setBlendMode(.normal)
         } else if !isMuted {
-            // Stopped. Dimmed whole, so it cannot be mistaken for a route
-            // running at full scale — see `idleStrength`.
+            // Stopped: the mark at rest, whole. No waterline in it, which is
+            // what says there is no route rather than a silent one.
             context.setBlendMode(.destinationOut)
-            NSColor.black.withAlphaComponent(1 - idleStrength).setFill()
+            NSColor.black.withAlphaComponent(1 - restingStrength).setFill()
             NSRect(origin: .zero, size: canvas).fill()
             context.setBlendMode(.normal)
         }

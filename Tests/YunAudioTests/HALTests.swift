@@ -1689,10 +1689,21 @@ struct StatusMarkTests {
         let idle = try ink(render(level: nil))
         let loud = try ink(render(level: 1.0))
         #expect(loud - idle > 0.04, "idle \(idle) and full scale \(loud) are too close")
-        // And a running-but-silent route is not the stopped one either: it is
-        // dimmer overall, and it has a waterline where the idle mark has none.
+
+        // And the scale runs the right way round. A first version used a
+        // dimmer empty meter than idle mark, so *starting* a route made the
+        // icon fainter until somebody spoke — measured at 0.196 against 0.210.
+        // One resting level for both makes the fill the only thing that adds
+        // light, which is the only arrangement in which more sound is more mark.
         let silent = try ink(render(level: 0))
-        #expect(silent < idle)
+        #expect(silent > idle, "starting a route made the mark fainter")
+        for (quieter, louder) in zip(
+            [Float(0), 0.03, 0.1, 0.4], [Float(0.03), 0.1, 0.4, 1.0])
+        {
+            #expect(
+                try ink(render(level: louder)) > ink(render(level: quieter)),
+                "\(louder) is not brighter than \(quieter)")
+        }
     }
 
     /// The number the fill turns on, and the reason it is not simply the height.
