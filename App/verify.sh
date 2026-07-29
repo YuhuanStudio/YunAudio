@@ -27,12 +27,63 @@ source ./App/toolchain.sh
 
 FULL=0
 FRESH=0
+# Which steps to run, as a comma-separated list of substrings, and which flow
+# check section.
+#
+# Because the whole gate is six to ten minutes and most changes touch one thing.
+# Running all of it for a one-line edit is not thoroughness, it is a reason to
+# stop running it — and a gate nobody runs is worse than no gate. The ladder is
+# printed by `--list`; the rule is to climb it, not to start at the top.
+ONLY=""
+FLOW_ONLY=""
 for argument in "$@"; do
 	case "${argument}" in
 	--full) FULL=1 ;;
 	--fresh) FRESH=1 ;;
+	--only=*) ONLY="${argument#*=}" ;;
+	--flow=*)
+		FLOW_ONLY="${argument#*=}"
+		FULL=1
+		;;
+	--list)
+		cat <<'LADDER'
+verify.sh runs these, in this order. Each is a substring match for --only.
+
+  build                          swift build                       ~1-30 s
+  tests                          607 of them                          ~7 s
+  strings                        both tables, and every loc()          ~1 s
+  app bundle                     build-app.sh                        ~50 s
+  offscreen render               every panel, no window server       ~20 s
+  photograph the real window     what the window server drew         ~70 s
+  --full adds:
+  nobody else has the devices    refuses to contend                    ~0 s
+  audio can start at all         one IO cycle                         ~3 s
+  the path is bit-exact          release build, measured             ~40 s
+  flow check                     the whole interface, live        ~150-230 s
+  --fresh adds:
+  a fresh clone                  built from nothing                  ~120 s
+
+  ./App/verify.sh --only=build,tests
+  ./App/verify.sh --only=strings
+  ./App/verify.sh --flow="more than one input"    one section, ~15 s
+
+A narrowed run says so at the end, and says what it did not check.
+LADDER
+		exit 0
+		;;
 	esac
 done
+
+# True when this step was asked for. An empty --only means all of them.
+wanted() {
+	[[ -z "${ONLY}" ]] && return 0
+	local step="$1" piece
+	local IFS=,
+	for piece in ${ONLY}; do
+		[[ "${step}" == *"${piece}"* ]] && return 0
+	done
+	return 1
+}
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
@@ -42,6 +93,10 @@ SKIPPED=()
 step() {
 	local name="$1"
 	shift
+	if ! wanted "${name}"; then
+		SKIPPED+=("${name} — not in --only=${ONLY}")
+		return 0
+	fi
 	printf '  %-34s' "${name}…"
 	if "$@" >"${WORK}/last.txt" 2>&1; then
 		echo "ok"
@@ -283,7 +338,11 @@ if [[ "${FULL}" == "1" ]]; then
 		SKIPPED+=("everything that touches audio — another copy of YunAudio is running and would be competing for the devices")
 	elif step "audio can start at all" audio_can_start; then
 		step "the path is bit-exact, release" bit_exact_release
-		step "flow check" env YUNAUDIO_FLOWCHECK=1 ./build/YunAudio.app/Contents/MacOS/YunAudioApp
+		step "flow check" env YUNAUDIO_FLOWCHECK=1 \
+			YUNAUDIO_FLOWCHECK_ONLY="${FLOW_ONLY}" \
+			./build/YunAudio.app/Contents/MacOS/YunAudioApp
+		[[ -n "${FLOW_ONLY}" ]] &&
+			SKIPPED+=("every flow check section except '${FLOW_ONLY}'")
 	else
 		SKIPPED+=("flow check — CoreAudio cannot start IO on this machine; a human must run: sudo killall coreaudiod")
 	fi

@@ -5903,6 +5903,28 @@ enum UIFlowCheck {
         }
         note("feeding \(toneDevice.name) a \(Int(LoopbackTone.hertz)) Hz tone at half scale")
 
+        // The chain out of the way for the measurement, and put back after.
+        //
+        // A 440 Hz sine is not speech, so a gate and a voice isolator between
+        // it and the meter remove it completely — and this section then reports
+        // that a second output carries no audio, which is true and is not what
+        // it was asking. It failed that way twice before anybody noticed the
+        // common factor was the person's own preferences: whatever they had
+        // switched on last was still switched on.
+        //
+        // A check whose answer depends on a setting it did not choose is not a
+        // check. Every other section that measures a tone does this; this one
+        // was new and did not.
+        let effectsBefore = model.enabledEffects
+        if !effectsBefore.isEmpty {
+            note("taking \(effectsBefore.count) stage(s) out of the path for the measurement")
+            for kind in effectsBefore { model.setEffect(kind, enabled: false) }
+            await settle(model, timeout: 15)
+        }
+        defer {
+            for kind in effectsBefore { model.setEffect(kind, enabled: true) }
+        }
+
         model.selectedSourceUID = toneDevice.uid
         await settle(model, timeout: 15)
         await waitUntil(
