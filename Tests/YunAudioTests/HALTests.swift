@@ -3026,3 +3026,76 @@ extension RemoteChannelTests {
         #expect(back == reply)
     }
 }
+
+/// Every public reader of the realtime graph takes the lock before it does.
+///
+/// This is a source check rather than a runtime one, because the failure it
+/// guards against is a use-after-free: the engine queue frees the graph on every
+/// stop and every rebuild, and a reader that arrives in between dereferences
+/// memory that has gone. Two segfaults in one afternoon, one in `routePeaks` on
+/// the main thread and one in the IO thread's ring write, with crash reports.
+///
+/// A test cannot reliably provoke that race — it is a few microseconds wide and
+/// a run that does not hit it proves nothing. What can be checked is that no
+/// accessor touches the graph without the lock, and that is exactly the mistake
+/// that is easy to make again: the natural way to add a meter is a one-line
+/// computed property, and the one-line version is the unsafe one.
+///
+/// Non-blocking is deliberate and is not the subject of this check.
+/// `startAttempt` holds the lock across a synchronous message to `coreaudiod`,
+/// so an interface reader that blocks freezes for as long as the audio server
+/// takes — measured, with the whole main thread parked under one of these
+/// getters. `stateLock.try()` counts as taking it.
+@Suite("Every reader of the graph takes the lock")
+struct GraphLockDisciplineTests {
+
+    @Test("no public accessor touches the graph without the lock")
+    func everyAccessorLocks() throws {
+        let source = try String(
+            contentsOfFile: Self.enginePath, encoding: .utf8)
+        let lines = source.components(separatedBy: "\n")
+        var offenders: [String] = []
+        for (index, line) in lines.enumerated() {
+            guard line.contains("public var ") || line.contains("public func ") else {
+                continue
+            }
+            // The declaration and its body, to the next public member.
+            var body = ""
+            for following in lines[index..<min(index + 18, lines.count)] {
+                if following != line, following.contains("    public ") { break }
+                body += following + "\n"
+            }
+            let touchesGraph =
+                body.contains("graph?.pointee") || body.contains("graph.pointee")
+                || body.contains("graphCell") || body.contains("isolationFailureCounter")
+            if touchesGraph, !body.contains("stateLock") {
+                offenders.append(line.trimmingCharacters(in: .whitespaces))
+            }
+        }
+        #expect(offenders.isEmpty, "\(offenders)")
+    }
+
+    /// The file has to be found, or the check above passes by reading nothing —
+    /// which is the failure mode of every test that greps a file.
+    @Test("and the source it reads is really there")
+    func theSourceIsFound() throws {
+        let source = try String(contentsOfFile: Self.enginePath, encoding: .utf8)
+        #expect(source.contains("public var routePeaks"))
+        #expect(source.count > 50_000)
+    }
+
+    /// Walks up from this file to the package root, so it does not depend on
+    /// where the tests are run from.
+    static var enginePath: String {
+        var directory = URL(fileURLWithPath: #filePath)
+        while directory.pathComponents.count > 1 {
+            directory.deleteLastPathComponent()
+            let candidate = directory.appendingPathComponent(
+                "Sources/YunAudioEngine/RoutingEngine.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+        return ""
+    }
+}

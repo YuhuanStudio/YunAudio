@@ -155,14 +155,26 @@ public final class RoutingEngine: @unchecked Sendable {
     /// sample — which is what `effectLatencyFrames` was for the life of the
     /// effect chain.
     public var alignmentFrames: Int {
-        stateLock.lock()
+        // Non-blocking, like the other reads the interface makes: this took the
+        // lock the ordinary way, and the ordinary way is held across a
+        // synchronous message to `coreaudiod` during a start.
+        guard stateLock.try() else { return 0 }
         defer { stateLock.unlock() }
         return Int(graph?.pointee.alignmentFrames ?? 0)
     }
     private var effectChain: EffectChain?
     /// Renders the model refused. Non-zero means audio passed through
     /// unprocessed, which the UI should surface rather than hide.
-    public var voiceIsolationFailures: UInt64 { isolationFailureCounter?.pointee ?? 0 }
+    /// Renders the model refused. Non-zero means audio passed through
+    /// unprocessed, which the UI should surface rather than hide.
+    ///
+    /// The counter is allocated per graph and freed with it, so this is the
+    /// same use-after-free as the meters were.
+    public var voiceIsolationFailures: UInt64 {
+        guard stateLock.try() else { return 0 }
+        defer { stateLock.unlock() }
+        return isolationFailureCounter?.pointee ?? 0
+    }
     /// True when drift correction was switched off on the strength of the
     /// driver's clock locking, so the path is only clean while the lock holds.
     private var requiresClockLock = false
@@ -1253,7 +1265,15 @@ public final class RoutingEngine: @unchecked Sendable {
         graph?.pointee.recordPaused = paused ? 1 : 0
     }
 
-    public var isRecordingPaused: Bool { graph?.pointee.recordPaused != 0 }
+    /// Under the lock like every other read of the graph, and non-blocking for
+    /// the same reason: this dereferences memory the engine queue may free.
+    /// Answering "not paused" for the frame a rebuild takes is the honest
+    /// default — a recording that is not running is not paused either.
+    public var isRecordingPaused: Bool {
+        guard stateLock.try() else { return false }
+        defer { stateLock.unlock() }
+        return graph?.pointee.recordPaused != 0
+    }
 
     /// Starts a separate file per source alongside the mix.
     ///
@@ -2093,11 +2113,19 @@ public final class RoutingEngine: @unchecked Sendable {
     /// The one number that says whether what the far end receives is too quiet,
     /// about right, or already damaged. Nothing else in the engine measures
     /// after the multiply.
-    public var outputPeak: Float { graph?.pointee.outputPeak ?? 0 }
+    public var outputPeak: Float {
+        guard stateLock.try() else { return 0 }
+        defer { stateLock.unlock() }
+        return graph?.pointee.outputPeak ?? 0
+    }
 
     /// Samples that reached or passed full scale on the destination bus since
     /// routing started.
-    public var outputClippedSamples: UInt64 { graph?.pointee.outputClipped ?? 0 }
+    public var outputClippedSamples: UInt64 {
+        guard stateLock.try() else { return 0 }
+        defer { stateLock.unlock() }
+        return graph?.pointee.outputClipped ?? 0
+    }
 
     /// Clears the clip count, so a latch can be reset without restarting.
     public func clearOutputClipping() {
@@ -2144,7 +2172,24 @@ public final class RoutingEngine: @unchecked Sendable {
 
     /// Smoothed RMS per route. Closer to how loud something sounds than the
     /// peak beside it.
+    /// Per-route levels, read from the interface twenty times a second.
+    ///
+    /// **Taken under the lock, or not taken.** These dereference the graph the
+    /// engine queue is free to free: `stop` and every rebuild release it, and a
+    /// read that arrives in between is a use-after-free. It is not theoretical
+    /// — two segfaults in one afternoon, one here and one in the IO thread's
+    /// ring write, with the crash reports to match.
+    ///
+    /// Not the ordinary lock, for the reason `echoCancellationStatus` explains
+    /// at length: `startAttempt` holds it across a synchronous message to
+    /// `coreaudiod`, which is unbounded when the audio server is wedged, and
+    /// blocking here would freeze the interface for as long as that took. A
+    /// meter that holds its last value for one frame of a rebuild is not worth
+    /// a frozen application — and it is what the meter did anyway, because the
+    /// levels it is reading are a decaying peak hold.
     public var routeRMS: [Float] {
+        guard stateLock.try() else { return [] }
+        defer { stateLock.unlock() }
         guard let graph else { return [] }
         let count = Int(graph.pointee.routeCount)
         return (0..<count).map { graph.pointee.rms[$0] }
@@ -2152,6 +2197,8 @@ public final class RoutingEngine: @unchecked Sendable {
 
     /// Peak magnitude of each active route since the last read.
     public var routePeaks: [Float] {
+        guard stateLock.try() else { return [] }
+        defer { stateLock.unlock() }
         guard let graph else { return [] }
         let count = Int(graph.pointee.routeCount)
         return (0..<count).map { graph.pointee.peaks[$0] }
@@ -2160,7 +2207,11 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Number of IO cycles completed. A stalled counter means the device is not
     /// actually pulling audio.
     public var cycleCount: UInt64 {
-        graphCell.map { yun_rt_cell_cycles($0) } ?? 0
+        // The cell too: `stop` frees it, and this is read from the interface
+        // and from every check that asks whether audio is flowing.
+        guard stateLock.try() else { return 0 }
+        defer { stateLock.unlock() }
+        return graphCell.map { yun_rt_cell_cycles($0) } ?? 0
     }
 
     /// The clock master's most recent timestamp, read through the cycle counter
