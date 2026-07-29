@@ -4297,6 +4297,92 @@ struct TranscriberTests {
         await transcriber.add([Float](repeating: 0.1, count: 4800), sampleRate: 48000)
         #expect(await transcriber.lines.isEmpty)
     }
+
+    /// Real speech, spoken by the system rather than checked in as a fixture —
+    /// there is no way to ask Apple's model a question about timing without
+    /// giving it something it will actually transcribe, and a synthesised tone
+    /// produces no lines at all.
+    private static func spokenSamples(_ words: String) throws -> (
+        samples: [Float], rate: Double
+    ) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-speech-\(UUID().uuidString).aiff")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-o", url.path, words]
+        try say.run()
+        say.waitUntilExit()
+        let file = try AVAudioFile(forReading: url)
+        let format = file.processingFormat
+        guard
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length))
+        else { return ([], format.sampleRate) }
+        try file.read(into: buffer)
+        guard let channel = buffer.floatChannelData else { return ([], format.sampleRate) }
+        return (
+            Array(UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength))),
+            format.sampleRate
+        )
+    }
+
+    /// In the blocks the interface's poll hands over, rather than in one lump.
+    private static func feed(
+        _ audio: (samples: [Float], rate: Double), to transcriber: Transcriber
+    ) {
+        let block = Int(audio.rate / 100)
+        for start in stride(from: 0, to: audio.samples.count, by: block) {
+            let end = min(start + block, audio.samples.count)
+            transcriber.add(Array(audio.samples[start..<end]), sampleRate: audio.rate)
+        }
+    }
+
+    /// `Line.start` says it is seconds from the start of the session, and it
+    /// was the analyser's own timeline instead — which begins at the first
+    /// buffer that transcriber's model accepted, not when the session did.
+    ///
+    /// Measured before the fix: three seconds of digital silence in front of a
+    /// sentence read back as 2.7, and three transcribers that opened 69, 73 and
+    /// 78 ms apart all reported their first line at 0.0. Warm, that skew is
+    /// invisible; on a first use of a language the model is fetched inside
+    /// `start`, and every source behind it in the loop opens after the
+    /// download, so the size of it is unbounded.
+    ///
+    /// So the case is stated at a size anybody can see: one source opens two
+    /// seconds into the session, and its line has to say two seconds. Before
+    /// the fix both said zero and the merge that makes several sources into one
+    /// conversation was sorting on a number that meant nothing across them.
+    @Test("a line's start is seconds from the session, not from its own first audio")
+    func startIsMeasuredFromTheSession() async throws {
+        let audio = try Self.spokenSamples("one two three four five")
+        try #require(!audio.samples.isEmpty)
+        let session = Date().timeIntervalSince1970
+
+        let early = Transcriber(speaker: "First")
+        try await early.start(now: session)
+        Self.feed(audio, to: early)
+
+        // Two seconds of the session pass before the second source is open.
+        try await Task.sleep(for: .seconds(2))
+        let late = Transcriber(speaker: "Second")
+        try await late.start(now: session)
+        Self.feed(audio, to: late)
+
+        // `stop` finalises through the end of input, so the lines are there
+        // when it returns — measured at 0.16 s, which is why nothing here
+        // sleeps waiting for them.
+        await early.stop()
+        await late.stop()
+        let first = try #require(await early.lines.first)
+        let second = try #require(await late.lines.first)
+        #expect(first.start < 1.0)
+        #expect(second.start > 1.5)
+        // And so the merge across sources is a record of the conversation.
+        #expect([second, first].sorted { $0.start < $1.start }.map(\.speaker) == [
+            "First", "Second",
+        ])
+    }
 }
 
 // MARK: - Headphone correction
