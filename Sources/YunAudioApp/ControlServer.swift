@@ -12,6 +12,14 @@ import YunAudioControl
 /// Deliberately the same three questions the scripting object model answers, and
 /// for the same reason: `ScriptTarget` is the definition of what can be read,
 /// and a second, larger definition here would be a second thing to keep in step.
+///
+/// This answers `yunaudio-cli` as well as `yunaudio-mcp`. It did not always —
+/// the command line had a distributed-notification channel of its own — and the
+/// three things that channel knew and this did not are all here now: a sentence
+/// that reports a failure is not a success (`lastCommandFailed`), a refused
+/// name comes back with the names that exist, and `answer` is written against
+/// `ScriptTarget` so all of it can be asserted against a stub rather than
+/// against a live router.
 @MainActor
 enum ControlServer {
 
@@ -38,27 +46,36 @@ enum ControlServer {
     /// The strings here are protocol, not interface: they are read by another
     /// program and go into an agent's reasoning about what to try next, so they
     /// stay in English and stay stable rather than going through `loc()`.
-    static func answer(_ request: ControlRequest, model: RouterModel) -> ControlReply {
+    static func answer(_ request: ControlRequest, model: any ScriptTarget) -> ControlReply {
         switch request {
         case .perform(let command):
             guard let outcome = model.perform(command) else {
                 // Nil is how the model says "there is no such thing". Naming
                 // which kind of thing matters: an agent told a scene is missing
                 // should list the scenes, not give up on the whole application.
+                // The list travels with the refusal rather than in a follow-up
+                // question, so neither front end has to ask twice to say
+                // something useful.
                 switch command {
                 case .preset(let name):
                     return .failure(
-                        "There is no scene called \"\(name)\". "
-                            + "Call yunaudio_list_names for the ones that exist.")
+                        "There is no scene called \"\(name)\".",
+                        alternatives: model.scriptPresetNames)
                 case .config(let name):
                     return .failure(
-                        "There is no setup called \"\(name)\". "
-                            + "Call yunaudio_list_names for the ones that exist.")
+                        "There is no setup called \"\(name)\".",
+                        alternatives: model.scriptConfigNames)
                 default:
                     return .failure("That command could not be carried out.")
                 }
             }
-            return .message(outcome)
+            // A sentence is not an outcome. `perform` answers a script that
+            // threw with the interpreter's error, and a recording that would
+            // not start with the reason it would not — both true sentences
+            // about something that did not work, and indistinguishable from a
+            // command that ran if only the text crosses. Read here, straight
+            // after `perform`, which is the only moment it means anything.
+            return model.lastCommandFailed ? .failure(outcome) : .message(outcome)
         case .status:
             guard let status = JSONValue(any: model.scriptStatus) else {
                 return .failure("The status contains a value that cannot be sent as JSON.")

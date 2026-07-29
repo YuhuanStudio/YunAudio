@@ -198,6 +198,36 @@ public enum JSONValue: Equatable, Sendable {
         }
     }
 
+    /// How one value reads on a terminal.
+    ///
+    /// Here rather than in `yunaudio-cli` because an executable target cannot be
+    /// imported by the tests, and this is precisely the kind of formatting that
+    /// goes wrong where nobody looks. The channel this replaced had its own
+    /// tagged value type carrying exactly this method, and the reason it was
+    /// tagged is the reason `int` and `double` are separate cases here: a level
+    /// of −70.0 dB printed as "-70" beside "-69.50" is what an untyped reply
+    /// produced, and neither line looked wrong on its own.
+    public var described: String {
+        switch self {
+        // A reading JSON cannot carry — a level of −∞ dBFS, which is what a
+        // meter shows with nothing plugged in. A dash reads as "no reading";
+        // the word `null` reads as a defect.
+        case .null: "—"
+        case .bool(let value): value ? "yes" : "no"
+        case .int(let value): String(value)
+        // Two places is what every level in this application is quoted to, and
+        // an unrounded double is fifteen digits of noise.
+        case .double(let value): String(format: "%.2f", value)
+        case .string(let value): value
+        case .array(let values):
+            values.isEmpty ? "—" : values.map(\.described).joined(separator: " ")
+        // Nothing in the status dictionary nests today. Printing the JSON is a
+        // line somebody can read rather than a line that is missing, which is
+        // what a `fatalError` or an empty string would leave behind.
+        case .object: text
+        }
+    }
+
     /// A JSON string literal.
     ///
     /// Everything below 0x20 has to be escaped or the document is invalid, and

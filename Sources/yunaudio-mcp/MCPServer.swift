@@ -169,12 +169,21 @@ public struct MCPServer: Sendable {
                     "setups": .array(setups.map(JSONValue.string)),
                 ])
                 return content(id: id, text: json.text, isError: false)
-            case .failure(let reason):
+            case .failure(let reason, let alternatives):
                 // A tool that reached the application and was refused is an
                 // error the *agent* can act on — a scene that has been renamed,
                 // say — so it belongs in the result rather than in a JSON-RPC
                 // error, which is for the protocol going wrong.
-                return content(id: id, text: reason, isError: true)
+                //
+                // The names that would have worked come back with the refusal,
+                // so they are said here rather than left to a `list_names` call
+                // the agent has to think to make. An agent that has to ask a
+                // second question to find out what it should have said the
+                // first time will sometimes just give up instead.
+                let suggestion =
+                    alternatives.isEmpty
+                    ? "" : " The ones that exist: " + alternatives.joined(separator: ", ") + "."
+                return content(id: id, text: reason + suggestion, isError: true)
             }
         } catch let error as ControlError {
             return content(id: id, text: error.message, isError: true)

@@ -246,14 +246,11 @@ Sources/
                     voice isolation, self test
   YunDesign/        the YunUI design system translated to SwiftUI
   YunAudioControl/  the command vocabulary and the control socket, shared by
-                    the application and the MCP server
+                    the application, the command line and the MCP server
   YunAudioApp/      the menu bar app
-  yunaudio-cli/     verification harness
-  yunaudio-mcp/     the MCP server, so an agent can drive the application
-  YunAudioControl/  the remote-control vocabulary, shared by the app and
-                    the tool so that there is one list of verbs
   yunaudio-cli/     verification harness, and the command line that
                     drives the running app
+  yunaudio-mcp/     the MCP server, so an agent can drive the application
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly for YunAudio.app
 ```
@@ -447,6 +444,11 @@ setups that exist. Naming one that does not gets the list of ones that do, which
 is more use than "not found". A command that could not be carried out exits 1
 and a line the tool could not parse exits 2, so a shell script can tell the
 difference between "the application refused" and "you typed it wrong".
+
+It reaches the application over the same Unix socket the MCP server uses, at
+`~/Library/Application Support/YunAudio/control.sock`. That is why "YunAudio is
+not running" comes back in milliseconds rather than after a timeout: nothing
+listening is `connect` failing, which is an answer, not a silence to wait out.
 
 `status` deliberately is not one of the verbs a URL or a MIDI note can send:
 asking what is happening must not be able to change it. Everything else is one

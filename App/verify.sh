@@ -209,8 +209,14 @@ bit_exact_release() {
 # other copies running, "217/261738 (0.08%)". A bit-exactness failure is the
 # most alarming thing this gate can print and it was somebody else's flow check.
 nobody_else_has_the_devices() {
+	# Matched on the executable name, not on a command line. `pgrep -f` matches
+	# any process whose *arguments* mention the path — including a diagnostic
+	# command that merely names it — so running one alongside the gate made it
+	# skip every audio check and report that it had. It said so under "not
+	# checked" rather than lying, which is the only reason this was noticed
+	# rather than believed.
 	local others
-	others=$(pgrep -f "YunAudio.app/Contents/MacOS/YunAudioApp" | wc -l | tr -d ' ')
+	others=$(pgrep -x YunAudioApp | wc -l | tr -d ' ')
 	[[ "${others}" == "0" ]]
 }
 
