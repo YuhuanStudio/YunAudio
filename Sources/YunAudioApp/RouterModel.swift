@@ -2,6 +2,7 @@ import AppKit
 import CoreAudio
 import Foundation
 import Observation
+import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunAudioRazer

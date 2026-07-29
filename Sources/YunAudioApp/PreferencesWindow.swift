@@ -1,4 +1,5 @@
 import SwiftUI
+import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunDesign

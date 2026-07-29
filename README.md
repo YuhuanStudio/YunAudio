@@ -245,8 +245,11 @@ Sources/
   YunAudioEngine/   the IOProc, routing matrix, clock anchor publisher,
                     voice isolation, self test
   YunDesign/        the YunUI design system translated to SwiftUI
+  YunAudioControl/  the command vocabulary and the control socket, shared by
+                    the application and the MCP server
   YunAudioApp/      the menu bar app
   yunaudio-cli/     verification harness
+  yunaudio-mcp/     the MCP server, so an agent can drive the application
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly for YunAudio.app
 ```
@@ -393,6 +396,48 @@ are discovered from metadata Xcode's own build phase extracts, and an
 application assembled by a shell script around a SwiftPM binary produces none.
 They would have compiled, run, and never appeared anywhere anybody could use
 them.
+
+## Driving it from an agent — MCP
+
+`yunaudio-mcp` is a Model Context Protocol server: JSON-RPC 2.0 over stdio, no
+dependencies, spawned by whatever client you point at it.
+
+```bash
+swift build -c release            # produces .build/release/yunaudio-mcp
+claude mcp add yunaudio -- "$PWD/.build/release/yunaudio-mcp"
+```
+
+Or, for a client configured by file — Claude Desktop, Zed, anything else that
+reads the same shape:
+
+```json
+{
+  "mcpServers": {
+    "yunaudio": { "command": "/absolute/path/to/yunaudio-mcp", "args": [] }
+  }
+}
+```
+
+Nine tools: `yunaudio_status`, `yunaudio_list_names`, `yunaudio_routing`,
+`yunaudio_mute`, `yunaudio_record`, `yunaudio_transcribe`,
+`yunaudio_apply_scene`, `yunaudio_apply_setup` and `yunaudio_run_script` — the
+same vocabulary as the URL scheme, because it is the same `RemoteCommand`
+underneath. Names are the user's own and some are translated, so
+`yunaudio_list_names` is the one to call before applying a scene by name.
+
+**YunAudio has to be running.** The server holds no state and knows nothing on
+its own: it forwards to the application over a Unix domain socket at
+`~/Library/Application Support/YunAudio/control.sock`, which the application
+creates on launch, removes on quit, and leaves readable only by its owner. If
+nothing is listening, every tool answers with that immediately rather than
+waiting. `--socket <path>` and `$YUNAUDIO_CONTROL_SOCKET` move it.
+
+A socket rather than the URL scheme, because a URL is one-way. `open
+yunaudio://mute/on` returns as soon as Launch Services has taken the event: it
+cannot say whether the microphone is now muted, whether the scene existed, or
+whether anything was there to hear it. That is fine for a Stream Deck key, where
+a person is looking at the result, and useless for an agent, where nobody is —
+and reading the state back is half of what an agent is for.
 
 ## Razer hardware control
 

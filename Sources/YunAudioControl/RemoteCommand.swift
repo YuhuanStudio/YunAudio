@@ -15,7 +15,13 @@ import YunDesign
 /// not unmuted. Toggles exist because a physical button has no way to know the
 /// current state, but anything driving this from a script should prefer the
 /// definite form.
-enum RemoteCommand: Equatable, Sendable {
+///
+/// This lives in a module of its own rather than in the application because the
+/// MCP server is a *separate process* and needs the same vocabulary. SwiftPM
+/// will not let one file belong to two targets, so the alternative was a second
+/// copy of the grammar in the server — and the whole reason this type exists is
+/// that a second copy does not stay in step with the first.
+public enum RemoteCommand: Equatable, Sendable {
     /// Nil means toggle: what a button without a light has to ask for.
     case routing(Bool?)
     case mute(Bool?)
@@ -31,14 +37,14 @@ enum RemoteCommand: Equatable, Sendable {
     case script(String)
 
     /// The scheme this application answers to.
-    static let scheme = "yunaudio"
+    public static let scheme = "yunaudio"
 
     /// Reads a command out of a URL, or nothing if it is not one.
     ///
     /// Deliberately strict. A URL arriving from outside is somebody else's
     /// string, and guessing what an unrecognised one meant is how a mute
     /// becomes a stop.
-    static func parse(_ url: URL) -> RemoteCommand? {
+    public static func parse(_ url: URL) -> RemoteCommand? {
         guard url.scheme?.lowercased() == scheme else { return nil }
 
         // The host is the noun and the first path component the verb:
@@ -81,7 +87,7 @@ enum RemoteCommand: Equatable, Sendable {
     /// The inverse of `parse`, and it is here so that anything wanting to
     /// *store* a command — a MIDI binding, for one — can keep the URL rather
     /// than a second encoding of the same list.
-    var url: URL {
+    public var url: URL {
         switch self {
         case .routing(let state): Self.url("routing", state)
         case .mute(let state): Self.url("mute", state)
@@ -107,7 +113,7 @@ enum RemoteCommand: Equatable, Sendable {
     }
 
     /// What to call this where somebody is choosing something to automate.
-    var title: String {
+    public var title: String {
         switch self {
         case .routing: loc("Start / stop routing")
         case .mute: loc("Mute / unmute")
@@ -125,7 +131,7 @@ enum RemoteCommand: Equatable, Sendable {
     /// Scenes and setups are deliberately not here: they are named by the user
     /// and there can be any number of them, so they belong in a list built from
     /// what is actually saved rather than in a fixed one.
-    static let bindable: [RemoteCommand] = [
+    public static let bindable: [RemoteCommand] = [
         .routing(nil), .mute(nil), .record(nil), .transcribe(nil),
     ]
 

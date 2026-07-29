@@ -4,6 +4,7 @@ import Testing
 
 import AppKit
 @testable import YunAudioApp
+@testable import YunAudioControl
 @testable import YunDesign
 @testable import YunAudioHAL
 @testable import YunAudioRazer

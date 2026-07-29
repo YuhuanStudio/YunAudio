@@ -3,6 +3,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
+import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunDesign
