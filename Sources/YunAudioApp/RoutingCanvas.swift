@@ -278,7 +278,20 @@ struct RoutingCanvas: View {
             model.disconnect(destination: reference)
             return
         }
-        model.connect(source: source, destination: reference)
+        // Picking a source and clicking a destination it already feeds used to
+        // do nothing at all: `connect` guards on the route existing, so the
+        // pending source was silently dropped and the canvas looked broken.
+        // Pulling that one cable is the only other thing the gesture can mean,
+        // and it is the only way to reach `disconnectRoute` — with two sources
+        // on one destination there was no way to remove just one of them
+        // without pulling both and patching the survivor back.
+        if model.activeRoutes.contains(
+            where: { $0.source == source && $0.destination == reference })
+        {
+            model.disconnectRoute(source: source, destination: reference)
+        } else {
+            model.connect(source: source, destination: reference)
+        }
         pendingSource = nil
     }
 }

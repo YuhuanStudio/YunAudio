@@ -4,6 +4,40 @@ import YunAudioEngine
 import YunAudioHAL
 import YunDesign
 
+/// Opening the settings window, from wherever asks.
+///
+/// It lives here rather than at each call site because there were two callers
+/// and the interesting one did not exist: settings could be reached *only* from
+/// the menu bar item's right-click menu, so anybody already working in the
+/// window had to go back to a menu they may never have known was there. The
+/// window has a button now, and this is what both of them send.
+///
+/// SwiftUI's `SettingsLink` is the tidy way to do this inside a view, and it is
+/// what the menu bar panel's footer uses — but nothing can press it from a
+/// check, and this project's recurring defect is exactly the control that looks
+/// right and reaches nothing. A selector both a button and a check can send is
+/// the price of being able to assert it.
+@MainActor
+enum SettingsWindow {
+    /// True when a responder took the action, which is the part worth knowing:
+    /// the `Settings` scene installs the handler, and without the scene the
+    /// send is a silent no-op rather than an error.
+    ///
+    /// The returned true is not a promise that a window appeared. Measured: the
+    /// scene's window only comes up for an *active* application, and a process
+    /// that cannot become active gets true and no window. That is why the flow
+    /// check asserts the action and says out loud that it did not check the
+    /// window — a person pressing the gear is active by definition, and a run
+    /// launched from a terminal never is.
+    @discardableResult
+    static func open() -> Bool {
+        // Without this the window opens behind whatever has focus when the app
+        // is an accessory, which looks like nothing happened.
+        NSApp.activate(ignoringOtherApps: true)
+        return NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+}
+
 /// The standalone preferences window.
 ///
 /// Everything here is deliberately *not* in the menu bar panel: the panel is for
@@ -86,6 +120,33 @@ struct PreferencesWindow: View {
         .frame(minWidth: 620, minHeight: 440)
         .background(Yun.Palette.background)
         .focusEffectDisabled()
+        .accessibilityIdentifier(Self.accessibilityIdentifier)
+    }
+
+    /// How this window is recognised from outside.
+    ///
+    /// SwiftUI's `Settings` scene gives its window no title in an accessory
+    /// application — measured, not assumed: with it open, `NSApp.windows` reads
+    /// `Item-0 | YunAudio |  | `, two of them blank. So the check that asserts
+    /// pressing the gear opens something cannot look for a name, and matching
+    /// "the window that is not the other ones" would pass for any window at
+    /// all. This is a deliberate handle, and VoiceOver gets it too.
+    static let accessibilityIdentifier = "YunAudioSettingsWindow"
+
+    /// The window this view is in, if it is open.
+    ///
+    /// Walks the view tree because the identifier lands on whichever `NSView`
+    /// SwiftUI hangs the modifier on, which is not the content view and is not
+    /// somewhere worth writing down.
+    @MainActor
+    static func openWindow() -> NSWindow? {
+        func carriesIdentifier(_ view: NSView) -> Bool {
+            view.accessibilityIdentifier() == accessibilityIdentifier
+                || view.subviews.contains(where: carriesIdentifier)
+        }
+        return NSApp.windows.first { window in
+            window.contentView.map(carriesIdentifier) ?? false
+        }
     }
 
     private var sidebar: some View {
@@ -740,6 +801,26 @@ struct PreferencesWindow: View {
                             .foregroundStyle(Yun.Palette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
+
+                    // Outside the routing branch on purpose: "can this
+                    // microphone do it at all" is a question worth answering
+                    // before anybody starts a route, and it is the one the two
+                    // model properties were written for. Both of them said in
+                    // their own doc comments that the interface had to show
+                    // this — "an interface that showed an indicator which could
+                    // never light would be worse than one that says the device
+                    // cannot do it" — and neither had a single reader outside
+                    // the flow check. Without it, "muted, but you are talking"
+                    // simply never appearing is indistinguishable from a
+                    // detector that is switched off, absent, or broken.
+                    YunDetailRow(
+                        loc("Voice detector"),
+                        value: Self.voiceDetectorState(
+                            isAvailable: model.canDetectVoiceActivity,
+                            isRunning: model.isDetectingVoiceActivity),
+                        tone: model.canDetectVoiceActivity
+                            ? (model.isDetectingVoiceActivity ? .success : .neutral)
+                            : .warning)
                 }
             }
 
@@ -1152,6 +1233,19 @@ struct PreferencesWindow: View {
                 }
             }
         }
+    }
+
+    /// What the system's own voice detector is doing, in a sentence.
+    ///
+    /// Static and taking its inputs rather than reading the model, so the flow
+    /// check can put it in every state and read back what a person would see.
+    /// The three states are genuinely different problems: a device that cannot
+    /// do it is somebody's hardware, a detector that is not running is a route
+    /// that has not started, and a detector that is running and silent is a
+    /// room with nobody in it.
+    static func voiceDetectorState(isAvailable: Bool, isRunning: Bool) -> String {
+        guard isAvailable else { return loc("this microphone does not publish one") }
+        return isRunning ? loc("running") : loc("available, not running")
     }
 
     private func heading(_ text: String) -> some View {

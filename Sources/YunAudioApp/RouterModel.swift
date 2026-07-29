@@ -3180,6 +3180,11 @@ final class RouterModel: ScriptTarget {
         entries.append((loc("Start / stop routing"), "⌘↩", false))
         entries.append((loc("Record"), "⌘R", false))
         entries.append((loc("Mute / unmute"), "⌘M", false))
+        // Listed because this page is where somebody looks for it, and because
+        // the shortcut is new: settings used to be reachable only from the menu
+        // bar item's right-click menu, so ⌘, — the combination macOS teaches
+        // everybody to try first — did nothing in the application's own window.
+        entries.append((loc("Settings"), "⌘,", false))
         for (index, preset) in RoutePreset.builtIn.enumerated() {
             entries.append((preset.name, "⌘\(index + 1)", false))
         }
@@ -4234,6 +4239,34 @@ final class RouterModel: ScriptTarget {
     /// means — so there is nothing to keep.
     func runScript(_ source: String) -> ScriptHost.Result {
         ScriptHost(target: self).run(source)
+    }
+
+    /// Runs a script once, now, and puts what came back where a person can read
+    /// it.
+    ///
+    /// `runScript` has been in the vocabulary from the beginning — the URL
+    /// scheme's `script`, the CLI's `run`, the MCP tool — and had no control
+    /// anywhere in the interface. The script tab could install something that
+    /// *reacts* to events and offered no way to make a script *do* anything, so
+    /// a script whose top level is `yun.preset("Voice chat")` could not be tried
+    /// from the panel that edits it. This is the same call that the URL takes,
+    /// with its result routed into the log the tab already shows — otherwise a
+    /// run that printed something would print it to nowhere.
+    @discardableResult
+    func runScriptNow(_ source: String) -> ScriptHost.Result {
+        let result = runScript(source)
+        for line in result.log { scriptLog.append(line) }
+        // The error goes in the log rather than into `residentScriptError`:
+        // that one means "this script would not load", and a run that threw
+        // halfway through loaded perfectly well. Conflating them would leave a
+        // red syntax error beside a script whose syntax is fine.
+        if let error = result.error {
+            scriptLog.append(loc("Script error:") + " " + error)
+        } else if !result.value.isEmpty {
+            scriptLog.append("→ " + result.value)
+        }
+        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
+        return result
     }
 
     /// The script that stays loaded and reacts to things.

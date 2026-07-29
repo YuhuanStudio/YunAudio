@@ -10,6 +10,7 @@
 "Refresh" = "重新整理";
 "Quit" = "結束";
 "Settings" = "設定";
+"Settings (⌘,)" = "設定（⌘,）";
 "Install" = "安裝";
 "Installing…" = "安裝中…";
 "Check again" = "重新檢查";
@@ -539,8 +540,6 @@
 "listening" = "正在接聽";
 "unavailable" = "無法使用";
 "Remote control" = "遠端控制";
-=======
-
 "Streaming" = "直播";
 "OBS" = "OBS";
 "Connect" = "連線";
@@ -562,4 +561,14 @@
 "%.0f ms" = "%.0f ms";
 "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier." = "這個應用程式送出去的每一樣東西，都比畫面晚到 OBS，晚的量就是效果鏈加上去的延遲。OBS 有一個欄位可以填，卻沒有辦法算出該填多少；這裡算得出來。填進去的是負值，因為它的意思是「把這段聲音當成更早發生的」。";
 "not sent yet" = "尚未送出";
->>>>>>> obs-integration
+=======
+"Run it now" = "立刻執行一次";
+"Run the script above once, top to bottom" = "把上面的腳本從頭到尾執行一次";
+"Rescan" = "重新掃描";
+"Look for Audio Units installed since this window opened" = "找出這個視窗開啟之後才安裝的 Audio Unit";
+"%+.1f dB · held by peaks" = "%+.1f dB · 被峰值擋住";
+"Voice detector" = "語音偵測器";
+"this microphone does not publish one" = "這支麥克風沒有公布";
+"available, not running" = "可用，但沒有在跑";
+"running" = "正在跑";
+>>>>>>> ui/no-way-in
