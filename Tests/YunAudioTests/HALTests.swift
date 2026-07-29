@@ -1306,9 +1306,30 @@ struct PreferencesRoundTripTests {
         preferences.tapMuteBehavior = TapMuteBehavior.mutedWhenTapped.storageKey
         preferences.sourceDeviceUID = "a-source"
         preferences.effectValues = ["gate.threshold": -38]
+        preferences.iconStyle = "paper"
         let data = try JSONEncoder().encode(preferences)
         let decoded = try JSONDecoder().decode(Preferences.self, from: data)
         #expect(decoded == preferences)
+        #expect(decoded.iconStyle == "paper")
+    }
+
+    /// Every name the icon picker can write has to be a name the next launch
+    /// can read. The picker is built from the same list, so the way this fails
+    /// is a style being *removed*: the file then names something that no longer
+    /// exists, and an icon that cannot be drawn is a blank tile rather than an
+    /// error.
+    @Test("every icon style survives being written down, and a dropped one falls back")
+    func iconStyleRoundTrip() throws {
+        for style in YunIconBadge.styles {
+            var preferences = Preferences.default
+            preferences.iconStyle = style.name
+            let data = try JSONEncoder().encode(preferences)
+            let decoded = try JSONDecoder().decode(Preferences.self, from: data)
+            #expect(YunIconBadge.style(named: decoded.iconStyle).name == style.name)
+        }
+        #expect(
+            YunIconBadge.style(named: "a-style-this-build-dropped").name
+                == YunIconBadge.fallbackStyle)
     }
 
     /// The reason every field added since the first release is optional: a file
@@ -1410,10 +1431,18 @@ struct ChannelDefaultTests {
 /// The menu bar mark, which is the only part of this application somebody is
 /// looking at while they are on a call.
 ///
-/// It has three states and they have to be distinguishable at eighteen points:
-/// idle, muted, and muted while the system's own detector can hear somebody
-/// speaking. The third is the one worth the drawing — the window can say
-/// "muted, but talking" all it likes, and nobody is looking at the window.
+/// It has four states and they have to be distinguishable at eighteen points:
+/// idle, routing at some level, muted, and muted while the system's own
+/// detector can hear somebody speaking. The last is the one worth the drawing —
+/// the window can say "muted, but talking" all it likes, and nobody is looking
+/// at the window.
+///
+/// The whole mark is monochrome, because a status item is a *template* image:
+/// macOS renders it in the menu bar's own foreground colour, so it follows light
+/// and dark mode and inverts under an open menu — and only the alpha channel
+/// survives that. Every claim below is about alpha and geometry for that reason,
+/// and the "no colour" test is what stops the states quietly going back to being
+/// a red dot and a green one.
 ///
 /// Asserted as pixels rather than by eye. "These two look different" is exactly
 /// the kind of claim that is obviously true until a badge one point larger
@@ -1422,19 +1451,105 @@ struct ChannelDefaultTests {
 @Suite("The menu bar mark")
 struct StatusMarkTests {
 
-    private func pixels(_ image: NSImage?) throws -> Data {
-        let image = try #require(image)
-        return try #require(image.tiffRepresentation)
+    /// Rendered into a bitmap of our own making rather than taken off the
+    /// `NSImage`: a drawing-handler image promises nothing about the size or
+    /// colour space of `tiffRepresentation`, and every assertion here is about
+    /// individual pixels. Drawn at 2× because that is what the menu bar
+    /// actually asks for on every display this application has ever run on.
+    private static let scale = 2
+    private static let side = 18 * scale
+
+    private func render(
+        level: Float?, isMuted: Bool = false, isSpeakingWhileMuted: Bool = false,
+        isDim: Bool = false
+    ) throws -> NSBitmapImageRep {
+        let side = Self.side
+        let rep = try #require(
+            NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .calibratedRGB, bytesPerRow: side * 4, bitsPerPixel: 32))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: rep))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.scaleBy(x: CGFloat(Self.scale), y: CGFloat(Self.scale))
+        StatusItemController.drawStatusMark(
+            level: level, isMuted: isMuted, isSpeakingWhileMuted: isSpeakingWhileMuted,
+            isDim: isDim)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return rep
+    }
+
+    private func bytes(_ rep: NSBitmapImageRep) throws -> Data {
+        try #require(rep.representation(using: .png, properties: [:]))
+    }
+
+    /// Total alpha over the square, as a fraction. How much ink the glyph puts
+    /// on the menu bar.
+    private func ink(_ rep: NSBitmapImageRep, in region: NSRect? = nil) throws -> Double {
+        let pixels = try #require(rep.bitmapData)
+        let region =
+            region ?? NSRect(x: 0, y: 0, width: CGFloat(Self.side), height: CGFloat(Self.side))
+        var total = 0.0
+        for row in Int(region.minY)..<Int(region.maxY) {
+            let base = row * rep.bytesPerRow
+            for column in Int(region.minX)..<Int(region.maxX) {
+                total += Double(pixels[base + column * 4 + 3]) / 255
+            }
+        }
+        return total / (region.width * region.height)
+    }
+
+    @Test("it is a template, so the menu bar can colour it")
+    func isATemplate() throws {
+        for image in [
+            StatusItemController.statusImage(level: nil),
+            StatusItemController.statusImage(level: 0.5),
+            StatusItemController.statusImage(level: nil, isMuted: true),
+        ] {
+            #expect(try #require(image).isTemplate)
+        }
+    }
+
+    /// The requirement in the form it can actually fail. A template throws
+    /// colour away, so a state drawn in red simply vanishes rather than looking
+    /// wrong — which is how the old mark could encode mute as "red" and have
+    /// nobody notice that the menu bar never showed red at all.
+    @Test("and nothing in it is coloured")
+    func nothingIsColoured() throws {
+        for (name, rep) in try [
+            ("idle", render(level: nil)),
+            ("routing", render(level: 0.5)),
+            ("muted", render(level: nil, isMuted: true)),
+            ("alarmed", render(level: nil, isMuted: true, isSpeakingWhileMuted: true)),
+        ] {
+            let pixels = try #require(rep.bitmapData)
+            var coloured = 0
+            for row in 0..<Self.side {
+                let base = row * rep.bytesPerRow
+                for column in 0..<Self.side {
+                    let offset = base + column * 4
+                    let r = pixels[offset], g = pixels[offset + 1], b = pixels[offset + 2]
+                    if r != g || g != b { coloured += 1 }
+                }
+            }
+            #expect(coloured == 0, "\(name) has \(coloured) coloured pixels")
+        }
     }
 
     @Test("muted and muted-while-talking are not the same mark")
     func alarmedDiffersFromMuted() throws {
-        let muted = try pixels(
-            StatusItemController.statusImage(level: nil, isMuted: true))
-        let alarmed = try pixels(
-            StatusItemController.statusImage(
-                level: nil, isMuted: true, isSpeakingWhileMuted: true))
-        #expect(muted != alarmed)
+        let muted = try bytes(render(level: nil, isMuted: true))
+        // The alarm is a blink, so it differs on the dim half of it. Both halves
+        // are checked: one that matched plain mute on *both* would be a warning
+        // that never appears.
+        let dim = try bytes(
+            render(level: nil, isMuted: true, isSpeakingWhileMuted: true, isDim: true))
+        let bright = try bytes(
+            render(level: nil, isMuted: true, isSpeakingWhileMuted: true, isDim: false))
+        #expect(muted != dim)
+        #expect(bright != dim)
     }
 
     /// And the alarm only ever means something alongside a mute. Voice activity
@@ -1442,17 +1557,239 @@ struct StatusMarkTests {
     /// would make the warning meaningless by being on all the time.
     @Test("speaking on a live microphone changes nothing")
     func speakingUnmutedIsNotAWarning() throws {
-        let plain = try pixels(StatusItemController.statusImage(level: 0.4))
-        let same = try pixels(
-            StatusItemController.statusImage(level: 0.4, isSpeakingWhileMuted: true))
+        let plain = try bytes(render(level: 0.4))
+        let same = try bytes(render(level: 0.4, isSpeakingWhileMuted: true, isDim: true))
         #expect(plain == same)
     }
 
-    @Test("and every state is drawn at all")
-    func everyStateDraws() throws {
-        #expect(StatusItemController.statusImage(level: nil) != nil)
-        #expect(StatusItemController.statusImage(level: 0.5) != nil)
-        #expect(StatusItemController.statusImage(level: nil, isMuted: true) != nil)
+    @Test("every state is drawn, and no two of them look alike")
+    func everyStateIsDistinct() throws {
+        let states: [(String, NSBitmapImageRep)] = try [
+            ("idle", render(level: nil)),
+            ("quiet", render(level: 0.02)),
+            ("loud", render(level: 0.8)),
+            ("muted", render(level: nil, isMuted: true)),
+            (
+                "alarmed",
+                render(level: nil, isMuted: true, isSpeakingWhileMuted: true, isDim: true)
+            ),
+        ]
+        for (index, state) in states.enumerated() {
+            #expect(try ink(state.1) > 0.02, "\(state.0) drew almost nothing")
+            for other in states.dropFirst(index + 1) {
+                #expect(
+                    try bytes(state.1) != bytes(other.1),
+                    "\(state.0) and \(other.0) are the same picture")
+            }
+        }
+    }
+
+    /// The meter says its number by *length*, not by opacity. A meter drawn as a
+    /// fading dot is unreadable once colour is gone — a faint dot and a small
+    /// one are the same pixel — so this asserts the ink in the meter's own
+    /// column actually grows.
+    @Test("the meter grows with the level")
+    func meterGrowsWithLevel() throws {
+        let column = NSRect(
+            x: 13 * CGFloat(Self.scale), y: 0, width: 3 * CGFloat(Self.scale),
+            height: CGFloat(Self.side))
+        let quiet = try ink(render(level: 0.02), in: column)
+        let middling = try ink(render(level: 0.15), in: column)
+        let loud = try ink(render(level: 0.9), in: column)
+        #expect(quiet < middling)
+        #expect(middling < loud)
+        // And idle has no meter at all, or "running" and "stopped" look alike.
+        #expect(try ink(render(level: nil), in: column) < quiet)
+    }
+
+    /// The curve behind the meter, which is the part a picture cannot show.
+    ///
+    /// The old one reached the top at −12 dBFS — an ordinary speech peak — so a
+    /// column driven by it would have stood full through every sentence
+    /// anybody said. That was survivable while the level was the opacity of a
+    /// dot and is not now.
+    @Test("the meter spreads speech across its range instead of pinning")
+    func meterCurveSpreadsSpeech() {
+        // Peaks a metre from a microphone at a normal speaking volume, roughly
+        // −30 to −6 dBFS. Every one of these has to be visibly different from
+        // the next, which is the whole job of a meter.
+        let speech: [Float] = [0.03, 0.06, 0.12, 0.25, 0.5]
+        let intensities = speech.map { StatusItemController.meterIntensity($0) }
+        for (quieter, louder) in zip(intensities, intensities.dropFirst()) {
+            // A twentieth of the column is a visible step at fourteen points.
+            #expect(louder - quieter > 0.05, "\(quieter) and \(louder) are too close")
+        }
+        #expect(intensities.allSatisfy { $0 > 0 && $0 < 1 }, "speech reaches an end stop")
+        // And the ends behave: silence is empty, full scale is full.
+        #expect(StatusItemController.meterIntensity(0) == 0)
+        #expect(StatusItemController.meterIntensity(1) == 1)
+        // A quiet room does not light it at all, or the meter twitches on the
+        // noise floor for as long as the application is running.
+        #expect(StatusItemController.meterIntensity(0.002) == 0)
+    }
+
+    /// The two defects the old glyph had, in the form that can catch them
+    /// coming back. Measured: the mark used to sit 1.4 points left of centre
+    /// with its ink touching the top edge of the image.
+    @Test("the mark is centred and does not touch the edges")
+    func markSitsInsideItsBox() throws {
+        let rep = try render(level: nil)
+        let pixels = try #require(rep.bitmapData)
+        var minX = Self.side, maxX = -1, minRow = Self.side, maxRow = -1
+        for row in 0..<Self.side {
+            let base = row * rep.bytesPerRow
+            for column in 0..<Self.side where pixels[base + column * 4 + 3] > 10 {
+                minX = min(minX, column)
+                maxX = max(maxX, column)
+                minRow = min(minRow, row)
+                maxRow = max(maxRow, row)
+            }
+        }
+        let scale = Double(Self.scale)
+        let centre = (Double(minX) + Double(maxX) + 1) / 2 / scale
+        // Within a point of the middle of an eighteen-point square. A point is
+        // not something anybody sees at this size; 1.4 of them was.
+        #expect(abs(centre - 9) <= 1, "the mark's centre is at \(centre) of 18")
+        // Apple's own menu bar symbols keep a margin; a glyph that runs to the
+        // edge reads as too large beside them.
+        #expect(Double(minRow) / scale >= 1, "no margin above the mark")
+        #expect(18 - Double(maxRow + 1) / scale >= 1, "no margin below the mark")
+    }
+
+    /// Weight, against the only reference that matters: what Apple puts in the
+    /// same menu bar. Too light and it reads as a smudge; too heavy and it is
+    /// the loudest thing up there.
+    @Test("and it weighs about what Apple's own symbols weigh")
+    func inkIsInTheSystemRange() throws {
+        let idle = try ink(render(level: nil))
+        // Measured across mic, mic.fill, waveform, speaker.wave.2.fill,
+        // airpodspro and bolt.horizontal.fill at this size: 0.17 to 0.28.
+        #expect(idle > 0.12, "the mark is fainter than any system symbol: \(idle)")
+        #expect(idle < 0.32, "the mark is heavier than any system symbol: \(idle)")
+    }
+}
+
+/// The application icon, which is drawn rather than stored.
+///
+/// The claims worth holding are the ones a wrong number makes invisible: a body
+/// that fills its canvas sits proud of every neighbour in the Dock, and a mark
+/// that is too small reads as an empty tile. Both were true of the icon this
+/// replaced — a 180-point bitmap scaled five-fold into a 1024 slot, with no
+/// body at all.
+@MainActor
+@Suite("The application icon")
+struct AppIconTests {
+
+    private func rep(_ size: Int, _ style: String = "graphite") throws -> NSBitmapImageRep {
+        try #require(YunIconBadge.bitmap(size: size, style: YunIconBadge.style(named: style)))
+    }
+
+    private func alpha(_ rep: NSBitmapImageRep, _ x: Int, _ y: Int) throws -> Double {
+        let pixels = try #require(rep.bitmapData)
+        return Double(pixels[y * rep.bytesPerRow + x * 4 + 3]) / 255
+    }
+
+    @Test("every slot iconutil asks for is produced, at the size it asks for")
+    func everySlotIsDrawn() throws {
+        for slot in YunIconBadge.iconsetSlots {
+            let rep = try rep(slot.pixels)
+            #expect(rep.pixelsWide == slot.pixels)
+            #expect(rep.pixelsHigh == slot.pixels)
+        }
+    }
+
+    /// Apple's grid: a body of 824 in a canvas of 1024. The corners must be
+    /// empty and the middle of each edge must not be.
+    @Test("the body is a rounded shape inside the canvas, not the whole canvas")
+    func bodyHasTheSystemMargins() throws {
+        let size = 1024
+        let rep = try rep(size)
+        // A corner of the canvas is outside the body by a wide margin.
+        #expect(try alpha(rep, 8, 8) < 0.02)
+        #expect(try alpha(rep, size - 9, 8) < 0.02)
+        // So is a corner of the body's own bounding box, because the body is
+        // rounded. This is what a plain rectangle would fail.
+        #expect(try alpha(rep, 104, 104) < 0.5)
+        // The middle of each edge of the body is solid.
+        #expect(try alpha(rep, size / 2, 104) > 0.98)
+        #expect(try alpha(rep, 104, size / 2) > 0.98)
+        #expect(try alpha(rep, size / 2, size / 2) > 0.98)
+        // And the canvas outside the body is empty apart from the shadow.
+        #expect(try alpha(rep, size / 2, 8) < 0.35)
+    }
+
+    /// The mark has to be big enough to see at the sizes people actually meet
+    /// the icon at. Measured against the body rather than the canvas, since the
+    /// canvas is mostly margin.
+    @Test("the mark fills most of the body")
+    func markIsNotLostInTheBody() throws {
+        let height = YunAppIcon.inkBox(height: 1, centredAt: .zero).height
+        #expect(height > 0)
+        let rep = try rep(1024)
+        // Sampled down the vertical centre line of the body: the mark should be
+        // present well above and well below the middle.
+        let body = (top: 1024 - 100, bottom: 100)
+        let span = Double(body.top - body.bottom)
+        var covered = 0
+        for row in body.bottom..<body.top {
+            // Row indices run downwards in a bitmap; the mark is symmetric
+            // enough about the centre line for this to be a fair sample.
+            if try alpha(rep, 512, row) > 0.02 { covered += 1 }
+        }
+        let fraction = Double(covered) / span
+        #expect(fraction > 0.5, "the mark covers \(fraction) of the body's height")
+    }
+
+    @Test("every style builds, and they do not all look the same")
+    func stylesDiffer() throws {
+        var seen: [Data] = []
+        for style in YunIconBadge.styles {
+            let rep = try #require(YunIconBadge.bitmap(size: 128, style: style))
+            let data = try #require(rep.representation(using: .png, properties: [:]))
+            #expect(!seen.contains(data), "\(style.name) is identical to another style")
+            seen.append(data)
+        }
+        #expect(seen.count == YunIconBadge.styles.count)
+    }
+
+    /// An unknown name must not silently produce a different icon from the one
+    /// asked for — `make-icon.sh --style typo` should build the default, and
+    /// that is only safe because the default is a real entry.
+    @Test("an unknown style name falls back to one that exists")
+    func unknownStyleFallsBack() {
+        #expect(YunIconBadge.style(named: "no-such-style").name == YunIconBadge.fallbackStyle)
+        #expect(YunIconBadge.style(named: nil).name == YunIconBadge.fallbackStyle)
+        #expect(YunIconBadge.styles.contains { $0.name == YunIconBadge.fallbackStyle })
+    }
+}
+
+/// Where the mark's ink is inside its own file.
+///
+/// This is measured rather than written down so that replacing the PNG is all
+/// somebody has to do to change the application's mark. The test is that the
+/// measurement is actually doing something: a bounding box covering the whole
+/// file would mean the scan had failed and every placement had quietly gone
+/// back to using the file's padding.
+@Suite("The mark's ink bounds")
+struct InkBoundsTests {
+
+    @Test("the mark is a portrait shape and does not fill its file")
+    func inkIsMeasured() {
+        let bounds = YunAppIcon.inkBounds
+        #expect(bounds.width > 0.2 && bounds.width < 0.9)
+        #expect(bounds.height > 0.5)
+        // Taller than it is wide — if this ever fails, the artwork changed
+        // shape and every box sized from `inkAspect` wants looking at.
+        #expect(YunAppIcon.inkAspect < 1)
+    }
+
+    @Test("and a box built from it keeps the mark's proportions")
+    func boxKeepsTheAspect() {
+        let box = YunAppIcon.inkBox(height: 100, centredAt: NSPoint(x: 50, y: 50))
+        #expect(box.height == 100)
+        #expect(abs(box.width - 100 * YunAppIcon.inkAspect) < 0.001)
+        #expect(abs(box.midX - 50) < 0.001)
+        #expect(abs(box.midY - 50) < 0.001)
     }
 }
 

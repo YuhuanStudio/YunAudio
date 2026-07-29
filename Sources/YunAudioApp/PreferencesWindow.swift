@@ -237,6 +237,21 @@ struct PreferencesWindow: View {
                 }
             }
 
+            heading(loc("Application icon"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    iconSwatches
+                    Text(
+                        loc(
+                            "Changes the icon this application draws — the About panel, its alerts and its notifications. The icon Finder shows is built into the app; rebuild it with ./App/make-icon.sh --style <name>."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             heading(loc("Accent colour"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
@@ -254,6 +269,46 @@ struct PreferencesWindow: View {
                     accentPreview
                 }
             }
+        }
+    }
+
+    /// The icons, drawn as themselves and at a size somebody judges an icon at.
+    ///
+    /// A segmented control of three words would be asking people to choose
+    /// between "graphite", "paper" and "mist" without showing them any of it.
+    private var iconSwatches: some View {
+        HStack(alignment: .top, spacing: Yun.Space.md) {
+            ForEach(YunIconBadge.styles, id: \.name) { style in
+                let isSelected = model.iconStyle == style.name
+                Button {
+                    model.iconStyle = style.name
+                } label: {
+                    VStack(spacing: 6) {
+                        Image(nsImage: YunIconBadge.image(size: 52, style: style))
+                            .frame(width: 52, height: 52)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                    .strokeBorder(
+                                        isSelected
+                                            ? Yun.Palette.textPrimary : Color.clear,
+                                        lineWidth: 2
+                                    )
+                                    .padding(-4)
+                            }
+                            .padding(4)
+                        Text(loc(style.name))
+                            .font(.system(size: 10, weight: isSelected ? .semibold : .regular))
+                            .foregroundStyle(
+                                isSelected
+                                    ? Yun.Palette.textPrimary : Yun.Palette.textTertiary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .focusEffectDisabled()
+                .accessibilityLabel(Text(loc(style.name)))
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -825,13 +880,15 @@ struct PreferencesWindow: View {
     private var aboutSection: some View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
             HStack(spacing: Yun.Space.md) {
-                if let mark = YunAppIcon.image {
-                    Image(nsImage: mark)
-                        .resizable()
-                        .interpolation(.high)
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 48, height: 48)
-                }
+                // The application icon proper, not the bare mark. This is the
+                // one place in an accessory application where somebody looks
+                // for the icon they see in Finder, and showing a different
+                // thing here is how an About panel reads as somebody else's.
+                Image(
+                    nsImage: YunIconBadge.image(
+                        size: 56, style: YunIconBadge.style(named: model.iconStyle))
+                )
+                .frame(width: 56, height: 56)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(loc("YunAudio"))
                         .font(.system(size: 20, weight: .semibold))

@@ -216,13 +216,15 @@ struct MainWindow: View {
 
     private var header: some View {
         HStack(spacing: Yun.Space.md) {
-            if let mark = YunAppIcon.image {
-                Image(nsImage: mark)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 22, height: 22)
-            }
+            // Trimmed, not the raw file: the mark is a portrait shape stored in
+            // a square PNG, so fitting the file to a 22-point square left the
+            // mark smaller than 22 points and a little left of where it looked
+            // like it should be.
+            Image(nsImage: YunAppIcon.trimmed)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 22)
             Text(loc("YunAudio"))
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(Yun.Palette.textPrimary)

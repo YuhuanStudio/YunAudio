@@ -16,6 +16,107 @@ enum PanelRenderer {
         // from the live window capture, which has a real backdrop.
         YunTheme.shared.style = .flat
         write(directory: directory, model: model, suffix: "")
+        writeMarks(to: directory)
+    }
+
+    /// The menu bar glyph and the application icon, which no window capture
+    /// contains.
+    ///
+    /// Both are eighteen points and 1024 points of the same drawing code, and
+    /// neither appears in any of the captures above — the glyph lives in the
+    /// menu bar and the icon lives in Finder. So the only way anybody had of
+    /// looking at them was to install the application, which meant that in
+    /// practice nobody looked at them at all. The tests assert that the states
+    /// differ; these say what they look like, which is a different question and
+    /// not one a test can answer.
+    private static func writeMarks(to directory: String) {
+        // Each state, and both halves of the alarm's blink.
+        let states: [(String, Float?, Bool, Bool, Bool)] = [
+            ("idle", nil, false, false, false),
+            ("quiet", 0.02, false, false, false),
+            ("speech", 0.25, false, false, false),
+            ("loud", 0.85, false, false, false),
+            ("muted", nil, true, false, false),
+            ("alarm", nil, true, true, false),
+            ("alarm dim", nil, true, true, true),
+        ]
+        // A status item is a template: the menu bar draws it in its own
+        // foreground colour. Rendered against both, because a glyph that is
+        // legible in one and not the other is the defect this catches.
+        for (appearance, background, foreground) in [
+            ("light", NSColor.white, NSColor.black),
+            ("dark", NSColor(white: 0.13, alpha: 1), NSColor.white),
+        ] {
+            let magnification: CGFloat = 6
+            let cell = 18 * magnification + 12
+            let width = Int(cell * CGFloat(states.count))
+            let height = Int(18 * magnification + 54)
+            guard
+                let rep = NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .calibratedRGB, bytesPerRow: width * 4, bitsPerPixel: 32),
+                let context = NSGraphicsContext(bitmapImageRep: rep)
+            else {
+                failed = true
+                continue
+            }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = context
+            background.setFill()
+            NSRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)).fill()
+            for (index, state) in states.enumerated() {
+                let x = CGFloat(index) * cell + 6
+                // Magnified, to judge the shape; and at the size it is actually
+                // seen, which is the only judgement that counts.
+                for (origin, size, interpolation) in [
+                    (NSPoint(x: x, y: 40), 18 * magnification, NSImageInterpolation.none),
+                    (NSPoint(x: x + 18 * magnification / 2 - 9, y: 16), 18, .high),
+                ] {
+                    NSGraphicsContext.saveGraphicsState()
+                    context.imageInterpolation = interpolation
+                    context.cgContext.translateBy(x: origin.x, y: origin.y)
+                    context.cgContext.scaleBy(x: size / 18, y: size / 18)
+                    // In a layer of its own, so that tinting the glyph the way
+                    // AppKit tints a template does not also tint the sheet
+                    // behind it.
+                    context.cgContext.beginTransparencyLayer(auxiliaryInfo: nil)
+                    StatusItemController.drawStatusMark(
+                        level: state.1, isMuted: state.2, isSpeakingWhileMuted: state.3,
+                        isDim: state.4)
+                    // What AppKit does to a template image, done here so the
+                    // capture shows what the menu bar shows rather than a black
+                    // shape on a black bar.
+                    foreground.setFill()
+                    NSRect(x: 0, y: 0, width: 18, height: 18).fill(using: .sourceAtop)
+                    context.cgContext.endTransparencyLayer()
+                    NSGraphicsContext.restoreGraphicsState()
+                }
+                (state.0 as NSString).draw(
+                    at: NSPoint(x: x, y: 2),
+                    withAttributes: [
+                        .font: NSFont.systemFont(ofSize: 10), .foregroundColor: foreground,
+                    ])
+            }
+            context.flushGraphics()
+            NSGraphicsContext.restoreGraphicsState()
+            if let png = rep.representation(using: .png, properties: [:]) {
+                print(write(png, named: "menu-bar-mark-\(appearance).png", to: directory))
+            } else {
+                failed = true
+            }
+        }
+
+        // Every icon style, at the size somebody judges an icon at.
+        for style in YunIconBadge.styles {
+            guard let rep = YunIconBadge.bitmap(size: 512, style: style),
+                let png = rep.representation(using: .png, properties: [:])
+            else {
+                failed = true
+                continue
+            }
+            print(write(png, named: "app-icon-\(style.name).png", to: directory))
+        }
     }
 
     private static func write(directory: String, model: RouterModel, suffix: String) {

@@ -3079,6 +3079,10 @@ final class RouterModel: ScriptTarget {
         }
         style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
         YunTheme.shared.style = style
+        // Through `style(named:)` so a preferences file naming an icon style
+        // that no longer exists restores the default rather than nothing.
+        iconStyle = YunIconBadge.style(named: saved.iconStyle).name
+        applyIconStyle()
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
         // The property's own `didSet` reloads and persists, and `isRestoring`
@@ -3124,6 +3128,7 @@ final class RouterModel: ScriptTarget {
                 cancelsEcho: cancelsEcho,
                 echoSpeakerUID: echoSpeakerUID,
                 style: style.rawValue,
+                iconStyle: iconStyle,
                 lightingMode: lighting.mode.rawValue,
                 lightingHue: lightingHue,
                 lightingBrightness: lightingBrightness,
@@ -5282,6 +5287,37 @@ final class RouterModel: ScriptTarget {
             YunTheme.shared.style = style
             persist()
         }
+    }
+
+    /// Which of `YunIconBadge.styles` the application icon wears.
+    ///
+    /// How far this reaches is worth being honest about, because it is not as
+    /// far as the equivalent setting on an iPhone. iOS has
+    /// `setAlternateIconName`, where the system owns a catalogue of icons the
+    /// app declared up front and swapping between them is one call. macOS has
+    /// no equivalent: what Finder and the Dock show is the `.icns` sealed
+    /// inside the bundle, chosen when the bundle was built, and the only way to
+    /// change it in place is to write a custom icon into the bundle — which
+    /// breaks its code signature, and this application is signed with the
+    /// microphone entitlement. A broken seal there does not mean a stale icon;
+    /// it means the microphone permission is revoked. Not a trade worth making
+    /// for a picture.
+    ///
+    /// So this changes every icon the *application* draws — the About panel and
+    /// anything that shows `NSApp.applicationIconImage`, which includes its
+    /// alerts and its notifications — and `./App/make-icon.sh --style <name>`
+    /// changes the one Finder shows.
+    var iconStyle: String = YunIconBadge.fallbackStyle {
+        didSet {
+            guard oldValue != iconStyle else { return }
+            applyIconStyle()
+            persist()
+        }
+    }
+
+    func applyIconStyle() {
+        NSApp?.applicationIconImage = YunIconBadge.image(
+            size: 512, style: YunIconBadge.style(named: iconStyle))
     }
 
     /// IO cycles completed. Only used by the flow check, which needs to know

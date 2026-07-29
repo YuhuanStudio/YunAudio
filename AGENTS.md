@@ -97,7 +97,10 @@ YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp  # real 
   only way to catch a colour that works in one theme and vanishes in the other.
   If you change the layout, check the render size in `PanelRenderer.swift` still
   covers the content — it was 860pt tall against taller content for a while and
-  quietly cropped the header out of every design check since.
+  quietly cropped the header out of every design check since. It also writes
+  `menu-bar-mark-*.png` and `app-icon-*.png`: neither the status item nor the
+  application icon appears in any window capture, so without those the only way
+  to look at them was to install the app, which meant nobody did.
 - **Screenshot** photographs the actual window at its minimum size, including
   the title bar. An offscreen render structurally cannot show that.
 - **`--verify`** copies the app elsewhere, moves the build tree out of reach and
@@ -108,6 +111,45 @@ YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp  # real 
   through `loc()`. A wrapped literal looks exactly like an unwrapped one; four
   survived every other check, including the entire preferences sidebar sitting
   in English beside Chinese content.
+
+### The icon is drawn, not stored
+
+```bash
+./App/make-icon.sh --list             # what the styles are called
+./App/make-icon.sh --style paper      # build build/YunAudio.icns as that one
+```
+
+There is one piece of artwork — `Sources/YunAudioApp/Resources/Icon.png` — and
+everything else is drawn from it by `YunIconBadge` and `YunAppIcon`. The icon
+build asks the application to draw each `.icns` slot at its own resolution,
+because the alternative is what this used to do: scale one 180-point bitmap into
+all ten, so the 1024 slot was a five-fold upscale.
+
+Settings → Appearance picks a style at runtime, and **it does not reach Finder,
+by design**. iOS has `setAlternateIconName`; macOS has no equivalent, and the
+only way to change a bundle's icon in place is to write a custom icon into the
+bundle — which breaks the code signature. This app is signed with the microphone
+entitlement, so a broken seal costs the microphone permission, not just a stale
+picture. The preference therefore changes every icon the *application* draws
+(About, `NSApp.applicationIconImage`, and so its alerts and notifications) and
+`make-icon.sh --style` changes the one Finder shows. Say so in the interface —
+it already does.
+
+Two things to know before touching any of it:
+
+- **Place the ink, not the file.** The mark is a portrait shape stored in a
+  square PNG and it is not centred in it. Drawing the file into a square box
+  put the mark 1.4 points left of centre with its tip against the top edge, in
+  the menu bar and in both window headers. `YunAppIcon.draw(inkFitting:)` and
+  `YunAppIcon.trimmed` exist so that mistake has one place to not be made.
+  The bounds are measured from the artwork at launch rather than written down,
+  so replacing the PNG is all that changing the mark takes.
+- **The status item is a template.** macOS renders it in the menu bar's own
+  foreground colour, which is what makes it follow light and dark mode and
+  invert under an open menu — and only the alpha channel survives that. Colour
+  cannot carry state there. It used to try: red for muted, green for level, none
+  of which ever reached the screen as drawn. Every state is a shape now, and
+  `StatusMarkTests` asserts there is not a coloured pixel in any of them.
 
 ### The engine is verified from the CLI
 

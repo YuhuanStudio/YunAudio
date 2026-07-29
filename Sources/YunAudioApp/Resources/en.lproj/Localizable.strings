@@ -528,3 +528,8 @@
 "%ds ago" = "%ds ago";
 "Recording could not be started." = "Recording could not be started.";
 "Transcription could not be started." = "Transcription could not be started.";
+"Application icon" = "Application icon";
+"Changes the icon this application draws — the About panel, its alerts and its notifications. The icon Finder shows is built into the app; rebuild it with ./App/make-icon.sh --style <name>." = "Changes the icon this application draws — the About panel, its alerts and its notifications. The icon Finder shows is built into the app; rebuild it with ./App/make-icon.sh --style <name>.";
+"graphite" = "Graphite";
+"paper" = "Paper";
+"mist" = "Mist";

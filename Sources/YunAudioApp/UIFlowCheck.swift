@@ -328,6 +328,37 @@ enum UIFlowCheck {
         }
         model.style = .flat
 
+        // The icon the application draws for itself. Every style has to build,
+        // because the picker draws all of them at once — one that returned a
+        // blank image would show as an empty tile beside the others and the
+        // preference would still save perfectly.
+        let originalIcon = model.iconStyle
+        // Before anything is changed. The model restores the chosen style while
+        // there is no `NSApp` to put it on, and `NSApp?.` makes that a silent
+        // no-op — so a saved choice could reach the picker and never reach the
+        // icon, which looks identical to a choice that was never saved.
+        check(
+            "the saved icon style reached the application at launch",
+            NSApp.applicationIconImage != nil)
+        for style in YunIconBadge.styles {
+            model.iconStyle = style.name
+            check("\(style.name) is remembered", model.iconStyle == style.name)
+            check(
+                "\(style.name) draws something",
+                YunIconBadge.bitmap(size: 64, style: style) != nil)
+            check(
+                "\(style.name) reaches the application's own icon",
+                NSApp.applicationIconImage != nil)
+        }
+        // A name that is not in the list must land on one that is, or a
+        // preferences file from a build that had a style this one dropped
+        // restores an icon that cannot be drawn.
+        model.iconStyle = "no-such-style"
+        check(
+            "an unknown style falls back rather than sticking",
+            YunIconBadge.style(named: model.iconStyle).name == YunIconBadge.fallbackStyle)
+        model.iconStyle = originalIcon
+
         try section("realtime tripwire")
         // The hook is process-wide, so leaving it armed taxes every allocation
         // in SwiftUI, AppKit and CoreAudio for a diagnostics page almost nobody

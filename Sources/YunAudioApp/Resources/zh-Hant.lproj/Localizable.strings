@@ -528,3 +528,8 @@
 "%ds ago" = "%d 秒前";
 "Recording could not be started." = "無法開始錄音。";
 "Transcription could not be started." = "無法開始轉錄。";
+"Application icon" = "應用程式圖示";
+"Changes the icon this application draws — the About panel, its alerts and its notifications. The icon Finder shows is built into the app; rebuild it with ./App/make-icon.sh --style <name>." = "會改變這個應用程式自己畫出來的圖示 —— 「關於」面板、警示對話框與通知。Finder 顯示的那個是封在 app 裡的，要換得用 ./App/make-icon.sh --style <名稱> 重建。";
+"graphite" = "石墨";
+"paper" = "紙白";
+"mist" = "薄霧";

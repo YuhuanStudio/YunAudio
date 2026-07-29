@@ -121,12 +121,27 @@ struct YunAudioApp: App {
         if environment["YUNAUDIO_RENDER"] == nil,
             environment["YUNAUDIO_FLOWCHECK"] == nil,
             environment["YUNAUDIO_SCREENSHOT"] == nil,
+            environment["YUNAUDIO_ICON"] == nil,
             !MainActor.assumeIsolated({ SingleInstance.claim() })
         {
             exit(0)
         }
         // The .lproj folders ship with this module, not with the main bundle.
         YunStrings.bundle = AppResources.bundle
+
+        // The application draws its own icon. `make-icon.sh` used to scale one
+        // 180-point bitmap into all ten slots of the iconset, which meant the
+        // largest was a five-fold upscale of it — soft in Finder, and mushy at
+        // 16 points where the small ones live. Drawing each slot at its own
+        // resolution costs nothing and needs the code that already knows where
+        // the mark's ink is, which is in this binary. See `YunIconBadge`.
+        if let directory = environment["YUNAUDIO_ICON"] {
+            let style = YunIconBadge.style(named: environment["YUNAUDIO_ICON_STYLE"])
+            let wrote = MainActor.assumeIsolated {
+                YunIconBadge.writeIconset(to: directory, style: style)
+            }
+            exit(wrote ? 0 : 1)
+        }
 
         // Design verification path. A menu bar popover cannot be opened without
         // accessibility permission, so the panel is rendered offscreen instead —
@@ -195,6 +210,13 @@ struct YunAudioApp: App {
             model.shutDown()
         }
         termination.flowCheckModel = model
+        // Again here, and for the reason the appearance is applied from the
+        // delegate rather than from `App.init`: the model restores this while
+        // there is no `NSApp` to put it on, and `NSApp?.` makes that a silent
+        // no-op rather than a crash. A chosen icon that only appears once the
+        // preferences window has been opened looks exactly like one that was
+        // never saved.
+        model.applyIconStyle()
         termination.statusItem = StatusItemController(model: model) {
             NSApp.activate(ignoringOtherApps: true)
             for window in NSApp.windows where window.title == "YunAudio" {

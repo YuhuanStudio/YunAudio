@@ -99,13 +99,11 @@ struct PanelView: View {
     /// the row below now, so the header does not have to say it twice.
     private var header: some View {
         HStack(spacing: Yun.Space.sm) {
-            if let mark = YunAppIcon.image {
-                Image(nsImage: mark)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(width: 18, height: 18)
-            }
+            Image(nsImage: YunAppIcon.trimmed)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(height: 18)
             Text(loc("YunAudio"))
                 .font(Yun.Text.title)
                 .foregroundStyle(Yun.Palette.textPrimary)

@@ -37,6 +37,9 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Which look the application wears. Optional so a file written before the
     /// setting existed still decodes.
     var style: String?
+    /// Which of `YunIconBadge.styles` the application icon wears. Optional for
+    /// the same reason.
+    var iconStyle: String?
     /// The input trim and the master, in decibels. Optional for the same
     /// reason.
     /// What the microphone's light ring shows.

@@ -1,27 +1,80 @@
 #!/bin/bash
 #
-# Builds YunAudio.icns from App/Assets/Icon.png.
+# Builds YunAudio.icns by asking the application to draw itself.
 #
-# The source is 180x180, so the large slots are upscaled and will look soft
-# next to a native icon. Replacing Icon.png with a 1024x1024 original is the
-# only real fix; this script will pick it up without changes.
+#   ./App/make-icon.sh                    the default look
+#   ./App/make-icon.sh --style paper      one of YunIconBadge.styles
+#   ./App/make-icon.sh --list             what the styles are called
+#
+# Why the app and not sips. This script used to scale one 180-point PNG into
+# all ten slots of the iconset, so the largest was a five-fold upscale — soft in
+# Finder at 512 and mushy at 16, where the body's edge and its shadow are a
+# pixel wide and cannot survive being resampled. The app draws each slot at its
+# own resolution instead, using the same code that knows where the mark's ink
+# sits inside the artwork. That code has to exist anyway for the menu bar.
+#
+# It also means the icon has settings rather than being an opaque file:
+# `YunIconBadge.styles` in Sources/YunAudioApp/AppIcon.swift is the list, and
+# adding an entry to it adds a `--style`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-SOURCE="App/Assets/Icon.png"
+# Ensures the SDK is new enough; see the script for why.
+source ./App/toolchain.sh
+
+STYLE="${YUNAUDIO_ICON_STYLE:-graphite}"
+CONFIGURATION="debug"
+LIST=0
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--style)
+		STYLE="${2:-}"
+		shift 2
+		;;
+	--style=*)
+		STYLE="${1#--style=}"
+		shift
+		;;
+	--configuration)
+		CONFIGURATION="${2:-debug}"
+		shift 2
+		;;
+	--release)
+		CONFIGURATION="release"
+		shift
+		;;
+	--list)
+		LIST=1
+		shift
+		;;
+	*)
+		echo "error: unknown argument $1" >&2
+		exit 1
+		;;
+	esac
+done
+
+if [[ "${LIST}" == "1" ]]; then
+	# Read out of the source rather than repeated here, so a style added in one
+	# place cannot be missing from the other.
+	grep -o 'name: "[a-z]*"' Sources/YunAudioApp/AppIcon.swift | sed 's/name: /  /;s/"//g'
+	exit 0
+fi
+
+BINARY=".build/${CONFIGURATION}/YunAudioApp"
+if [[ ! -x "${BINARY}" ]]; then
+	swift build -c "${CONFIGURATION}" --product YunAudioApp
+fi
+
 SET="build/YunAudio.iconset"
 rm -rf "${SET}"
 mkdir -p "${SET}"
 
-# The iconset names are fixed by iconutil; each is the pixel size it must be.
-for entry in "16 icon_16x16" "32 icon_16x16@2x" "32 icon_32x32" "64 icon_32x32@2x" \
-             "128 icon_128x128" "256 icon_128x128@2x" "256 icon_256x256" \
-             "512 icon_256x256@2x" "512 icon_512x512" "1024 icon_512x512@2x"; do
-	size="${entry%% *}"
-	name="${entry##* }"
-	sips -z "${size}" "${size}" "${SOURCE}" --out "${SET}/${name}.png" >/dev/null
-done
+# A non-zero exit here means a slot could not be written. An icon build that
+# half-succeeded produces an icns that iconutil accepts and Finder renders as a
+# blank page, which is a much harder thing to notice later.
+YUNAUDIO_ICON="${SET}" YUNAUDIO_ICON_STYLE="${STYLE}" "${BINARY}"
 
 iconutil --convert icns "${SET}" --output "build/YunAudio.icns"
 rm -rf "${SET}"
-echo "built build/YunAudio.icns"
+echo "built build/YunAudio.icns (${STYLE})"

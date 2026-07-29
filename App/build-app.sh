@@ -37,7 +37,10 @@ BUNDLE="build/YunAudio.app"
 
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
-./App/make-icon.sh >/dev/null
+# The icon is drawn by the binary that was just built, so it has to be told
+# which one — asking for the debug build here during a release build would
+# compile a second copy of the whole application to draw a picture.
+./App/make-icon.sh --configuration "${CONFIGURATION}" >/dev/null
 cp build/YunAudio.icns "${BUNDLE}/Contents/Resources/"
 
 # The SwiftPM resource bundle carries the icon and both string tables, and
