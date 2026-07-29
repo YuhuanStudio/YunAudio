@@ -5,6 +5,7 @@ import Observation
 import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
+import YunAudioOBS
 import YunAudioRazer
 import YunDesign
 
@@ -1325,6 +1326,11 @@ final class RouterModel: ScriptTarget {
             persist()
             // Nothing to warn about once the microphone is live again.
             if !isInputMuted { isSpeakingWhileMuted = false }
+            // A streamer who hits mute means everywhere. OBS's own mute for the
+            // same source is a separate switch on a separate window, and the
+            // failure it produces is the one nobody notices in time.
+            let muted = isInputMuted
+            Task { await obsLink.mirrorMute(muted) }
             fire(isInputMuted ? .muted : .unmuted)
         }
     }
@@ -2971,6 +2977,10 @@ final class RouterModel: ScriptTarget {
         quickConfigs = QuickConfigStore.load()
         refreshHeadphoneProfiles()
         restore()
+        // After `restore`, so loading the file does not immediately write it
+        // back — and `restore` is guarded anyway, which is belt and braces on
+        // the one path where a setting arriving from disk looked like a change.
+        obsLink.persist = { [weak self] in self?.persist() }
 
         engine.onClockLockFailure = { [weak self] in
             Task { @MainActor in self?.clockLockFailed = true }
@@ -3098,6 +3108,32 @@ final class RouterModel: ScriptTarget {
     /// what is here is the ownership and the two lines of persistence.
     let midiControl = MIDIController()
 
+    // MARK: OBS
+
+    /// The link to OBS. Everything it does lives in `OBSLink.swift`; what is
+    /// here is the ownership, the persistence, and the one number worth sending.
+    let obsLink = OBSLink()
+
+    /// The sync offset OBS would need, in milliseconds, for its own captures to
+    /// line up with what this application produces.
+    ///
+    /// Negative, and the magnitude is the effect chain's latency. Computable
+    /// with nothing connected, which is why it is here rather than inside
+    /// `OBSLink`: it is a fact about this application, and the interface should
+    /// show it whether or not anybody is streaming.
+    var obsSyncOffsetMilliseconds: Double {
+        OBSSyncOffset.forProcessingLatency(
+            frames: engine.effectLatencyFrames,
+            sampleRate: pathQuality?.sampleRate ?? preferredSampleRate)
+    }
+
+    /// Tells OBS what the chain costs now. Does nothing when nothing is linked.
+    func pushOBSSyncOffset() {
+        let frames = engine.effectLatencyFrames
+        let rate = pathQuality?.sampleRate ?? preferredSampleRate
+        Task { await obsLink.pushSyncOffset(latencyFrames: frames, sampleRate: rate) }
+    }
+
     /// Written down on its own rather than through `persist()`, because a
     /// binding can be learned while a preset is being applied and `persist()`
     /// declines to write during those.
@@ -3210,6 +3246,11 @@ final class RouterModel: ScriptTarget {
         {
             selectedDestinationUID = uid
         }
+        obsLink.host = saved.obsHost ?? "127.0.0.1"
+        obsLink.port = saved.obsPort ?? OBSConnection.defaultPort
+        obsLink.inputName = saved.obsInputName ?? ""
+        obsLink.mirrorsMute = saved.obsMirrorsMute ?? false
+
         selectDefaults()
         reloadResidentScript()
     }
@@ -3284,7 +3325,11 @@ final class RouterModel: ScriptTarget {
                 // given with nil and `save` replaces the whole blob, so every
                 // save — including the one the script editor's own `didSet`
                 // triggers — wrote the script away as nothing.
-                residentScript: residentScript))
+                residentScript: residentScript,
+                obsHost: obsLink.host,
+                obsPort: obsLink.port,
+                obsInputName: obsLink.inputName,
+                obsMirrorsMute: obsLink.mirrorsMute))
     }
 
     // MARK: Devices
@@ -4230,7 +4275,8 @@ final class RouterModel: ScriptTarget {
                 return loc("Script error:") + " " + error
             }
             let said = result.log.joined(separator: " · ")
-            return said.isEmpty ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
+            return said.isEmpty
+                ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
         case .preset(let name):
             // Matched without case, because a URL somebody typed will not have
             // the capitals right and refusing over that is pedantry.

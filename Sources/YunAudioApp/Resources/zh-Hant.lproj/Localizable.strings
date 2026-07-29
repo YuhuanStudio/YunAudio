@@ -534,3 +534,25 @@
 "paper" = "紙白";
 "mist" = "薄霧";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "移除會重啟 coreaudiod，所以所有音訊會中斷一下，而且需要管理員密碼。";
+
+"Streaming" = "直播";
+"OBS" = "OBS";
+"Connect" = "連線";
+"Disconnect" = "中斷連線";
+"Not connected" = "未連線";
+"Connecting…" = "連線中…";
+"OBS %@" = "OBS %@";
+"Address" = "位址";
+"Port" = "連接埠";
+"Password" = "密碼";
+"OBS's WebSocket server is off until you switch it on, under Tools → WebSocket Server Settings. The password is on the same panel, behind Show Connect Info. It is kept for this session only, because the preferences file is not a safe place for it." = "OBS 的 WebSocket 伺服器預設是關的，要自己去「工具 → WebSocket 伺服器設定」打開。密碼在同一個面板裡，按「顯示連線資訊」就看得到。密碼只留在這次工作階段裡，因為偏好設定檔不是放它的安全地方。";
+"The source OBS hears this through" = "OBS 用哪一路聽這裡";
+"not chosen" = "尚未選擇";
+"Mute OBS's copy when the microphone is muted" = "麥克風靜音時，一併靜音 OBS 那一路";
+"Sync offset" = "同步偏移";
+"What the chain costs" = "處理鏈的代價";
+"Last sent to OBS" = "上次送給 OBS 的值";
+"Send it to OBS" = "送給 OBS";
+"%.0f ms" = "%.0f ms";
+"Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier." = "這個應用程式送出去的每一樣東西，都比畫面晚到 OBS，晚的量就是效果鏈加上去的延遲。OBS 有一個欄位可以填，卻沒有辦法算出該填多少；這裡算得出來。填進去的是負值，因為它的意思是「把這段聲音當成更早發生的」。";
+"not sent yet" = "尚未送出";
