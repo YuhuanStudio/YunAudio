@@ -113,6 +113,13 @@ struct Preferences: Codable, Equatable, Sendable {
     /// preferences file has no business being.
     var tapMuteBehavior: String?
 
+    /// The script that stays loaded and reacts to things.
+    ///
+    /// Optional so a file written by a version that predates scripting still
+    /// decodes — every field added here has been, and the one time one was
+    /// not, every setting after it in the file was silently lost.
+    var residentScript: String?
+
     static let `default` = Preferences(
         sourceDeviceUID: nil,
         destinationDeviceUID: nil,
@@ -158,7 +165,8 @@ struct Preferences: Codable, Equatable, Sendable {
         recentSourceUIDs: [],
         recentDestinationUIDs: [],
         midiBindings: [:],
-        tapMuteBehavior: TapMuteBehavior.unmuted.storageKey)
+        tapMuteBehavior: TapMuteBehavior.unmuted.storageKey,
+        residentScript: nil)
 }
 
 extension TapMuteBehavior {

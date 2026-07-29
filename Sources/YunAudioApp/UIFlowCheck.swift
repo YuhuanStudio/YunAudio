@@ -3188,6 +3188,7 @@ enum UIFlowCheck {
         try await checkMIDI(model: model)
         try await checkScoring(model: model)
         try await checkVoiceActivity(model: model)
+        try await checkScripting(model: model)
         try await checkRedrawCost(model: model)
         try await checkCarriedState(model: model)
 
@@ -3928,6 +3929,63 @@ enum UIFlowCheck {
 
         model.monitorDeviceUID = monitorBefore
         await waitUntil("monitoring went back as it was", { !model.isBusy }, timeout: 15)
+    }
+
+    /// Scripting, against the real model rather than a stub.
+    ///
+    /// The unit tests drive a stub, which is right for the object model but
+    /// cannot show the two things that only matter here: that a command from a
+    /// script reaches the same place a button does, and that an event actually
+    /// fires when the thing happens rather than when a test calls `dispatch`.
+    private static func checkScripting(model: RouterModel) async throws {
+        try section("scripting")
+
+        let before = model.residentScript
+        defer { model.residentScript = before }
+
+        // Reading. The status has to describe this machine, not a shape.
+        let reading = model.runScript(
+            "var s = yun.status(); [s.running, s.muted, yun.presets().length].join('/')")
+        check("a script can read the state", reading.isSuccess)
+        note("status reads: \(reading.value)")
+
+        // Acting, through the same vocabulary a button uses.
+        let wasMuted = model.isInputMuted
+        _ = model.runScript("yun.mute(true)")
+        check("a script can mute", model.isInputMuted)
+        _ = model.runScript("yun.mute(false)")
+        check("and unmute", !model.isInputMuted)
+        model.isInputMuted = wasMuted
+
+        // A name this application does not have must stop the script rather
+        // than being skipped, or the rest of it runs against an arrangement
+        // nobody chose.
+        let missing = model.runScript("yun.preset('no such scene'); yun.mute(true)")
+        check("an unknown scene stops the script", !missing.isSuccess)
+        check("and nothing after it ran", model.isInputMuted == wasMuted)
+
+        // Events, fired by the application doing the thing rather than by the
+        // check calling into the script layer.
+        model.residentScript = """
+            var seen = [];
+            yun.on('muted', function () { seen.push('muted'); yun.log('muted'); });
+            yun.on('unmuted', function () { seen.push('unmuted'); yun.log('unmuted'); });
+            """
+        check("a resident script loads", model.residentScriptError == nil)
+        if let problem = model.residentScriptError { note(problem) }
+        model.isInputMuted = true
+        model.isInputMuted = false
+        model.isInputMuted = wasMuted
+        note("script said: " + model.scriptLog.joined(separator: ", "))
+        check(
+            "muting the microphone reached the script",
+            model.scriptLog.contains("muted") && model.scriptLog.contains("unmuted"))
+
+        // And a broken one is reported where somebody will see it, rather than
+        // silently not running for the rest of the session.
+        model.residentScript = "yun.on('nope', function () {});"
+        check("an unknown event is refused at load", model.residentScriptError != nil)
+        if let problem = model.residentScriptError { note(problem) }
     }
 
     /// The system's own voice detector.

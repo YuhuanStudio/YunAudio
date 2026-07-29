@@ -1324,6 +1324,7 @@ final class RouterModel: ScriptTarget {
             persist()
             // Nothing to warn about once the microphone is live again.
             if !isInputMuted { isSpeakingWhileMuted = false }
+            fire(isInputMuted ? .muted : .unmuted)
         }
     }
 
@@ -1368,7 +1369,12 @@ final class RouterModel: ScriptTarget {
                 // talking" while unmuted would be a meter, and there is a real
                 // one two rows up that measures the signal rather than asking
                 // the system about it.
-                self.isSpeakingWhileMuted = speaking && self.isInputMuted
+                let wanted = speaking && self.isInputMuted
+                let changed = wanted != self.isSpeakingWhileMuted
+                self.isSpeakingWhileMuted = wanted
+                // Only on the edge. A script told once a second that somebody
+                // is still talking cannot tell that from somebody starting.
+                if changed, wanted { self.fire(.speakingWhileMuted) }
             }
         }
     }
@@ -3014,6 +3020,11 @@ final class RouterModel: ScriptTarget {
         YunTheme.shared.style = style
         voiceIsolationEnabled = enabledEffects.contains(.voiceIsolation)
         voiceIsolationMix = saved.voiceIsolationMix
+        // The property's own `didSet` reloads and persists, and `isRestoring`
+        // stops the persist but not the reload — so it is loaded explicitly
+        // below, once the rest of the model is in place. A handler that fired
+        // during a restore would be looking at half an arrangement.
+        residentScript = saved.residentScript ?? ""
         preferredSampleRate = saved.preferredSampleRate
         bufferFrames =
             Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
@@ -3029,6 +3040,7 @@ final class RouterModel: ScriptTarget {
             selectedDestinationUID = uid
         }
         selectDefaults()
+        reloadResidentScript()
     }
 
     private func persist() {
@@ -3226,7 +3238,18 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var startFailed = false
 
     private func handleDeviceChange() {
+        let before = Set((inputDevices + outputDevices).map(\.uid))
         refreshDevices()
+        let after = Set((inputDevices + outputDevices).map(\.uid))
+        // Named, because "something changed" is not something a script can act
+        // on. Which device arrived is exactly the thing a rule like "when the
+        // interface is plugged in, use it" needs.
+        for uid in after.subtracting(before) {
+            fire(.deviceAppeared, ["uid": uid, "name": deviceNames[uid] ?? uid])
+        }
+        for uid in before.subtracting(after) {
+            fire(.deviceDisappeared, ["uid": uid, "name": deviceNames[uid] ?? uid])
+        }
 
         // Taking a device back has to happen before noticing one is missing,
         // or unplugging the fallback while the original is already home again
@@ -3661,6 +3684,7 @@ final class RouterModel: ScriptTarget {
                 }
                 self.isRunning = true
                 self.lastError = nil
+                self.fire(.routingStarted)
                 self.startFailed = false
                 // The detector needs the device's input to be running, which it
                 // now is. Started here rather than at selection for that reason
@@ -3762,6 +3786,7 @@ final class RouterModel: ScriptTarget {
 
     private func finishStop() {
         isRunning = false
+        fire(.routingStopped)
         stopVoiceActivity()
         // The engine tore the recorder down with the route, so the flag has to
         // follow or the button would claim a recording is still running against
@@ -3845,11 +3870,75 @@ final class RouterModel: ScriptTarget {
 
     /// Runs a script against this model.
     ///
-    /// The host is made per run rather than kept: it holds nothing between
-    /// runs by design — one script must not be able to leave a global behind
-    /// that changes what the next one means — so there is nothing to keep.
+    /// A fresh host per run: it holds nothing between runs by design — one
+    /// script must not leave a global behind that changes what the next one
+    /// means — so there is nothing to keep.
     func runScript(_ source: String) -> ScriptHost.Result {
         ScriptHost(target: self).run(source)
+    }
+
+    /// The script that stays loaded and reacts to things.
+    ///
+    /// Persisted, because a script that has to be pasted in again after every
+    /// launch is a script nobody uses. Loaded on assignment so the editor shows
+    /// the error immediately rather than at the next restart.
+    var residentScript: String = "" {
+        didSet {
+            guard oldValue != residentScript else { return }
+            persist()
+            reloadResidentScript()
+        }
+    }
+
+    /// What loading it said, so the interface can show a syntax error next to
+    /// the script rather than nowhere.
+    private(set) var residentScriptError: String?
+
+    @ObservationIgnored private var residentHost: ScriptHost?
+
+    private func reloadResidentScript() {
+        guard !residentScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            residentHost = nil
+            residentScriptError = nil
+            return
+        }
+        let host = ScriptHost(target: self)
+        let result = host.load(residentScript)
+        residentScriptError = result.error
+        // Kept even when it failed to load, so `listens(for:)` is honestly
+        // empty rather than the previous script's handlers going on firing
+        // under the new script's name.
+        residentHost = host
+    }
+
+    /// Tells the resident script something happened.
+    ///
+    /// Silent when nothing is listening, which is almost always: this is called
+    /// from the poll and from every state change, so the cost of no script has
+    /// to be one dictionary lookup.
+    func fire(_ event: ScriptHost.Event, _ payload: [String: Any] = [:]) {
+        guard let residentHost, residentHost.listens(for: event) else { return }
+        let result = residentHost.dispatch(event, payload)
+        // A handler that threw is reported once, where a person will see it.
+        // Swallowing it would leave somebody's automation silently not running.
+        if let error = result.error {
+            residentScriptError = loc("Script error:") + " " + error
+        }
+        for line in result.log { scriptLog.append(line) }
+        // Bounded: a handler on `tick` that logs runs once a second for as long
+        // as the application does.
+        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
+    }
+
+    /// What resident handlers have said, most recent last.
+    private(set) var scriptLog: [String] = []
+
+    @ObservationIgnored private var pollsSinceScriptTick = 0
+    /// Asked once per second rather than per poll. `listens(for:)` is cheap,
+    /// but the poll is the hottest path in the interface and the answer cannot
+    /// change without a script being loaded.
+    private var residentListensForTick: Bool {
+        residentHost?.listens(for: .tick) ?? false
     }
 
     /// Carries out something another program asked for.
@@ -4258,6 +4347,23 @@ final class RouterModel: ScriptTarget {
         // suggested transpose was permanently nil. Every unit test passed
         // throughout: they call `KeyDetector` directly.
         lap("nowPlaying") { if isSingingVisible { refreshNowPlaying(); updateSinging() } }
+        // Once a second, not twenty times: a script watching a number does not
+        // need it at the meter's rate, and a handler that runs twenty times a
+        // second is a handler somebody's laptop can hear.
+        pollsSinceScriptTick += 1
+        if pollsSinceScriptTick >= 20 {
+            pollsSinceScriptTick = 0
+            if residentListensForTick {
+                fire(
+                    .tick,
+                    [
+                        "peak": Double(peakLevel),
+                        "loudness": analysis.shortTerm.isFinite ? analysis.shortTerm : -70,
+                        "muted": isInputMuted,
+                        "recording": isRecording,
+                    ])
+            }
+        }
         lap("gainReduction") { refreshGainReduction() }
         lap("ducking") { refreshDucking() }
         if isAutoLevelling { stepAutoLevel() }

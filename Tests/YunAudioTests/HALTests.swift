@@ -2025,3 +2025,164 @@ struct ScriptURLTests {
         #expect(other == .script("yun.mute()"))
     }
 }
+
+/// Scripts that stay and react.
+///
+/// A scripting interface with no triggers is half an interface — automation is
+/// what Audio Hijack's is praised for, and a script that can only be run by
+/// hand is a slower way of pressing a button. These run real JavaScript in a
+/// real resident context and then make the events happen.
+@MainActor
+@Suite("Scripts that react to things")
+struct ScriptEventTests {
+
+    private func host() -> (ScriptHost, ScriptingTests.Target) {
+        let target = ScriptingTests.Target()
+        return (ScriptHost(target: target), target)
+    }
+
+    @Test("a handler is called when the thing happens")
+    func handlerFires() {
+        let (host, target) = self.host()
+        _ = target
+        let loaded = host.load("yun.on('start', function () { yun.log('up'); });")
+        #expect(loaded.isSuccess, "\(loaded.error ?? "")")
+        let fired = host.dispatch(.routingStarted)
+        #expect(fired.log == ["up"])
+    }
+
+    /// The payload is how an event says anything useful. Without it a handler
+    /// has to go and ask, and by then the moment has moved.
+    @Test("a handler is given what happened")
+    func handlerReceivesPayload() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load("yun.on('tick', function (e) { yun.log('peak ' + e.peak); });")
+        let fired = host.dispatch(.tick, ["peak": 0.25])
+        #expect(fired.log == ["peak 0.25"])
+    }
+
+    /// Several scripts watching one event is the ordinary case: one watching
+    /// the microphone and another watching the recording are not one script.
+    @Test("every handler for an event is called")
+    func allHandlersFire() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load(
+            """
+            yun.on('muted', function () { yun.log('one'); });
+            yun.on('muted', function () { yun.log('two'); });
+            """)
+        #expect(host.dispatch(.muted).log == ["one", "two"])
+    }
+
+    /// A typo in an event name would otherwise be a script that looks right,
+    /// loads cleanly and does nothing for ever — the worst outcome available.
+    @Test("an event name that does not exist is an error at load time")
+    func unknownEventIsRejected() {
+        let (host, target) = self.host()
+        _ = target
+        let loaded = host.load("yun.on('started', function () {});")
+        #expect(!loaded.isSuccess)
+        #expect(loaded.error?.contains("started") == true)
+        // And the list of real names is in the message, because the next thing
+        // anybody wants to know is what they should have typed.
+        #expect(loaded.error?.contains("start") == true)
+    }
+
+    /// A handler that throws must not take the others with it, and must not
+    /// quietly unregister itself: an event that failed once because a device
+    /// was busy should still be handled for the rest of the session.
+    @Test("a handler that throws does not stop the others or itself")
+    func oneBadHandlerDoesNotStopTheRest() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load(
+            """
+            yun.on('stop', function () { throw new Error('bad'); });
+            yun.on('stop', function () { yun.log('still here'); });
+            """)
+        let first = host.dispatch(.routingStopped)
+        #expect(first.log == ["still here"])
+        #expect(first.error?.contains("bad") == true)
+        // Again, and it is still registered.
+        #expect(host.dispatch(.routingStopped).log == ["still here"])
+    }
+
+    /// A resident script keeps its own state — that is the whole reason the
+    /// context is kept rather than rebuilt for each event.
+    @Test("a script remembers between events")
+    func stateSurvivesBetweenEvents() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load(
+            "var seen = 0; yun.on('tick', function () { seen++; yun.log('' + seen); });")
+        _ = host.dispatch(.tick)
+        _ = host.dispatch(.tick)
+        #expect(host.dispatch(.tick).log == ["3"])
+    }
+
+    /// Loading replaces. Two copies of a script both reacting is not what
+    /// anybody means by editing one.
+    @Test("loading again replaces what was there")
+    func loadingReplaces() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load("yun.on('muted', function () { yun.log('old'); });")
+        _ = host.load("yun.on('muted', function () { yun.log('new'); });")
+        #expect(host.dispatch(.muted).log == ["new"])
+    }
+
+    /// A script that fails while loading leaves nothing behind. Half a script
+    /// reacting to things is worse than none, because the half that is there
+    /// looks like the whole.
+    @Test("a script that throws while loading registers nothing")
+    func failedLoadRegistersNothing() {
+        let (host, target) = self.host()
+        _ = target
+        let loaded = host.load(
+            "yun.on('muted', function () { yun.log('half'); }); throw new Error('nope');")
+        #expect(!loaded.isSuccess)
+        #expect(host.dispatch(.muted).log.isEmpty)
+        #expect(!host.listens(for: .muted))
+    }
+
+    /// The same limit as a one-shot run, and for a stronger reason: a handler
+    /// runs on somebody else's schedule rather than on a person pressing a
+    /// button, so an endless loop in one would hang the application at a moment
+    /// nobody chose.
+    @Test("an endless loop inside a handler is stopped too")
+    func runawayHandlerIsStopped() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load("yun.on('tick', function () { while (true) {} });")
+        let began = Date()
+        let fired = host.dispatch(.tick)
+        #expect(!fired.isSuccess, "an endless handler reported success")
+        #expect(Date().timeIntervalSince(began) < 20)
+    }
+
+    /// Dispatching something nothing listens for costs nothing and says
+    /// nothing, because most events have no handler most of the time.
+    @Test("an event nobody listens for is quiet")
+    func unhandledEventIsQuiet() {
+        let (host, target) = self.host()
+        _ = target
+        _ = host.load("yun.on('start', function () { yun.log('up'); });")
+        let fired = host.dispatch(.deviceAppeared)
+        #expect(fired.log.isEmpty)
+        #expect(fired.isSuccess)
+        #expect(!host.listens(for: .deviceAppeared))
+        #expect(host.listens(for: .routingStarted))
+    }
+
+    /// A handler can act, not only observe — otherwise this is a logging
+    /// facility rather than automation.
+    @Test("a handler can drive the application")
+    func handlerCanAct() {
+        let (host, target) = self.host()
+        _ = host.load("yun.on('speakingWhileMuted', function () { yun.mute(false); });")
+        _ = host.dispatch(.speakingWhileMuted)
+        #expect(target.performed == [.mute(false)])
+    }
+}

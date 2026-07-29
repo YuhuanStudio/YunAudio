@@ -50,6 +50,18 @@ final class ScriptHost {
     private weak var target: ScriptTarget?
     private var output: [String] = []
 
+    /// The context a resident script lives in.
+    ///
+    /// Kept, unlike the one a single run gets. A script that reacts to things
+    /// has to still be there when they happen, and its handlers are closures
+    /// over its own state — so the context is the script, and throwing it away
+    /// between events would throw away everything it had worked out.
+    private var residentContext: JSContext?
+    /// Handlers by event name, in the order they were registered. Several
+    /// handlers for one event is the ordinary case: one script watching the
+    /// microphone and another watching the recording are not one script.
+    private var handlers: [String: [JSManagedValue]] = [:]
+
     init(target: ScriptTarget) {
         self.target = target
     }
@@ -95,13 +107,8 @@ final class ScriptHost {
 
         // Stopped rather than trusted. The limit is on the context group, which
         // is what actually interrupts a loop with no function calls in it.
-        JSContextGroupSetExecutionTimeLimit(
-            JSContextGetGroup(context.jsGlobalContextRef), Self.timeLimit, nil, nil)
-        defer {
-            JSContextGroupClearExecutionTimeLimit(JSContextGetGroup(context.jsGlobalContextRef))
-        }
-
-        let value = context.evaluateScript(source)
+        var value: JSValue?
+        withTimeLimit(context) { value = context.evaluateScript(source) }
         if let thrown {
             return Result(value: "", log: output, error: thrown)
         }
@@ -109,6 +116,134 @@ final class ScriptHost {
             (value?.isUndefined ?? true) || (value?.isNull ?? true)
             ? "" : (value?.toString() ?? "")
         return Result(value: rendered, log: output, error: nil)
+    }
+
+    // MARK: Scripts that stay
+
+    /// The events a script may ask to be told about.
+    ///
+    /// A closed set, and named rather than derived from anything internal. This
+    /// is the part of a scripting interface that is hardest to take back: a
+    /// handler somebody wrote a year ago has to still be called, so every name
+    /// here is a promise. Adding one later is free; changing what one means is
+    /// not.
+    enum Event: String, CaseIterable, Sendable {
+        case routingStarted = "start"
+        case routingStopped = "stop"
+        case muted
+        case unmuted
+        case recordingStarted = "recordStart"
+        case recordingStopped = "recordStop"
+        /// The microphone is muted and the system's own detector can hear
+        /// somebody speaking. The reason a script can be more useful than a
+        /// pill: it can also unmute, or say something out loud.
+        case speakingWhileMuted
+        case deviceAppeared
+        case deviceDisappeared
+        /// Once a second while routing, so a script can watch a number without
+        /// needing timers of its own. There are deliberately no timers in the
+        /// context — a script cannot schedule itself, the application decides
+        /// when it runs, and that is what keeps a runaway script bounded.
+        case tick
+    }
+
+    /// Loads a script that stays, replacing whatever was loaded before.
+    ///
+    /// - Returns: What evaluating it produced. Handlers registered during that
+    ///   evaluation are kept; one that throws while registering leaves none,
+    ///   because a half-loaded script is worse than no script.
+    @discardableResult
+    func load(_ source: String) -> Result {
+        residentContext = nil
+        handlers = [:]
+        guard target != nil else {
+            return Result(
+                value: "", log: [], error: loc("The application is no longer there."))
+        }
+        guard let context = JSContext() else {
+            return Result(value: "", log: [], error: loc("The interpreter could not be started."))
+        }
+        output = []
+        var thrown: String?
+        context.exceptionHandler = { _, exception in thrown = exception?.toString() }
+        install(into: context)
+        installEvents(into: context)
+        withTimeLimit(context) { _ = context.evaluateScript(source) }
+        if let thrown {
+            handlers = [:]
+            return Result(value: "", log: output, error: thrown)
+        }
+        residentContext = context
+        return Result(value: "", log: output, error: nil)
+    }
+
+    /// True when a script is loaded and listening for this event.
+    func listens(for event: Event) -> Bool {
+        !(handlers[event.rawValue] ?? []).isEmpty
+    }
+
+    /// Tells the loaded script something happened.
+    ///
+    /// - Returns: The messages the handlers asked to show, and the first error
+    ///   any of them threw. A handler that throws does not stop the others and
+    ///   does not unregister itself: an event that fails once because a device
+    ///   was busy should not silently stop being handled for the rest of the
+    ///   session.
+    @discardableResult
+    func dispatch(_ event: Event, _ payload: [String: Any] = [:]) -> Result {
+        guard let context = residentContext, let listeners = handlers[event.rawValue],
+            !listeners.isEmpty
+        else { return Result(value: "", log: [], error: nil) }
+        output = []
+        var thrown: String?
+        context.exceptionHandler = { _, exception in
+            if thrown == nil { thrown = exception?.toString() }
+        }
+        let argument = JSValue(object: payload, in: context) ?? JSValue(undefinedIn: context)
+        withTimeLimit(context) {
+            for listener in listeners {
+                listener.value?.call(withArguments: [argument as Any])
+            }
+        }
+        return Result(value: "", log: output, error: thrown)
+    }
+
+    /// Runs something inside the limit and clears it afterwards.
+    ///
+    /// Applied to every entry into the interpreter rather than only to a
+    /// one-shot run: an endless loop inside an event handler hangs the
+    /// application exactly as thoroughly as one at the top level, and a handler
+    /// runs on somebody else's schedule rather than on a person pressing a
+    /// button.
+    private func withTimeLimit(_ context: JSContext, _ body: () -> Void) {
+        let group = JSContextGetGroup(context.jsGlobalContextRef)
+        JSContextGroupSetExecutionTimeLimit(group, Self.timeLimit, nil, nil)
+        defer { JSContextGroupClearExecutionTimeLimit(group) }
+        body()
+    }
+
+    private func installEvents(into context: JSContext) {
+        let names = Set(Event.allCases.map(\.rawValue))
+        let on: @convention(block) (String, JSValue?) -> Void = { [weak self] name, handler in
+            guard let self else { return }
+            // An unknown event name is an error rather than a handler that
+            // never fires. A typo in `yun.on('started', …)` would otherwise be
+            // a script that looks right, loads cleanly and does nothing for
+            // ever — the worst outcome available.
+            guard names.contains(name) else {
+                context.exception = JSValue(
+                    object: "there is no event called \"\(name)\" — "
+                        + Event.allCases.map(\.rawValue).sorted().joined(separator: ", "),
+                    in: context)
+                return
+            }
+            guard let handler, handler.isObject,
+                let managed = JSManagedValue(value: handler, andOwner: self)
+            else { return }
+            self.handlers[name, default: []].append(managed)
+        }
+        context.objectForKeyedSubscript("yun")?
+            .setObject(on, forKeyedSubscript: "on" as NSString)
     }
 
     // MARK: The object model
