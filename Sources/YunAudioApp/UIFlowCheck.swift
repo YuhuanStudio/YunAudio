@@ -942,15 +942,45 @@ enum UIFlowCheck {
         // Deliberately pushed into clipping and back, because an indicator that
         // has never been seen to light is not an indicator.
         //
-        // Both stages pushed to the top rather than just the trim: a quiet room
-        // sat at −50 dBFS, so +40 dB of trim still landed ten decibels short of
-        // full scale and the check failed for want of signal rather than for
-        // want of detection.
+        // Both stages pushed rather than just the trim: a quiet room sat at
+        // −50 dBFS, so +40 dB of trim still landed ten decibels short of full
+        // scale and the check failed for want of signal rather than for want of
+        // detection.
+        //
+        // And pushed until it clips rather than by a fixed amount, because a
+        // fixed amount is a claim about how loud the room is, and this room
+        // does not hold still. Measured on this machine, same binary, sixteen
+        // runs of this section: with the old fixed +80 dB across the two
+        // stages it failed **eight times out of eight**, landing between 34 and
+        // 60 dB short of full scale; escalating passed eight out of eight, and
+        // what it needed ranged from +40 dB to +120 dB across the pair. The
+        // level the meter reports is no help in deciding in advance either — it
+        // decays at 20 dB a second, so it describes what recently arrived
+        // rather than what is arriving now, and it read *higher* on the run
+        // that failed than on the run that passed.
+        //
+        // Escalating costs whoever is listening nothing: full scale is full
+        // scale, so a louder push does not make a louder noise, and the loop
+        // stops the moment anything reaches it.
+        //
+        // The first rung is deliberately below what any room needs, so the
+        // escalation is exercised on every run and the note underneath reports
+        // how much headroom the room actually had. A ladder whose first rung
+        // always succeeds is a ladder nobody has ever climbed.
         let trimBeforeClip = model.inputDecibels
         let masterBeforeClip = model.outputDecibels
-        model.inputDecibels = 40
-        model.outputDecibels = 40
-        await pause(0.6)
+        var pushed: Float = 0
+        for stage: Float in [20, 60, 100, 140] {
+            pushed = stage
+            model.inputDecibels = stage
+            model.outputDecibels = stage
+            await pause(upTo: 1.0, until: { model.outputClippedSamples > 0 })
+            if model.outputClippedSamples > 0 { break }
+        }
+        note(
+            String(
+                format: "+%.0f dB on each stage: peak %.1f dBFS, %@ clipped",
+                pushed, model.outputPeakDecibels, "\(model.outputClippedSamples)"))
         check("clipping is detected once it happens", model.outputClippedSamples > 0)
         check("and it is called clipping", model.outputVerdict == .clipping)
         model.inputDecibels = trimBeforeClip
@@ -1555,17 +1585,33 @@ enum UIFlowCheck {
             })
         // Until every stem has enough in it to assert on, rather than two
         // seconds whichever way it goes. The size below is the real check.
+        //
+        // The elapsed time is waited for as well, and that is not belt and
+        // braces: a stereo stem passes 100 kB in about a quarter of a second,
+        // so the size alone stopped the recording after 0.35 s — measured — and
+        // the assertion at the bottom of this section then read a duration that
+        // had survived the stop perfectly well and was simply shorter than the
+        // half second it was comparing against. It failed in a full run and
+        // passed on its own for no better reason than which one wrote its
+        // hundred kilobytes first.
         await pause(
-            upTo: 2.0,
+            upTo: 4.0,
             until: {
-                stems.allSatisfy { url in
-                    let size =
-                        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size]
-                        as? Int ?? 0
-                    return size > 100_000
-                }
+                model.recordingSeconds > 0.8
+                    && stems.allSatisfy { url in
+                        let size =
+                            (try? FileManager.default.attributesOfItem(atPath: url.path))?[
+                                .size]
+                            as? Int ?? 0
+                        return size > 100_000
+                    }
             })
+        let secondsBeforeStemStop = model.recordingSeconds
         model.toggleRecording()
+        note(
+            String(
+                format: "stems ran %.2fs; %.2fs after the stop",
+                secondsBeforeStemStop, model.recordingSeconds))
         await pause(0.6)
         for url in stems {
             let size =
@@ -1580,7 +1626,16 @@ enum UIFlowCheck {
         // The duration has to survive the stop. Reading it after releasing the
         // recorder returned zero, so the elapsed time snapped to 00:00 at
         // exactly the moment anyone would look at it.
-        check("the elapsed time survived the stop", model.recordingSeconds > 0.5)
+        //
+        // Against what it read a moment before the stop rather than against a
+        // fixed half second, which is the claim: nothing was lost by releasing
+        // the recorder. A constant here is a second assertion about how long
+        // the wait above happened to run, and it was that second assertion —
+        // never this one — that was failing.
+        check("there was an elapsed time to survive", secondsBeforeStemStop > 0.5)
+        check(
+            "the elapsed time survived the stop",
+            model.recordingSeconds >= secondsBeforeStemStop)
 
         if let file {
             // The recorder drains on its own thread, so the last frames land
@@ -3013,7 +3068,7 @@ enum UIFlowCheck {
             check("no error was left behind", model.lastError == nil)
         }
 
-        try checkApplicationList(model: model)
+        try await checkApplicationList(model: model)
 
         try section("stopping")
         // Stop, pressed while the engine queue was busy with a rebuild. The busy
@@ -4642,12 +4697,41 @@ enum UIFlowCheck {
     /// folded in.
     ///
     /// - Parameter model: The live model, mid-route.
-    private static func checkApplicationList(model: RouterModel) throws {
+    private static func checkApplicationList(model: RouterModel) async throws {
         try section("application list, with audio running")
 
         // What the panel and the window actually ask for.
         let panelLimit = 6
         let windowLimit = 8
+
+        // First, let the HAL catch up with the route.
+        //
+        // The section immediately above stops the route and starts it again,
+        // and `processIsRunningOutput` is the HAL's own bookkeeping about a
+        // device that has just been handed back: it becomes true some time
+        // after `isRunning` does, not with it. Measured here at **0.84 s**, and
+        // at 0.01 s on two other runs — which is what makes it a race rather
+        // than a delay somebody would have noticed. Everything below asks the
+        // machine what is playing, so waiting once here is the difference
+        // between checking the list and checking whether CoreAudio had finished
+        // its paperwork.
+        //
+        // Before the enumeration rather than after it: the list is a snapshot,
+        // so a refresh taken while the HAL still said nothing was playing
+        // carries that answer into every assertion made against it afterwards.
+        let askedAt = Date()
+        if model.isRunning {
+            await pause(
+                upTo: 5.0,
+                until: {
+                    ((try? AudioProcesses.all(includingSilent: true)) ?? [])
+                        .contains(where: \.isPlaying)
+                })
+            note(
+                String(
+                    format: "the HAL took %.2fs to say anything was playing",
+                    -askedAt.timeIntervalSinceNow))
+        }
 
         // Nobody has refreshed since the route started. This is the call the
         // list itself makes when it appears, and it has to be enough.
