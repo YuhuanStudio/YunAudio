@@ -6099,6 +6099,25 @@ struct KaraokeScoreTests {
         #expect(score.silentSeconds > 8.5)
     }
 
+    /// A live score is about the attempt so far. Notes that have not happened
+    /// are not silence: charging the complete MIDI file made a perfect first
+    /// ten seconds of a four-minute song read about four per cent.
+    @Test("the live score does not charge notes in the future")
+    func futureIsNotSilence() {
+        let sung = singer(offBy: 0, seconds: 10)
+        let wholeSong = reference(seconds: 4 * 60)
+        let live = KaraokeScore.score(
+            sung: sung, reference: wholeSong, through: 10)
+        let finished = KaraokeScore.score(
+            sung: sung, reference: wholeSong)
+
+        #expect(live.percentage > 99)
+        #expect(abs(live.referenceSeconds - 10) < 0.1)
+        #expect(live.silentSeconds < 0.1)
+        #expect(finished.percentage > 3)
+        #expect(finished.percentage < 5)
+    }
+
     /// And a singer producing samples twice as fast cannot earn twice the
     /// credit, which is the same bug pointing the other way.
     @Test("a faster tracker does not score higher")

@@ -107,6 +107,11 @@ extension KaraokeScore {
     /// song and is not a good performance, and fifty per cent says both.
     public static let nearPitchCredit: Double = 0.5
 
+    /// Scale degrees are immutable across every refresh. Keeping them once
+    /// avoids rebuilding two tiny heap arrays in the fallback scorer.
+    private static let majorScaleDegrees = [0, 2, 4, 5, 7, 9, 11]
+    private static let minorScaleDegrees = [0, 2, 3, 5, 7, 8, 10]
+
     /// How far a sung sample may be from a reference moment and still be that
     /// moment's answer.
     ///
@@ -168,23 +173,42 @@ extension KaraokeScore {
     ///     than present and silent.
     ///   - lyrics: The words, in time order, for the per-line breakdown. A line
     ///     runs until the next one starts. Pass nothing for a total only.
+    ///   - through: The song clock to score through. Future notes are not
+    ///     silence; infinity scores the whole supplied reference.
     /// - Returns: The total and, when lyrics were given, one entry per line.
     public static func score(
-        sung: [PitchSample], reference: [PitchSample], lyrics: [Lyrics.Line] = []
+        sung: [PitchSample], reference: [PitchSample], lyrics: [Lyrics.Line] = [],
+        through: Double = .infinity
     ) -> KaraokeScore {
         let sung = sung.sorted { $0.time < $1.time }
         let reference = reference.sorted { $0.time < $1.time }
-        guard !reference.isEmpty else { return .none }
+        return scoreChronological(
+            sung: sung, sungStep: typicalStep(of: sung),
+            reference: reference, referenceStep: typicalStep(of: reference),
+            lyrics: lyrics, through: through)
+    }
 
-        let referenceStep = typicalStep(of: reference)
-        let sungStep = typicalStep(of: sung)
-        guard referenceStep > 0 else { return .none }
+    /// Scores live series whose order and cadence are already known.
+    ///
+    /// `SingerPitch` and `MidiMelody` both publish chronological samples at a
+    /// fixed cadence. Sorting them and finding the same median gap four times a
+    /// second made a visible score walk and allocate over the whole performance
+    /// forever. The general `score` entry point keeps accepting unordered data;
+    /// this one records the stronger contract the live path can prove.
+    public static func scoreChronological(
+        sung: [PitchSample], sungStep: Double,
+        reference: [PitchSample], referenceStep: Double,
+        lyrics: [Lyrics.Line] = [], through: Double = .infinity
+    ) -> KaraokeScore {
+        guard !reference.isEmpty, referenceStep > 0 else { return .none }
 
         // One bucket per lyric line, plus one for whatever falls before the
         // first line — an instrumental introduction that still has a tune in it
         // counts towards the total even though no line covers it.
-        var starts = lyrics.map(\.time)
-        if starts.first.map({ $0 > 0 }) ?? true { starts.insert(-.infinity, at: 0) }
+        var starts: [Double] = []
+        starts.reserveCapacity(lyrics.count + 1)
+        if lyrics.first.map({ $0.time > 0 }) ?? true { starts.append(-.infinity) }
+        for line in lyrics { starts.append(line.time) }
         var onPerBucket = [Double](repeating: 0, count: starts.count)
         var nearPerBucket = [Double](repeating: 0, count: starts.count)
         var totalPerBucket = [Double](repeating: 0, count: starts.count)
@@ -212,6 +236,10 @@ extension KaraokeScore {
         // decided by whether the singer held the note into the gap.
         let weight = referenceStep
         for moment in reference {
+            // Notes after the player has reached this point have not been
+            // missed. Counting the complete MIDI file here made a perfect first
+            // verse of a four-minute song read about four per cent.
+            if moment.time > through { break }
             while bucket + 1 < starts.count, starts[bucket + 1] <= moment.time { bucket += 1 }
             totalPerBucket[bucket] += weight
             totalSeconds += weight
@@ -250,6 +278,7 @@ extension KaraokeScore {
         // total only.
         let leading = lyrics.isEmpty || starts.count > lyrics.count ? 1 : 0
         var lines: [Line] = []
+        lines.reserveCapacity(lyrics.count)
         for index in lyrics.indices {
             let slot = index + leading
             guard slot < totalPerBucket.count else { break }
@@ -291,12 +320,19 @@ extension KaraokeScore {
         through: Double
     ) -> KaraokeScore {
         let sung = sung.sorted { $0.time < $1.time }
-        let step = typicalStep(of: sung)
-        guard step > 0 else { return .none }
+        return keyScoreChronological(
+            sung: sung, sungStep: typicalStep(of: sung), key: key,
+            lyrics: lyrics, through: through)
+    }
 
-        let degrees =
-            key.isMinor ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11]
-        let pitchClasses = degrees.map { Double((key.pitchClass + $0) % 12) }
+    /// The key-and-timing score for the live pitch tracker's ordered series.
+    public static func keyScoreChronological(
+        sung: [PitchSample], sungStep: Double, key: KeyDetector.Key,
+        lyrics: [Lyrics.Line], through: Double
+    ) -> KaraokeScore {
+        guard sungStep > 0 else { return .none }
+
+        let degrees = key.isMinor ? minorScaleDegrees : majorScaleDegrees
         let onThreshold = 0.5
         let nearThreshold = 0.9
 
@@ -305,23 +341,51 @@ extension KaraokeScore {
         var errorTotal = 0.0
         var onPerLine = [Double](repeating: 0, count: lyrics.count)
         var nearPerLine = [Double](repeating: 0, count: lyrics.count)
+        var lineCursor = 0
         for sample in sung {
-            let error =
-                pitchClasses
-                .map { semitoneError(sung: sample.midi, reference: $0) }
-                .min { abs($0) < abs($1) } ?? 0
+            // An Array.map here allocated twice per pitched frame: 84,422
+            // allocations to refresh one thirty-minute score. Seven scalar
+            // comparisons are the entire operation.
+            var error = Double.infinity
+            for degree in degrees {
+                let pitchClass = Double((key.pitchClass + degree) % 12)
+                let candidate = semitoneError(
+                    sung: sample.midi, reference: pitchClass)
+                if abs(candidate) < abs(error) { error = candidate }
+            }
             errorTotal += error
-            let line = lyricIndex(at: sample.time, lyrics: lyrics)
+            // Both lists are chronological. A binary search per sample was
+            // about 380,000 comparisons in a half-hour session; one cursor
+            // crosses each lyric boundary once.
+            while lineCursor + 1 < lyrics.count,
+                lyrics[lineCursor + 1].time <= sample.time
+            {
+                lineCursor += 1
+            }
+            let line: Int?
+            if lyrics.indices.contains(lineCursor),
+                sample.time >= lyrics[lineCursor].time
+            {
+                let end =
+                    min(
+                        lineCursor + 1 < lyrics.count
+                            ? lyrics[lineCursor + 1].time
+                            : lyrics[lineCursor].time + 4,
+                        lyrics[lineCursor].time + 4)
+                line = sample.time < end ? lineCursor : nil
+            } else {
+                line = nil
+            }
             if abs(error) <= onThreshold {
-                onSeconds += step
-                if let line { onPerLine[line] += step }
+                onSeconds += sungStep
+                if let line { onPerLine[line] += sungStep }
             } else if abs(error) <= nearThreshold {
-                nearSeconds += step
-                if let line { nearPerLine[line] += step }
+                nearSeconds += sungStep
+                if let line { nearPerLine[line] += sungStep }
             }
         }
 
-        let sungSeconds = Double(sung.count) * step
+        let sungSeconds = Double(sung.count) * sungStep
         let expectedSeconds =
             lyrics.isEmpty
             ? sungSeconds
@@ -337,6 +401,7 @@ extension KaraokeScore {
             denominator > 0 ? max(0, min(100, credit / denominator * 100)) : 0
 
         var lineScores: [Line] = []
+        lineScores.reserveCapacity(lyrics.count)
         for index in lyrics.indices {
             let start = lyrics[index].time
             let end =
@@ -435,6 +500,14 @@ public final class SingerPitch {
     /// The most recent estimate in hertz, or zero when there is no pitch to
     /// find. What the interface shows.
     public private(set) var hertz: Float = 0
+
+    /// Seconds represented by one tracker estimate.
+    ///
+    /// Known from the frame size rather than rediscovered by allocating and
+    /// sorting every historical gap whenever the interface refreshes a score.
+    public var sampleInterval: Double {
+        Double(PitchTracker.frameSize) / sampleRate
+    }
 
     /// Whether every sample is kept, or only the running range.
     ///
