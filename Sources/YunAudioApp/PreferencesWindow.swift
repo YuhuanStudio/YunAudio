@@ -22,6 +22,13 @@ enum SettingsWindow {
     /// True when a responder took the action, which is the part worth knowing:
     /// the `Settings` scene installs the handler, and without the scene the
     /// send is a silent no-op rather than an error.
+    ///
+    /// The returned true is not a promise that a window appeared. Measured: the
+    /// scene's window only comes up for an *active* application, and a process
+    /// that cannot become active gets true and no window. That is why the flow
+    /// check asserts the action and says out loud that it did not check the
+    /// window — a person pressing the gear is active by definition, and a run
+    /// launched from a terminal never is.
     @discardableResult
     static func open() -> Bool {
         // Without this the window opens behind whatever has focus when the app
