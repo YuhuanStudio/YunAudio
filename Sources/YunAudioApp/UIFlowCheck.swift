@@ -1556,6 +1556,19 @@ enum UIFlowCheck {
 
         try section("recording")
         check("recording is offered while routing", model.isRunning)
+        // Listening before the button is pressed, because `recordStart` and
+        // `recordStop` were names in `ScriptHost.Event` that nothing raised.
+        // The scripting help lists every case, and `installEvents` refuses an
+        // unknown name so that a mistyped handler cannot silently never fire —
+        // so these two were accepted, advertised, and never called. Asserted
+        // here rather than in the scripting section because recording needs a
+        // route, and this is where there is certainly one.
+        let scriptBeforeRecording = model.residentScript
+        model.residentScript = """
+            yun.on('recordStart', function (e) { yun.log('recordStart ' + e.file); });
+            yun.on('recordStop', function (e) { yun.log('recordStop ' + e.seconds); });
+            """
+        check("a script can ask about recording", model.residentScriptError == nil)
         model.toggleRecording()
         check("the recording started", model.isRecording)
         check("no error was reported", model.lastError == nil)
@@ -1592,6 +1605,20 @@ enum UIFlowCheck {
         model.toggleRecording()
         check("the recording stopped", !model.isRecording)
         check("stopping clears the pause", !model.isRecordingPaused)
+        note("script said: " + model.scriptLog.joined(separator: ", "))
+        check(
+            "starting the recording reached the script",
+            model.scriptLog.contains { $0.hasPrefix("recordStart ") })
+        check(
+            "and stopping it did",
+            model.scriptLog.contains { $0.hasPrefix("recordStop ") })
+        // The payload is the point of the event: a script that is told a
+        // recording finished and not which file has been told nothing it can
+        // act on.
+        check(
+            "the file it names is the one that was written",
+            model.scriptLog.contains { $0 == "recordStart " + (file?.path ?? "—") })
+        model.residentScript = scriptBeforeRecording
 
         try section("stems")
         // A file per source alongside the mix. What cannot be recovered from a
@@ -3974,6 +4001,22 @@ enum UIFlowCheck {
         check(
             "and back again",
             PreferencesStore.load().recordingFormat == originalFormat.rawValue)
+
+        // And a third time, on the field added directly after `tapMuteBehavior`
+        // — which is how this one was found. The script editor's own `didSet`
+        // called `persist()`, `Preferences` had the field, and `persist()` did
+        // not name it, so the memberwise initialiser wrote nil and a script
+        // somebody had spent an evening on was gone at the next launch. The
+        // interface said nothing; it restored `""` and looked untouched.
+        let originalScript = model.residentScript
+        model.residentScript = "// survives a relaunch"
+        check(
+            "the resident script reached the file",
+            PreferencesStore.load().residentScript == "// survives a relaunch")
+        model.residentScript = originalScript
+        check(
+            "and back again",
+            PreferencesStore.load().residentScript == originalScript)
     }
 
     /// The monitor mix, which is carried by route *indices* rather than by
@@ -4088,10 +4131,15 @@ enum UIFlowCheck {
         // check calling into the script layer.
         model.residentScript = """
             var seen = [];
+            yun.log('loaded');
             yun.on('muted', function () { seen.push('muted'); yun.log('muted'); });
             yun.on('unmuted', function () { seen.push('unmuted'); yun.log('unmuted'); });
             """
         check("a resident script loads", model.residentScriptError == nil)
+        // The top level is where somebody puts the line that tells them the
+        // script is the one they think it is, and it was thrown away — only a
+        // handler's output ever reached the panel headed "What it has said".
+        check("and what it said while loading is shown", model.scriptLog.contains("loaded"))
         if let problem = model.residentScriptError { note(problem) }
         model.isInputMuted = true
         model.isInputMuted = false
@@ -4149,6 +4197,11 @@ enum UIFlowCheck {
         // the state reads 0 with input not running — an indicator wired to a
         // detector nobody enabled would be permanently dark and look correct.
         check("and the route switched it on", VoiceActivityWatcher.isEnabled(on: source.id))
+        // And the watcher the model is actually holding says so. The device
+        // answering yes is not the same claim: the watcher's initialiser hands
+        // back a live object even when its own enable write failed, and nothing
+        // in the application used to ask.
+        check("and the watcher the model holds is running", model.isDetectingVoiceActivity)
         note(
             "reference for echo cancellation: "
                 + (VoiceActivityWatcher.suggestedReferenceDeviceUID(for: source.id)

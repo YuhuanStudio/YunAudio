@@ -27,7 +27,10 @@ public actor Transcriber {
         /// Which source said it, by the name the mixer shows.
         public let speaker: String
         public let text: String
-        /// Seconds from the start of the session.
+        /// Seconds from the start of the session — the instant handed to
+        /// `start(now:)`, which every source is given the same value of. That
+        /// is what makes merging several sources into one conversation
+        /// meaningful; see `sessionOffset` for what it took to make it true.
         public let start: Double
         public let duration: Double
 
@@ -84,6 +87,9 @@ public actor Transcriber {
     /// The cast back happens inside the availability guards.
     private let feed = Feed()
     private var resultsTask: Task<Void, Never>?
+    /// When the session began, on the caller's clock. Every source of one
+    /// session is given the same value, which is what makes `Line.start`
+    /// comparable across them.
     private var startedAt: Double = 0
     private var isRunning = false
 
@@ -126,6 +132,10 @@ public actor Transcriber {
 
     /// Starts transcribing. The caller then feeds it audio.
     ///
+    /// - Parameter now: When the session began, as a
+    ///   `Date().timeIntervalSince1970`. Every line's `start` is measured from
+    ///   it, so give every source of one session the same value or their
+    ///   transcripts cannot be merged.
     /// - Throws: `Unavailable` describing which of the three ways it can fail
     ///   happened, because "transcription is unavailable" is not something
     ///   anybody can act on.
@@ -196,8 +206,34 @@ public actor Transcriber {
             Line(
                 speaker: speaker,
                 text: text,
-                start: result.range.start.seconds,
+                start: sessionOffset + result.range.start.seconds,
                 duration: result.range.duration.seconds))
+    }
+
+    /// Seconds between the session beginning and this source's first audio.
+    ///
+    /// The analyser's timeline and the session's are two different clocks and
+    /// were silently taken for one. Measured here, against real speech:
+    ///
+    /// - Three seconds of digital silence in front of a sentence read back as
+    ///   `range.start` 2.7, so the analyser's zero is the first buffer it
+    ///   accepted rather than anything to do with the session.
+    /// - Three transcribers started one after another — the shape
+    ///   `startTranscribing` has — opened 69, 73 and 78 ms into the session,
+    ///   because audio fed before a transcriber's model is open is dropped.
+    ///   All three then reported their line at `start` 0.0. Warm that is 9 ms
+    ///   of skew between sources; on a first use of a language the model is
+    ///   fetched inside `start`, and the sources behind it in the loop open
+    ///   however long that download took.
+    ///
+    /// So the offset is added rather than assumed to be nothing, which is what
+    /// `startedAt` was recorded for and never used for. What the analyser
+    /// counts *after* that origin is still audio delivered rather than wall
+    /// time — a ring that yields nothing holds the clock still — so this makes
+    /// the origin right, not the whole timeline immune to a dropout.
+    private var sessionOffset: Double {
+        guard let opened = feed.openedAt else { return 0 }
+        return max(0, opened - startedAt)
     }
 
     /// Feeds audio: mono float at whatever rate the router is running.
@@ -248,6 +284,15 @@ public actor Transcriber {
         private let lock = NSLock()
         private var converter: AnyObject?
         private var continuation: AsyncStream<AnalyzerInput>.Continuation?
+        private var firstAccepted: Double?
+
+        /// When the converter swallowed its first sample, on the same wall
+        /// clock the session start was taken on. Nil until it has.
+        var openedAt: Double? {
+            lock.lock()
+            defer { lock.unlock() }
+            return firstAccepted
+        }
 
         func open(converter: AnyObject?, continuation: AsyncStream<AnalyzerInput>.Continuation)
         {
@@ -255,6 +300,7 @@ public actor Transcriber {
             defer { lock.unlock() }
             self.converter = converter
             self.continuation = continuation
+            firstAccepted = nil
         }
 
         func send(_ buffer: AVAudioPCMBuffer) {
@@ -265,6 +311,11 @@ public actor Transcriber {
                 let converter = converter as? AnalyzerInputConverter,
                 let inputs = try? converter.convert(buffer, at: nil)
             else { return }
+            // Noted on the buffer the converter took rather than on the first
+            // one it gave something back for: it chunks, so the first call can
+            // yield nothing at all, and the analyser's zero is the first sample
+            // it swallowed either way.
+            if firstAccepted == nil { firstAccepted = Date().timeIntervalSince1970 }
             for input in inputs { continuation.yield(input) }
         }
 

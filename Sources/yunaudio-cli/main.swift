@@ -437,8 +437,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
         exit(1)
     }
     let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? []).filter {
-        $0.name.localizedCaseInsensitiveContains(appMatch)
-            || ($0.bundleID?.localizedCaseInsensitiveContains(appMatch) ?? false)
+        AudioApplications.matches(appMatch, process: $0)
     }
     guard !processes.isEmpty else {
         print("no process matching \"\(appMatch)\"")
@@ -782,19 +781,15 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Discord"
     do {
         let processes = try AudioProcesses.all(includingSilent: true)
-        let matches = processes.filter {
-            $0.name.localizedCaseInsensitiveContains(match)
-                || ($0.bundleID?.localizedCaseInsensitiveContains(match) ?? false)
-        }
+        let matches = processes.filter { AudioApplications.matches(match, process: $0) }
         guard !matches.isEmpty else {
             print("no process matching \"\(match)\"")
             exit(1)
         }
         print("tapping \(matches.count) process(es):")
         for process in matches {
-            print(
-                "  · \(process.name)  pid \(process.pid)\(process.isPlaying ? "  [playing]" : "")"
-            )
+            let name = AudioApplications.displayName(of: process)
+            print("  · \(name)  pid \(process.pid)\(process.isPlaying ? "  [playing]" : "")")
         }
         let tap = try ProcessTap(
             processIDs: matches.map(\.id), muteBehavior: .unmuted)
@@ -1428,10 +1423,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "far-end" {
         print("could not enumerate applications")
         exit(1)
     }
-    // Fall back to the raw process list. Anything without a bundle identifier
-    // is not offered in the interface — capture is keyed on that identifier —
-    // but `afplay` and its kind are exactly what one reaches for to put a known
-    // signal through this path, so the command should be able to name them.
+    // Fall back to the raw process list. A grouped application is the better
+    // answer when there is one — it carries every helper process — but `afplay`
+    // and its kind are exactly what one reaches for to put a known signal
+    // through this path, and they head no group.
     let target: (name: String, ids: [AudioObjectID], count: Int)
     if let application = applications.first(where: {
         $0.name.localizedCaseInsensitiveContains(match)
@@ -1439,21 +1434,16 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "far-end" {
     }) {
         target = (application.name, application.processIDs, application.processCount)
     } else {
-        // A bare executable has no bundle identifier and no entry in the
-        // running-application list, so it has no name to match on — a process
-        // id is the only handle it has.
-        let wantedPID = pid_t(match)
         let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? [])
-            .filter {
-                if let wantedPID { return $0.pid == wantedPID }
-                return $0.name.localizedCaseInsensitiveContains(match)
-                    || ($0.bundleID?.localizedCaseInsensitiveContains(match) ?? false)
-            }
+            .filter { AudioApplications.matches(match, process: $0) }
         guard !processes.isEmpty else {
             print("nothing matching \"\(match)\" is producing audio")
             exit(1)
         }
-        target = (processes[0].name, processes.map(\.id), processes.count)
+        target = (
+            AudioApplications.displayName(of: processes[0]), processes.map(\.id),
+            processes.count
+        )
     }
 
     // Unmuted: this is a measurement, and silencing the application would

@@ -869,6 +869,56 @@ struct AudioApplicationGroupingTests {
         #expect(apps.count == 1)
         #expect(apps[0].bundleID == "com.apple.WebKit")
     }
+
+    /// Anything the interface can name, the command line has to be able to name
+    /// too — and they disagreed. `grouped()` resolves an executable name for a
+    /// process that publishes no bundle identifier; every command that matched
+    /// on `AudioProcess.name` directly saw "PID 69200" instead. Measured with
+    /// one `afplay` playing a tone: `yunaudio-cli apps` listed "afplay",
+    /// `yunaudio-cli tap afplay` answered `no process matching "afplay"`, and
+    /// the only way to reach it was to type its process id.
+    ///
+    /// Stated against this very process. `proc_pidpath` answers for any live
+    /// process id, so the case needs no player and no waiting: the test runner
+    /// publishes no bundle identifier, which is exactly the shape that was
+    /// going wrong. The first version did spawn a player and wait for the HAL
+    /// to notice it, and failed two runs in four inside a full test run — a
+    /// flaky gate is worse than no gate.
+    @Test("everything the interface can name, a command line can name too")
+    func matchingAgreesWithTheListedName() throws {
+        let mine = getpid()
+        let halName = "PID \(mine)"
+        let executable = AudioApplications.displayName(
+            bundleID: nil, pid: mine, halName: halName)
+        #expect(executable != halName)
+        #expect(!executable.isEmpty)
+        #expect(
+            AudioApplications.matches(executable, bundleID: nil, pid: mine, halName: halName))
+        // The process id still works, and is the only unambiguous handle when
+        // two copies of one executable are running.
+        #expect(
+            AudioApplications.matches(String(mine), bundleID: nil, pid: mine, halName: halName))
+        #expect(
+            !AudioApplications.matches("Discord", bundleID: nil, pid: mine, halName: halName))
+        // A process that does publish one keeps the name that was resolved from
+        // the running-application list, which is the one a person recognises.
+        #expect(
+            AudioApplications.displayName(
+                bundleID: "com.hnc.Discord", pid: mine, halName: "Discord") == "Discord")
+
+        // And the general form of it, against whatever is running: every row
+        // the interface offers is reachable by the name it shows.
+        let processes = try AudioProcesses.all(includingSilent: true)
+        var byID: [AudioObjectID: AudioProcess] = [:]
+        for process in processes where byID[process.id] == nil { byID[process.id] = process }
+        for application in try AudioApplications.grouped() {
+            let members = application.processIDs.compactMap { byID[$0] }
+            guard !members.isEmpty else { continue }
+            #expect(
+                members.contains { AudioApplications.matches(application.name, process: $0) },
+                "the interface lists \"\(application.name)\" and no process matches that")
+        }
+    }
 }
 
 // MARK: - Aggregate members
