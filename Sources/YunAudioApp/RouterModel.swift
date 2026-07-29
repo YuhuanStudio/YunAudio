@@ -2919,7 +2919,37 @@ final class RouterModel: ScriptTarget {
             scope: kAudioObjectPropertyScopeInput)
     }
 
-    /// Label for one source channel, named where the device is known.
+    /// What each input channel of *a given device* carries.
+    ///
+    /// Keyed on the device, because the labels are a fact about that device and
+    /// nothing else. The patchbay drew a row per source and labelled every one
+    /// of them with the *selected* device's names — so with a Seiren V3 Pro
+    /// chosen, a second microphone's channels, and the channels of any captured
+    /// application, were all labelled "Processed", "Dry" and "Post-expander".
+    /// Names belonging to a device the row has nothing to do with, on a control
+    /// whose entire job is saying which signal is which.
+    func channelNames(ofDeviceUID uid: String) -> [DeviceChannelNames.Channel]? {
+        guard let device = inputDevices.first(where: { $0.uid == uid }) else { return nil }
+        return DeviceChannelNames.channels(
+            modelUID: device.modelUID, name: device.name,
+            scope: kAudioObjectPropertyScopeInput)
+    }
+
+    /// Label for one channel of a named device.
+    ///
+    /// A captured application has no entry in `inputDevices` at all, so it falls
+    /// through to the plain number — which is right: an application's audio has
+    /// no capsule topology to describe.
+    func channelLabel(_ channel: Int, ofDeviceUID uid: String) -> String {
+        if let names = channelNames(ofDeviceUID: uid), channel < names.count {
+            return loc(names[channel].name)
+        }
+        return "\(loc("Ch")) \(channel + 1)"
+    }
+
+    /// Label for one channel of the selected source. Kept for the places that
+    /// are showing that device and nothing else — the device card, and the
+    /// menu bar panel's channel picker.
     func sourceChannelLabel(_ channel: Int) -> String {
         if let names = sourceChannelNames, channel < names.count {
             // Through loc() like everything else. The translations for these

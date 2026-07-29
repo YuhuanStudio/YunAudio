@@ -3374,3 +3374,62 @@ struct ScrollFadeTests {
         #expect(top > 0.99)
     }
 }
+
+/// Whose channel names appear on which row.
+///
+/// The patchbay draws a row per source and labelled every one of them with the
+/// *selected* device's channel names. With a Seiren V3 Pro chosen, a second
+/// microphone's channels — and the channels of any captured application — came
+/// out as "Processed", "Dry" and "Post-expander": names belonging to a device
+/// the row has nothing to do with, on a control whose entire job is saying
+/// which signal is which.
+///
+/// The rule is asserted here without a live HAL, because what went wrong is the
+/// lookup key rather than the lookup.
+@Suite("Whose channel names these are")
+struct ChannelNameOwnershipTests {
+
+    @Test("a device with a known topology gets its own names")
+    func knownDeviceIsNamed() {
+        let names = DeviceChannelNames.channels(
+            modelUID: nil, name: "Razer Seiren V3 Pro",
+            scope: kAudioObjectPropertyScopeInput)
+        let channels = try? #require(names)
+        #expect(channels?.count == 3)
+        // Three taps of one capsule, which is the whole reason these are named.
+        #expect(channels?.contains { $0.isDefault } == true)
+    }
+
+    /// The case that was wrong. Nothing about one device may describe another.
+    @Test("a device with no profile gets no names, whatever else is selected")
+    func unknownDeviceIsNotNamed() {
+        for other in ["BlackHole 16ch", "MacBook Pro Microphone", "Some Interface"] {
+            #expect(
+                DeviceChannelNames.channels(
+                    modelUID: nil, name: other, scope: kAudioObjectPropertyScopeInput)
+                    == nil, "\(other)")
+        }
+    }
+
+    /// And a profile only ever describes inputs. An output row asking for these
+    /// would get the microphone's capsule names on a pair of speakers.
+    @Test("output channels are never named from an input profile")
+    func outputsAreNeverNamed() {
+        #expect(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeOutput) == nil)
+    }
+
+    /// The patchbay asks by device, not by whatever is selected. Asserted as
+    /// source, because a label bound to the wrong property compiles perfectly.
+    @Test("the patchbay labels each row from that row's own device")
+    func patchbayAsksByDevice() throws {
+        let root = GraphLockDisciplineTests.enginePath
+            .replacingOccurrences(of: "Sources/YunAudioEngine/RoutingEngine.swift", with: "")
+        let canvas = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RoutingCanvas.swift", encoding: .utf8)
+        #expect(canvas.contains("channelLabel(channel, ofDeviceUID: group.uid)"))
+        #expect(!canvas.contains("model.sourceChannelLabel(channel)"))
+    }
+}

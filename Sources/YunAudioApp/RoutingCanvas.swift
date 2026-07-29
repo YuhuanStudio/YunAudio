@@ -122,8 +122,11 @@ struct RoutingCanvas: View {
                 ForEach(group.channels, id: \.self) { channel in
                     port(
                         ChannelRef(deviceUID: group.uid, channel: channel),
+                        // The row's own device, not whichever one is selected.
+                        // Every source row used to be labelled with the
+                        // selected device's channel names.
                         label: isSource
-                            ? model.sourceChannelLabel(channel)
+                            ? model.channelLabel(channel, ofDeviceUID: group.uid)
                             : "\(loc("Ch")) \(channel + 1)",
                         isSource: isSource, pitch: pitch)
                 }
