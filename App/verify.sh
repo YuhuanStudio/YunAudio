@@ -53,8 +53,14 @@ step() {
 	# read. Falls back to the tail when nothing matched, so a failure with no
 	# recognisable diagnostic still shows something.
 	local diagnostics
-	diagnostics=$(grep -aE "(error|warning): |✘|FAILED|failed:" "${WORK}/last.txt" |
-		grep -avE "^\s+(builtin-|/Applications/|cd /)" | cut -c1-200 | head -12)
+	# The flow check prints its failures as a list *after* the line that says how
+	# many there were, so a pattern that matches only the header prints a count
+	# and no names — which is what it did, and a count nobody can act on is
+	# worse than silence. Everything from that line to the end comes too.
+	diagnostics=$( {
+		grep -aE "(error|warning): |✘" "${WORK}/last.txt"
+		sed -n '/flow(s) failed/,$p' "${WORK}/last.txt"
+	} | grep -avE "^\s+(builtin-|/Applications/|cd /)" | cut -c1-200 | head -20)
 	if [[ -n "${diagnostics}" ]]; then
 		sed 's/^/      /' <<<"${diagnostics}"
 	else
@@ -168,6 +174,44 @@ step "photograph the real window" photographed_the_real_window
 # it is behind a flag rather than in the way of every run. What is *not*
 # negotiable is that a run without it says so: a green summary that quietly
 # omitted the only check that touches real devices is worse than a red one.
+# The two headline claims, together, because they are measured by the same run:
+# every sample arrives unchanged, and the IO thread allocates nothing.
+#
+# **Release only.** A debug build allocates from Swift's own checking machinery —
+# a million times in one self-test — so a debug measurement of this says nothing
+# and reads as a catastrophe. It was measured by hand until now, which for the
+# two claims this project is actually about is not good enough.
+bit_exact_release() {
+	swift build -c release --product yunaudio-cli >/dev/null 2>&1 || return 1
+	local output
+	output=$(.build/release/yunaudio-cli selftest "MacBook Pro" "YunAudio" 2>&1)
+	echo "${output}" | tail -3
+	grep -q "^bit-exact:" <<<"${output}" || return 1
+	# Counted rather than pattern-matched on the happy phrasing: the failing
+	# line says "ALLOCATIONS ... the no-allocation rule is broken", and a check
+	# that only looked for the good sentence would pass on an empty run.
+	grep -q "realtime path: 0 allocations" <<<"${output}" || return 1
+	# The identical count has to be the whole count. "1/261738 identical" also
+	# begins with "bit-exact:".
+	local counts
+	counts=$(grep -oE "[0-9]+/[0-9]+ samples identical" <<<"${output}" | head -1)
+	[[ -n "${counts}" ]] || return 1
+	[[ "${counts%%/*}" == "$(echo "${counts}" | sed 's|.*/||; s| .*||')" ]]
+}
+
+# Asked before anything is measured, not after it has produced a number.
+#
+# Two copies do not produce two results, they produce two wrong ones — and the
+# wrong one looks like a defect in whatever was being measured. Seen here: the
+# same self-test gave "261738/261738 identical" and, a minute later with two
+# other copies running, "217/261738 (0.08%)". A bit-exactness failure is the
+# most alarming thing this gate can print and it was somebody else's flow check.
+nobody_else_has_the_devices() {
+	local others
+	others=$(pgrep -f "YunAudio.app/Contents/MacOS/YunAudioApp" | wc -l | tr -d ' ')
+	[[ "${others}" == "0" ]]
+}
+
 audio_can_start() {
 	local rate
 	rate=$(.build/debug/yunaudio-cli soak 2>/dev/null | grep "cycle rate" | grep -oE '[0-9]+\.[0-9]' | head -1)
@@ -178,7 +222,10 @@ if [[ "${FULL}" == "1" ]]; then
 	# Asked first, because every signal-measuring check fails with a message
 	# about its own subject when CoreAudio cannot start IO — and that has cost
 	# an afternoon before. See AGENTS.md.
-	if step "audio can start at all" audio_can_start; then
+	if ! nobody_else_has_the_devices; then
+		SKIPPED+=("everything that touches audio — another copy of YunAudio is running and would be competing for the devices")
+	elif step "audio can start at all" audio_can_start; then
+		step "the path is bit-exact, release" bit_exact_release
 		step "flow check" env YUNAUDIO_FLOWCHECK=1 ./build/YunAudio.app/Contents/MacOS/YunAudioApp
 	else
 		SKIPPED+=("flow check — CoreAudio cannot start IO on this machine; a human must run: sudo killall coreaudiod")
