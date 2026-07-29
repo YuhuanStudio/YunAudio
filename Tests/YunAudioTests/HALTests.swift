@@ -3529,3 +3529,88 @@ struct PreferencesCompletenessTests {
         #expect(missing.isEmpty, "not in Preferences.default: \(missing)")
     }
 }
+
+
+/// macOS 26 added `CATapDescription.bundleIDs` and `processRestoreEnabled`,
+/// which together are the answer to OBS's issue #9144 — "Application Capture
+/// loses audio when application reopens on macOS", open since June 2023, whose
+/// workaround in OBS is a button labelled "Restart capture".
+///
+/// These use the real HAL, because the question is entirely about what the HAL
+/// does with what it is given. This project has already been caught once by a
+/// `CATapDescription`-adjacent field that reads like a constraint in the header
+/// and is silently ignored (`kAudioSubDeviceInputChannelsKey`), and a setting
+/// that is accepted and dropped looks exactly like a setting that works.
+@Suite("A capture that outlives the application")
+struct ProcessTapRestoreTests {
+
+    /// The capability, stated as plainly as it can be: a tap can be created for
+    /// an application that is **not running**, and is not even installed. No
+    /// process object exists to name, so `bundleIDs` is the only thing holding
+    /// it, which is why the two properties have to be set together.
+    @Test("a tap can be made for an application that is not running")
+    func absentApplication() throws {
+        let tap = try ProcessTap(
+            processIDs: [], bundleIDs: ["com.yuhuanstudio.nothing.at.all"])
+        let held = try #require(tap.systemDescription())
+        #expect(held.isProcessRestoreEnabled)
+        #expect(held.bundleIDs == ["com.yuhuanstudio.nothing.at.all"])
+        // Nothing is attached, which is the point: the tap is waiting for it.
+        #expect(held.processes.isEmpty)
+    }
+
+    /// The read-back is off the tap object, not off the description this
+    /// process is still holding. Asserting our own object would assert that
+    /// Swift assigns properties.
+    @Test("the HAL keeps both, and reports them back")
+    func roundTrip() throws {
+        let tap = try ProcessTap(
+            processIDs: [], muteBehavior: .mutedWhenTapped,
+            bundleIDs: ["com.apple.Music", "com.spotify.client"])
+        let held = try #require(ProcessTap.description(of: tap.id))
+        #expect(held.isProcessRestoreEnabled)
+        #expect(held.bundleIDs.sorted() == ["com.apple.Music", "com.spotify.client"])
+        // The fields that were already being set have to still be there: a
+        // property added to a description is a chance to overwrite one.
+        #expect(held.isPrivate)
+        #expect(held.muteBehavior == .mutedWhenTapped)
+    }
+
+    /// **The flag was never the missing piece.** `processRestoreEnabled`
+    /// defaults to *true* on a fresh `CATapDescription`, so every tap this
+    /// application has ever created already had it on — and restored nothing,
+    /// because `bundleIDs` defaults to empty and there was consequently nothing
+    /// to remember. Setting the flag alone would have been a change with no
+    /// effect that looked exactly like a fix.
+    ///
+    /// This is asserted rather than written in a comment because it is the
+    /// whole reason the two properties are set together, and because a future
+    /// macOS flipping the default would otherwise turn a working capture into a
+    /// silent one with nothing pointing at the cause.
+    @Test("restore is on by default and does nothing without bundle identifiers")
+    func theFlagWasNeverTheMissingPiece() throws {
+        let tap = try ProcessTap(processIDs: [])
+        #expect(!tap.restoresProcesses)
+        let held = try #require(tap.systemDescription())
+        #expect(held.isProcessRestoreEnabled)
+        #expect(held.bundleIDs.isEmpty)
+    }
+
+    /// And the read-back is a read-back rather than a constant.
+    ///
+    /// Without this, every assertion above would be satisfied by a HAL that
+    /// returns `true` for this property no matter what it was handed — which,
+    /// given that the default is already `true`, is not a far-fetched way for
+    /// all of this to mean nothing.
+    @Test("an explicit refusal comes back as a refusal")
+    func explicitFalse() throws {
+        let description = CATapDescription(stereoMixdownOfProcesses: [])
+        description.isPrivate = true
+        description.isProcessRestoreEnabled = false
+        var id = AudioObjectID(kAudioObjectUnknown)
+        try #require(AudioHardwareCreateProcessTap(description, &id) == noErr)
+        defer { AudioHardwareDestroyProcessTap(id) }
+        let held = try #require(ProcessTap.description(of: id))
+        #expect(!held.isProcessRestoreEnabled)
+    }
+}

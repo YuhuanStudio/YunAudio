@@ -38,11 +38,20 @@ let package = Package(
         // exists to prevent.
         .target(name: "YunAudioControl"),
 
+        // A client of somebody else's control protocol, which is why it is not
+        // in `YunAudioControl`: that module is the vocabulary this application
+        // answers to and has to keep answering to, and obs-websocket is a
+        // vocabulary the OBS project can change under us. It depends on
+        // `YunAudioControl` only for `JSONValue` — a second JSON type in one
+        // process is the kind of duplication this package layout exists to
+        // prevent.
+        .target(name: "YunAudioOBS", dependencies: ["YunAudioControl"]),
+
         .executableTarget(
             name: "YunAudioApp",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
-                "YunAudioControl",
+                "YunAudioControl", "YunAudioOBS",
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.
@@ -54,6 +63,7 @@ let package = Package(
             name: "yunaudio-cli",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRazer", "YunAudioControl",
+                "YunAudioOBS",
             ]),
 
         // An MCP server, so an agent can drive the application. Stateless: it
@@ -65,7 +75,7 @@ let package = Package(
             name: "YunAudioTests",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer",
-                "YunAudioControl", "yunaudio-mcp",
+                "YunAudioControl", "YunAudioOBS", "yunaudio-mcp",
                 // The app is an executable target, and a test target can depend
                 // on one since Swift 5.5. It is here so the MIDI message
                 // decoding and soft-takeover arithmetic can be tested without a

@@ -34,7 +34,7 @@ struct PreferencesWindow: View {
     }
 
     enum Section: String, CaseIterable, Identifiable {
-        case general, appearance, audio, shortcuts, midi, diagnostics, about
+        case general, appearance, audio, shortcuts, midi, streaming, diagnostics, about
         var id: String { rawValue }
 
         var title: String {
@@ -44,6 +44,7 @@ struct PreferencesWindow: View {
             case .audio: loc("Audio")
             case .shortcuts: loc("Shortcuts")
             case .midi: loc("MIDI control")
+            case .streaming: loc("Streaming")
             case .diagnostics: loc("Diagnostics")
             case .about: loc("About")
             }
@@ -56,6 +57,7 @@ struct PreferencesWindow: View {
             case .audio: "waveform"
             case .shortcuts: "command"
             case .midi: "pianokeys"
+            case .streaming: "dot.radiowaves.left.and.right"
             case .diagnostics: "waveform.path.ecg"
             case .about: "info.circle"
             }
@@ -129,6 +131,7 @@ struct PreferencesWindow: View {
         case .audio: audioSection
         case .shortcuts: shortcutsSection
         case .midi: midiSection
+        case .streaming: streamingSection
         case .diagnostics: diagnosticsSection
         case .about: aboutSection
         }
@@ -1019,6 +1022,135 @@ struct PreferencesWindow: View {
             .font(Yun.Text.caption)
             .foregroundStyle(Yun.Palette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Streaming
+
+    /// The OBS link.
+    ///
+    /// In preferences rather than in the main window on purpose: this is a
+    /// connection somebody sets up once, which is exactly the line this window
+    /// draws. The number it produces — how far the chain puts this application
+    /// behind real time — is on show whether or not anything is connected,
+    /// because it is a fact about the audio rather than about OBS.
+    private var streamingSection: some View {
+        // `obsLink` is a `let` on the model, so `$link.host` cannot be
+        // formed. Explicit bindings rather than making it a `var`: it is one
+        // object for the life of the application, and a settable reference
+        // would be a way to swap the connection out from under an in-flight
+        // request.
+        @Bindable var link = model.obsLink
+        return VStack(alignment: .leading, spacing: Yun.Space.lg) {
+            heading(loc("OBS"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    HStack(spacing: Yun.Space.sm) {
+                        Text(model.obsLink.summary)
+                            .font(Yun.Text.body)
+                            .foregroundStyle(
+                                model.obsLink.isConnected
+                                    ? Yun.Palette.textPrimary : Yun.Palette.textSecondary
+                            )
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: Yun.Space.sm)
+                        if model.obsLink.isConnected {
+                            Button(loc("Disconnect")) {
+                                Task { await model.obsLink.disconnect() }
+                            }
+                            .buttonStyle(YunButtonStyle(.secondary, small: true))
+                        } else {
+                            Button(loc("Connect")) {
+                                Task { await model.obsLink.connect() }
+                            }
+                            .buttonStyle(YunButtonStyle(.primary, small: true))
+                        }
+                    }
+                    YunDivider()
+                    // A text field renders as a yellow bar with a prohibitory
+                    // sign in the offscreen design capture, which would blind
+                    // that check for this whole section. The rendered branch
+                    // shows the same values as text, so the capture is still
+                    // checking the colour and spacing of something real.
+                    if isRendering {
+                        YunDetailRow(
+                            loc("Address"),
+                            value: "\(model.obsLink.host):\(model.obsLink.port)")
+                    } else {
+                        HStack(spacing: Yun.Space.sm) {
+                            TextField(loc("Address"), text: $link.host)
+                                .textFieldStyle(.roundedBorder)
+                            TextField(
+                                loc("Port"),
+                                value: $link.port, format: .number.grouping(.never)
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 72)
+                            SecureField(loc("Password"), text: $link.password)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+                    Text(
+                        loc(
+                            "OBS's WebSocket server is off until you switch it on, under Tools → WebSocket Server Settings. The password is on the same panel, behind Show Connect Info. It is kept for this session only, because the preferences file is not a safe place for it."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("The source OBS hears this through"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    if model.obsLink.inputs.isEmpty {
+                        YunDetailRow(
+                            loc("Input"),
+                            value: model.obsLink.inputName.isEmpty
+                                ? loc("not chosen") : model.obsLink.inputName)
+                    } else {
+                        YunSelect(
+                            selection: $link.inputName,
+                            options: model.obsLink.inputs.map {
+                                .init(value: $0, title: $0)
+                            })
+                    }
+                    YunDivider()
+                    Toggle(
+                        loc("Mute OBS's copy when the microphone is muted"),
+                        isOn: $link.mirrorsMute
+                    )
+                    .toggleStyle(YunToggleStyle())
+                }
+            }
+
+            heading(loc("Sync offset"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    YunDetailRow(
+                        loc("What the chain costs"),
+                        value: String(
+                            format: loc("%.0f ms"), abs(model.obsSyncOffsetMilliseconds)))
+                    YunDetailRow(
+                        loc("Last sent to OBS"),
+                        value: model.obsLink.pushedOffsetMilliseconds.map {
+                            String(format: loc("%.0f ms"), $0)
+                        } ?? loc("not sent yet"))
+                    Button(loc("Send it to OBS")) { model.pushOBSSyncOffset() }
+                        .buttonStyle(YunButtonStyle(.secondary, small: true))
+                        .disabled(!model.obsLink.isConnected)
+                        .opacity(model.obsLink.isConnected ? 1 : 0.35)
+                    Text(
+                        loc(
+                            "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
         }
     }
 

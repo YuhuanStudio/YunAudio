@@ -129,6 +129,17 @@ struct Preferences: Codable, Equatable, Sendable {
     /// not, every setting after it in the file was silently lost.
     var residentScript: String?
 
+    /// Where OBS is, and which of its inputs reads this application.
+    ///
+    /// The password is deliberately absent. `UserDefaults` is a plain file in
+    /// the user's home directory, and this application's own control socket is
+    /// `chmod 600` because of what it can do; a websocket password in clear
+    /// beside that would be inconsistent. See `OBSLink.password`.
+    var obsHost: String?
+    var obsPort: Int?
+    var obsInputName: String?
+    var obsMirrorsMute: Bool?
+
     static let `default` = Preferences(
         sourceDeviceUID: nil,
         destinationDeviceUID: nil,
@@ -176,7 +187,11 @@ struct Preferences: Codable, Equatable, Sendable {
         recentDestinationUIDs: [],
         midiBindings: [:],
         tapMuteBehavior: TapMuteBehavior.unmuted.storageKey,
-        residentScript: nil)
+        residentScript: nil,
+        obsHost: "127.0.0.1",
+        obsPort: 4455,
+        obsInputName: "",
+        obsMirrorsMute: false)
 }
 
 extension TapMuteBehavior {

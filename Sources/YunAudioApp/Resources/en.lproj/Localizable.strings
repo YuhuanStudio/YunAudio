@@ -534,7 +534,32 @@
 "paper" = "Paper";
 "mist" = "Mist";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password.";
+<<<<<<< HEAD
 "Control socket" = "Control socket";
 "listening" = "listening";
 "unavailable" = "unavailable";
 "Remote control" = "Remote control";
+=======
+
+"Streaming" = "Streaming";
+"OBS" = "OBS";
+"Connect" = "Connect";
+"Disconnect" = "Disconnect";
+"Not connected" = "Not connected";
+"Connecting…" = "Connecting…";
+"OBS %@" = "OBS %@";
+"Address" = "Address";
+"Port" = "Port";
+"Password" = "Password";
+"OBS's WebSocket server is off until you switch it on, under Tools → WebSocket Server Settings. The password is on the same panel, behind Show Connect Info. It is kept for this session only, because the preferences file is not a safe place for it." = "OBS's WebSocket server is off until you switch it on, under Tools → WebSocket Server Settings. The password is on the same panel, behind Show Connect Info. It is kept for this session only, because the preferences file is not a safe place for it.";
+"The source OBS hears this through" = "The source OBS hears this through";
+"not chosen" = "not chosen";
+"Mute OBS's copy when the microphone is muted" = "Mute OBS's copy when the microphone is muted";
+"Sync offset" = "Sync offset";
+"What the chain costs" = "What the chain costs";
+"Last sent to OBS" = "Last sent to OBS";
+"Send it to OBS" = "Send it to OBS";
+"%.0f ms" = "%.0f ms";
+"Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier." = "Everything this application produces reaches OBS later than the picture does, by however much the effect chain adds. OBS has a field for that and no way of working out what belongs in it; this does. The value is negative there, because it says to treat the sound as having happened earlier.";
+"not sent yet" = "not sent yet";
+>>>>>>> obs-integration

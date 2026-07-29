@@ -6,6 +6,7 @@ import Foundation
 import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
+import YunAudioOBS
 import YunDesign
 
 /// Drives the model through the sequences a person actually performs.
@@ -5047,6 +5048,78 @@ enum UIFlowCheck {
         check("the route did not go down", model.isRunning)
 
         try await checkChainAlignment(model: model)
+        try await checkOBSLink(model: model)
+    }
+
+    /// The link to OBS, as far as it can be driven with OBS not installed.
+    ///
+    /// What is checked here is everything that does not need the far end: the
+    /// number this application would tell OBS, that it is the chain's latency
+    /// with the sign the protocol wants, and that a connection to nothing comes
+    /// back promptly with a sentence naming the switch that is off — which is
+    /// the first thing almost everybody meets, because obs-websocket ships
+    /// disabled.
+    ///
+    /// The handshake itself is asserted against a stub server in the unit
+    /// tests. Nothing anywhere asserts OBS's *behaviour*, and that is stated in
+    /// `RESEARCH.md` rather than implied by a green run.
+    private static func checkOBSLink(model: RouterModel) async throws {
+        try section("obs link")
+
+        let link = model.obsLink
+        check("it starts disconnected", link.state == .off && !link.isConnected)
+        check("and says so in a sentence", link.summary == loc("Not connected"))
+        check(
+            "the settings window has somewhere to show it",
+            PreferencesWindow.Section.allCases.contains(.streaming))
+
+        // The offset is a fact about this application's own audio, so it has to
+        // read correctly with nothing connected at all.
+        let frames = model.chainAlignment.chain
+        let rate = model.pathQuality?.sampleRate ?? 48000
+        let offset = model.obsSyncOffsetMilliseconds
+        note(String(format: "chain %d frames at %.0f Hz, offset %.0f ms", frames, rate, offset))
+        check("the offset is never positive", offset <= 0)
+        check(
+            "and it is the chain's latency in milliseconds",
+            abs(offset + (Double(frames) / rate * 1000).rounded()) < 0.001
+                || offset == -950)
+        check("nothing has been sent yet", link.pushedOffsetMilliseconds == nil)
+
+        // Port 1 needs root to bind, so nothing is listening on it and nothing
+        // can start listening on it while this runs. A random high port could
+        // belong to something.
+        link.host = "127.0.0.1"
+        link.port = 1
+        let started = Date()
+        await link.connect()
+        let elapsed = Date().timeIntervalSince(started)
+        note(String(format: "a closed port answered in %.2fs", elapsed))
+        check("a closed port fails rather than hangs", elapsed < 6)
+        if case .failed(let reason) = link.state {
+            check(
+                "and the failure names the switch that is off",
+                reason.contains("WebSocket") || reason.contains("WebSocket 伺服器"))
+        } else {
+            check("a closed port fails", false)
+        }
+        check(
+            "nothing was sent to a connection that never opened",
+            link.pushedOffsetMilliseconds == nil)
+
+        // Muting with no link must be silent rather than an error: the mirror
+        // is off by default and a person who never opens this section should
+        // never see anything about it.
+        let wasMuted = model.isInputMuted
+        model.isInputMuted = !wasMuted
+        model.isInputMuted = wasMuted
+        check("muting with no link says nothing", model.lastError == nil)
+
+        await link.disconnect()
+        check("disconnecting puts it back", link.state == .off)
+        link.port = OBSConnection.defaultPort
+        check("no error was reported", model.lastError == nil)
+        check("the route did not go down", model.isRunning)
     }
 
     /// The chain's latency has to reach something that moves a sample.
