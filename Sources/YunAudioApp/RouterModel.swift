@@ -47,7 +47,7 @@ final class RouterModel: ScriptTarget {
             }
             applyChannelDefaults()
             persist()
-            restartIfRunning()
+            rerouteAfterDeviceChange()
         }
     }
     var selectedDestinationUID: String? {
@@ -60,7 +60,7 @@ final class RouterModel: ScriptTarget {
                 displacedDestinationName = nil
             }
             persist()
-            restartIfRunning()
+            rerouteAfterDeviceChange()
         }
     }
 
@@ -3863,11 +3863,30 @@ final class RouterModel: ScriptTarget {
                     self.isRunning = false
                     self.lastError = failure
                     self.startFailed = true
-                    self.restartIsPending = false
                     // Nothing came up, so a stop that was refused while this was
                     // in flight has already got what it wanted. Left set it
-                    // would take down the next start somebody asked for.
+                    // would take down the next start somebody asked for — and it
+                    // outranks the pending rebuild below, exactly as it does
+                    // everywhere else.
+                    let stayDown = self.stopIsPending
                     self.stopIsPending = false
+                    if stayDown {
+                        self.restartIsPending = false
+                        return
+                    }
+                    // An edit that arrived while this doomed start was in flight
+                    // is not a retry of it. It is what somebody chose while
+                    // watching it not work, and it is quite likely the thing
+                    // that makes it work — a different output, a rate both ends
+                    // can present. Thrown away, it left the same dead end
+                    // `rerouteAfterDeviceChange` exists for: nothing running,
+                    // and the interface showing a device the engine was never
+                    // asked about.
+                    if self.restartIsPending {
+                        self.restartIsPending = false
+                        self.startFailed = false
+                        self.start()
+                    }
                     return
                 }
                 self.isRunning = true
@@ -4225,7 +4244,8 @@ final class RouterModel: ScriptTarget {
                 return loc("Script error:") + " " + error
             }
             let said = result.log.joined(separator: " · ")
-            return said.isEmpty ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
+            return said.isEmpty
+                ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
         case .preset(let name):
             // Matched without case, because a URL somebody typed will not have
             // the capitals right and refusing over that is pedantry.
@@ -4371,6 +4391,41 @@ final class RouterModel: ScriptTarget {
         // than during a start; then there is nothing to do but not come back up.
         if isRunning { stop(then: nil) }
         return true
+    }
+
+    /// What choosing a device does: rebuild a running route, or bring back one
+    /// that is down only because the last start would not come up.
+    ///
+    /// The second half is the whole of this. A start that fails leaves the
+    /// route down and the model still pointing at the devices it failed on —
+    /// and picking a different one, which is the one thing that could make the
+    /// difference, did nothing whatever. `restartIfRunning` wants a running
+    /// route and there is none; the resume in `handleDeviceChange` wants a
+    /// device to have actually gone; the one place that reads `startFailed`
+    /// wants a *confirmed unplug*. So nothing anywhere acted on it and the
+    /// route stayed down for good, with the interface showing the device
+    /// somebody had just chosen and no audio going anywhere near it.
+    ///
+    /// Reachable without any timing at all, which is why it survived: every
+    /// device is in both lists, so the source appears in the output picker,
+    /// choosing it is refused with a sentence saying so — and correcting the
+    /// mistake left the destination bus at digital silence. Measured, and
+    /// asserted in the flow check.
+    ///
+    /// Bounded by hand rather than by luck: only an edit somebody makes gets
+    /// here, so a start that fails again costs one more attempt and not the
+    /// self-feeding retry `startFailed` exists to prevent.
+    private func rerouteAfterDeviceChange() {
+        // Before anything else, and for the same reason `restartIfRunning`
+        // checks it: a batch sets several devices and the route must come up
+        // once, at the end, rather than against a half-applied configuration.
+        guard !isApplyingPreset else { return }
+        guard !isRunning, !isBusy, startFailed else {
+            restartIfRunning()
+            return
+        }
+        startFailed = false
+        start()
     }
 
     private func restartIfRunning() {
