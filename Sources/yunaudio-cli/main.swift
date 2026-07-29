@@ -1,6 +1,7 @@
 import AVFoundation
 import CoreAudio
 import Foundation
+import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunAudioRazer
@@ -399,6 +400,30 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
 // reconfigures someone's hardware has to be able to put it back.
 // What is actually going on right now: live taps, and which devices each
 // audio-using process has open.
+/// Driving the running application rather than the hardware.
+///
+/// Everything below this line opens devices and measures them. These verbs open
+/// nothing: they ask the copy of YunAudio that already owns the route, over the
+/// same vocabulary the URL scheme, the MIDI bindings and the scripting
+/// interface all speak. `RemoteCommand` is that vocabulary and there is one of
+/// it — a fourth private list of verbs in a command-line tool would be a fourth
+/// thing to keep in step, and they do not stay in step.
+///
+/// First, because a control verb has to win over a measuring one that shares
+/// its name. `record` used to capture a few seconds to a file here; it now
+/// means the application's recorder, and the capture is `capture`.
+if CommandLine.arguments.count > 1 {
+    var arguments = Array(CommandLine.arguments.dropFirst())
+    // Any verb, not only `script`: what somebody wiring a Stream Deck key wants
+    // is the URL for the thing they just typed.
+    let printingURL = arguments.contains("--url")
+    arguments.removeAll { $0 == "--url" }
+    let outcome = ControlArguments.parse(arguments)
+    if outcome != .notMine {
+        exit(RemoteControl.run(outcome, printingURL: printingURL))
+    }
+}
+
 // Sends one application's audio to a device of its own, the way SoundSource
 // does — and silences the copy the application would otherwise play itself.
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
@@ -457,7 +482,11 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
 }
 
 // Records the routed signal to a file.
-if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "record" {
+//
+// `capture` rather than `record`, which now means the application's own
+// recorder — one word cannot be both "measure this machine for five seconds"
+// and "start recording, and tell me you did".
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "capture" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
     let all = (try? AudioDevices.all()) ?? []
     // Any input will do; the USB microphone is often unplugged.
@@ -1755,27 +1784,6 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
         exit(1)
     }
     print("\nno allocation on the IO thread in any case")
-    exit(0)
-}
-
-/// Builds the URL for a script, so somebody can see what to send without
-/// having to work out the percent-encoding by hand.
-///
-/// Printed rather than opened: `open` would hand it to the running application,
-/// and a command that changes somebody's audio setup should be one they typed
-/// on purpose.
-if CommandLine.arguments.count > 2, CommandLine.arguments[1] == "script" {
-    let source = CommandLine.arguments[2]
-    var allowed = CharacterSet.urlPathAllowed
-    allowed.remove(charactersIn: "?#")
-    let encoded = source.addingPercentEncoding(withAllowedCharacters: allowed) ?? source
-    let url = "yunaudio://script/" + encoded
-    print(url)
-    print("")
-    // Single-quoted for the shell, with any single quote in the source escaped
-    // the way `sh` requires — a script that uses `'` for its strings is the
-    // ordinary case, and a line somebody copies has to work when they paste it.
-    print("  open '" + url.replacingOccurrences(of: "'", with: "'\\''") + "'")
     exit(0)
 }
 

@@ -1762,12 +1762,42 @@ final class RouterModel: ScriptTarget {
     /// What the canceller is doing, or nil when it is not in the path.
     var echoStatus: EchoCancellationStatus? { engine.echoCancellationStatus }
 
+    /// Why the canceller is not in the path, when it was asked for.
+    ///
+    /// The engine has recorded this since it was written and only the
+    /// command-line harness ever asked. Somebody who switched echo
+    /// cancellation on in the menu bar, and got none, was told nothing at all.
+    var echoCancellationMessage: String? {
+        guard cancelsEcho, isRunning, let reason = engine.lastEchoCancellationError
+        else { return nil }
+        return Self.echoMessage(reason)
+    }
+
+    /// Split out for the reason `isolationMessage` is: the failure cannot be
+    /// produced on demand, and the mapping is the testable part of it.
+    static func echoMessage(_ reason: String) -> String {
+        switch reason {
+        case RoutingEngine.EchoFailure.notBuilt:
+            loc("The echo canceller could not be built.")
+        case RoutingEngine.EchoFailure.wouldNotStart:
+            loc("The echo canceller would not start.")
+        default: reason
+        }
+    }
+
     // MARK: Recording
 
     /// Container to write. WAV keeps a bit-exact path bit-exact on disk; AAC is
     /// a quarter the size and a lossy copy of the thing this project spends
     /// most of its effort keeping intact.
-    var recordingFormat: Recorder.Format = .wav
+    ///
+    /// Persisted, unlike `recordsStems` beside it, which it was not: the picker
+    /// in the recording panel wrote here, the engine read it, presets carried
+    /// it — and every launch put it back to WAV. Somebody choosing AAC to save
+    /// disk got WAV files the next morning with nothing to say why.
+    var recordingFormat: Recorder.Format = .wav {
+        didSet { if oldValue != recordingFormat { persist() } }
+    }
 
     private(set) var isRecording = false
     private(set) var recordingURL: URL?
@@ -1871,8 +1901,16 @@ final class RouterModel: ScriptTarget {
         recordingSeconds = engine.recordingDuration
         // The writer stops itself on a file-system error. Left unnoticed, the
         // button would go on saying "recording" over a file that stopped
-        // growing minutes ago.
-        if !engine.isRecording {
+        // growing minutes ago — which is what it did, because the writer
+        // failing does not release the recorder and `isRecording` therefore
+        // stayed true. The reason is asked for first now, and it is the
+        // system's own sentence about what went wrong rather than this
+        // application's guess at it.
+        if let reason = engine.recordingError {
+            engine.stopRecording()
+            isRecording = false
+            lastError = String(format: loc("Recording stopped: %@"), reason)
+        } else if !engine.isRecording {
             isRecording = false
             lastError = loc("Recording stopped: the file could not be written.")
         }
@@ -2672,6 +2710,26 @@ final class RouterModel: ScriptTarget {
 
     private(set) var isRunning = false
     private(set) var lastError: String?
+
+    /// What to say when voice isolation was asked for and did not attach.
+    ///
+    /// A function rather than three lines at the call site so that it can be
+    /// asserted: the case that matters is the one nobody can produce on demand,
+    /// and the mapping is the only part of it that is testable at all. An
+    /// unrecognised reason is passed through rather than swallowed — the
+    /// engine's own words in front of somebody is worse than a translation and
+    /// far better than silence, which is what there was.
+    static func isolationMessage(_ reason: String) -> String {
+        let explained =
+            switch reason {
+            case RoutingEngine.IsolationFailure.unitNotInstantiated:
+                loc("this system does not offer it")
+            case RoutingEngine.IsolationFailure.chainNotBuilt:
+                loc("the processing chain could not be built")
+            default: reason
+            }
+        return String(format: loc("Voice isolation is not running: %@."), explained)
+    }
     private(set) var levels: [Float] = []
     private(set) var pathQuality: PathQuality?
     private(set) var isClockLocked = false
@@ -3007,6 +3065,8 @@ final class RouterModel: ScriptTarget {
         pluginValues = saved.pluginValues ?? [:]
         voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
         recordsStems = saved.recordsStems ?? false
+        recordingFormat =
+            saved.recordingFormat.flatMap(Recorder.Format.init(rawValue:)) ?? .wav
         monitorSends = saved.monitorSends ?? [:]
         tapMuteBehavior =
             saved.tapMuteBehavior.flatMap(TapMuteBehavior.init(storageKey:)) ?? .unmuted
@@ -3083,6 +3143,7 @@ final class RouterModel: ScriptTarget {
                 pluginValues: pluginValues,
                 voicePreset: voicePreset.rawValue,
                 recordsStems: recordsStems,
+                recordingFormat: recordingFormat.rawValue,
                 monitorSends: monitorSends,
                 outputDelays: outputDelays,
                 // The two flat fields are still written so that a file this
@@ -3717,6 +3778,18 @@ final class RouterModel: ScriptTarget {
                 if let dropped = self.engine.droppedMonitor {
                     self.monitorWasDropped(dropped)
                 }
+                // Voice isolation asked for and not attached.
+                //
+                // The engine has written down why since the day it was
+                // written, and nothing anywhere read it. The route comes up,
+                // the effect goes on showing as enabled, the signal goes round
+                // it, and the only person who could tell is the one listening
+                // for something that is not there. This is the same rule as
+                // the path quality badge: say when the path is not what was
+                // asked for.
+                if isolation != nil, let reason = self.engine.lastIsolationError {
+                    self.lastError = Self.isolationMessage(reason)
+                }
                 // The analysers are built per run, because the K-weighting
                 // coefficients and the FFT bin mapping both depend on the rate
                 // the aggregate settled on.
@@ -3869,6 +3942,10 @@ final class RouterModel: ScriptTarget {
     var scriptPresetNames: [String] { allPresets.map { loc($0.name) } }
     var scriptConfigNames: [String] { quickConfigs.map(\.name) }
 
+    /// Set by `perform`, read by whatever front end wants an exit status
+    /// rather than a sentence.
+    private(set) var lastCommandFailed = false
+
     /// Runs a script against this model.
     ///
     /// A fresh host per run: it holds nothing between runs by design — one
@@ -3957,6 +4034,7 @@ final class RouterModel: ScriptTarget {
     ///   button to it should not fail silently.
     @discardableResult
     func perform(_ command: RemoteCommand) -> String? {
+        lastCommandFailed = false
         switch command {
         case .routing(let wanted):
             let target = wanted ?? !isRunning
@@ -3968,6 +4046,15 @@ final class RouterModel: ScriptTarget {
         case .record(let wanted):
             let target = wanted ?? !isRecording
             if target != isRecording { toggleRecording() }
+            // "Recording stopped." in answer to "start recording" is a true
+            // sentence about the state and a misleading answer to the
+            // question. Recording needs a running route, and being told so is
+            // the difference between a command that failed and one that was
+            // ignored.
+            if target, !isRecording {
+                lastCommandFailed = true
+                return lastError ?? loc("Recording could not be started.")
+            }
             return isRecording ? loc("Recording.") : loc("Recording stopped.")
         case .transcribe(let wanted):
             let target = wanted ?? !isTranscribing
@@ -3976,13 +4063,20 @@ final class RouterModel: ScriptTarget {
             } else if !target, isTranscribing {
                 stopTranscribing()
             }
+            if target, !isTranscribing {
+                lastCommandFailed = true
+                return transcriptionError ?? loc("Transcription could not be started.")
+            }
             return isTranscribing ? loc("Transcribing.") : loc("Transcription stopped.")
         case .config(let name):
             guard
                 let configuration = quickConfigs.first(where: {
                     $0.name.compare(name, options: .caseInsensitive) == .orderedSame
                 })
-            else { return nil }
+            else {
+                lastCommandFailed = true
+                return nil
+            }
             let outcome = apply(configuration)
             return outcome.isComplete
                 ? configuration.name
@@ -3993,7 +4087,10 @@ final class RouterModel: ScriptTarget {
             // A script that failed has to say so out loud — a button wired to
             // one that has since broken must not look like it worked.
             let result = runScript(source)
-            if let error = result.error { return loc("Script error:") + " " + error }
+            if let error = result.error {
+                lastCommandFailed = true
+                return loc("Script error:") + " " + error
+            }
             let said = result.log.joined(separator: " · ")
             return said.isEmpty ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
         case .preset(let name):
@@ -4004,7 +4101,10 @@ final class RouterModel: ScriptTarget {
                     loc($0.name).compare(name, options: .caseInsensitive) == .orderedSame
                         || $0.name.compare(name, options: .caseInsensitive) == .orderedSame
                 })
-            else { return nil }
+            else {
+                lastCommandFailed = true
+                return nil
+            }
             apply(preset)
             return loc(preset.name)
         }
@@ -5037,14 +5137,6 @@ final class RouterModel: ScriptTarget {
     }
 
     @ObservationIgnored private var analysisNeeds: SignalAnalyser.Needs = []
-
-    /// Raw frames off the analysis tap, for diagnostics that want the signal
-    /// rather than a summary of it.
-    func drainAnalysisForDiagnostics(
-        into destination: UnsafeMutablePointer<Float>, capacity: Int
-    ) -> Int {
-        engine.drainAnalysis(into: destination, capacity: capacity)
-    }
 
     /// True when no analysis is being computed at all.
     var analysisIsIdle: Bool { analyser?.isIdle ?? true }

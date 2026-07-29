@@ -45,6 +45,12 @@ struct EchoCancellationControls: View {
                         })
                 }
 
+                // Asked for and not running. Until this row existed the engine
+                // knew and only the command-line harness could be told.
+                if let message = model.echoCancellationMessage {
+                    YunDetailRow(loc("Canceller"), value: message, tone: .danger)
+                }
+
                 if let status = model.echoStatus {
                     YunDetailRow(
                         loc("Reference"),
@@ -56,6 +62,15 @@ struct EchoCancellationControls: View {
                     if status.dropped > 0 {
                         YunDetailRow(
                             loc("Dropped"), value: "\(status.dropped)", tone: .danger)
+                    }
+                    // "Should be zero; anything else means the device changed
+                    // its buffer size underneath the unit", said the field's
+                    // own doc comment — while nothing read it. Every sibling
+                    // in that struct was already shown somewhere.
+                    if status.truncatedBlocks > 0 {
+                        YunDetailRow(
+                            loc("Truncated"), value: "\(status.truncatedBlocks)",
+                            tone: .warning)
                     }
                 }
             }

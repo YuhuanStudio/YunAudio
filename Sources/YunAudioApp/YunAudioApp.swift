@@ -62,6 +62,10 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
 
     var flowCheckModel: RouterModel?
 
+    /// Owned here for the reason the status item is: it has to outlive the
+    /// scene body that installed it.
+    let remote = RemoteListener()
+
     /// Where a URL handed to the application ends up.
     ///
     /// Taken off the Apple Event directly rather than through SwiftUI's
@@ -160,9 +164,19 @@ struct YunAudioApp: App {
         }
         termination.installURLHandler()
 
-        // The socket answers the same commands and, unlike a URL, can be asked
-        // a question. `yunaudio-mcp` is on the other end of it.
+        // Two ways to be asked a question, because a URL cannot carry an
+        // answer: a Unix socket that `yunaudio-mcp` connects to, and a
+        // distributed notification that `yunaudio-cli` uses. Both carry the
+        // same `RemoteCommand` vocabulary, which is the part that matters.
+        //
+        // Two transports for one vocabulary is still a duplication, and the
+        // socket is the better of them — a failed `connect` is an immediate,
+        // unambiguous "not running", where a notification cannot tell that
+        // apart from "has not answered yet" until a timeout expires. Moving the
+        // command line onto it is worth doing; it is not worth doing untested,
+        // on a machine where the flow check cannot run.
         termination.controlListener = ControlServer.start(model: model)
+        termination.remote.start(target: model)
     }
 
     /// Creates the menu bar presence once, on whichever scene is evaluated

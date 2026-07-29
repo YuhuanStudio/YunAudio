@@ -30,11 +30,13 @@ let package = Package(
 
         .target(name: "YunAudioRazer"),
 
-        // The command vocabulary and the socket that carries it. A module of
-        // its own because the MCP server is a separate process and needs the
-        // same definitions, and SwiftPM will not let one file belong to two
-        // targets — the alternative was a second copy of the grammar.
-        .target(name: "YunAudioControl", dependencies: ["YunDesign"]),
+        // The command vocabulary and the socket that carries it. A URL, a MIDI
+        // note, a line of script, a command line and an MCP tool are five front
+        // ends onto one list of verbs — and SwiftPM will not let one file
+        // belong to two targets, so the list lives here rather than being
+        // copied into each tool. A copy of a grammar is the thing this type
+        // exists to prevent.
+        .target(name: "YunAudioControl"),
 
         .executableTarget(
             name: "YunAudioApp",
@@ -48,7 +50,11 @@ let package = Package(
             ],
             resources: [.process("Resources")]),
 
-        .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
+        .executableTarget(
+            name: "yunaudio-cli",
+            dependencies: [
+                "YunAudioHAL", "YunAudioEngine", "YunAudioRazer", "YunAudioControl",
+            ]),
 
         // An MCP server, so an agent can drive the application. Stateless: it
         // forwards over the control socket and holds nothing, which is what

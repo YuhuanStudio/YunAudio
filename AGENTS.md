@@ -371,6 +371,11 @@ Sources/
   yunaudio-cli/     the verification harness
   yunaudio-mcp/     the MCP server: JSON-RPC 2.0 on stdio, stateless, forwards
                     everything over the control socket
+  YunAudioControl/  RemoteCommand and the command-line parser — the one
+                    vocabulary the URL scheme, MIDI, scripts and the terminal
+                    all speak, in a module two executables can both read
+  yunaudio-cli/     the verification harness, and the half that drives the
+                    running application rather than the hardware
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly, toolchain selection, string check
 DEVICES.md          what the hardware actually is, per device, and how each

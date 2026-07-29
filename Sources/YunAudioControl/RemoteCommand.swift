@@ -1,5 +1,4 @@
 import Foundation
-import YunDesign
 
 /// Something another program can ask this one to do.
 ///
@@ -16,11 +15,14 @@ import YunDesign
 /// current state, but anything driving this from a script should prefer the
 /// definite form.
 ///
-/// This lives in a module of its own rather than in the application because the
-/// MCP server is a *separate process* and needs the same vocabulary. SwiftPM
-/// will not let one file belong to two targets, so the alternative was a second
-/// copy of the grammar in the server — and the whole reason this type exists is
-/// that a second copy does not stay in step with the first.
+/// This lives in its own module rather than in the application because
+/// `yunaudio-cli` and `yunaudio-mcp` are separate processes onto the same
+/// verbs, and one executable
+/// target cannot read a type defined in another. The alternative was a second
+/// copy of the list inside the tool, which is the thing the whole arrangement
+/// exists to avoid. One member could not come with it: `title` needs `loc()`,
+/// and pulling the design system into a command-line tool to reach it costs
+/// more than the extension in `RemoteCommand+Title.swift` does.
 public enum RemoteCommand: Equatable, Sendable {
     /// Nil means toggle: what a button without a light has to ask for.
     case routing(Bool?)
@@ -112,18 +114,6 @@ public enum RemoteCommand: Equatable, Sendable {
         return URL(string: "\(scheme)://\(noun)/\(escaped)")!
     }
 
-    /// What to call this where somebody is choosing something to automate.
-    public var title: String {
-        switch self {
-        case .routing: loc("Start / stop routing")
-        case .mute: loc("Mute / unmute")
-        case .record: loc("Record")
-        case .transcribe: loc("Transcribe")
-        case .config(let name): name
-        case .preset(let name): loc(name)
-        case .script: loc("Run a script")
-        }
-    }
 
     /// The commands worth putting a physical button on, in the toggle form a
     /// button without a light has to ask for.
@@ -138,7 +128,11 @@ public enum RemoteCommand: Equatable, Sendable {
     /// Turns a verb into on, off, or toggle. Double-optional: the outer level
     /// says whether the verb was understood at all, the inner one carries the
     /// toggle.
-    private static func state(_ verb: String?) -> Bool?? {
+    ///
+    /// Shared with the command line, which accepts the same words for the same
+    /// reason: somebody who has typed `yunaudio://mute/on` should not have to
+    /// learn that the terminal spells it differently.
+    static func state(_ verb: String?) -> Bool?? {
         switch verb {
         case nil, "toggle": .some(nil)
         case "on", "start", "1", "true", "yes": .some(true)

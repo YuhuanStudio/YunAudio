@@ -517,3 +517,14 @@
 "Loaded." = "Loaded.";
 "What it has said" = "What it has said";
 "Events" = "Events";
+"Recording stopped: %@" = "Recording stopped: %@";
+"Voice isolation is not running: %@." = "Voice isolation is not running: %@.";
+"this system does not offer it" = "this system does not offer it";
+"the processing chain could not be built" = "the processing chain could not be built";
+"The echo canceller could not be built." = "The echo canceller could not be built.";
+"The echo canceller would not start." = "The echo canceller would not start.";
+"Canceller" = "Canceller";
+"Truncated" = "Truncated";
+"%ds ago" = "%ds ago";
+"Recording could not be started." = "Recording could not be started.";
+"Transcription could not be started." = "Transcription could not be started.";

@@ -633,7 +633,15 @@ struct PreferencesWindow: View {
 
     private var midiLastMessage: String {
         guard let message = model.midiControl.lastMessage else { return loc("nothing yet") }
-        return message.address.displayName + " · \(message.value)"
+        var line = message.address.displayName + " · \(message.value)"
+        // When it arrived, which the controller has recorded since it was
+        // written and nothing showed. Without it a pad pressed a minute ago and
+        // a pad pressed just now read identically, which is exactly the
+        // question somebody staring at this row is asking.
+        if let at = model.midiControl.lastMessageAt {
+            line += " · " + String(format: loc("%ds ago"), Int(-at.timeIntervalSinceNow))
+        }
+        return line
     }
 
     // MARK: Diagnostics

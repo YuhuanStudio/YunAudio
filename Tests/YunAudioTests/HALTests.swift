@@ -4,6 +4,7 @@ import Testing
 
 import AppKit
 @testable import YunAudioApp
+@testable import YunAudioEngine
 @testable import YunAudioControl
 @testable import YunDesign
 @testable import YunAudioHAL
@@ -1841,14 +1842,23 @@ struct ScriptingTests {
             case .preset(let name), .config(let name):
                 // Nil is how the model says "no such thing", and the script
                 // layer has to turn that into an error rather than a shrug.
+                lastCommandFailed = !known.contains(name)
                 return known.contains(name) ? "applied \(name)" : nil
             default:
+                // Left alone rather than cleared: one set of cases sets it from
+                // outside to stand for whatever happened before, and clearing
+                // it here would make `perform` erase the thing under test.
                 return "done"
             }
         }
         var scriptStatus: [String: Any] { status }
         var scriptPresetNames: [String] { ["Voice chat", "Recording"] }
         var scriptConfigNames: [String] { ["Streaming"] }
+        /// Settable, because one set of cases drives it from outside and the
+        /// other wants `perform` to set it — the same two ways the model is
+        /// used. `perform` writes it for the case that has a rule: a command
+        /// that named something this application does not have.
+        var lastCommandFailed = false
     }
 
     private func host() -> (ScriptHost, Target) {
@@ -2264,5 +2274,346 @@ struct WrapBreakTests {
             #expect(used <= 300, "a line came to \(used)")
         }
         #expect(lines.flatMap { $0 } == Array(0..<widths.count))
+    }
+}
+
+/// The command line as a front end onto the same verbs.
+///
+/// Argument handling is exactly the kind of code that is written once, reads
+/// obviously right, and turns `mute off` into a toggle for a year. It is a pure
+/// function over an array of strings so that it can be asserted rather than
+/// tried, and there is a case per verb because a verb nobody wrote a case for
+/// is a verb nobody checked.
+@Suite("The command line")
+struct ControlArgumentsTests {
+
+    @Test("every verb reaches the command the URL scheme would")
+    func verbs() {
+        let expected: [([String], ControlArguments.Outcome)] = [
+            (["start"], .perform(.routing(true))),
+            (["stop"], .perform(.routing(false))),
+            (["toggle"], .perform(.routing(nil))),
+            (["routing", "on"], .perform(.routing(true))),
+            (["mute"], .perform(.mute(nil))),
+            (["mute", "on"], .perform(.mute(true))),
+            (["mute", "off"], .perform(.mute(false))),
+            (["record", "on"], .perform(.record(true))),
+            (["transcribe", "off"], .perform(.transcribe(false))),
+            (["preset", "Voice call"], .perform(.preset("Voice call"))),
+            (["config", "Podcast"], .perform(.config("Podcast"))),
+            (["script", "yun.mute()"], .perform(.script("yun.mute()"))),
+            (["status"], .status),
+        ]
+        for (arguments, outcome) in expected {
+            #expect(ControlArguments.parse(arguments) == outcome, "\(arguments)")
+        }
+    }
+
+    /// Somebody typing into a terminal has the caps lock in whatever state they
+    /// left it, and refusing over that is pedantry rather than safety.
+    @Test("case does not matter")
+    func caseInsensitive() {
+        #expect(ControlArguments.parse(["MUTE", "ON"]) == .perform(.mute(true)))
+        #expect(ControlArguments.parse(["Stop"]) == .perform(.routing(false)))
+        // The name, though, is the user's own text and is passed through as
+        // typed. Matching it without case is the model's job, and it does it.
+        #expect(ControlArguments.parse(["preset", "VOICE"]) == .perform(.preset("VOICE")))
+    }
+
+    /// The words the URL scheme accepts, accepted here too. One definition of
+    /// what "on" means, not two.
+    @Test("the URL scheme's words for on and off all work")
+    func statesMatchTheURLScheme() {
+        for word in ["on", "start", "1", "true", "yes"] {
+            #expect(ControlArguments.parse(["mute", word]) == .perform(.mute(true)), "\(word)")
+        }
+        for word in ["off", "stop", "0", "false", "no"] {
+            let parsed = ControlArguments.parse(["mute", word])
+            #expect(parsed == .perform(.mute(false)), "\(word)")
+        }
+    }
+
+    /// A name with spaces in it should not need quoting, because the scenes
+    /// this application ships with have spaces in their names.
+    @Test("a name is joined rather than truncated")
+    func namesJoin() {
+        #expect(
+            ControlArguments.parse(["preset", "Voice", "call"])
+                == .perform(.preset("Voice call")))
+    }
+
+    /// Nothing outside the control vocabulary may be claimed: the measuring
+    /// half of the tool is behind these and a verb swallowed here is a verb
+    /// that stopped working.
+    @Test("the measuring verbs are left alone")
+    func harnessVerbsAreNotClaimed() {
+        for verb in [
+            "selftest", "soak", "dsp", "route", "capture", "tone", "light", "apps",
+            "tap", "volume", "aec", "bench", "mic", "vad", "swap", "timing",
+        ] {
+            #expect(ControlArguments.parse([verb]) == .notMine, "\(verb)")
+        }
+        #expect(ControlArguments.parse([]) == .notMine)
+        // Named apart because the URL scheme *does* accept `route` for
+        // routing, and taking it here would have quietly broken the measuring
+        // verb of the same name.
+        #expect(
+            ControlArguments.parse(["route", "Mic", "YunAudio", "5"]) == .notMine)
+    }
+
+    /// A word that is not on, off or toggle is refused rather than guessed at.
+    /// The failure being avoided is a mistyped mute that turns into a stop.
+    @Test("an unrecognised state is refused, with the alternatives named")
+    func badStateIsRefused() {
+        guard case .complaint(let message) = ControlArguments.parse(["mute", "sometimes"])
+        else {
+            Issue.record("a nonsense state was accepted")
+            return
+        }
+        #expect(message.contains("sometimes"))
+        #expect(message.contains("on, off or toggle"))
+    }
+
+    /// `record` was the harness verb that captured seconds to a file, so
+    /// `record 5` is a line somebody's notes still have in them. It has to say
+    /// where that went rather than just refusing.
+    @Test("the old meaning of record is named in its own error")
+    func recordCollisionIsExplained() {
+        guard case .complaint(let message) = ControlArguments.parse(["record", "5"]) else {
+            Issue.record("record 5 was taken as a state")
+            return
+        }
+        #expect(message.contains("capture 5"))
+    }
+
+    /// `stop recording` reads like an instruction and means "stop routing".
+    /// Dropping the extra word would do something nobody asked for.
+    @Test("a verb that takes nothing refuses an argument")
+    func extraArgumentsAreRefused() {
+        guard case .complaint = ControlArguments.parse(["stop", "recording"]) else {
+            Issue.record("an extra word was silently dropped")
+            return
+        }
+        guard case .complaint = ControlArguments.parse(["status", "now"]) else {
+            Issue.record("status took an argument")
+            return
+        }
+    }
+
+    @Test("a name is required where one is meant")
+    func missingNamesAreRefused() {
+        for verb in ["preset", "config", "script"] {
+            guard case .complaint = ControlArguments.parse([verb]) else {
+                Issue.record("\(verb) accepted no name")
+                return
+            }
+        }
+    }
+
+    /// The line the tool prints for `--url` has to be a line the application
+    /// actually answers to, or it is a copy-paste that silently does nothing.
+    @Test("everything the command line can produce survives the URL scheme")
+    func everythingRoundTrips() {
+        let lines = [
+            ["start"], ["stop"], ["toggle"], ["mute"], ["mute", "off"], ["record", "on"],
+            ["transcribe"], ["preset", "Voice call"], ["config", "Podcast"],
+            ["script", "yun.log('a?b#c'); yun.mute(true)"],
+        ]
+        for line in lines {
+            guard case .perform(let command) = ControlArguments.parse(line) else {
+                Issue.record("\(line) did not parse")
+                return
+            }
+            #expect(RemoteCommand.parse(command.url) == command, "\(line)")
+        }
+    }
+}
+
+/// What crosses between the terminal and the application.
+///
+/// A URL is one-way, so the tool needs a reply to print — and a reply that
+/// misreports the state is exactly the defect that looks fine from outside.
+@MainActor
+@Suite("Answering the command line")
+struct RemoteChannelTests {
+
+    /// The one that will bite. A `Bool` inside `Any` bridges to `NSNumber`, and
+    /// so does an `Int`: ordinary `as? Bool` casting turns "one route" into
+    /// "routes: yes".
+    @Test("a count is not a flag")
+    func integersDoNotBecomeBooleans() {
+        #expect(RemoteValue(1) == .count(1))
+        #expect(RemoteValue(0) == .count(0))
+        #expect(RemoteValue(true) == .flag(true))
+        #expect(RemoteValue(false) == .flag(false))
+        #expect(RemoteValue(1.5) == .number(1.5))
+        // The one that actually shipped for a minute: a level of exactly
+        // −70.0 dB is a `Double`, and `as? Int` takes it happily, so the
+        // status printed "−70" beside "−69.50" and neither looked wrong.
+        #expect(RemoteValue(-70.0) == .number(-70))
+        #expect(RemoteValue(0.0) == .number(0))
+        #expect(RemoteValue(0.0)?.described == "0.00")
+        #expect(RemoteValue("gate") == .text("gate"))
+        #expect(RemoteValue(["gate", "limiter"]) == .list(["gate", "limiter"]))
+        #expect(RemoteValue(Data()) == nil)
+    }
+
+    /// Including the values that are the *same JSON* as another case. A round
+    /// trip asserted only on 0.5 passes while 0.0 comes back as a count, which
+    /// is what happened: the terminal printed "0" beside "-69.50".
+    @Test("a reply survives the crossing")
+    func replyRoundTrips() throws {
+        let reply = RemoteReply(
+            token: "abc", outcome: "Microphone muted.",
+            status: [
+                "running": .flag(true), "routes": .count(2), "peak": .number(0.5),
+                "loudness": .number(0), "buffer": .count(0), "muted": .flag(false),
+                "source": .text("Mic"), "effects": .list([]),
+            ],
+            presets: ["Voice call"], configs: ["Podcast"])
+        let payload = try #require(reply.payload)
+        let back = try #require(
+            RemoteReply.from([RemoteChannel.payloadKey: payload]))
+        #expect(back == reply)
+    }
+
+    /// Somebody else's string until it parses: any process on the machine can
+    /// post to a distributed name.
+    @Test("rubbish on the wire is not a request")
+    func rubbishIsRejected() {
+        #expect(RemoteRequest.from(nil) == nil)
+        #expect(RemoteRequest.from([RemoteChannel.payloadKey: "not json"]) == nil)
+        #expect(RemoteRequest.from(["something": "else"]) == nil)
+    }
+
+    @Test("a command reaches the application and its sentence comes back")
+    func commandsArePerformed() {
+        let target = ScriptingTests.Target()
+        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
+        let reply = RemoteListener.reply(to: request, from: target)
+        #expect(target.performed == [.mute(true)])
+        #expect(reply.outcome == "done")
+        #expect(reply.token == "t")
+    }
+
+    /// The whole point of keeping `status` out of `RemoteCommand`: asking what
+    /// is happening must not change what is happening.
+    @Test("asking changes nothing")
+    func statusPerformsNothing() {
+        let target = ScriptingTests.Target()
+        target.status = ["running": true, "routes": 3]
+        let reply = RemoteListener.reply(to: RemoteRequest(token: "t"), from: target)
+        #expect(target.performed.isEmpty)
+        #expect(reply.outcome == nil)
+        #expect(reply.status["running"] == .flag(true))
+        #expect(reply.status["routes"] == .count(3))
+        #expect(reply.status["routes"]?.described == "3")
+    }
+
+    /// "No such scene" is a dead end. The names that would have worked come
+    /// back with the refusal so the tool can print them.
+    @Test("a refused name comes back with the names that exist")
+    func refusalCarriesTheAlternatives() {
+        let target = ScriptingTests.Target()
+        let request = RemoteRequest(token: "t", url: "yunaudio://preset/Voise%20chat")
+        let reply = RemoteListener.reply(to: request, from: target)
+        #expect(reply.outcome == nil)
+        #expect(reply.presets == ["Voice chat", "Recording"])
+        #expect(reply.configs == ["Streaming"])
+    }
+
+    /// Every reply carries the state as well as the sentence, so a caller can
+    /// check what its command did without asking twice and hoping nothing moved.
+    @Test("a reply to a command carries the state as well")
+    func repliesCarryState() {
+        let target = ScriptingTests.Target()
+        target.status = ["muted": false]
+        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
+        let reply = RemoteListener.reply(to: request, from: target)
+        #expect(reply.outcome == "done")
+        #expect(reply.status["muted"] == .flag(false))
+    }
+}
+
+/// Failures the engine writes down, and what the interface says about them.
+///
+/// None of these can be produced on demand — an Audio Unit that will not
+/// instantiate, a disk that fills — so the mapping is the only testable part.
+/// It is worth testing because the alternative to a wrong sentence here is what
+/// was there before, which was no sentence at all.
+@MainActor
+@Suite("Saying why something did not come up")
+struct FailureMessageTests {
+
+    /// Matched against the engine's own constants, so a reworded phrase is a
+    /// compile-time change rather than a silent fall-through to raw English.
+    @Test("every isolation failure the engine can record has a sentence")
+    func isolationFailuresAreExplained() {
+        for reason in [
+            RoutingEngine.IsolationFailure.chainNotBuilt,
+            RoutingEngine.IsolationFailure.unitNotInstantiated,
+        ] {
+            let message = RouterModel.isolationMessage(reason)
+            #expect(message != reason, "\(reason)")
+            #expect(message.contains(loc("Voice isolation is not running: %@.").prefix(5)))
+        }
+    }
+
+    /// A reason from a version that has since gained one is shown rather than
+    /// swallowed. Somebody reading the engine's own words is worse than a
+    /// translation and far better than silence.
+    @Test("an unknown reason is passed through rather than dropped")
+    func unknownIsolationReasonSurvives() {
+        #expect(RouterModel.isolationMessage("something new").contains("something new"))
+        #expect(RouterModel.echoMessage("something new") == "something new")
+    }
+
+    @Test("every echo cancellation failure the engine can record has a sentence")
+    func echoFailuresAreExplained() {
+        for reason in [
+            RoutingEngine.EchoFailure.notBuilt, RoutingEngine.EchoFailure.wouldNotStart,
+        ] {
+            #expect(RouterModel.echoMessage(reason) != reason, "\(reason)")
+        }
+    }
+
+    /// The field that had a picker, an engine reading it and a preset carrying
+    /// it, and no line in the preferences file.
+    @Test("the recording format has somewhere to be written down")
+    func recordingFormatIsPersistable() throws {
+        var preferences = Preferences.default
+        #expect(preferences.recordingFormat == Recorder.Format.wav.rawValue)
+        preferences.recordingFormat = Recorder.Format.aac.rawValue
+        let data = try JSONEncoder().encode(preferences)
+        let back = try JSONDecoder().decode(Preferences.self, from: data)
+        #expect(back.recordingFormat == Recorder.Format.aac.rawValue)
+    }
+}
+
+extension RemoteChannelTests {
+    /// A sentence is not an exit status.
+    ///
+    /// A script that throws still produces a sentence — the interpreter's
+    /// error — so a shell reading only the outcome could not tell a script that
+    /// had stopped working from one that was working.
+    @Test("a command that failed says so, separately from what it printed")
+    func failureIsCarriedApartFromTheSentence() {
+        let target = ScriptingTests.Target()
+        target.lastCommandFailed = true
+        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
+        #expect(RemoteListener.reply(to: request, from: target).failed)
+
+        // A question cannot fail, and must not report a failure left over from
+        // whatever the last command was.
+        #expect(!RemoteListener.reply(to: RemoteRequest(token: "t"), from: target).failed)
+    }
+
+    @Test("the failure flag survives the crossing")
+    func failureRoundTrips() throws {
+        let reply = RemoteReply(token: "t", outcome: "Script error: oops", failed: true)
+        let payload = try #require(reply.payload)
+        let back = try #require(RemoteReply.from([RemoteChannel.payloadKey: payload]))
+        #expect(back.failed)
+        #expect(back == reply)
     }
 }

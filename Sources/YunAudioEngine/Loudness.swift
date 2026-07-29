@@ -25,7 +25,6 @@ public struct LoudnessMeter: Sendable {
     /// as the standard requires.
     private let hopFrames: Int
     private var pending: [Double] = []
-    private var pendingCount = 0
 
     /// Momentary loudness, over the last 400 ms. What a meter shows.
     public private(set) var momentary: Double = -.infinity
@@ -57,7 +56,6 @@ public struct LoudnessMeter: Sendable {
             }
             let weighted = filter.process(sample)
             pending.append(weighted * weighted)
-            pendingCount += 1
 
             if pending.count >= blockFrames {
                 let mean = pending.reduce(0, +) / Double(blockFrames)
