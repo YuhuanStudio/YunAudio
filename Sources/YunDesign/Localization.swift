@@ -10,6 +10,7 @@ public enum YunLanguage: String, CaseIterable, Identifiable, Sendable {
     case system
     case english = "en"
     case traditionalChinese = "zh-Hant"
+    case simplifiedChinese = "zh-Hans"
 
     public var id: String { rawValue }
 
@@ -26,6 +27,7 @@ public enum YunLanguage: String, CaseIterable, Identifiable, Sendable {
         case .system: loc("Follow the system")
         case .english: "English"
         case .traditionalChinese: "繁體中文"
+        case .simplifiedChinese: "简体中文"
         }
     }
 }
