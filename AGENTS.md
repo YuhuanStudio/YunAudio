@@ -361,9 +361,16 @@ Sources/
   YunAudioRazer/    HID control of the Seiren V3 Pro, reverse-engineered
   YunDesign/        the YunUI design system in SwiftUI — tokens, theme,
                     controls, localisation
+  YunAudioControl/  RemoteCommand — the one definition of what this
+                    application can be asked to do — and the Unix socket the
+                    MCP server reaches it through. Its own module because the
+                    server is a separate process and SwiftPM will not share a
+                    file between two targets
   YunAudioApp/      the menu bar app; RouterModel is the single source of
                     truth and MainWindow is the tabbed inspector
   yunaudio-cli/     the verification harness
+  yunaudio-mcp/     the MCP server: JSON-RPC 2.0 on stdio, stateless, forwards
+                    everything over the control socket
 Driver/             YunAudioDriver.driver — the AudioServerPlugIn
 App/                bundle assembly, toolchain selection, string check
 DEVICES.md          what the hardware actually is, per device, and how each

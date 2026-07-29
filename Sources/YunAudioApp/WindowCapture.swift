@@ -58,11 +58,20 @@ enum WindowCapture {
         if let model {
             let wasShowing = model.inspectorTab
             for tab in MainWindow.Inspector.allCases {
+                let began = Date()
                 model.inspectorTab = tab
                 settle(turns: 12)
                 photograph(
                     window, sizes: [("tab-\(tab.rawValue)", CGSize(width: 980, height: 600))],
                     into: directory, appearances: [.darkAqua])
+                // Timed per tab, because the whole capture went from thirty
+                // seconds to four minutes when these were added and "it got
+                // slower" is not something anybody can act on.
+                let took = Date().timeIntervalSince(began)
+                if took > 3 {
+                    FileHandle.standardError.write(
+                        Data(String(format: "  %@ took %.1fs\n", tab.rawValue, took).utf8))
+                }
             }
             model.inspectorTab = wasShowing
         }

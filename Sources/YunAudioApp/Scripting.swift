@@ -1,5 +1,6 @@
 import Foundation
 import JavaScriptCore
+import YunAudioControl
 import YunAudioRT
 import YunDesign
 

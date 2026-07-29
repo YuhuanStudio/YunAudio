@@ -1,4 +1,5 @@
 import SwiftUI
+import YunAudioControl
 import YunDesign
 
 /// Watches for the application quitting.
@@ -13,6 +14,10 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     /// Owned here because the status item has to outlive the scene body that
     /// created it, and a SwiftUI scene is not a place to keep a reference.
     var statusItem: StatusItemController?
+    /// The control socket, for the same reason. Held so that quitting can take
+    /// the socket file away — a stale one left on disk is what the next launch
+    /// has to reason about.
+    var controlListener: ControlListener?
 
     func applicationWillTerminate(_ notification: Notification) {
         onTerminate?()
@@ -154,6 +159,10 @@ struct YunAudioApp: App {
             FileHandle.standardError.write(Data("yunaudio: \(url) — \(outcome)\n".utf8))
         }
         termination.installURLHandler()
+
+        // The socket answers the same commands and, unlike a URL, can be asked
+        // a question. `yunaudio-mcp` is on the other end of it.
+        termination.controlListener = ControlServer.start(model: model)
     }
 
     /// Creates the menu bar presence once, on whichever scene is evaluated
@@ -162,10 +171,13 @@ struct YunAudioApp: App {
     private func installStatusItem() {
         guard termination.statusItem == nil else { return }
         installRemoteControl()
-        termination.onTerminate = {
+        termination.onTerminate = { [termination] in
             // The ring is hardware state that outlives the process. Leaving it
             // lit after quitting would look like a fault rather than a setting.
             model.lighting.stop()
+            // Before the model goes: a socket still accepting connections would
+            // hand requests to a torn-down router.
+            termination.controlListener?.stop()
             model.shutDown()
         }
         termination.flowCheckModel = model

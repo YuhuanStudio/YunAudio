@@ -110,7 +110,28 @@ render_wrote_everything() {
 
 photographed_the_real_window() {
 	rm -rf "${WORK}/shot"
-	YUNAUDIO_SCREENSHOT="${WORK}/shot" ./build/YunAudio.app/Contents/MacOS/YunAudioApp || return 1
+	# Bounded, and judged by what it produced rather than by how it ended. The
+	# capture asks the router to start so it can photograph a window with meters
+	# in it, and on a machine where CoreAudio cannot start IO that call blocks
+	# in `AudioDeviceCreateIOProcID` on a `mach_msg` to a `coreaudiod` that is
+	# not answering — measured at four minutes, all of it after every photograph
+	# had already been written. Waiting for a clean exit would make the gate
+	# hostage to a broken audio server; the photographs are what this step is
+	# for, and they are all there.
+	YUNAUDIO_SCREENSHOT="${WORK}/shot" ./build/YunAudio.app/Contents/MacOS/YunAudioApp &
+	local capture=$!
+	local waited=0
+	while kill -0 "${capture}" 2>/dev/null && [[ ${waited} -lt 90 ]]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 "${capture}" 2>/dev/null; then
+		kill "${capture}" 2>/dev/null
+		wait "${capture}" 2>/dev/null
+		echo "  (the capture had to be stopped after ${waited}s — checking what it wrote)"
+	else
+		wait "${capture}" 2>/dev/null
+	fi
 	local count
 	count=$(find "${WORK}/shot" -name '*.png' | wc -l | tr -d ' ')
 	# Both appearances at both sizes, plus the running state.

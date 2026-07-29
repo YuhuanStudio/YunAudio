@@ -8,6 +8,7 @@ let package = Package(
     products: [
         .library(name: "YunAudioHAL", targets: ["YunAudioHAL"]),
         .executable(name: "yunaudio-cli", targets: ["yunaudio-cli"]),
+        .executable(name: "yunaudio-mcp", targets: ["yunaudio-mcp"]),
         .executable(name: "YunAudioApp", targets: ["YunAudioApp"]),
     ],
     targets: [
@@ -29,10 +30,17 @@ let package = Package(
 
         .target(name: "YunAudioRazer"),
 
+        // The command vocabulary and the socket that carries it. A module of
+        // its own because the MCP server is a separate process and needs the
+        // same definitions, and SwiftPM will not let one file belong to two
+        // targets — the alternative was a second copy of the grammar.
+        .target(name: "YunAudioControl", dependencies: ["YunDesign"]),
+
         .executableTarget(
             name: "YunAudioApp",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
+                "YunAudioControl",
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.
@@ -42,10 +50,16 @@ let package = Package(
 
         .executableTarget(name: "yunaudio-cli", dependencies: ["YunAudioHAL", "YunAudioEngine", "YunAudioRazer"]),
 
+        // An MCP server, so an agent can drive the application. Stateless: it
+        // forwards over the control socket and holds nothing, which is what
+        // lets an MCP client start and stop it whenever it likes.
+        .executableTarget(name: "yunaudio-mcp", dependencies: ["YunAudioControl"]),
+
         .testTarget(
             name: "YunAudioTests",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer",
+                "YunAudioControl", "yunaudio-mcp",
                 // The app is an executable target, and a test target can depend
                 // on one since Swift 5.5. It is here so the MIDI message
                 // decoding and soft-takeover arithmetic can be tested without a
