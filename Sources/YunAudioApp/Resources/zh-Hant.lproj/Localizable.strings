@@ -535,3 +535,12 @@
 "paper" = "紙白";
 "mist" = "薄霧";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "移除會重啟 coreaudiod，所以所有音訊會中斷一下，而且需要管理員密碼。";
+"Run it now" = "立刻執行一次";
+"Run the script above once, top to bottom" = "把上面的腳本從頭到尾執行一次";
+"Rescan" = "重新掃描";
+"Look for Audio Units installed since this window opened" = "找出這個視窗開啟之後才安裝的 Audio Unit";
+"%+.1f dB · held by peaks" = "%+.1f dB · 被峰值擋住";
+"Voice detector" = "語音偵測器";
+"this microphone does not publish one" = "這支麥克風沒有公布";
+"available, not running" = "可用，但沒有在跑";
+"running" = "正在跑";

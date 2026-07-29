@@ -766,12 +766,24 @@ struct MainWindow: View {
                         detail: $0.manufacturerName)
                 })
 
-            Text(
-                String(
-                    format: loc("%d installed."), model.availablePlugins.count)
-            )
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(spacing: Yun.Space.sm) {
+                Text(
+                    String(
+                        format: loc("%d installed."), model.availablePlugins.count)
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                Spacer(minLength: 0)
+                // The scan ran once, in `init`, and there was no way to ask for
+                // another: an Audio Unit installed while this was open stayed
+                // absent from the list until the application was restarted, and
+                // nothing on screen suggested that was why. The application list
+                // beside it has had a Refresh since the beginning; this is the
+                // same button for the same reason.
+                Button(loc("Rescan")) { model.refreshPlugins() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                    .help(loc("Look for Audio Units installed since this window opened"))
+            }
         }
     }
 
@@ -1662,19 +1674,39 @@ struct MainWindow: View {
                         .background(
                             Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.control))
 
-                    // The error goes next to the script rather than in a
-                    // status bar somewhere else: a syntax error is about the
-                    // thing on screen, and a script that failed to load is
-                    // otherwise indistinguishable from one that never fires.
-                    if let problem = model.residentScriptError {
-                        Text(problem)
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.danger)
-                            .textSelection(.enabled)
-                    } else if !model.residentScript.isEmpty {
-                        Text(loc("Loaded."))
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.success)
+                    // Running one once had no control at all: the tab installs
+                    // a script that reacts to events, and the other half of the
+                    // feature — run this, now — was reachable only from a URL,
+                    // the command line and the MCP tool. Loading a script that
+                    // only registers handlers tells you nothing about whether
+                    // it works; pressing this does.
+                    HStack(spacing: Yun.Space.sm) {
+                        Button(loc("Run it now")) {
+                            model.runScriptNow(model.residentScript)
+                        }
+                        .buttonStyle(YunButtonStyle(.secondary, small: true))
+                        .disabled(
+                            model.residentScript.trimmingCharacters(in: .whitespacesAndNewlines)
+                                .isEmpty
+                        )
+                        .help(loc("Run the script above once, top to bottom"))
+
+                        // The error goes next to the script rather than in a
+                        // status bar somewhere else: a syntax error is about the
+                        // thing on screen, and a script that failed to load is
+                        // otherwise indistinguishable from one that never fires.
+                        if let problem = model.residentScriptError {
+                            Text(problem)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.danger)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else if !model.residentScript.isEmpty {
+                            Text(loc("Loaded."))
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.success)
+                        }
+                        Spacer(minLength: 0)
                     }
 
                     // What the handlers have said. Without it a script that
@@ -1687,7 +1719,9 @@ struct MainWindow: View {
                             .foregroundStyle(Yun.Palette.textSecondary)
                         ScrollView {
                             VStack(alignment: .leading, spacing: 2) {
-                                ForEach(Array(model.scriptLog.suffix(12).enumerated()), id: \.offset) {
+                                ForEach(
+                                    Array(model.scriptLog.suffix(12).enumerated()), id: \.offset
+                                ) {
                                     _, line in
                                     Text(line)
                                         .font(.system(size: 11, design: .monospaced))
@@ -1709,10 +1743,11 @@ struct MainWindow: View {
                     // thing somebody needs is the list.
                     Text(
                         ScriptHost.Event.allCases.map(\.rawValue).sorted()
-                            .joined(separator: "   "))
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Yun.Palette.textSecondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                            .joined(separator: "   ")
+                    )
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }

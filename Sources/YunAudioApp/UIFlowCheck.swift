@@ -489,6 +489,20 @@ enum UIFlowCheck {
             note("nothing installed that can load in-process — hosting not exercised")
         }
 
+        // The rescan button. `refreshPlugins` ran once, from `init`, and had no
+        // control: an Audio Unit installed while this was open stayed invisible
+        // until the application was restarted, and nothing on screen said so.
+        // What is asserted is that asking again is safe — it drops units that
+        // have gone away, so a rescan that lost a plugin somebody is using
+        // would be worse than no button.
+        let offeredBefore = model.availablePlugins.count
+        let inChain = model.enabledPlugins
+        model.refreshPlugins()
+        check(
+            "rescanning finds at least what was already there",
+            model.availablePlugins.count >= offeredBefore)
+        check("and leaves the chain alone", model.enabledPlugins == inChain)
+
         try section("light ring")
         if model.lighting.isAvailable {
             for mode in LightingMode.allCases {
@@ -2354,6 +2368,36 @@ enum UIFlowCheck {
                 model.cycleCountForDiagnostics > cyclesBefore)
             check("still running after patching", model.isRunning)
 
+            // Pulling one cable rather than everything reaching a port. The
+            // canvas offered only the second: picking a source and clicking a
+            // destination it already fed did nothing at all, so a destination
+            // carrying two sources could not have one of them removed without
+            // pulling both. `disconnectRoute` existed the whole time with
+            // nothing calling it.
+            let hadCable = model.activeRoutes.contains {
+                $0.source == from && $0.destination == newCable
+            }
+            model.connect(source: from, destination: newCable)
+            await pause(0.4)
+            let sharing = model.activeRoutes.filter { $0.destination == newCable }.count
+            check("the port carries what was just patched into it", sharing >= 1)
+            model.disconnectRoute(source: from, destination: newCable)
+            await pause(0.4)
+            let left = model.activeRoutes.filter { $0.destination == newCable }.count
+            check("one cable came out", left == sharing - 1)
+            // The distinction the canvas could not make: everything else
+            // reaching that port has to still be there.
+            if sharing > 1 {
+                check("and the others reaching it stayed", left > 0)
+            }
+            check("still running after pulling one cable", model.isRunning)
+            // Back as it was found, since everything below runs against the
+            // patch this section leaves behind.
+            if hadCable {
+                model.connect(source: from, destination: newCable)
+                await pause(0.4)
+            }
+
             // A sixteen-channel destination must not put sixteen empty ports on
             // the canvas; the card was taller than the window and pushed the
             // mixer out of sight.
@@ -4172,6 +4216,35 @@ enum UIFlowCheck {
         model.residentScript = "yun.on('nope', function () {});"
         check("an unknown event is refused at load", model.residentScriptError != nil)
         if let problem = model.residentScriptError { note(problem) }
+
+        // The tab's "Run it now" button. Running a script once was in the
+        // vocabulary from the beginning — the URL scheme, the CLI, the MCP tool
+        // — and there was no control for it anywhere: the tab could install a
+        // script that reacts and offered no way to make one do anything. What
+        // the button calls is this, and what matters is that the result reaches
+        // the log the tab draws, because a run whose output goes nowhere is
+        // indistinguishable from a button that does nothing.
+        model.residentScript = "yun.log('ran once'); 6 * 7"
+        let logBefore = model.scriptLog.count
+        let once = model.runScriptNow(model.residentScript)
+        check("the run button's call succeeds", once.isSuccess)
+        check("its value came back", once.value == "42")
+        check("and the log grew", model.scriptLog.count > logBefore)
+        check("with what the script printed", model.scriptLog.contains("ran once"))
+        check("and with what it evaluated to", model.scriptLog.contains("→ 42"))
+
+        // A run that throws must say so in the same place, rather than looking
+        // exactly like a run that did nothing.
+        let failedBefore = model.scriptLog.count
+        let broken = model.runScriptNow("throw new Error('deliberate')")
+        check("a throwing run is reported as a failure", !broken.isSuccess)
+        check(
+            "and said so where the tab shows it",
+            model.scriptLog.count > failedBefore
+                && model.scriptLog.last?.contains("deliberate") == true)
+        // A run that threw is not a script that would not load, and the two are
+        // shown in different places on purpose.
+        check("without claiming the script failed to load", model.residentScriptError == nil)
     }
 
     /// The system's own voice detector.

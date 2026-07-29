@@ -535,3 +535,12 @@
 "paper" = "Paper";
 "mist" = "Mist";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password.";
+"Run it now" = "Run it now";
+"Run the script above once, top to bottom" = "Run the script above once, top to bottom";
+"Rescan" = "Rescan";
+"Look for Audio Units installed since this window opened" = "Look for Audio Units installed since this window opened";
+"%+.1f dB · held by peaks" = "%+.1f dB · held by peaks";
+"Voice detector" = "Voice detector";
+"this microphone does not publish one" = "this microphone does not publish one";
+"available, not running" = "available, not running";
+"running" = "running";
