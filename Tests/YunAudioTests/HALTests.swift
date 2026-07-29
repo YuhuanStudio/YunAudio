@@ -927,9 +927,8 @@ struct AudioApplicationGroupingTests {
         // And the general form of it: every row the interface offers is
         // reachable by the name it shows.
         let processes = try AudioProcesses.all(includingSilent: true)
-        let byID = Dictionary(processes.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in
-            first
-        })
+        var byID: [AudioObjectID: AudioProcess] = [:]
+        for process in processes where byID[process.id] == nil { byID[process.id] = process }
         for application in try AudioApplications.grouped() {
             let members = application.processIDs.compactMap { byID[$0] }
             guard !members.isEmpty else { continue }

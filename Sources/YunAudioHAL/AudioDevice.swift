@@ -246,8 +246,6 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         (id.optionalValue(of: .isRunningSomewhere) ?? 0) != 0
     }
 
-    /// Presentation latency in frames for a scope, combining the device's own
-    /// latency with the safety offset the HAL keeps ahead of the IO cycle.
     /// True when this output is a Bluetooth headset that has already dropped to
     /// call quality.
     ///

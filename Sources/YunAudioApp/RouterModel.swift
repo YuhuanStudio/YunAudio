@@ -1361,6 +1361,18 @@ final class RouterModel: ScriptTarget {
         return VoiceActivityWatcher.isAvailable(on: source.id)
     }
 
+    /// True while the detector this route built is actually running.
+    ///
+    /// `VoiceActivityWatcher` reports this and nothing in the application asked
+    /// — which is the one question that decides whether "not speaking" means
+    /// anything. Its initialiser returns a live object even when the write that
+    /// switches detection on failed, and then the state reads 0 for ever,
+    /// `isSpeakingWhileMuted` never becomes true, and the "muted, but talking"
+    /// pill cannot appear, with nothing anywhere saying the detector is not
+    /// running. Asked of the watcher rather than of the device, because it is
+    /// the watcher's own claim that is being checked.
+    var isDetectingVoiceActivity: Bool { voiceWatcher?.isObserving ?? false }
+
     private func startVoiceActivity() {
         guard voiceWatcher == nil, let source = selectedSource else { return }
         voiceWatcher = VoiceActivityWatcher(device: source.id) { [weak self] speaking in
@@ -1857,6 +1869,15 @@ final class RouterModel: ScriptTarget {
             recordingSeconds = engine.recordingDuration
             engine.stopRecording()
             isRecording = false
+            // `recordStart` and `recordStop` were declared in `ScriptHost.Event`
+            // and raised by nothing, which is worse than absent: the event names
+            // are listed in the scripting help, and `installEvents` refuses an
+            // unknown name precisely so that a typo cannot become a handler that
+            // never fires. So `yun.on('recordStop', …)` was accepted, listed and
+            // never called — the one failure that guard exists to prevent.
+            fire(
+                .recordingStopped,
+                ["file": recordingURL?.path ?? "", "seconds": recordingSeconds])
             return
         }
         guard isRunning else {
@@ -1881,6 +1902,7 @@ final class RouterModel: ScriptTarget {
             isRecordingPaused = false
             recordingSeconds = 0
             lastError = nil
+            fire(.recordingStarted, ["file": recordingURL?.path ?? ""])
         } catch {
             lastError = String(describing: error)
         }
@@ -3216,7 +3238,15 @@ final class RouterModel: ScriptTarget {
                 // setting that decides whether a captured application is still
                 // audible was forgotten at every launch, silently, back to the
                 // default.
-                tapMuteBehavior: tapMuteBehavior.storageKey))
+                tapMuteBehavior: tapMuteBehavior.storageKey,
+                // The same omission as `tapMuteBehavior` above, on the field
+                // added directly after it: a `didSet` that persists, a
+                // `Preferences` field to persist into, and no line here joining
+                // them. The memberwise initialiser fills an optional it was not
+                // given with nil and `save` replaces the whole blob, so every
+                // save — including the one the script editor's own `didSet`
+                // triggers — wrote the script away as nothing.
+                residentScript: residentScript))
     }
 
     // MARK: Devices
@@ -4041,6 +4071,13 @@ final class RouterModel: ScriptTarget {
         let host = ScriptHost(target: self)
         let result = host.load(residentScript)
         residentScriptError = result.error
+        // What the script said while it was loading goes to the same place as
+        // what its handlers say. It was dropped, so a script whose top level
+        // called `yun.log` wrote to nowhere while the panel above it is headed
+        // "What it has said" — and the top level is exactly where somebody puts
+        // the line that tells them the script is the one they think it is.
+        for line in result.log { scriptLog.append(line) }
+        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
         // Kept even when it failed to load, so `listens(for:)` is honestly
         // empty rather than the previous script's handlers going on firing
         // under the new script's name.

@@ -4236,6 +4236,12 @@ struct AudioMixConstraintTests {
 @Suite("Transcription")
 struct TranscriberTests {
 
+    /// Some real speech and the rate it is at.
+    private struct SpokenAudio {
+        let samples: [Float]
+        let rate: Double
+    }
+
     @Test("the framework is present on this system")
     func supported() {
         #expect(Transcriber.isSupported)
@@ -4302,9 +4308,7 @@ struct TranscriberTests {
     /// there is no way to ask Apple's model a question about timing without
     /// giving it something it will actually transcribe, and a synthesised tone
     /// produces no lines at all.
-    private static func spokenSamples(_ words: String) throws -> (
-        samples: [Float], rate: Double
-    ) {
+    private static func spokenSamples(_ words: String) throws -> SpokenAudio {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("yunaudio-speech-\(UUID().uuidString).aiff")
         defer { try? FileManager.default.removeItem(at: url) }
@@ -4318,19 +4322,19 @@ struct TranscriberTests {
         guard
             let buffer = AVAudioPCMBuffer(
                 pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length))
-        else { return ([], format.sampleRate) }
+        else { return SpokenAudio(samples: [], rate: format.sampleRate) }
         try file.read(into: buffer)
-        guard let channel = buffer.floatChannelData else { return ([], format.sampleRate) }
-        return (
-            Array(UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength))),
-            format.sampleRate
-        )
+        guard let channel = buffer.floatChannelData else {
+            return SpokenAudio(samples: [], rate: format.sampleRate)
+        }
+        return SpokenAudio(
+            samples: Array(
+                UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength))),
+            rate: format.sampleRate)
     }
 
     /// In the blocks the interface's poll hands over, rather than in one lump.
-    private static func feed(
-        _ audio: (samples: [Float], rate: Double), to transcriber: Transcriber
-    ) {
+    private static func feed(_ audio: SpokenAudio, to transcriber: Transcriber) {
         let block = Int(audio.rate / 100)
         for start in stride(from: 0, to: audio.samples.count, by: block) {
             let end = min(start + block, audio.samples.count)
@@ -4379,9 +4383,8 @@ struct TranscriberTests {
         #expect(first.start < 1.0)
         #expect(second.start > 1.5)
         // And so the merge across sources is a record of the conversation.
-        #expect([second, first].sorted { $0.start < $1.start }.map(\.speaker) == [
-            "First", "Second",
-        ])
+        let merged = [second, first].sorted { $0.start < $1.start }
+        #expect(merged.map(\.speaker) == ["First", "Second"])
     }
 }
 
