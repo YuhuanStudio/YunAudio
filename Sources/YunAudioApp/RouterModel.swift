@@ -2026,7 +2026,16 @@ final class RouterModel: ScriptTarget {
     }
 
     func refreshApps() {
-        availableApps = (try? AudioApplications.grouped()) ?? []
+        // Anything already captured is listed whether or not it happens to be
+        // audible at this instant. A process with no bundle identifier is listed
+        // only while the HAL says it is running output, and that property blinks
+        // — see the note in `AudioApplications.group`. `start` calls this and
+        // then resolves the captured identifiers against what came back, so a
+        // blink at that moment meant no tap, no route, and nothing said about
+        // it. Measured with the flow check's own player, one argument apart:
+        // without this, two routes and "resolved to no running process"; with
+        // it, four routes and the key it was built in.
+        availableApps = (try? AudioApplications.grouped(keeping: capturedAppBundleIDs)) ?? []
         appsRefreshedAt = Date()
     }
 
@@ -2048,6 +2057,43 @@ final class RouterModel: ScriptTarget {
     /// CoreAudio — so this is the only way back from a route to the application
     /// behind it, which is what per-application volume and roles need.
     @ObservationIgnored private(set) var tapOwners: [String: String] = [:]
+
+    /// Captured identifiers that the last start resolved to no running process.
+    ///
+    /// Not an error — an application ticked weeks ago and not running today is
+    /// the ordinary case — but until now it was not anything at all. A capture
+    /// that resolves to nothing builds no tap, and a mix with no tap in it looks
+    /// exactly like a mix whose tap is silent, which is how an afternoon went
+    /// into the analysers before anybody established that no music had been put
+    /// on the bus.
+    @ObservationIgnored private(set) var unresolvedCaptures: [String] = []
+
+    /// Captured applications whose tap CoreAudio refused at the last start.
+    ///
+    /// The other half of the same question. `lastError` says this too, once,
+    /// and then the next thing to go wrong writes over it — so the fact that a
+    /// capture was refused survives here for anything asking afterwards.
+    @ObservationIgnored private(set) var refusedCaptures: [String] = []
+
+    /// How many channels of a tap to route into the destination.
+    ///
+    /// A tap that publishes no format is taken as stereo. So is one that
+    /// publishes a format carrying zero channels, which is a *different* thing
+    /// and `?? 2` did not cover: it only sees the absent case, so a present
+    /// zero would have built no routes at all and said nothing about it —
+    /// indistinguishable from a tap that is merely quiet. The same trap as the
+    /// `?? 48000` guarding the reported sample rate a few hundred lines down,
+    /// and worth closing for the same reason rather than because it has been
+    /// seen: a mix silently missing a source is what this whole area cost.
+    ///
+    /// - Parameters:
+    ///   - published: What the tap says it carries, if it says anything.
+    ///   - destination: Channels the destination has room for.
+    /// - Returns: How many channels to build routes for.
+    static func channelsToRoute(published: UInt32?, destination: Int) -> Int {
+        let carried = Int(published ?? 0)
+        return min(destination, carried > 0 ? carried : 2)
+    }
 
     /// The application a route's source belongs to, if it is one.
     func application(of route: Route) -> AudioApplication? {
@@ -3577,7 +3623,12 @@ final class RouterModel: ScriptTarget {
         let capturedApps = availableApps.filter {
             capturedAppBundleIDs.contains($0.bundleID) && !$0.processIDs.isEmpty
         }
+        unresolvedCaptures =
+            capturedAppBundleIDs
+            .subtracting(capturedApps.map(\.bundleID))
+            .sorted()
         tapOwners = [:]
+        refusedCaptures = []
         if !capturedApps.isEmpty {
             let destinationChannels = min(2, selectedDestination?.outputChannels ?? 0)
             var failed: [String] = []
@@ -3591,8 +3642,9 @@ final class RouterModel: ScriptTarget {
                 }
                 taps.append(tap)
                 tapOwners[tap.uid] = app.bundleID
-                let tapChannels = Int(tap.format?.mChannelsPerFrame ?? 2)
-                for channel in 0..<min(destinationChannels, tapChannels) {
+                let tapChannels = Self.channelsToRoute(
+                    published: tap.format?.mChannelsPerFrame, destination: destinationChannels)
+                for channel in 0..<tapChannels {
                     routeList.append(
                         Route(
                             source: ChannelRef(deviceUID: tap.uid, channel: channel),
@@ -3603,6 +3655,7 @@ final class RouterModel: ScriptTarget {
                             isDuckable: true))
                 }
             }
+            refusedCaptures = failed
             if !failed.isEmpty {
                 lastError = String(
                     format: loc("%@ could not be captured."),

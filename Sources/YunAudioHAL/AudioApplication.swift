@@ -110,7 +110,12 @@ extension AudioApplications {
     /// Ordering is what makes this useful: playing first, then foreground, then
     /// name. Whatever is making noise right now is almost always what the user
     /// came here to capture.
-    public static func grouped() throws -> [AudioApplication] {
+    ///
+    /// - Parameter keeping: Identities that must be listed whether or not their
+    ///   process is making a sound at that instant. See `group`.
+    /// - Returns: One entry per application, whatever is playing first.
+    /// - Throws: Whatever reading the HAL's process list threw.
+    public static func grouped(keeping: Set<String> = []) throws -> [AudioApplication] {
         let processes = try AudioProcesses.all(includingSilent: true).map(entry(for:))
         return group(
             processes: processes,
@@ -118,7 +123,8 @@ extension AudioApplications {
             // Accessory processes are not allowed to own a group, but they
             // still have a name and an icon worth showing — Siri and Control
             // Centre are recognisable, `com.apple.Siri` is not.
-            named: runningApplications(foregroundOnly: false))
+            named: runningApplications(foregroundOnly: false),
+            keeping: keeping)
     }
 
     /// - Parameters:
@@ -128,11 +134,15 @@ extension AudioApplications {
     ///     identifier. Only these may head a group.
     ///   - named: Every running application, so an accessory still gets its own
     ///     name and icon.
+    ///   - keeping: Identities to list even when the process behind one is
+    ///     momentarily making no sound — in practice, whatever the user has
+    ///     already chosen to capture.
     /// - Returns: One entry per application, whatever is playing first.
     public static func group(
         processes: [ProcessEntry],
         foreground: [String: ApplicationInfo],
-        named: [String: ApplicationInfo]
+        named: [String: ApplicationInfo],
+        keeping: Set<String> = []
     ) -> [AudioApplication] {
         // Longest match wins so `com.hnc.Discord.helper.Renderer` folds into
         // `com.hnc.Discord` and not into some shorter accidental prefix.
@@ -156,8 +166,30 @@ extension AudioApplications {
                 // Recording counted as silent, so a process with no bundle
                 // holding the microphone was dropped from the one list that
                 // exists to say what is using the audio on this machine.
-                guard process.isPlaying || process.isRecording else { continue }
-                groups[identity(forPID: process.pid), default: []].append(process)
+                //
+                // And "making none" is a far coarser question than it looks.
+                // `kAudioProcessPropertyIsRunningOutput` answers for the instant
+                // it is read rather than for the last second, and it blinks:
+                // measured here against afplay playing one continuous 60-second
+                // tone, audible throughout, it read 0 for 22 of 24 samples taken
+                // a quarter of a second apart, and 1 for all 60 of another run.
+                // The blinks cluster around anything that disturbs the device
+                // underneath — a route starting, a rate changing — which is
+                // exactly when the router re-reads this list, because adding a
+                // capture restarts the route.
+                //
+                // What that cost: a player the user had just ticked resolved to
+                // no process, no tap was built, the mix carried the microphone
+                // alone, and nothing anywhere said so. The flow check blamed the
+                // key detector for hearing the room.
+                //
+                // So a process the caller has already chosen survives the blink.
+                // Only those: the long tail is still dropped, because `keeping`
+                // holds identities somebody picked by hand.
+                let identity = identity(forPID: process.pid)
+                guard process.isPlaying || process.isRecording || keeping.contains(identity)
+                else { continue }
+                groups[identity, default: []].append(process)
                 continue
             }
             let owner =
@@ -205,7 +237,13 @@ extension AudioApplications {
         // "PID 47482" is not a row anybody can act on, and it is exactly the
         // row somebody needs when their headset has dropped to call quality and
         // they are trying to find out what did it.
-        if process.bundleID?.isEmpty ?? true, process.isPlaying || process.isRecording,
+        //
+        // Asked of every process with no bundle rather than only the audible
+        // ones, because audibility flickers — see the note in `group`, and the
+        // row that flickered with it read "afplay" one second and "PID 47482"
+        // the next. One `proc_pidpath` per process is a syscall against an
+        // enumeration that already costs 27 ms.
+        if process.bundleID?.isEmpty ?? true,
             let executable = executableName(ofPID: process.pid)
         {
             name = executable

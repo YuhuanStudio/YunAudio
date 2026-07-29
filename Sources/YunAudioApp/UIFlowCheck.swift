@@ -3462,6 +3462,24 @@ enum UIFlowCheck {
         // two routes, and `tapOwners` empty.
         let tapped = model.activeRoutes.contains { model.application(of: $0) != nil }
         check("the capture became routes on the bus", tapped)
+        // Which of them failed. Resolving to no process, a tap CoreAudio
+        // refused, and a tap that published no channels to route all end as no
+        // routes on the bus, and they want three different things done about
+        // them. Saying only "no routes" sent the last person reading the
+        // analysers.
+        if !model.unresolvedCaptures.isEmpty {
+            note(
+                "resolved to no running process: "
+                    + model.unresolvedCaptures.joined(separator: ", "))
+        }
+        if !model.refusedCaptures.isEmpty {
+            note("CoreAudio refused the tap: " + model.refusedCaptures.joined(separator: ", "))
+        }
+        if !tapped, model.unresolvedCaptures.isEmpty, model.refusedCaptures.isEmpty {
+            note(
+                "the tap was built and carried no channels — destination "
+                    + "\(model.selectedDestination?.outputChannels ?? 0) channel(s)")
+        }
 
         // With the chain running, because that is the case anybody karaokes in
         // and it is the one that was in doubt. Voice isolation is a speech
