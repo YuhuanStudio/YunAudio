@@ -461,6 +461,28 @@ final class RouterModel: ScriptTarget {
     /// Which line is being sung, and how far through it.
     private(set) var lyricLine: Int?
     private(set) var lyricProgress: Double = 0
+    /// Where the song has got to, extrapolated between the once-a-second
+    /// answers a player will give. See `TrackClock` for why it is not simply
+    /// asked every poll.
+    ///
+    /// Computed rather than published, so that reading it exactly — which every
+    /// clock a score is anchored on has to — does not invalidate a view twenty
+    /// times a second for a timecode that shows whole seconds. `songSecond` is
+    /// the published half.
+    var songPosition: Double {
+        trackClock.position(at: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+    }
+    /// The whole second the timecode shows, published only when it changes.
+    private(set) var songSecond: Int = 0
+    /// Seconds to pull the words earlier, positive meaning earlier.
+    ///
+    /// The `.lrc` format has an `[offset:]` tag for exactly this, and it is
+    /// wrong as often as it is right: the file somebody downloaded was written
+    /// against a different master, a different pressing, or a stream with a
+    /// different silent lead-in. Everybody who has ever sung to a downloaded
+    /// `.lrc` has wanted this control and the panel did not have one, so the
+    /// only remedy was editing the file between verses.
+    private(set) var lyricNudge: Double = 0
     /// Set while somebody is looking at the lyrics, so nothing is asked of the
     /// music players when nobody is.
     var isSingingVisible = false {
@@ -470,21 +492,46 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Moves the words against the recording, in tenths of a second.
+    ///
+    /// Bounded at two seconds either way: past that the file is for a different
+    /// recording rather than out by a lead-in, and a control that can put the
+    /// words a verse out is a control that loses somebody their place.
+    func nudgeLyrics(by seconds: Double) {
+        lyricNudge = max(-2, min(2, ((lyricNudge + seconds) * 10).rounded() / 10))
+        followTheWords()
+    }
+
     /// What key the backing track is in, once enough of it has been heard.
     private(set) var songKey: KeyDetector.Key?
     /// How far the song would have to move for this singer, in semitones.
     private(set) var suggestedShift: Int?
-    /// Every note sung since the panel was opened, as MIDI numbers.
-    ///
-    /// Kept as a running sum rather than a list: what is wanted is the middle
-    /// of somebody's range, and a mean over a few thousand frames is that.
-    @ObservationIgnored private var sungTotal: Double = 0
-    @ObservationIgnored private var sungCount: Int = 0
+
     /// The middle of the singer's measured range, or nil before they have sung.
-    var comfortableMidi: Double? {
-        // Twenty frames is about a second of actual singing, which is the least
-        // that can be called a range rather than a note.
-        sungCount >= 20 ? sungTotal / Double(sungCount) : nil
+    ///
+    /// **From the singer's own tap, not from the analysis ring.** This and
+    /// `heardNote` both used to read `analysis.pitchHertz`, and that ring is
+    /// written from the *output bus* — every source mixed, after the master.
+    /// With music playing, which is the one case this panel exists for, the
+    /// dominant pitch on that bus is the backing track, so the panel reported
+    /// the song as the singer's range and then built a transpose suggestion on
+    /// top of it. Measured with the microphone silent and an F major
+    /// progression captured onto the bus: the panel named a note throughout.
+    ///
+    /// Every source already has its own ring for the transcript and the score.
+    /// This uses the same one, which is why the panel opens taps while it is
+    /// merely being looked at rather than only while it is scoring.
+    var comfortableMidi: Double? { singerTrack?.comfortableMidi }
+
+    /// The pitch track of whoever is singing — the first source that is a real
+    /// input rather than a captured application, since a captured application
+    /// is the backing track by definition.
+    private var singerTrack: SingerPitch? {
+        for (index, track) in singerTracks.enumerated()
+        where index < scoringIsBackingTrack.count && !scoringIsBackingTrack[index] {
+            return track
+        }
+        return nil
     }
 
     /// Folds the current chroma into the key estimate.
@@ -510,12 +557,9 @@ final class RouterModel: ScriptTarget {
     private static let chromaEveryNPolls = 4
 
     private func updateSinging() {
-        // The singer, from the pitch tracker that is already running.
-        let hertz = analysis.pitchHertz
-        if hertz > 0 {
-            sungTotal += 69 + 12 * log2(Double(hertz) / 440)
-            sungCount += 1
-        }
+        // One tracker per source, kept open while the panel is, so the note and
+        // the range below are the voice rather than the mix.
+        refreshSingerTracks()
 
         pollsSinceChroma += 1
         guard pollsSinceChroma >= Self.chromaEveryNPolls else { return }
@@ -546,17 +590,22 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    /// The note the microphone is hearing, or nil when there is no pitch to
-    /// find. The tracker has been here since it was written; this is the first
-    /// thing that gave it a reason to be looked at.
-    var heardNote: String? { PitchTracker.noteName(analysis.pitchHertz) }
+    /// The note the singer is hearing themselves make, or nil when there is no
+    /// pitch to find on their own microphone.
+    ///
+    /// The singer's tap rather than the mix — see `comfortableMidi`. The
+    /// difference is the whole panel: on the mix this line reads the backing
+    /// track and reads it confidently.
+    var heardNote: String? { PitchTracker.noteName(singerHertz) }
+
+    /// What the singer's own microphone is at, in hertz. Zero when nobody is
+    /// singing, or when routing is not up and there is no tap to ask.
+    var singerHertz: Float { singerTrack?.hertz ?? 0 }
 
     private func clearSinging() {
         isScoringSinging = false
         songKey = nil
         suggestedShift = nil
-        sungTotal = 0
-        sungCount = 0
         chromaTotal = [Double](repeating: 0, count: 12)
         chromaWindows = 0
         pollsSinceChroma = 0
@@ -565,9 +614,12 @@ final class RouterModel: ScriptTarget {
         melody = nil
         lyricLine = nil
         lyricProgress = 0
-        // Due again, so re-opening the panel asks straight away rather than
-        // showing whatever the clock has extrapolated from an old answer.
+        songSecond = 0
+        lyricNudge = 0
+        isHandRun = false
+        trackClock.stop()
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
+        releaseSingerTracks()
     }
 
     // MARK: Scoring, and duets
@@ -612,6 +664,10 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var singerTracks: [SingerPitch] = []
     @ObservationIgnored private var scoringNames: [String] = []
     @ObservationIgnored private var scoringUIDs: [String] = []
+    /// Which of them is a captured application rather than somebody's
+    /// microphone. A captured application is the backing track by definition,
+    /// so it is not who "you are singing" is about.
+    @ObservationIgnored private var scoringIsBackingTrack: [Bool] = []
     /// The melody sampled once, rather than on every poll: it is seven thousand
     /// samples for a five-minute song and it does not change while it plays.
     @ObservationIgnored private var scoringReference: [PitchSample] = []
@@ -635,6 +691,49 @@ final class RouterModel: ScriptTarget {
     /// somebody makes on purpose.
     private static let seekToleranceSeconds: Double = 2
 
+    /// Opens a tap and a pitch tracker per source, or leaves the ones that are
+    /// already right alone.
+    ///
+    /// Called from the poll while the panel is open rather than only when
+    /// scoring starts, because "the note you are singing" and "how far to move
+    /// the song for you" are about the singer and the only place the singer
+    /// exists on their own is their own ring. Rebuilt only when the set of
+    /// sources actually changes: rebuilding on every poll would throw away the
+    /// performance twenty times a second.
+    ///
+    /// - Returns: True when there is at least one tracker to read.
+    @discardableResult
+    private func refreshSingerTracks() -> Bool {
+        guard isSingingVisible || isScoringSinging, isRunning else { return false }
+        let opened = openSourceTaps()
+        guard opened > 0 else { return false }
+        let groups = Array(sourceGroups.prefix(opened))
+        guard groups.map(\.uid) != scoringUIDs || singerTracks.count != groups.count else {
+            return !singerTracks.isEmpty
+        }
+        scoringUIDs = groups.map(\.uid)
+        scoringNames = groups.map {
+            representative(of: $0).map(routeTitle) ?? loc("Source")
+        }
+        scoringIsBackingTrack = groups.map {
+            representative(of: $0).flatMap(application(of:)) != nil
+        }
+        singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
+        for track in singerTracks {
+            track.keepsHistory = isScoringSinging
+            track.reset(at: songPosition)
+        }
+        return !singerTracks.isEmpty
+    }
+
+    private func releaseSingerTracks() {
+        singerTracks = []
+        scoringUIDs = []
+        scoringNames = []
+        scoringIsBackingTrack = []
+        closeSourceTapsIfIdle()
+    }
+
     private func startScoring() {
         guard isRunning else {
             singingError = loc("Start routing before it can score you.")
@@ -643,35 +742,45 @@ final class RouterModel: ScriptTarget {
             isScoringSinging = false
             return
         }
-        let opened = openSourceTaps()
-        guard opened > 0 else {
+        guard refreshSingerTracks() else {
             singingError = loc("Could not listen to any source.")
             isScoringSinging = false
             return
         }
-        let groups = Array(sourceGroups.prefix(opened))
-        scoringUIDs = groups.map(\.uid)
-        scoringNames = groups.map {
-            representative(of: $0).map(routeTitle) ?? loc("Source")
-        }
-        // The extrapolated position rather than the last answer: the player is
-        // asked twice a second now, and anchoring a singer's clock to an answer
-        // up to half a second old would put every score that far out.
-        let anchor = trackPosition
-        singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
-        for track in singerTracks { track.reset(at: anchor) }
-        rebuildScoringReference()
+        restartScore()
         singingError = nil
         pollsSinceScore = Self.scoreEveryNPolls
         refreshSingers()
     }
 
+    /// Puts every singer back at the start of their attempt.
+    ///
+    /// A karaoke machine's other button. The clock a score is measured on is
+    /// the song's, and the whole of somebody's first verse being counted
+    /// against them because they started the song late is the ordinary way a
+    /// score becomes meaningless — and toggling the switch was the only remedy,
+    /// which also loses the tune, the taps and the words.
+    func restartScore() {
+        for track in singerTracks {
+            track.keepsHistory = true
+            track.reset(at: songPosition)
+        }
+        rebuildScoringReference()
+        singers = []
+        pollsSinceScore = Self.scoreEveryNPolls
+    }
+
     private func stopScoring() {
-        singerTracks = []
         scoringReference = []
         singers = []
         singingError = nil
-        closeSourceTapsIfIdle()
+        // The trackers stay open while the panel is: the note at the top of it
+        // is live whether or not anybody asked for a score.
+        for track in singerTracks {
+            track.keepsHistory = false
+            track.reset(at: songPosition)
+        }
+        if !isSingingVisible { releaseSingerTracks() }
     }
 
     private func rebuildScoringReference() {
@@ -722,12 +831,12 @@ final class RouterModel: ScriptTarget {
     /// Only when the two have genuinely parted company. Re-anchoring on every
     /// poll would hand the score whatever jitter an Apple event round trip
     /// happened to have.
-    private func reanchorIfSeeked(to track: NowPlaying.Track) {
-        guard isScoringSinging, track.isPlaying, let first = singerTracks.first else {
+    private func reanchorIfSeeked(to seconds: Double) {
+        guard isScoringSinging, trackClock.isPlaying, let first = singerTracks.first else {
             return
         }
-        guard abs(track.position - first.elapsed) > Self.seekToleranceSeconds else { return }
-        for singer in singerTracks { singer.reset(at: track.position) }
+        guard abs(seconds - first.elapsed) > Self.seekToleranceSeconds else { return }
+        for singer in singerTracks { singer.reset(at: seconds) }
         singers = []
     }
 
@@ -738,81 +847,231 @@ final class RouterModel: ScriptTarget {
             .appendingPathComponent("YunAudio/Lyrics", isDirectory: true)
     }
 
-    /// Asks the players what is playing, and finds words for it.
+    /// Where the song has got to, and what it is, and which words go with it.
     ///
-    /// Cheap enough to do on the interface's own timer only because the panel
-    /// has to be open: an Apple event is a process hop each way, and doing it
-    /// while nobody is looking would be paying for a feature nobody asked for.
+    /// The player is asked about once a second and the moments in between are
+    /// arithmetic — see `TrackClock`. The old shape asked on every poll, which
+    /// measured 61.4 ms of Apple events against a 50 ms poll period, so the
+    /// panel spent more than the whole of the main thread finding out something
+    /// that advances at one second per second. Whatever the animation said, the
+    /// highlight could not sweep, because nothing had time to draw it.
     func refreshNowPlaying() {
         guard isSingingVisible else { return }
-        pollsSinceNowPlaying += 1
-        if pollsSinceNowPlaying >= Self.nowPlayingEveryNPolls, !isAskingNowPlaying {
-            pollsSinceNowPlaying = 0
-            isAskingNowPlaying = true
-            NowPlaying.currentAsynchronously { [weak self] track in
-                self?.receiveNowPlaying(track)
+        if !isHandRun {
+            // Counted rather than conditioned on there being an answer yet. A
+            // running player with nothing loaded answers nil every time, and
+            // "ask again until it says something" would be the old cost back
+            // for the one case nobody can act on.
+            pollsSinceNowPlaying += 1
+            if pollsSinceNowPlaying >= Self.nowPlayingEveryNPolls {
+                pollsSinceNowPlaying = 0
+                askThePlayer()
             }
         }
-        updateLyricPosition()
+        followTheWords()
     }
 
-    /// How often a music player is actually asked, in polls of the
-    /// twenty-a-second timer.
+    // MARK: Words with no player to ask
+
+    /// True while the words came from a file somebody chose and the clock is
+    /// being run by hand rather than by a player.
     ///
-    /// See `NowPlaying.currentAsynchronously`: one ask is 62 ms of somebody
-    /// else's process, and it was on every poll. Twice a second is faster than
-    /// anybody changes a track, and what the panel needs at the meter's rate —
-    /// where in the song we are — is carried by the clock in between.
-    private static let nowPlayingEveryNPolls = 10
+    /// Music and Spotify have scripting dictionaries. A browser, a hardware
+    /// player, a file on the desktop and a karaoke machine plugged into the
+    /// line input have none, and to all of them the panel used to say "Play
+    /// something in Music or Spotify" and offer nothing else — which is most of
+    /// the ways anybody actually plays a backing track. Choosing the words and
+    /// starting them when the music starts is what a karaoke machine has always
+    /// done, and it makes the whole path — words, tune, clock, score —
+    /// exercisable without a music service being in any particular state.
+    private(set) var isHandRun = false
 
-    /// Starts due, so opening the panel asks at once rather than in half a
-    /// second. Not `Int.max`, which the increment below would trap on.
-    @ObservationIgnored private var pollsSinceNowPlaying = RouterModel.nowPlayingEveryNPolls
-    /// Set while an ask is in flight, so a player that answers slowly cannot
-    /// have a second question put to it before it has answered the first.
-    @ObservationIgnored private var isAskingNowPlaying = false
-    /// When the answer being carried arrived, on the monotonic clock.
-    @ObservationIgnored private var nowPlayingAnsweredAt: TimeInterval = 0
+    /// Whether hand-run words are moving.
+    var isRunningWords: Bool { isHandRun && trackClock.isPlaying }
 
-    private func receiveNowPlaying(_ track: NowPlaying.Track?) {
-        isAskingNowPlaying = false
-        if track?.title != nowPlaying?.title || track?.artist != nowPlaying?.artist {
-            lyrics = track.flatMap(Self.findLyrics)
-            melody = track.flatMap(Self.findMelody)
-            if isScoringSinging { rebuildScoringReference() }
+    /// Takes an `.lrc` chosen by hand, with the tune beside it if there is one.
+    ///
+    /// - Returns: False when nothing in the file carried a timestamp, which is
+    ///   the honest answer for a page of words with no timing.
+    @discardableResult
+    func openWords(at url: URL) -> Bool {
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+            let parsed = Lyrics.parse(text)
+        else { return false }
+        isHandRun = true
+        lyrics = parsed
+        melody =
+            ["mid", "midi"]
+            .lazy
+            .map { url.deletingPathExtension().appendingPathExtension($0) }
+            .compactMap { try? Data(contentsOf: $0) }
+            .compactMap(MidiMelody.parse)
+            .first
+        // Where the words run out. The last line is given the four seconds
+        // `Lyrics.progress(at:)` gives it, and the tune wins when it is longer
+        // — a hand-run clock with nothing to stop it would sweep on past the
+        // end of a song that had already finished.
+        let ends = max(
+            melody?.duration ?? 0, (parsed.lines.last?.time ?? 0) - parsed.offset + 4)
+        nowPlaying = NowPlaying.Track(
+            application: loc("By hand"),
+            title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
+            artist: parsed.artist ?? "", album: parsed.album ?? "",
+            position: 0, duration: ends, isPlaying: false)
+        trackClock.stop()
+        trackClock.duration = ends
+        lyricLine = nil
+        lyricProgress = 0
+        songSecond = 0
+        if isScoringSinging { rebuildScoringReference() }
+        return true
+    }
+
+    /// Starts the hand-run words from a moment on the song's clock.
+    ///
+    /// The same instant re-anchors every singer, because the score and the
+    /// words have to be measured against the same zero or the per-line
+    /// breakdown belongs to different lines than the ones it names.
+    func runWords(from seconds: Double = 0) {
+        guard isHandRun else { return }
+        trackClock.adopt(
+            seconds, isPlaying: true,
+            trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        if var track = nowPlaying, !track.isPlaying {
+            track.isPlaying = true
+            nowPlaying = track
         }
-        nowPlaying = track
-        nowPlayingAnsweredAt = ProcessInfo.processInfo.systemUptime
-        if let track { reanchorIfSeeked(to: track) }
-        updateLyricPosition()
+        if isScoringSinging { restartScore() }
+        followTheWords()
     }
 
-    /// Where in the song the panel thinks we are.
+    /// Stops them where they are.
+    func stopWords() {
+        guard isHandRun else { return }
+        let held = songPosition
+        trackClock.adopt(
+            held, isPlaying: false,
+            trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        if var track = nowPlaying, track.isPlaying {
+            track.isPlaying = false
+            nowPlaying = track
+        }
+    }
+
+    /// Hands the panel back to whatever a player says.
+    func closeWords() {
+        guard isHandRun else { return }
+        isHandRun = false
+        trackClock.stop()
+        nowPlaying = nil
+        lyrics = nil
+        melody = nil
+        lyricLine = nil
+        lyricProgress = 0
+        songSecond = 0
+        pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
+    }
+
+    /// How many polls apart a player is asked where it is.
     ///
-    /// The player's last answer plus the time since it arrived, while it is
-    /// playing. Asking again would be truer by a few tens of milliseconds, cost
-    /// 62 of them, and arrive with the jitter of an Apple event round trip on
-    /// it — and a lyric line is about a second wide.
-    var trackPosition: Double {
-        guard let track = nowPlaying else { return 0 }
-        guard track.isPlaying else { return track.position }
-        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - nowPlayingAnsweredAt)
-        guard track.duration > 0 else { return track.position + elapsed }
-        return min(track.duration, track.position + elapsed)
+    /// Twenty, which is once a second. The cheap read is 20.7 ms at the median
+    /// on this machine, so this is 2.1% of the main thread against the 123% the
+    /// full read on every poll cost. A second is also about as long as anybody
+    /// can hold a seek or a pause against the interface without noticing, and
+    /// the correction when one happens is measured rather than assumed —
+    /// `trackClock.lastCorrection`.
+    private static let nowPlayingEveryNPolls = 20
+
+    @ObservationIgnored private var trackClock = TrackClock()
+    /// Starts at the interval so that opening the panel asks at once rather
+    /// than showing an empty header for a second.
+    @ObservationIgnored private var pollsSinceNowPlaying = RouterModel.nowPlayingEveryNPolls
+    /// Which player answered last, so the cheap read asks that one first rather
+    /// than paying a round trip per installed player.
+    @ObservationIgnored private var lastPlayer: String?
+
+    /// How far the freewheeling clock had strayed when the player last spoke,
+    /// in seconds. The only honest check on extrapolating at all.
+    var lyricClockCorrection: Double { trackClock.lastCorrection }
+
+    /// Asks the player where it is, without the interface waiting for it.
+    ///
+    /// This was a synchronous Apple event on the main actor: 20.7 ms for the
+    /// position and 61.4 for the metadata, all of it spent inside the player's
+    /// own main thread. Twice a second that is a frame gone twice a second for
+    /// as long as the panel is open, and the previous version of this asked on
+    /// every poll, which was 1.24 seconds of work per second of wall clock.
+    ///
+    /// One question at a time. A player that is slow to answer must not have a
+    /// second put to it before it has answered the first, or a stall turns into
+    /// a queue that never drains.
+    private func askThePlayer() {
+        guard !isAskingThePlayer else { return }
+        isAskingThePlayer = true
+        NowPlaying.positionAsynchronously(
+            preferring: lastPlayer, knownIdentity: nowPlaying?.identity
+        ) { [weak self] position, track, middle in
+            self?.isAskingThePlayer = false
+            self?.receivePosition(position, track: track, trueAt: middle)
+        }
     }
 
-    private func updateLyricPosition() {
-        guard nowPlaying != nil, let lyrics else {
-            lyricLine = nil
-            lyricProgress = 0
+    /// True while an ask is in flight.
+    @ObservationIgnored private var isAskingThePlayer = false
+
+    /// What the player said, applied on the main actor.
+    private func receivePosition(
+        _ position: NowPlaying.Position?, track: NowPlaying.Track?, trueAt middle: Double
+    ) {
+        guard let position else {
+            lastPlayer = nil
+            trackClock.stop()
+            if nowPlaying != nil { nowPlaying = nil }
+            if lyrics != nil { lyrics = nil }
+            if melody != nil { melody = nil }
             return
         }
-        let position = trackPosition
-        // Through `publish` for the reason every other poll write is: these are
-        // read by the lyrics view, and assigning the same line number twenty
-        // times a second would invalidate it twenty times a second.
-        publish(lyrics.index(at: position), to: \.lyricLine)
-        publish(lyrics.progress(at: position), to: \.lyricProgress)
+        lastPlayer = position.application
+        // Fetched on the other thread only when the song had actually changed,
+        // so arriving with one here *is* the change.
+        if let track { adopt(track) }
+        if var current = nowPlaying, current.isPlaying != position.isPlaying {
+            current.isPlaying = position.isPlaying
+            nowPlaying = current
+        }
+        trackClock.duration = nowPlaying?.duration ?? 0
+        trackClock.adopt(position.seconds, isPlaying: position.isPlaying, trueAt: middle)
+        reanchorIfSeeked(to: position.seconds)
+    }
+
+    /// Takes a new song, with the words and the tune that go with it.
+    private func adopt(_ track: NowPlaying.Track?) {
+        nowPlaying = track
+        lyrics = track.flatMap(Self.findLyrics)
+        melody = track.flatMap(Self.findMelody)
+        if isScoringSinging { rebuildScoringReference() }
+    }
+
+    /// Moves the highlight to wherever the clock now says the song is.
+    ///
+    /// Every poll, and costing nothing: this is the half that had to be
+    /// separated from the asking for the sweep to be able to move at all.
+    private func followTheWords() {
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        let position = trackClock.position(at: now)
+        // Published only when the second it displays changes. The timecode is
+        // whole seconds, so republishing it twenty times a second would
+        // invalidate the whole panel for a string that is the same string.
+        if Int(position) != songSecond { songSecond = Int(position) }
+        guard let lyrics else {
+            if lyricLine != nil { lyricLine = nil }
+            if lyricProgress != 0 { lyricProgress = 0 }
+            return
+        }
+        let heard = position + lyricNudge
+        let index = lyrics.index(at: heard)
+        if lyricLine != index { lyricLine = index }
+        lyricProgress = lyrics.progress(at: heard)
     }
 
     /// Finds an `.lrc` for a track by name.
@@ -5064,6 +5323,10 @@ final class RouterModel: ScriptTarget {
 
     /// True while the per-source rings are open.
     @ObservationIgnored private var sourceTapsOpen = false
+    /// Which sources they were opened for. A tap is bound to the route it was
+    /// built on, so this is what says whether the open ones are still the right
+    /// ones.
+    @ObservationIgnored private var sourceTapsFor: [String] = []
 
     /// Opens one ring per source, or leaves the open ones alone.
     ///
@@ -5074,14 +5337,29 @@ final class RouterModel: ScriptTarget {
     /// is listening, is the only shape that works — and it is the reason the
     /// second feature needed no new audio path at all.
     ///
+    /// They are also reopened when the sources move under them. The panel holds
+    /// these open while it is merely visible now, so a route rebuild —
+    /// capturing an application, switching a device — happens *while* they are
+    /// open, and the taps do not survive one. Measured: capturing a player with
+    /// the singing panel open left `transcriptTapCount` at zero while
+    /// `sourceTapsOpen` still said yes, so the next thing to ask for a tap was
+    /// told there were none and scoring refused to start with "could not listen
+    /// to any source". Keyed on which sources rather than on the count, so a
+    /// machine where fewer taps open than there are sources does not tear them
+    /// down and rebuild them twenty times a second.
+    ///
     /// - Returns: How many were opened, or how many are already open.
     @discardableResult
     private func openSourceTaps() -> Int {
-        if sourceTapsOpen { return engine.transcriptTapCount }
-        let first = sourceGroups.compactMap(\.routes.first)
+        let groups = sourceGroups
+        let first = groups.compactMap(\.routes.first)
         guard !first.isEmpty else { return 0 }
+        let uids = groups.map(\.uid)
+        if sourceTapsOpen, sourceTapsFor == uids { return engine.transcriptTapCount }
+        if sourceTapsOpen { engine.stopTranscriptTaps() }
         let opened = engine.startTranscriptTaps(routes: first)
         sourceTapsOpen = opened > 0
+        sourceTapsFor = opened > 0 ? uids : []
         transcriptRate = engine.pathQuality?.sampleRate ?? 48000
         return opened
     }
@@ -5090,9 +5368,14 @@ final class RouterModel: ScriptTarget {
     /// transcript while somebody is being scored would take the scorer's audio
     /// away with it.
     private func closeSourceTapsIfIdle() {
-        guard sourceTapsOpen, !isTranscribing, !isScoringSinging else { return }
+        // The singing panel counts as a listener whether or not it is scoring:
+        // the note it shows is one of these rings, not the mixed bus.
+        guard sourceTapsOpen, !isTranscribing, !isScoringSinging, !isSingingVisible else {
+            return
+        }
         engine.stopTranscriptTaps()
         sourceTapsOpen = false
+        sourceTapsFor = []
     }
 
     /// Moves audio from the rings to whoever asked for it, and lines back.

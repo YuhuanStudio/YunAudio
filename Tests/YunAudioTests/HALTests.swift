@@ -3667,3 +3667,109 @@ struct ChannelChoiceMemoryTests {
         #expect(!(6 < 1), "channel 6 is not available on a one-channel device")
     }
 }
+
+
+/// The words and the player are on two different clocks, and the whole of the
+/// singing panel's timing rests on the arithmetic that joins them.
+///
+/// The defect this replaced was not visible in any of these numbers: the panel
+/// asked the player where it was on every one of its twenty polls a second,
+/// which measured 61.4 ms of Apple events against a 50 ms poll period. So the
+/// last assertion here is the one that matters — that a second of freewheeling
+/// produces a moving highlight rather than one that jumps once a second.
+@Suite("Where the song has got to")
+struct TrackClockTests {
+
+    @Test("nothing is claimed before a player has answered")
+    func nothingBeforeAnAnswer() {
+        let clock = TrackClock()
+        #expect(clock.isValid == false)
+        #expect(clock.position(at: 1000) == 0)
+    }
+
+    @Test("a playing song advances at one second a second")
+    func playingAdvances() {
+        var clock = TrackClock()
+        clock.adopt(10, isPlaying: true, trueAt: 100)
+        #expect(abs(clock.position(at: 100) - 10) < 1e-9)
+        #expect(abs(clock.position(at: 100.5) - 10.5) < 1e-9)
+        #expect(abs(clock.position(at: 103) - 13) < 1e-9)
+    }
+
+    @Test("a paused song does not")
+    func pausedStays() {
+        var clock = TrackClock()
+        clock.adopt(10, isPlaying: false, trueAt: 100)
+        #expect(clock.position(at: 105) == 10)
+    }
+
+    /// The pump and the read are not ordered against each other, so the
+    /// arithmetic can be asked about a moment before its own anchor. Walking
+    /// the highlight back up the page is worse than standing still.
+    @Test("it never runs backwards")
+    func neverBackwards() {
+        var clock = TrackClock()
+        clock.adopt(10, isPlaying: true, trueAt: 100)
+        #expect(clock.position(at: 99) == 10)
+    }
+
+    /// Past the end the player has already stopped and simply not been asked
+    /// yet. Freewheeling on would run the words off the bottom of a song that
+    /// had finished.
+    @Test("it stops at the end of the track")
+    func stopsAtTheEnd() {
+        var clock = TrackClock()
+        clock.duration = 12
+        clock.adopt(10, isPlaying: true, trueAt: 100)
+        #expect(abs(clock.position(at: 101) - 11) < 1e-9)
+        #expect(clock.position(at: 200) == 12)
+    }
+
+    /// The one honest check on extrapolating at all: when the player next
+    /// speaks, how far had the guess strayed.
+    @Test("it says how far it had strayed when the player next speaks")
+    func reportsItsOwnCorrection() {
+        var clock = TrackClock()
+        clock.adopt(10, isPlaying: true, trueAt: 100)
+        #expect(clock.lastCorrection == 0)
+        // A second later the player says 11.2 where the arithmetic said 11.0.
+        clock.adopt(11.2, isPlaying: true, trueAt: 101)
+        #expect(abs(clock.lastCorrection - 0.2) < 1e-9)
+        // And a seek is a correction of the size of the seek.
+        clock.adopt(40, isPlaying: true, trueAt: 102)
+        #expect(abs(clock.lastCorrection - 27.8) < 1e-9)
+    }
+
+    /// The user-visible claim, stated as a number.
+    ///
+    /// A lyric line is highlighted by a mask whose width is `progress`. Asking
+    /// the player once a second and using its answer directly gives that mask
+    /// one value a second — a jump, not a sweep, whatever the animation says.
+    /// The same one answer a second, extrapolated, gives it one per poll.
+    @Test("a second of freewheeling is a sweep rather than one jump")
+    func theHighlightSweeps() throws {
+        let lyrics = try #require(Lyrics.parse("[00:10.00]one\n[00:14.00]two"))
+        var clock = TrackClock()
+        clock.adopt(10, isPlaying: true, trueAt: 100)
+
+        var extrapolated: Set<Double> = []
+        var asked: Set<Double> = []
+        // Twenty polls, which is the second between two answers.
+        for poll in 0..<20 {
+            let now = 100 + Double(poll) / 20
+            extrapolated.insert(lyrics.progress(at: clock.position(at: now)))
+            // What the panel did before: the player's last answer, unmoved.
+            asked.insert(lyrics.progress(at: 10))
+        }
+        #expect(asked.count == 1, "the old shape moved \(asked.count) times in a second")
+        #expect(
+            extrapolated.count == 20,
+            "the sweep took \(extrapolated.count) values across the second")
+        // And it really did cross a quarter of the line — four seconds long, so
+        // a second of it is a quarter.
+        let start = lyrics.progress(at: clock.position(at: 100))
+        let end = lyrics.progress(at: clock.position(at: 100.95))
+        #expect(abs(start) < 1e-9)
+        #expect(abs(end - 0.2375) < 1e-6, "a second across a four-second line reached \(end)")
+    }
+}
