@@ -13,12 +13,15 @@ import Foundation
 /// considered and are worth writing down so they are not tried again as though
 /// they were new ideas.
 ///
-/// - **A distributed notification with a reply notification.** It works, but it
-///   is a broadcast bus: correlating a reply with its request needs an id and a
+/// - **A distributed notification with a reply notification.** It works — it
+///   was what `yunaudio-cli` used, for a while, beside this — but it is a
+///   broadcast bus: correlating a reply with its request needs an id and a
 ///   timeout invented on top, every other process on the machine can watch the
 ///   traffic, and "no reply yet" and "the application is not running" are the
 ///   same observation until the timeout expires. That last one matters most —
 ///   an agent needs to be told the application is not running, not to wait.
+///   The command line has been moved onto this socket and that channel is gone;
+///   one vocabulary over two transports was one transport too many.
 /// - **App Intents.** Ruled out already, for the reason in `RemoteCommand`: the
 ///   metadata is extracted by an Xcode build phase this project does not have.
 ///
@@ -26,6 +29,15 @@ import Foundation
 /// immediate, unambiguous "nothing is listening", the reply belongs to the
 /// request by construction, and the filesystem does the access control.
 public enum ControlSocket {
+    /// The bundle a tool is looking for.
+    ///
+    /// A failed `connect` already means "nothing is listening", which is the
+    /// whole answer for most callers. This sharpens the one case where it is
+    /// not: an application that is in the menu bar and still not answering is
+    /// an older build with no control socket in it, and "launch YunAudio" is
+    /// unhelpful advice to somebody looking straight at it.
+    public static let bundleIdentifier = "com.yuhuanstudio.yunaudio"
+
     /// Where the socket lives, unless something says otherwise.
     ///
     /// Beside the rest of the application's state rather than in a temporary
@@ -103,7 +115,14 @@ public enum ControlReply: Equatable, Sendable {
     /// The command named something this application does not have, or could not
     /// be carried out. Distinct from a transport failure: this one reached the
     /// application and was answered.
-    case failure(String)
+    ///
+    /// `alternatives` is the names that would have worked, when the refusal was
+    /// about a name. "There is no scene called Podcast" is a dead end and a
+    /// list beside it is an answer, so it travels *with* the refusal rather
+    /// than needing a second question — which is what the notification channel
+    /// this replaced did, and what both front ends would otherwise have had to
+    /// rebuild for themselves. Empty for every other kind of failure.
+    case failure(String, alternatives: [String] = [])
 
     public var json: JSONValue {
         switch self {
@@ -117,15 +136,26 @@ public enum ControlReply: Equatable, Sendable {
                 "scenes": .array(scenes.map(JSONValue.string)),
                 "setups": .array(setups.map(JSONValue.string)),
             ])
-        case .failure(let reason):
-            .object(["ok": .bool(false), "error": .string(reason)])
+        case .failure(let reason, let alternatives):
+            // The key is left out entirely when there is nothing to suggest,
+            // rather than sent as an empty array: a reader then has one
+            // question — is it there — instead of two.
+            alternatives.isEmpty
+                ? .object(["ok": .bool(false), "error": .string(reason)])
+                : .object([
+                    "ok": .bool(false), "error": .string(reason),
+                    "alternatives": .array(alternatives.map(JSONValue.string)),
+                ])
         }
     }
 
     public init?(json: JSONValue) {
         guard let ok = json["ok"]?.boolValue else { return nil }
         guard ok else {
-            self = .failure(json["error"]?.stringValue ?? "unknown failure")
+            self = .failure(
+                json["error"]?.stringValue ?? "unknown failure",
+                alternatives: json["alternatives"]?.arrayValue?.compactMap(\.stringValue)
+                    ?? [])
             return
         }
         if let status = json["status"] {

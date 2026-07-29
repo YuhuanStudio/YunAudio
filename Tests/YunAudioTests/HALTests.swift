@@ -1431,7 +1431,9 @@ struct ChannelDefaultTests {
     /// stereo pair, and the arithmetic says even.
     @Test("nothing to route is mono rather than stereo")
     func zeroIsMono() {
-        #expect(RouterModel.defaultChannelChoice(inputChannels: 0, names: nil).mode == SourceChannelMode.mono)
+        #expect(
+            RouterModel.defaultChannelChoice(inputChannels: 0, names: nil).mode
+                == SourceChannelMode.mono)
     }
 
     /// A device that publishes its own topology overrules the count, and it is
@@ -1465,7 +1467,8 @@ struct ChannelDefaultTests {
             DeviceChannelNames.Channel(name: "In \($0)", detail: "", isDefault: false)
         }
         #expect(
-            RouterModel.defaultChannelChoice(inputChannels: 2, names: names).mode == SourceChannelMode.stereo)
+            RouterModel.defaultChannelChoice(inputChannels: 2, names: names).mode
+                == SourceChannelMode.stereo)
     }
 }
 
@@ -2215,7 +2218,8 @@ struct RecordingApplicationTests {
     func playingIsNotRecording() {
         let apps = AudioApplications.group(
             processes: [
-                process(1, pid: 10, bundle: "com.spotify.client", name: "Spotify", playing: true)
+                process(
+                    1, pid: 10, bundle: "com.spotify.client", name: "Spotify", playing: true)
             ],
             foreground: ["com.spotify.client": .init(name: "Spotify")],
             named: ["com.spotify.client": .init(name: "Spotify")])
@@ -2838,71 +2842,144 @@ struct ControlArgumentsTests {
     }
 }
 
-/// What crosses between the terminal and the application.
+/// What the application says back to another process.
 ///
-/// A URL is one-way, so the tool needs a reply to print — and a reply that
-/// misreports the state is exactly the defect that looks fine from outside.
+/// There is one transport now: the control socket, which `yunaudio-cli` and
+/// `yunaudio-mcp` both speak. `yunaudio-cli` used to have a
+/// distributed-notification channel of its own, and this suite is what that
+/// channel's tests became — every case below asserts something that was true of
+/// the notification reply and had to stay true of the socket one, because a
+/// carry-across that is only checked by reading it is not a carry-across.
+///
+/// Written against `ScriptTarget` and a stub, for the reason the scripting
+/// layer is: a reply that misreports the state is exactly the defect that looks
+/// fine from outside.
 @MainActor
-@Suite("Answering the command line")
-struct RemoteChannelTests {
+@Suite("Answering another process")
+struct ControlAnswerTests {
 
     /// The one that will bite. A `Bool` inside `Any` bridges to `NSNumber`, and
     /// so does an `Int`: ordinary `as? Bool` casting turns "one route" into
-    /// "routes: yes".
-    @Test("a count is not a flag")
-    func integersDoNotBecomeBooleans() {
-        #expect(RemoteValue(1) == .count(1))
-        #expect(RemoteValue(0) == .count(0))
-        #expect(RemoteValue(true) == .flag(true))
-        #expect(RemoteValue(false) == .flag(false))
-        #expect(RemoteValue(1.5) == .number(1.5))
-        // The one that actually shipped for a minute: a level of exactly
-        // −70.0 dB is a `Double`, and `as? Int` takes it happily, so the
-        // status printed "−70" beside "−69.50" and neither looked wrong.
-        #expect(RemoteValue(-70.0) == .number(-70))
-        #expect(RemoteValue(0.0) == .number(0))
-        #expect(RemoteValue(0.0)?.described == "0.00")
-        #expect(RemoteValue("gate") == .text("gate"))
-        #expect(RemoteValue(["gate", "limiter"]) == .list(["gate", "limiter"]))
-        #expect(RemoteValue(Data()) == nil)
+    /// "routes: yes", and `as? Int` turns a level of −70.0 dB into "-70" while
+    /// −69.5 stays a decimal. Both were observed in the first status printed.
+    @Test("a count is not a flag, and a whole number is not a count")
+    func numbersKeepTheirType() {
+        #expect(JSONValue(any: 1) == .int(1))
+        #expect(JSONValue(any: 0) == .int(0))
+        #expect(JSONValue(any: true) == .bool(true))
+        #expect(JSONValue(any: false) == .bool(false))
+        #expect(JSONValue(any: 1.5) == .double(1.5))
+        #expect(JSONValue(any: -70.0) == .double(-70))
+        #expect(JSONValue(any: 0.0) == .double(0))
+        #expect(JSONValue(any: "gate") == .string("gate"))
+        #expect(
+            JSONValue(any: ["gate", "limiter"])
+                == .array([.string("gate"), .string("limiter")]))
+        #expect(JSONValue(any: Data()) == nil)
+
+        // And how each of them reads on a terminal, which is the half a type
+        // alone does not fix.
+        #expect(JSONValue(any: 0.0)?.described == "0.00")
+        #expect(JSONValue(any: 0)?.described == "0")
+        #expect(JSONValue(any: true)?.described == "yes")
+        #expect(JSONValue(any: false)?.described == "no")
+        #expect(JSONValue(any: ["gate", "limiter"])?.described == "gate limiter")
+        #expect(JSONValue(any: [String]())?.described == "—")
+        // A level of −∞ dBFS is what a meter reads with nothing plugged in, and
+        // JSON has no word for it. One dash, not a document that failed.
+        #expect(JSONValue(any: -Double.infinity)?.described == "—")
     }
 
-    /// Including the values that are the *same JSON* as another case. A round
-    /// trip asserted only on 0.5 passes while 0.0 comes back as a count, which
-    /// is what happened: the terminal printed "0" beside "-69.50".
-    @Test("a reply survives the crossing")
-    func replyRoundTrips() throws {
-        let reply = RemoteReply(
-            token: "abc", outcome: "Microphone muted.",
-            status: [
-                "running": .flag(true), "routes": .count(2), "peak": .number(0.5),
-                "loudness": .number(0), "buffer": .count(0), "muted": .flag(false),
-                "source": .text("Mic"), "effects": .list([]),
-            ],
-            presets: ["Voice call"], configs: ["Podcast"])
-        let payload = try #require(reply.payload)
-        let back = try #require(
-            RemoteReply.from([RemoteChannel.payloadKey: payload]))
+    /// The trap that made the channel this replaced tag every value on the wire:
+    /// a level of exactly 0 dB written as a bare JSON number is `0`, which reads
+    /// back as an integer, so the terminal printed "0" beside "-69.50".
+    ///
+    /// This encoding needs no tag because it never writes `0` for a double —
+    /// `Double.description` is "0.0" and `JSONSerialization` reads that back as
+    /// a floating-point `NSNumber`. That is a property of two pieces of
+    /// Foundation behaviour rather than of anything written down here, which is
+    /// exactly why it is asserted rather than assumed.
+    @Test("a status survives the wire with every value still the type it was")
+    func statusRoundTripsThroughItsOwnText() throws {
+        let status = JSONValue.object([
+            "running": .bool(true), "routes": .int(2), "peak": .double(0.5),
+            "loudness": .double(0), "bufferFrames": .int(0), "muted": .bool(false),
+            "source": .string("Mic"), "effects": .array([]),
+        ])
+        let reply = ControlReply.status(status)
+        let onTheWire = try #require(JSONValue.parse(reply.json.text))
+        let back = try #require(ControlReply(json: onTheWire))
         #expect(back == reply)
+
+        guard case .status(let read) = back else {
+            Issue.record("the status came back as \(back)")
+            return
+        }
+        #expect(read["loudness"] == .double(0))
+        #expect(read["loudness"]?.described == "0.00")
+        #expect(read["bufferFrames"] == .int(0))
+        #expect(read["bufferFrames"]?.described == "0")
+        #expect(read["running"]?.described == "yes")
     }
 
-    /// Somebody else's string until it parses: any process on the machine can
-    /// post to a distributed name.
-    @Test("rubbish on the wire is not a request")
-    func rubbishIsRejected() {
-        #expect(RemoteRequest.from(nil) == nil)
-        #expect(RemoteRequest.from([RemoteChannel.payloadKey: "not json"]) == nil)
-        #expect(RemoteRequest.from(["something": "else"]) == nil)
+    /// "No such scene" is a dead end. The names that would have worked travel
+    /// with the refusal, so the tool can print them without asking again.
+    @Test("a refusal carries the names that would have worked, across the wire")
+    func refusalCarriesTheAlternatives() throws {
+        let target = ScriptingTests.Target()
+        let reply = ControlServer.answer(.perform(.preset("Voise chat")), model: target)
+        #expect(
+            reply
+                == .failure(
+                    "There is no scene called \"Voise chat\".",
+                    alternatives: ["Voice chat", "Recording"]))
+
+        let setup = ControlServer.answer(.perform(.config("Nope")), model: target)
+        #expect(
+            setup
+                == .failure(
+                    "There is no setup called \"Nope\".", alternatives: ["Streaming"]))
+
+        // And the list is still there on the far side. An `alternatives` key
+        // that only exists in the struct is a list nothing ever prints.
+        let onTheWire = try #require(JSONValue.parse(reply.json.text))
+        #expect(try #require(ControlReply(json: onTheWire)) == reply)
+    }
+
+    /// A sentence is not an exit status.
+    ///
+    /// A script that throws still produces a sentence — the interpreter's
+    /// error — so a shell reading only the text could not tell a script that had
+    /// stopped working from one that was working. `yunaudio-cli script` printed
+    /// the error and exited 0 for exactly as long as nothing asserted this.
+    @Test("a command that failed says so, separately from what it printed")
+    func failureIsCarriedApartFromTheSentence() {
+        let target = ScriptingTests.Target()
+        target.lastCommandFailed = true
+        #expect(
+            ControlServer.answer(.perform(.mute(true)), model: target)
+                == .failure("done"))
+
+        // A question cannot fail, and must not report a failure left over from
+        // whatever the last command was.
+        guard case .status = ControlServer.answer(.status, model: target) else {
+            Issue.record("a question reported the last command's failure")
+            return
+        }
+
+        // And a command that worked is a message, not a failure — otherwise the
+        // case above passes for the wrong reason.
+        target.lastCommandFailed = false
+        #expect(
+            ControlServer.answer(.perform(.mute(true)), model: target) == .message("done"))
     }
 
     @Test("a command reaches the application and its sentence comes back")
     func commandsArePerformed() {
         let target = ScriptingTests.Target()
-        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
-        let reply = RemoteListener.reply(to: request, from: target)
+        #expect(
+            ControlServer.answer(.perform(.mute(true)), model: target) == .message("done"))
         #expect(target.performed == [.mute(true)])
-        #expect(reply.outcome == "done")
-        #expect(reply.token == "t")
     }
 
     /// The whole point of keeping `status` out of `RemoteCommand`: asking what
@@ -2911,36 +2988,18 @@ struct RemoteChannelTests {
     func statusPerformsNothing() {
         let target = ScriptingTests.Target()
         target.status = ["running": true, "routes": 3]
-        let reply = RemoteListener.reply(to: RemoteRequest(token: "t"), from: target)
+        let reply = ControlServer.answer(.status, model: target)
         #expect(target.performed.isEmpty)
-        #expect(reply.outcome == nil)
-        #expect(reply.status["running"] == .flag(true))
-        #expect(reply.status["routes"] == .count(3))
-        #expect(reply.status["routes"]?.described == "3")
+        #expect(reply == .status(.object(["running": .bool(true), "routes": .int(3)])))
     }
 
-    /// "No such scene" is a dead end. The names that would have worked come
-    /// back with the refusal so the tool can print them.
-    @Test("a refused name comes back with the names that exist")
-    func refusalCarriesTheAlternatives() {
+    @Test("the names come back as the two lists that exist")
+    func namesAreListed() {
         let target = ScriptingTests.Target()
-        let request = RemoteRequest(token: "t", url: "yunaudio://preset/Voise%20chat")
-        let reply = RemoteListener.reply(to: request, from: target)
-        #expect(reply.outcome == nil)
-        #expect(reply.presets == ["Voice chat", "Recording"])
-        #expect(reply.configs == ["Streaming"])
-    }
-
-    /// Every reply carries the state as well as the sentence, so a caller can
-    /// check what its command did without asking twice and hoping nothing moved.
-    @Test("a reply to a command carries the state as well")
-    func repliesCarryState() {
-        let target = ScriptingTests.Target()
-        target.status = ["muted": false]
-        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
-        let reply = RemoteListener.reply(to: request, from: target)
-        #expect(reply.outcome == "done")
-        #expect(reply.status["muted"] == .flag(false))
+        #expect(
+            ControlServer.answer(.names, model: target)
+                == .names(scenes: ["Voice chat", "Recording"], setups: ["Streaming"]))
+        #expect(target.performed.isEmpty)
     }
 }
 
@@ -2996,33 +3055,5 @@ struct FailureMessageTests {
         let data = try JSONEncoder().encode(preferences)
         let back = try JSONDecoder().decode(Preferences.self, from: data)
         #expect(back.recordingFormat == Recorder.Format.aac.rawValue)
-    }
-}
-
-extension RemoteChannelTests {
-    /// A sentence is not an exit status.
-    ///
-    /// A script that throws still produces a sentence — the interpreter's
-    /// error — so a shell reading only the outcome could not tell a script that
-    /// had stopped working from one that was working.
-    @Test("a command that failed says so, separately from what it printed")
-    func failureIsCarriedApartFromTheSentence() {
-        let target = ScriptingTests.Target()
-        target.lastCommandFailed = true
-        let request = RemoteRequest(token: "t", url: "yunaudio://mute/on")
-        #expect(RemoteListener.reply(to: request, from: target).failed)
-
-        // A question cannot fail, and must not report a failure left over from
-        // whatever the last command was.
-        #expect(!RemoteListener.reply(to: RemoteRequest(token: "t"), from: target).failed)
-    }
-
-    @Test("the failure flag survives the crossing")
-    func failureRoundTrips() throws {
-        let reply = RemoteReply(token: "t", outcome: "Script error: oops", failed: true)
-        let payload = try #require(reply.payload)
-        let back = try #require(RemoteReply.from([RemoteChannel.payloadKey: payload]))
-        #expect(back.failed)
-        #expect(back == reply)
     }
 }
