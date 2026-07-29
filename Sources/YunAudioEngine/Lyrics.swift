@@ -2,17 +2,11 @@ import Foundation
 
 /// Time-synchronised lyrics, read from an `.lrc` file.
 ///
-/// **Documents, not a service.** Neither Apple Music nor Spotify publishes
-/// time-synced lyrics through any API a third party may use — Apple's are
-/// inside the Music app and Spotify's come from a licensing arrangement with
-/// Musixmatch. Going after either would mean a private framework or somebody
-/// else's terms of service, and both would break.
-///
-/// `.lrc` is the format karaoke has used for twenty-five years, it is plain
-/// text, and people already have files for the songs they sing. Same argument
-/// as the device profiles and the AutoEq curves: a file describes something,
-/// it does not execute, and the one for your exact recording beats a database
-/// of approximations.
+/// `.lrc` is the common representation regardless of where the words came
+/// from: a local file, Music's own plain words, or one of the independently
+/// queried public indexes. Keeping parsing in the engine and fetching in the
+/// application makes the timeline a pure, numerically testable value and keeps
+/// a network response out of the audio path.
 public struct Lyrics: Sendable, Hashable {
 
     public struct Line: Sendable, Hashable {

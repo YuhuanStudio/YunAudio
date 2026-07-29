@@ -27,6 +27,10 @@ public final class ClockAnchorPublisher {
     /// Ten updates a second is plenty to track a crystal that is tens of parts
     /// per million out, and keeps the IPC cost invisible.
     private let interval: TimeInterval = 0.1
+    /// Publishing is the clock lock. Reading its status is only telemetry, and
+    /// the crystal cannot change meaningfully at the publication rate.
+    private static let statusRefreshStride = 5
+    private var publicationTick = 0
 
     public init?(driverDeviceUID: String = ClockAnchorPublisher.driverDeviceUID) {
         guard let device = try? AudioDevices.device(uid: driverDeviceUID) else { return nil }
@@ -62,12 +66,20 @@ public final class ClockAnchorPublisher {
 
     public func start(anchorSource: @escaping @Sendable () -> ClockAnchor?) {
         stop()
+        publicationTick = 0
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now() + interval, repeating: interval)
         timer.setEventHandler { [weak self] in
             guard let self, let anchor = anchorSource() else { return }
             self.publish(anchor)
-            self.refreshStatus()
+            self.publicationTick &+= 1
+            // The first read stays at 100 ms so lock acquisition is reported
+            // promptly. Thereafter two reads a second are enough for UI
+            // telemetry, reducing CoreAudio property IPC from 20 calls/s
+            // (10 writes + 10 reads) to 12 without slowing the clock feed.
+            if Self.shouldRefreshStatus(afterPublication: self.publicationTick) {
+                self.refreshStatus()
+            }
         }
         timer.resume()
         self.timer = timer
@@ -115,6 +127,12 @@ public final class ClockAnchorPublisher {
         isLocked = (dictionary["following"] as? Double ?? 0) != 0
         rateRatio = dictionary["rateRatio"] as? Double ?? 1.0
         if wasLocked != isLocked { onLockChanged?(isLocked) }
+    }
+
+    /// The telemetry cadence, separate from the timer so the resource contract
+    /// can be asserted without a real driver.
+    static func shouldRefreshStatus(afterPublication tick: Int) -> Bool {
+        tick > 0 && (tick - 1) % statusRefreshStride == 0
     }
 }
 

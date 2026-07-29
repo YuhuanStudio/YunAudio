@@ -90,6 +90,26 @@ been tested — it has to converge, not overshoot, not hunt, and refuse to act o
 silence. The classifier is checked against real synthesised speech rather than
 only against its own label table.
 
+**Karaoke that does not assume Chinese music has no words.** Music's own
+lyrics and local `.lrc` files come first, then LRCLIB, QQ Music, NetEase Cloud
+Music and lyrics.ovh are asked concurrently. A validated timeline wins and
+cancels the slower requests; simplified and traditional metadata, live
+editions and television-performance labels are matched without attaching an
+original recording to an accompaniment by mistake. Spotify itself exposes no
+lyrics property, but a real run with 黃霄雲's *年少心動雨季* found a 265-second
+timeline with more than sixty lines through the Chinese sources.
+
+Scoring says what its reference is. A matching MIDI file is an exact melody;
+captured original vocals are an automatic audio-derived reference; an
+accompaniment on its own can honestly provide only key, intonation and phrase
+timing because it does not contain the vocal melody. Each microphone keeps its
+own pitch history and score, so a duet is two measured performances rather than
+two voices guessed out of one mix. Music and Spotify supply supported
+now-playing metadata through their scripting dictionaries. Other captured
+players use public ShazamKit recognition when the distributed App ID has the
+ShazamKit service enabled; an ad-hoc build states that signing requirement
+instead of retrying a catalogue request that cannot succeed.
+
 **Direct monitoring that is actually direct.** Hearing yourself through a
 conferencing app is thirty milliseconds behind, which is late enough to stumble
 over. Monitoring here is a second destination on the same aggregate, so it is one

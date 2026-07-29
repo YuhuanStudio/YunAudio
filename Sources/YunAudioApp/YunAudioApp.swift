@@ -38,6 +38,7 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         // never saved.
         YunTheme.shared.applyAppearance()
         InterfaceOptions.apply()
+        FirstLaunchPermissions.requestIfNeeded(environment: environment)
 
         // Photographing the real window has to happen here for the same reason:
         // there is no window until the scene has been through the run loop.

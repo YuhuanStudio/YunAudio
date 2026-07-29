@@ -1411,13 +1411,36 @@ struct MainWindow: View {
                         YunBadge(track.application)
                     }
                 }
+            } else if let problem = model.nowPlayingProblem {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Text(problem)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button(loc("Open Automation settings")) {
+                        guard
+                            let url = URL(
+                                string:
+                                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+                            )
+                        else { return }
+                        NSWorkspace.shared.open(url)
+                    }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                }
+            } else if let problem = model.musicRecognitionProblem {
+                Text(problem)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(
                     NowPlaying.hasAPlayer
                         ? loc(
-                            "Play something in Music or Spotify, or choose the words yourself.")
+                            "Play something in Music or Spotify, capture another music application, or choose the words yourself."
+                        )
                         : loc(
-                            "Neither Music nor Spotify is installed — choose the words yourself."
+                            "Capture a music application such as QQ Music or NetEase, or choose the words yourself."
                         )
                 )
                 .font(Yun.Text.caption)
@@ -1430,17 +1453,18 @@ struct MainWindow: View {
             YunDivider()
 
             if let lyrics = model.lyrics {
+                lyricsSource(synchronised: true)
                 lyricView(lyrics)
                 lyricNudge
+            } else if let plain = model.plainLyrics {
+                lyricsSource(synchronised: false)
+                Text(plain)
+                    .font(Yun.Text.body)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             } else if model.nowPlaying != nil {
-                Text(
-                    loc(
-                        "No words for this one. Drop an .lrc into the folder below and it will be found by name."
-                    )
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+                lyricsLookupState
             }
 
             // The key of what is playing, and how far it would have to move.
@@ -1508,6 +1532,54 @@ struct MainWindow: View {
                 NSWorkspace.shared.open(directory)
             }
             .buttonStyle(YunButtonStyle(.ghost, small: true))
+        }
+    }
+
+    @ViewBuilder
+    private func lyricsSource(synchronised: Bool) -> some View {
+        HStack(spacing: Yun.Space.xs) {
+            if let source = model.lyricsSourceName {
+                Text(String(format: loc("Words from %@"), source))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+            }
+            YunBadge(synchronised ? loc("timed") : loc("plain words"))
+            Spacer(minLength: 0)
+        }
+    }
+
+    @ViewBuilder
+    private var lyricsLookupState: some View {
+        switch model.lyricsLookupStatus {
+        case .loading:
+            HStack(spacing: Yun.Space.sm) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(loc("Searching Music, LRCLIB, QQ Music, NetEase and lyrics.ovh…"))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+            }
+        case .failed, .rateLimited:
+            VStack(alignment: .leading, spacing: Yun.Space.xs) {
+                Text(
+                    model.lyricsLookupStatus == .rateLimited
+                        ? loc("The lyric services asked YunAudio to wait.")
+                        : loc("The lyric services could not be reached.")
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.warning)
+                Button(loc("Try the lyric sources again")) { model.retryLyricsLookup() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+        case .notFound, .idle, .local, .native, .online:
+            Text(
+                loc(
+                    "No words were found in Music, LRCLIB, QQ Music, NetEase or lyrics.ovh. A local .lrc still takes priority."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1593,7 +1665,7 @@ struct MainWindow: View {
                     .foregroundStyle(Yun.Palette.textPrimary)
                 Text(
                     loc(
-                        "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name."
+                        "Listens to each microphone on its own. A matching .mid gives an exact tune score; otherwise YunAudio uses captured original vocals or the detected key."
                     )
                 )
                 .font(Yun.Text.caption)
@@ -1615,18 +1687,11 @@ struct MainWindow: View {
                 .foregroundStyle(Yun.Palette.warning)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        if model.isScoringSinging, model.melody == nil {
-            // Said rather than shown as nought per cent: a score of zero
-            // because nobody sang and a score of zero because there is nothing
-            // to sing against are different facts.
-            Text(
-                loc(
-                    "No tune for this one, so there is nothing to score against — the note below is still live."
-                )
-            )
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
+        if model.isScoringSinging {
+            Text(scoringReferenceDescription)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         // Driven by whether there are any rather than by the switch, which is
         // the same thing in the running application — the list is filled when
@@ -1634,6 +1699,21 @@ struct MainWindow: View {
         // offscreen capture show the rows without opening a tap.
         ForEach(Array(model.singers.enumerated()), id: \.element.id) { index, singer in
             singerRow(singer, colour: Self.singerColour(index))
+        }
+    }
+
+    private var scoringReferenceDescription: String {
+        switch model.scoringReferenceMode {
+        case .waiting:
+            loc("Finding the strongest scoring reference…")
+        case .midi:
+            loc("Exact melody score from the matching MIDI file.")
+        case .capturedPlayer:
+            loc(
+                "Automatic score from the captured original vocal; a matching MIDI remains more exact."
+            )
+        case .key:
+            loc("Key and timing score — accompaniment alone does not contain the vocal melody.")
         }
     }
 
@@ -2265,9 +2345,10 @@ struct MainWindow: View {
                 fraction: Binding(
                     get: { model.outputDelay(of: device.uid) / RouterModel.maximumOutputDelay },
                     set: {
-                        model.setOutputDelay(
+                        model.previewOutputDelay(
                             $0 * RouterModel.maximumOutputDelay, for: device.uid)
-                    }))
+                    }),
+                onEditingEnded: { model.commitOutputDelays() })
         }
     }
 
@@ -2322,7 +2403,6 @@ struct MainWindow: View {
                 .monospacedDigit()
                 .frame(width: 42, alignment: .trailing)
         }
-        .animation(.linear(duration: 0.05), value: decibels)
     }
 
     private func effectRow(_ kind: EffectKind) -> some View {
@@ -2374,7 +2454,9 @@ struct MainWindow: View {
                     selection: Binding(
                         get: { Int(model.value(of: parameter, in: kind).rounded()) },
                         set: { model.setValue(Float($0), of: parameter, in: kind) }),
-                    options: parameter.options.enumerated().map { ($0.offset, loc($0.element)) },
+                    options: parameter.options.enumerated().map {
+                        ($0.offset, loc($0.element))
+                    },
                     // How many of these there are comes from a third-party
                     // unit, so it is not a number this window gets to assume.
                     wraps: true

@@ -25,6 +25,150 @@ public enum LightingMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// The small piece of state shared with the HID render thread.
+///
+/// A lock is cheap at thirty reads a second, and it makes a generation change
+/// an actual handover rather than five unrelated data races. The previous
+/// `nonisolated(unsafe)` annotations had no effect on a nonisolated class
+/// member; the compiler said so, and the old render thread could consequently
+/// miss the generation change and keep writing beside the new one.
+final class LightingRenderState: @unchecked Sendable {
+    struct Snapshot: Sendable {
+        let mode: LightingMode
+        let colour: RazerRing.Colour
+        let level: Float
+        let isMuted: Bool
+    }
+
+    private let lock = NSLock()
+    private var generation = 0
+    private var mode: LightingMode = .off
+    private var colour: RazerRing.Colour = (0, 120, 255)
+    private var level: Float = 0
+    private var isMuted = false
+
+    func update(mode: LightingMode) {
+        lock.withLock { self.mode = mode }
+    }
+
+    func update(colour: RazerRing.Colour) {
+        lock.withLock { self.colour = colour }
+    }
+
+    func update(level: Float, isMuted: Bool) {
+        lock.withLock {
+            self.level = level
+            self.isMuted = isMuted
+        }
+    }
+
+    /// Invalidates the outgoing loop and returns the new loop's identity.
+    @discardableResult
+    func advanceGeneration() -> Int {
+        lock.withLock {
+            generation &+= 1
+            return generation
+        }
+    }
+
+    /// One coherent frame, or nil once this loop has been superseded.
+    func snapshot(for expectedGeneration: Int) -> Snapshot? {
+        lock.withLock {
+            guard generation == expectedGeneration else { return nil }
+            return Snapshot(mode: mode, colour: colour, level: level, isMuted: isMuted)
+        }
+    }
+}
+
+/// Everything one background render loop owns.
+///
+/// The device itself is not `Sendable`; this box is, because every access to it
+/// goes through the shared device lock. Capturing the box rather than the
+/// device also gives Swift's `Thread` closure the same ownership model the code
+/// actually uses.
+private final class LightingRenderWorker: @unchecked Sendable {
+    private let device: RazerDevice
+    private let deviceLock: NSLock
+    private let state: LightingRenderState
+    private let generation: Int
+
+    init(
+        device: RazerDevice, deviceLock: NSLock, state: LightingRenderState,
+        generation: Int
+    ) {
+        self.device = device
+        self.deviceLock = deviceLock
+        self.state = state
+        self.generation = generation
+    }
+
+    func run() {
+        var step = 0
+        var frameGate = LightingFrameGate()
+        // The ring's own smoothing. The meters fall at 20 dB a second, which is
+        // right for reading a number and too fast for something in peripheral
+        // vision — it reads as flicker.
+        var smoothed: Float = 0
+
+        while let snapshot = state.snapshot(for: generation) {
+            let target = snapshot.level
+            smoothed = target > smoothed ? target : smoothed * 0.88 + target * 0.12
+
+            let colours = LightingController.frame(
+                mode: snapshot.mode, colour: snapshot.colour, level: smoothed,
+                isMuted: snapshot.isMuted, step: step)
+            var delivered = false
+            if frameGate.shouldSend(colours) {
+                let frame = RazerLightingCommand.frame(
+                    colours, transactionID: UInt8(step % 0x1F))
+                delivered = deviceLock.withLock {
+                    (try? device.send(frame)) == .success
+                }
+                // A busy or failed request did not put these pixels on the
+                // hardware. Let the next tick retry even if the image itself
+                // is unchanged.
+                if !delivered { frameGate.invalidate() }
+            }
+            step &+= 1
+            // A solid colour has no next frame. Ending the worker here removes
+            // thirty state locks, array builds and HID round trips a second
+            // until the colour or mode actually changes and `restart` sends a
+            // new one.
+            if snapshot.mode == .solid, delivered { return }
+            Thread.sleep(forTimeInterval: 1.0 / 30)
+        }
+    }
+}
+
+/// Suppresses frames the twelve physical LEDs cannot distinguish.
+///
+/// A level is continuous but the ring is not: most adjacent meter samples
+/// light the same LEDs. The old loop still opened the HID device, wrote 64
+/// bytes, waited 5 ms and read them back thirty times a second for those
+/// identical frames.
+struct LightingFrameGate {
+    private var previous: [RazerRing.Colour]?
+
+    mutating func shouldSend(_ colours: [RazerRing.Colour]) -> Bool {
+        if let previous, Self.equal(previous, colours) { return false }
+        previous = colours
+        return true
+    }
+
+    mutating func invalidate() {
+        previous = nil
+    }
+
+    private static func equal(
+        _ lhs: [RazerRing.Colour], _ rhs: [RazerRing.Colour]
+    ) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { pair in
+            pair.0.r == pair.1.r && pair.0.g == pair.1.g && pair.0.b == pair.1.b
+        }
+    }
+}
+
 /// Drives the Seiren's light ring from what the router is doing.
 ///
 /// The capture that produced the protocol also established that the device has
@@ -49,14 +193,14 @@ final class LightingController {
     var mode: LightingMode = .off {
         didSet {
             guard oldValue != mode else { return }
-            renderMode = mode
+            renderState.update(mode: mode)
             restart()
         }
     }
     /// The colour used by `.solid`, and the lit colour used by `.level`.
     var colour: (r: UInt8, g: UInt8, b: UInt8) = (0, 120, 255) {
         didSet {
-            renderColour = colour
+            renderState.update(colour: colour)
             if mode == .solid { restart() }
         }
     }
@@ -64,29 +208,9 @@ final class LightingController {
         didSet { if oldValue != brightness { applyBrightness() } }
     }
 
-    /// Read on the render thread; written on the main actor. A torn float here
-    /// would cost one frame of one LED, which is not worth a lock.
-    /// Mirrors of the settings above, for the render thread.
-    ///
-    /// It cannot reach the main actor to read them. Hopping would mean waiting
-    /// on the main queue thirty times a second, and `assumeIsolated` from a
-    /// thread that is not the main actor is not an assertion that can be made —
-    /// it traps, which is exactly how the first version of this died.
-    nonisolated(unsafe) private var level: Float = 0
-    nonisolated(unsafe) private var isMuted = false
-    /// Which render thread is the current one.
-    ///
-    /// A single boolean was not enough: `restart` cleared it and set it again,
-    /// so a thread that had not yet noticed the clear carried on and two
-    /// threads wrote frames at once. Each thread keeps the generation it was
-    /// started with and stops as soon as that stops being the current one.
-    nonisolated(unsafe) private var generation = 0
-    nonisolated(unsafe) private var renderMode: LightingMode = .off
-    nonisolated(unsafe) private var renderColour: (r: UInt8, g: UInt8, b: UInt8) =
-        (0, 120, 255)
-
     private var device: RazerDevice?
     private var thread: Thread?
+    private let renderState = LightingRenderState()
 
     /// One owner of the device at a time.
     ///
@@ -107,12 +231,11 @@ final class LightingController {
     /// Called from the router's poll, so the ring follows the same numbers the
     /// meters do.
     func update(level: Float, isMuted: Bool) {
-        self.level = level
-        self.isMuted = isMuted
+        renderState.update(level: level, isMuted: isMuted)
     }
 
     func stop() {
-        generation &+= 1
+        renderState.advanceGeneration()
         thread = nil
         guard let device else { return }
         // Left dark rather than holding the last frame: a ring stuck on a
@@ -130,7 +253,7 @@ final class LightingController {
     }
 
     private func restart() {
-        generation &+= 1
+        let generation = renderState.advanceGeneration()
         thread = nil
         guard let device else { return }
 
@@ -151,41 +274,16 @@ final class LightingController {
             return
         }
 
-        let mine = generation
-        let thread = Thread { [weak self] in self?.render(device: device, generation: mine) }
+        let worker = LightingRenderWorker(
+            device: device, deviceLock: deviceLock, state: renderState,
+            generation: generation)
+        let thread = Thread { worker.run() }
         thread.name = "com.yuhuanstudio.yunaudio.lighting"
         // Below the audio threads and above nothing: a late frame is a late
         // frame, and this must never compete with the IO cycle.
         thread.qualityOfService = .utility
         thread.start()
         self.thread = thread
-    }
-
-    /// The render loop. Runs off the main actor and touches only the two
-    /// scalars above.
-    nonisolated private func render(device: RazerDevice, generation mine: Int) {
-        var step = 0
-        // The ring's own smoothing. The meters fall at 20 dB a second, which is
-        // right for reading a number and too fast for something in peripheral
-        // vision — it reads as flicker.
-        var smoothed: Float = 0
-
-        while generation == mine {
-            let target = level
-            smoothed = target > smoothed ? target : smoothed * 0.88 + target * 0.12
-
-            let colours = Self.frame(
-                mode: renderMode, colour: renderColour, level: smoothed,
-                isMuted: isMuted, step: step)
-
-            let frame = RazerLightingCommand.frame(
-                colours, transactionID: UInt8(step % 0x1F))
-            deviceLock.lock()
-            _ = try? device.send(frame)
-            deviceLock.unlock()
-            step &+= 1
-            Thread.sleep(forTimeInterval: 1.0 / 30)
-        }
     }
 
     /// The frame the device is currently holding, read back off it.

@@ -116,19 +116,35 @@ public final class PitchTracker {
     /// - Returns: One estimate per frame, zero where unvoiced.
     public func track(frames: [Float], count: Int) -> [Float] {
         guard count > 0, frames.count >= count * Self.frameSize else { return [] }
-        return (0..<count).map { index in
-            let start = index * Self.frameSize
-            return estimate(Array(frames[start..<(start + Self.frameSize)]))
+        var estimates = [Float](repeating: 0, count: count)
+        frames.withUnsafeBufferPointer { framesBuffer in
+            estimates.withUnsafeMutableBufferPointer { estimatesBuffer in
+                guard let framesAddress = framesBuffer.baseAddress else { return }
+                for index in 0..<count {
+                    estimatesBuffer[index] = estimate(
+                        framesAddress.advanced(by: index * Self.frameSize))
+                }
+            }
         }
+        return estimates
     }
 
     /// A single frame, for callers that have one.
     public func track(frame: [Float]) -> Float {
         guard frame.count >= Self.frameSize else { return 0 }
-        return estimate(Array(frame.prefix(Self.frameSize)))
+        return frame.withUnsafeBufferPointer { track(frame: $0) }
     }
 
-    private func estimate(_ frame: [Float]) -> Float {
+    /// A single frame borrowed from a caller-owned buffer.
+    ///
+    /// The singing tracker already accumulates into fixed storage. Borrowing
+    /// it keeps one array copy out of every 43 ms analysis hop.
+    public func track(frame: UnsafeBufferPointer<Float>) -> Float {
+        guard frame.count >= Self.frameSize, let address = frame.baseAddress else { return 0 }
+        return estimate(address)
+    }
+
+    private func estimate(_ frame: UnsafePointer<Float>) -> Float {
         // The mean comes off first.
         //
         // A constant offset correlates perfectly with itself at every lag, so

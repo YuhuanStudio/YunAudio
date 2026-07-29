@@ -63,6 +63,9 @@ public final class Recorder: @unchecked Sendable {
     private var writer: Thread?
     private var isStopping = false
     private let stopLock = NSLock()
+    private let writerWake = DispatchSemaphore(value: 0)
+    private let writerReady = DispatchSemaphore(value: 0)
+    private let writerFinished = DispatchSemaphore(value: 0)
 
     /// - Parameters:
     ///   - directory: Where the file goes. The caller owns the choice so the
@@ -125,7 +128,10 @@ public final class Recorder: @unchecked Sendable {
         }
         self.ring = ring
 
-        let thread = Thread { [weak self] in self?.drain() }
+        let thread = Thread { [weak self] in
+            self?.drain()
+            self?.writerFinished.signal()
+        }
         thread.name = "com.yuhuanstudio.yunaudio.recorder"
         thread.qualityOfService = .utility
         thread.start()
@@ -143,12 +149,29 @@ public final class Recorder: @unchecked Sendable {
     }
 
     public func stop() {
+        guard writer != nil else { return }
         stopLock.lock()
         isStopping = true
         stopLock.unlock()
-        // Give the writer a moment to flush what is still in the ring.
-        while writer?.isFinished == false { usleep(20000) }
+        // The writer normally sleeps for 100 ms between empty reads. Waking it
+        // directly makes an idle stop immediate without raising its permanent
+        // wake rate, and the completion semaphore is a real join rather than a
+        // 20 ms polling loop on whichever thread asked to stop.
+        writerWake.signal()
+        writerFinished.wait()
         writer = nil
+    }
+
+    /// Waits until the writer has entered the loop that `stop()` wakes.
+    ///
+    /// Starting a `Thread` schedules it; it does not mean the thread has run.
+    /// Keeping that distinction observable lets the stop-latency test measure
+    /// the explicit wake rather than how long a saturated machine took to
+    /// schedule a brand-new utility thread.
+    func waitUntilWriterIsReady(timeout: DispatchTime) -> Bool {
+        guard writerReady.wait(timeout: timeout) == .success else { return false }
+        writerReady.signal()
+        return true
     }
 
     private var shouldStop: Bool {
@@ -168,6 +191,7 @@ public final class Recorder: @unchecked Sendable {
         else { return }
 
         var scratch = [Float](repeating: 0, count: chunk * channels)
+        writerReady.signal()
 
         while true {
             let stopping = shouldStop
@@ -176,7 +200,7 @@ public final class Recorder: @unchecked Sendable {
             }
             if read == 0 {
                 if stopping { break }
-                usleep(100_000)
+                _ = writerWake.wait(timeout: .now() + .milliseconds(100))
                 continue
             }
 

@@ -94,7 +94,8 @@ final class ScriptHost {
     func run(_ source: String) -> Result {
         output = []
         guard let context = JSContext() else {
-            return Result(value: "", log: [], error: loc("The interpreter could not be started."))
+            return Result(
+                value: "", log: [], error: loc("The interpreter could not be started."))
         }
 
         // Held weakly for the lifetime of the host — the model owns the host,
@@ -169,7 +170,8 @@ final class ScriptHost {
                 value: "", log: [], error: loc("The application is no longer there."))
         }
         guard let context = JSContext() else {
-            return Result(value: "", log: [], error: loc("The interpreter could not be started."))
+            return Result(
+                value: "", log: [], error: loc("The interpreter could not be started."))
         }
         output = []
         var thrown: String?
@@ -224,7 +226,15 @@ final class ScriptHost {
     /// runs on somebody else's schedule rather than on a person pressing a
     /// button.
     private func withTimeLimit(_ context: JSContext, _ body: () -> Void) {
-        let group = JSContextGetGroup(context.jsGlobalContextRef)
+        guard let group = JSContextGetGroup(context.jsGlobalContextRef) else {
+            // Running without the group limit is not a fallback: one endless
+            // loop would take the main actor with it. Report the unavailable
+            // interpreter through the same exception path as every other
+            // script failure.
+            context.exception = JSValue(
+                object: loc("The interpreter could not be started."), in: context)
+            return
+        }
         JSContextGroupSetExecutionTimeLimit(group, Self.timeLimit, nil, nil)
         defer { JSContextGroupClearExecutionTimeLimit(group) }
         body()
@@ -269,9 +279,13 @@ final class ScriptHost {
         // for toggle — the same three states the URL scheme has, for the same
         // reason. A button with no light has to be able to ask for a toggle;
         // anything that knows the state should say which it wants.
-        func command(_ make: @escaping (Bool?) -> RemoteCommand) -> @convention(block) (
-            JSValue?
-        ) -> String {
+        func command(
+            _ make: @escaping (Bool?) -> RemoteCommand
+        )
+            -> @convention(block) (
+                JSValue?
+            ) -> String
+        {
             { [weak self] argument in
                 let wanted: Bool? =
                     (argument?.isUndefined ?? true) || (argument?.isNull ?? true)
@@ -289,7 +303,9 @@ final class ScriptHost {
         // throw when the name is not one this application has — a script asking
         // for a scene that has been renamed should stop, not carry on as if it
         // had worked.
-        func named(_ make: @escaping (String) -> RemoteCommand, _ kind: String)
+        func named(
+            _ make: @escaping (String) -> RemoteCommand, _ kind: String
+        )
             -> @convention(block) (String) -> String
         {
             { [weak self] name in

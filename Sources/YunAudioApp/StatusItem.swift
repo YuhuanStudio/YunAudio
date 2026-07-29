@@ -127,9 +127,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
         // Redraw the glyph as the level moves. Twice a second is enough for a
         // 15-point image and keeps an idle menu bar from waking the CPU.
-        levelObserver = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            Task { @MainActor in self.refreshImage() }
-        }
+        levelObserver = Timer.scheduledTimer(
+            timeInterval: 0.5, target: self, selector: #selector(refreshImageOnTimer),
+            userInfo: nil, repeats: true)
     }
 
     private var rightClickMenu: NSMenu?
@@ -187,6 +187,21 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// How many times the glyph has actually been redrawn, for the check that
     /// this is not merely a comment.
     private(set) static var redraws = 0
+    /// Allocations of the menu's name snapshot, for the idle-cost check.
+    ///
+    /// The status timer runs 172,800 times a day. Rebuilding the submenu was
+    /// already gated, but constructing a new `[String]` to discover that
+    /// nothing had changed was not. This counts the allocation rather than the
+    /// menu rebuild so the check cannot pass for that old, wasteful reason.
+    private(set) static var configNameSnapshots = 0
+
+    @objc private func refreshImageOnTimer() {
+        // A target/selector timer calls us directly on the main run loop.
+        // Wrapping every tick in `Task { @MainActor }` allocated and enqueued
+        // another job twice a second merely to get back to the executor the
+        // timer was already running on.
+        refreshImage()
+    }
 
     private func refreshImage() {
         tick &+= 1
@@ -212,8 +227,15 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// alternative is a second copy of it that can disagree with the first.
     private func refreshConfigs() {
         guard let submenu = configItem?.submenu else { return }
-        let names = model.quickConfigs.map(\.name)
-        guard names != listedConfigs else { return }
+        let configs = model.quickConfigs
+        if let listedConfigs,
+            listedConfigs.count == configs.count,
+            zip(listedConfigs, configs).allSatisfy({ $0 == $1.name })
+        {
+            return
+        }
+        Self.configNameSnapshots += 1
+        let names = configs.map(\.name)
         listedConfigs = names
         submenu.removeAllItems()
         if names.isEmpty {

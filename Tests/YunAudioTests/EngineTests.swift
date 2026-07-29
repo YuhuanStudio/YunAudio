@@ -199,10 +199,45 @@ struct MeterBallisticsTests {
     }
 }
 
+// MARK: - Clock publication cost
+
+@Suite("Clock publication cost")
+struct ClockPublicationCostTests {
+    @Test("ten clock writes need only two status reads")
+    func statusReadbackIsDecimated() {
+        let refreshes = (1...10).filter {
+            ClockAnchorPublisher.shouldRefreshStatus(afterPublication: $0)
+        }
+        // The first answer still arrives after one 100 ms publication, while
+        // the steady-state property traffic falls from 20 to 12 calls/s.
+        #expect(refreshes == [1, 6])
+        #expect(refreshes.count == 2)
+    }
+
+    @Test("the reduced cadence remains stable over a minute")
+    func cadenceDoesNotDrift() {
+        let refreshes = (1...600).count {
+            ClockAnchorPublisher.shouldRefreshStatus(afterPublication: $0)
+        }
+        #expect(refreshes == 120)
+    }
+}
+
 // MARK: - Realtime pointer publication
 
 @Suite("RCU cell")
 struct RealtimeCellTests {
+    /// The test owns the pointer until its worker has signalled completion.
+    /// Swift cannot infer that lifetime from a semaphore, so the unchecked part
+    /// is confined to the box whose only job is carrying that fact.
+    private final class CellHandle: @unchecked Sendable {
+        let pointer: OpaquePointer
+
+        init(_ pointer: OpaquePointer) {
+            self.pointer = pointer
+        }
+    }
+
     @Test("publish returns the pointer it replaced")
     func publishReturnsOld() throws {
         let first = UnsafeMutableRawPointer.allocate(byteCount: 8, alignment: 8)
@@ -233,6 +268,7 @@ struct RealtimeCellTests {
     @Test("waiting succeeds once two cycles have been retired")
     func waitSucceedsAfterTwoCycles() throws {
         let cell = try #require(yun_rt_cell_create(nil))
+        let handle = CellHandle(cell)
 
         // Stand in for the IO thread.
         //
@@ -246,7 +282,7 @@ struct RealtimeCellTests {
         let finished = DispatchSemaphore(value: 0)
         let retiring = Thread {
             for _ in 0..<8 {
-                yun_rt_cell_retire(cell)
+                yun_rt_cell_retire(handle.pointer)
                 usleep(2000)
             }
             finished.signal()
@@ -351,7 +387,7 @@ struct SampleRingTests {
         let ring = try #require(yun_rt_ring_create(1024))
         defer { yun_rt_ring_free(ring) }
 
-        var written = [Float](repeating: 0.5, count: 300)
+        let written = [Float](repeating: 0.5, count: 300)
         _ = written.withUnsafeBufferPointer {
             yun_rt_ring_write(ring, $0.baseAddress!, 300)
         }
@@ -375,7 +411,7 @@ struct SampleRingTests {
         let ring = try #require(yun_rt_ring_create(600))
         defer { yun_rt_ring_free(ring) }
 
-        var samples = [Float](repeating: 1, count: 2000)
+        let samples = [Float](repeating: 1, count: 2000)
         let taken = samples.withUnsafeBufferPointer {
             yun_rt_ring_write(ring, $0.baseAddress!, 2000)
         }
@@ -511,6 +547,64 @@ struct ProcessingChainTests {
 /// 1 kHz sine, the decibel law, and the two gates.
 @Suite("Loudness")
 struct LoudnessTests {
+
+    private func referenceReadings(
+        _ blocks: [Double]
+    ) -> (
+        integrated: Double, range: Double
+    ) {
+        let absolute = blocks.filter { LoudnessMeter.loudness(ofMeanSquare: $0) > -70 }
+        guard !absolute.isEmpty else { return (-.infinity, 0) }
+        let ungated = absolute.reduce(0, +) / Double(absolute.count)
+        let threshold = LoudnessMeter.loudness(ofMeanSquare: ungated) - 10
+        let gated = absolute.filter {
+            LoudnessMeter.loudness(ofMeanSquare: $0) > threshold
+        }
+        let integrated =
+            gated.isEmpty
+            ? -.infinity
+            : LoudnessMeter.loudness(
+                ofMeanSquare: gated.reduce(0, +) / Double(gated.count))
+        let ordered = absolute.map {
+            LoudnessMeter.loudness(ofMeanSquare: $0)
+        }.sorted()
+        guard ordered.count > 4 else { return (integrated, 0) }
+        let low = ordered[Int(Double(ordered.count) * 0.1)]
+        let high =
+            ordered[
+                min(ordered.count - 1, Int(Double(ordered.count) * 0.95))]
+        return (integrated, high - low)
+    }
+
+    private func hourOfBlockEnergy() -> [Double] {
+        var state: UInt64 = 0xCAFE_F00D_D15C_A11
+        let centres = [-61.0, -37.0, -25.0, -15.0, -8.0]
+        return (0..<36_000).map { index in
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            let unit = Double(state >> 11) / Double(UInt64.max >> 11)
+            let loudness = centres[index % centres.count] + (unit - 0.5) * 10
+            return pow(10, (loudness + 0.691) / 10)
+        }
+    }
+
+    /// Most blocks occupy one 0.01 LU bin, half immediately either side of the
+    /// relative gate. Treating that bin as one mean produced a 2.43 LU error
+    /// even though its width was only 0.01 LU.
+    private func gateBoundaryCorpus() -> [Double] {
+        let below = pow(10, (-29.999 + 0.691) / 10)
+        let above = pow(10, (-29.991 + 0.691) / 10)
+        let high = pow(10, (-10.0 + 0.691) / 10)
+        let target = pow(10, (-29.995 + 0.691) / 10)
+        let lowMean = (below + above) / 2
+        let highShare = (10 * target - lowMean) / (high - lowMean)
+        let total = 100_000
+        let highCount = Int((Double(total) * highShare).rounded())
+        let lowCount = total - highCount
+
+        return [Double](repeating: below, count: lowCount / 2)
+            + [Double](repeating: above, count: lowCount - lowCount / 2)
+            + [Double](repeating: high, count: highCount)
+    }
 
     /// Feeds `seconds` of a sine at a given peak amplitude.
     private func sine(
@@ -665,7 +759,7 @@ struct LoudnessTests {
     func peakIsIndependent() {
         var meter = LoudnessMeter(sampleRate: 48000)
         sine(into: &meter, amplitude: 0.01, seconds: 2)
-        var spike: [Float] = [1.0]
+        let spike: [Float] = [1.0]
         spike.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: 1) }
         #expect(abs(meter.peak) < 0.01)
         #expect(meter.integrated < -40)
@@ -701,6 +795,67 @@ struct LoudnessTests {
         // The relative gate throws the quiet part away, so the integrated
         // figure barely moves.
         #expect(abs(meter.integrated - integratedAfterLoud) < 0.6)
+    }
+
+    @Test("a bounded distribution agrees with the exact one after an hour")
+    func boundedDistributionMatchesReference() {
+        let blocks = hourOfBlockEnergy()
+        let reference = referenceReadings(blocks)
+        var distribution = LoudnessDistribution()
+        for block in blocks { distribution.add(block) }
+
+        let integratedError = abs(distribution.integrated - reference.integrated)
+        let rangeError = abs(distribution.range - reference.range)
+        print(
+            "loudness histogram error: integrated \(integratedError) LU, "
+                + "range \(rangeError) LU")
+        #expect(distribution.blockCount == 36_000)
+        #expect(integratedError < 0.02)
+        #expect(rangeError < 0.02)
+    }
+
+    @Test("a relative gate splits populations inside its boundary bin")
+    func gateBoundaryIsNotQuantisedAsOnePopulation() {
+        let blocks = gateBoundaryCorpus()
+        let reference = referenceReadings(blocks)
+        var distribution = LoudnessDistribution()
+        for block in blocks { distribution.add(block) }
+
+        let error = abs(distribution.integrated - reference.integrated)
+        print(
+            "gate-boundary loudness: reference \(reference.integrated) LUFS, "
+                + "bounded \(distribution.integrated) LUFS, error \(error) LU")
+        #expect(reference.integrated > -17.57)
+        #expect(reference.integrated < -17.56)
+        #expect(error < 0.001)
+    }
+
+    @Test("an hour of loudness has bounded update and display costs")
+    func longSessionQueriesAreBounded() {
+        var distribution = LoudnessDistribution()
+        for block in hourOfBlockEnergy() { distribution.add(block) }
+        let probes = (0..<17).map {
+            pow(10, (-24.0 + Double($0) * 0.17 + 0.691) / 10)
+        }
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        var checksum = 0.0
+        for index in 0..<1_000 {
+            // Mutating between reads stops an optimised build hoisting the
+            // otherwise pure-looking getters out of the benchmark loop. The
+            // number therefore includes the fixed-cost Fenwick and centroid
+            // update as well as both display readings.
+            distribution.add(probes[index % probes.count])
+            checksum += distribution.integrated + distribution.range
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        print(
+            "1,000 hour-long loudness updates and reads: \(elapsed) ns, "
+                + "checksum \(checksum)")
+        // The previous filter-and-sort getters took about 1.21 ms per reading
+        // at this size. A 100 ms ceiling for one thousand reads leaves a wide
+        // margin for a loaded test machine while still rejecting that shape.
+        #expect(elapsed < 100_000_000)
     }
 
     /// Every target has to name itself and sit somewhere a person could reach.
@@ -2992,6 +3147,26 @@ struct VoiceCharacterTests {
 @Suite("Recording formats")
 struct RecorderFormatTests {
 
+    @Test("stopping an idle writer does not wait for its polling interval")
+    func idleStopIsPrompt() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-stop-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = try Recorder(
+            directory: directory, format: .wav, channels: 1, sampleRate: 48000,
+            timestamp: Date(timeIntervalSince1970: 0))
+        #expect(recorder.waitUntilWriterIsReady(timeout: .now() + 5))
+        let began = DispatchTime.now().uptimeNanoseconds
+        recorder.stop()
+        let milliseconds =
+            Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
+
+        #expect(milliseconds < 60, "idle stop took \(milliseconds) ms")
+    }
+
     @Test("every offered format opens a real file")
     func formatsWrite() throws {
         let directory = FileManager.default.temporaryDirectory
@@ -4301,7 +4476,7 @@ struct TranscriberTests {
     @Test("audio before it starts is ignored")
     func ignoresAudioBeforeStart() async {
         let transcriber = Transcriber(speaker: "Microphone")
-        await transcriber.add([Float](repeating: 0.1, count: 4800), sampleRate: 48000)
+        transcriber.add([Float](repeating: 0.1, count: 4800), sampleRate: 48000)
         #expect(await transcriber.lines.isEmpty)
     }
 
@@ -5233,6 +5408,47 @@ struct SelftestWaitTests {
     }
 }
 
+/// CoreAudio accepting a start request is not evidence that its IOProc runs.
+///
+/// A preset rebuild returned `noErr` with zero cycles, leaving the application
+/// claiming to run while recording, Spotify capture and every analyser all
+/// read silence. The live flow check supplies the hardware assertion; this
+/// keeps the bounded two-cycle contract attached to every start.
+@Suite("Proving an audio start")
+struct AudioStartProofTests {
+    @Test("a successful status still has to produce two cycles")
+    func startWaitsForCycles() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        #expect(source.contains("guard yun_rt_cell_wait_for_swap(cell, 750)"))
+        #expect(source.contains("throw RoutingError.noIOCycles"))
+    }
+
+    @Test("a stalled start retries the same configuration before dropping anything")
+    func retriesExactly() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let retry = try #require(source.range(of: "if case RoutingError.noIOCycles"))
+        let ladder = try #require(source.range(of: "var ladder:"))
+        #expect(retry.lowerBound < ladder.lowerBound)
+        let between = source[retry.lowerBound..<ladder.lowerBound]
+        #expect(between.contains("try startAttempt(configuration)"))
+    }
+
+    @Test("the flow check proves its own tone generator is producing cycles")
+    func loopbackToneIsProven() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/UIFlowCheck.swift", encoding: .utf8)
+        let tone = try #require(source.range(of: "private final class LoopbackTone"))
+        let implementation = source[tone.lowerBound...]
+        #expect(implementation.contains("yun_rt_cell_wait_for_swap(cycles, 750)"))
+        #expect(implementation.contains("for _ in 0..<2"))
+    }
+}
+
 // MARK: - Key detection
 
 /// Every karaoke machine has a transpose button because a song is written in
@@ -5994,6 +6210,81 @@ struct KaraokeScoreTests {
             sung: singer(offBy: 0, seconds: 3).reversed(), reference: ordered.reversed())
         #expect(abs(score.percentage - 100) < 0.001)
     }
+
+    @Test("a streaming song can be scored honestly from its key without a MIDI file")
+    func keyFallback() {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let inKey =
+            singer(offBy: 0, midi: 60, seconds: 2)
+            + singer(offBy: 0, midi: 64, seconds: 4, from: 2)
+        let chromatic = singer(offBy: 0, midi: 61, seconds: 4)
+        let lines = [Lyrics.Line(time: 0, text: "the phrase")]
+        let good = KaraokeScore.keyScore(
+            sung: inKey, key: cMajor, lyrics: lines, through: 4)
+        let wrong = KaraokeScore.keyScore(
+            sung: chromatic, key: cMajor, lyrics: lines, through: 4)
+        #expect(good.isMeaningful)
+        #expect(good.percentage > 98)
+        #expect(wrong.percentage < 1)
+        #expect(good.lines.count == 1)
+        #expect(good.lines[0].percentage > 98)
+    }
+
+    @Test("the key fallback charges timed silence rather than awarding one good note")
+    func keyFallbackCountsSilence() {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let score = KaraokeScore.keyScore(
+            sung: singer(offBy: 0, midi: 60, seconds: 2), key: cMajor,
+            lyrics: [Lyrics.Line(time: 0, text: "four seconds")], through: 4)
+        #expect(score.percentage > 45)
+        #expect(score.percentage < 55)
+        #expect(score.silentSeconds > 1.9)
+        #expect(abs(score.referenceSeconds - 4) < 0.01)
+    }
+
+    @Test("an instrumental gap between timed lines is not counted as missed singing")
+    func keyFallbackSkipsInstrumentalGaps() {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let first = singer(offBy: 0, midi: 60, seconds: 4)
+        let second = singer(offBy: 0, midi: 64, seconds: 34, from: 30)
+        let score = KaraokeScore.keyScore(
+            sung: first + second, key: cMajor,
+            lyrics: [
+                Lyrics.Line(time: 0, text: "first"),
+                Lyrics.Line(time: 30, text: "second"),
+            ], through: 34)
+        #expect(score.percentage > 98)
+        #expect(abs(score.referenceSeconds - 8) < 0.1)
+        #expect(score.silentSeconds < 0.1)
+    }
+
+    @Test("a captured original supplies notes only while words are being sung")
+    func capturedOriginalReference() {
+        let samples =
+            singer(offBy: 0, midi: 60, seconds: 4)
+            + singer(offBy: 0, midi: 36, seconds: 30, from: 4)
+            + singer(offBy: 0, midi: 64, seconds: 34, from: 30)
+            + [PitchSample(time: 31, midi: 110)]
+        let reference = KaraokeScore.capturedReference(
+            samples,
+            lyrics: [
+                Lyrics.Line(time: 0, text: "first"),
+                Lyrics.Line(time: 30, text: "second"),
+            ], through: 34)
+        #expect(!reference.isEmpty)
+        #expect(reference.allSatisfy { $0.time < 4 || $0.time >= 30 })
+        #expect(reference.allSatisfy { (36...96).contains($0.midi) })
+        #expect(reference.count < samples.count / 2)
+
+        let good = KaraokeScore.score(
+            sung: reference, reference: reference)
+        let wrong = KaraokeScore.score(
+            sung: reference.map {
+                PitchSample(time: $0.time, midi: $0.midi + 2)
+            }, reference: reference)
+        #expect(good.percentage > 98)
+        #expect(wrong.percentage < 1)
+    }
 }
 
 // MARK: - Following a singer off one source
@@ -6092,6 +6383,64 @@ struct SingerPitchTests {
         #expect(abs(kept - unkept) < 1e-9, "\(kept) against \(unkept)")
         #expect(abs(unkept - 57) < 0.2)  // A3
         #expect(abs(notKeeping.hertz - keeping.hertz) < 0.01)
+    }
+
+    @Test("block boundaries do not change a frame or its clock")
+    func arbitraryBlockBoundaries() throws {
+        let whole = try #require(SingerPitch(sampleRate: 48_000))
+        let chunked = try #require(SingerPitch(sampleRate: 48_000))
+        let samples = tone(hertz: 220, seconds: 0.7)
+        whole.reset(at: 12.5)
+        chunked.reset(at: 12.5)
+        whole.add(samples)
+
+        let sizes = [1, 17, 2_047, 113, 4_096, 509]
+        var offset = 0
+        var block = 0
+        while offset < samples.count {
+            let end = min(samples.count, offset + sizes[block % sizes.count])
+            chunked.add(Array(samples[offset..<end]))
+            offset = end
+            block += 1
+        }
+
+        #expect(chunked.samples == whole.samples)
+        #expect(chunked.hertz == whole.hertz)
+        #expect(chunked.elapsed == whole.elapsed)
+    }
+
+    #if DEBUG
+        @Test(
+            "one second of steady-state pitch tracking allocates nothing",
+            .disabled("allocation evidence requires an optimised build"))
+    #else
+        @Test("one second of steady-state pitch tracking allocates nothing")
+    #endif
+    func steadyStateDoesNotAllocate() throws {
+        let singer = try #require(SingerPitch(sampleRate: 48_000))
+        singer.keepsHistory = false
+        let samples = tone(hertz: 220, seconds: 1)
+
+        // Warm Accelerate and every lazy Swift runtime path before measuring.
+        singer.add(Array(samples.prefix(PitchTracker.frameSize)))
+        singer.reset(at: 0)
+
+        RoutingEngine.enableAllocationTripwire()
+        defer { RoutingEngine.disableAllocationTripwire() }
+        let before = RoutingEngine.allocationViolations
+        let started = DispatchTime.now().uptimeNanoseconds
+        samples.withUnsafeBufferPointer { buffer in
+            yun_rt_tripwire_mark_realtime(true)
+            singer.add(buffer)
+            yun_rt_tripwire_mark_realtime(false)
+        }
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let allocations = RoutingEngine.allocationViolations - before
+
+        print(
+            "singer pitch steady state: \(elapsed) ns/s of audio, "
+                + "\(allocations) allocation operations")
+        #expect(allocations == 0)
     }
 }
 

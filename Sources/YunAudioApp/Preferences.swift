@@ -252,6 +252,13 @@ extension TapMuteBehavior {
 @MainActor
 enum PreferencesStore {
     private static let key = "com.yuhuanstudio.yunaudio.preferences"
+    private static let writer = CoalescedPreferenceWriter<Preferences>(
+        delay: .milliseconds(150)
+    ) { preferences in
+        guard let data = try? JSONEncoder().encode(preferences) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+    private static var terminationObserver: NSObjectProtocol?
 
     /// Whether anything has ever been saved.
     ///
@@ -260,10 +267,15 @@ enum PreferencesStore {
     /// all: a first launch and a launch where every value happens to equal its
     /// default are indistinguishable from the outside.
     static var hasStoredPreferences: Bool {
-        UserDefaults.standard.data(forKey: key) != nil
+        writer.pendingValue != nil || UserDefaults.standard.data(forKey: key) != nil
     }
 
     static func load() -> Preferences {
+        // A caller explicitly asking to load the preferences is asking about
+        // the durable form, not merely the latest slider value in memory.
+        // Flushing here keeps the relaunch checks from passing for the wrong
+        // reason while ordinary high-rate controls still never call `load`.
+        writer.flush()
         guard let data = UserDefaults.standard.data(forKey: key),
             let decoded = try? JSONDecoder().decode(Preferences.self, from: data)
         else { return .default }
@@ -271,8 +283,64 @@ enum PreferencesStore {
     }
 
     static func save(_ preferences: Preferences) {
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+        installTerminationObserver()
+        writer.submit(preferences)
+    }
+
+    private static func installTerminationObserver() {
+        guard terminationObserver == nil else { return }
+        terminationObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { _ in
+            // NotificationCenter promised the main queue above. Flushing here
+            // means a value changed just before Quit is not left behind in the
+            // coalescing window.
+            MainActor.assumeIsolated { writer.flush() }
+        }
+    }
+}
+
+/// Keeps high-rate controls out of the preferences encoder.
+///
+/// A slider can publish sixty values a second. Audio applies every one, but a
+/// preferences file only needs the last: serialising the whole model for the
+/// intermediate values stalls the same main actor that is drawing the drag.
+/// The window is fixed from its first value, so continuous movement still
+/// reaches disk periodically rather than postponing the write indefinitely.
+@MainActor
+final class CoalescedPreferenceWriter<Value> {
+    private let delay: Duration
+    private let write: (Value) -> Void
+    private var task: Task<Void, Never>?
+    private(set) var pendingValue: Value?
+
+    init(delay: Duration, write: @escaping (Value) -> Void) {
+        self.delay = delay
+        self.write = write
+    }
+
+    func submit(_ value: Value) {
+        pendingValue = value
+        guard task == nil else { return }
+        task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: delay)
+            guard !Task.isCancelled else { return }
+            task = nil
+            writePending()
+        }
+    }
+
+    func flush() {
+        task?.cancel()
+        task = nil
+        writePending()
+    }
+
+    private func writePending() {
+        guard let value = pendingValue else { return }
+        pendingValue = nil
+        write(value)
     }
 }
 

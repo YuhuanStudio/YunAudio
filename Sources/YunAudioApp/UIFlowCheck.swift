@@ -7,6 +7,7 @@ import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunAudioOBS
+import YunAudioRT
 import YunDesign
 
 /// Drives the model through the sequences a person actually performs.
@@ -1250,10 +1251,17 @@ enum UIFlowCheck {
         // this, one redraw every time.
         await pause(0.7)
         let redrawsBefore = StatusItemController.redraws
+        let configSnapshotsBefore = StatusItemController.configNameSnapshots
         await pause(2.0)
         let idleRedraws = StatusItemController.redraws - redrawsBefore
+        let idleConfigSnapshots =
+            StatusItemController.configNameSnapshots - configSnapshotsBefore
         note("\(idleRedraws) menu bar redraw(s) in 2 s idle, after the change to idle")
         check("the menu bar mark is not redrawn while nothing changes", idleRedraws == 0)
+        note("\(idleConfigSnapshots) menu snapshot allocation(s) in the same 2 s")
+        check(
+            "the unchanged setup menu allocates no name snapshots",
+            idleConfigSnapshots == 0)
         if wasRunning {
             model.start()
             await waitUntil("and routing came back", { model.isRunning }, timeout: 15)
@@ -1904,10 +1912,17 @@ enum UIFlowCheck {
             check("routes still resolve", !model.activeRoutes.isEmpty && faderPerRoute)
             await pause(1.5)
             let produced = model.echoStatus?.produced ?? 0
-            await pause(1.0)
-            check(
+            // The status getter deliberately uses `tryLock`: a SwiftUI read
+            // must not freeze behind graph publication. Consequently nil here
+            // can mean "the engine lock was busy for this instant", not "the
+            // bridge disappeared". One full run landed on exactly that poll
+            // and turned a healthy 48,000 frames/s into a reported zero.
+            await waitUntil(
                 "the canceller keeps producing",
-                (model.echoStatus?.produced ?? 0) > produced)
+                {
+                    guard let status = model.echoStatus else { return false }
+                    return status.produced > produced
+                }, timeout: 2)
 
             model.cancelsEcho = false
             await waitUntil(
@@ -2236,11 +2251,39 @@ enum UIFlowCheck {
         var stalledOn: [String] = []
         var missingFrom: [String] = []
         var stoppedOn: [String] = []
+        var slowestInspectorRead = 0.0
+        var slowestLiveControlWrite = 0.0
+        let originalMaster = model.outputDecibels
         let swapsBegan = Date()
         for kind in EffectKind.allCases {
             for wanted in [true, false] {
                 let cyclesBefore = model.cycleCountForDiagnostics
                 model.setEffect(kind, enabled: wanted)
+                // Let the engine queue enter the Audio Unit build, then ask the
+                // same question SwiftUI asks while drawing the processing
+                // section. This used to wait on the engine's state lock for the
+                // whole instantiation and turned a background swap into a
+                // visibly frozen control.
+                await pause(0.002)
+                let controlBegan = DispatchTime.now().uptimeNanoseconds
+                model.outputDecibels =
+                    model.outputDecibels == originalMaster
+                    ? originalMaster - 0.1 : originalMaster
+                slowestLiveControlWrite = max(
+                    slowestLiveControlWrite,
+                    Double(DispatchTime.now().uptimeNanoseconds - controlBegan) / 1_000_000)
+                let inspectorBegan = DispatchTime.now().uptimeNanoseconds
+                _ = model.activeEffectStages
+                // A hosted unit's parameter list used to take the same lock
+                // synchronously from the processing panel. Include it when the
+                // machine has one, even though this section does not leave that
+                // third-party unit in the chain.
+                if let plugin = model.availablePlugins.first {
+                    _ = model.pluginParameters(plugin)
+                }
+                slowestInspectorRead = max(
+                    slowestInspectorRead,
+                    Double(DispatchTime.now().uptimeNanoseconds - inspectorBegan) / 1_000_000)
                 await settle(model, timeout: 12)
                 let cyclesAfter = model.cycleCountForDiagnostics
                 let label = "\(kind.rawValue) \(wanted ? "on" : "off")"
@@ -2263,6 +2306,20 @@ enum UIFlowCheck {
             String(
                 format: "%.2fs to switch all %d stages on and off again",
                 swapSeconds, EffectKind.allCases.count))
+        note(
+            String(
+                format: "slowest main-thread chain inspection %.2f ms",
+                slowestInspectorRead))
+        note(
+            String(
+                format: "slowest live control during a swap %.2f ms",
+                slowestLiveControlWrite))
+        check(
+            "drawing the chain never waits for an Audio Unit to build",
+            slowestInspectorRead < 5)
+        check(
+            "nor does a live control wait for the engine rebuild",
+            slowestLiveControlWrite < 5)
         check("the route never stopped", stoppedOn.isEmpty)
         check(
             "and never restarted: the cycle counter never went backwards", restartedOn.isEmpty)
@@ -2272,6 +2329,7 @@ enum UIFlowCheck {
         if !missingFrom.isEmpty {
             note("wrong chain on: " + missingFrom.joined(separator: ", "))
         }
+        model.outputDecibels = originalMaster
 
         // A knob moved off its default, so that what is asserted afterwards is
         // the stored position surviving the swap rather than the default
@@ -2677,18 +2735,88 @@ enum UIFlowCheck {
         // the pitch tracker, the music players' scripting dictionaries, and a
         // routed microphone. What was missing was the words, and those are a
         // file.
+        model.refreshApps()
+        let playerBundleIDs = Set(["com.apple.Music", "com.spotify.client"])
+        let livePlayer = model.availableApps.first {
+            playerBundleIDs.contains($0.bundleID) && $0.isPlaying
+        }
+        let capturesBeforeSinging = model.capturedAppBundleIDs
+        if let livePlayer, !model.capturedAppBundleIDs.contains(livePlayer.bundleID) {
+            model.capturedAppBundleIDs.insert(livePlayer.bundleID)
+            await settle(model, timeout: 15)
+            await waitUntil(
+                "the playing application joined the route",
+                {
+                    model.activeRoutes.contains {
+                        model.application(of: $0)?.bundleID == livePlayer.bundleID
+                    }
+                }, timeout: 15)
+        }
+        let cyclesBeforeSinging = model.cycleCountForDiagnostics
+        await pause(
+            upTo: 1.0,
+            until: { model.cycleCountForDiagnostics > cyclesBeforeSinging })
+        check(
+            "the route is producing before KTV reads it",
+            model.cycleCountForDiagnostics > cyclesBeforeSinging)
         model.isSingingVisible = true
-        await pause(0.6)
+        await pause(
+            upTo: 3.0,
+            until: { model.nowPlaying != nil || model.nowPlayingProblem != nil })
         if let track = model.nowPlaying {
             note(
                 "\(track.application): \(track.artist) — \(track.title) at \(Int(track.position))s"
             )
             check("a playing track has a duration", track.duration > 0)
+            if let livePlayer {
+                check(
+                    "the player CoreAudio says is playing answered the panel",
+                    track.application == livePlayer.name)
+            }
+            if OnlineLyrics.canonicalTitle(track.title)
+                == OnlineLyrics.canonicalTitle("年少心動雨季")
+            {
+                await pause(upTo: 8, until: { model.lyrics != nil })
+                note(
+                    "the specified Spotify case loaded \(model.lyrics?.lines.count ?? 0) "
+                        + "timed lines from \(model.lyricsSourceName ?? "no source")")
+                check(
+                    "年少心動雨季 has a real timed lyric despite Spotify having none",
+                    (model.lyrics?.lines.count ?? 0) >= 50)
+                check(
+                    "its timeline reaches the final minute of the recording",
+                    (model.lyrics?.lines.last?.time ?? 0) > 240)
+            }
+        } else if let problem = model.nowPlayingProblem {
+            note(problem)
+            check("a playing application answered the panel", livePlayer == nil)
         } else {
             note(
                 NowPlaying.hasAPlayer
                     ? "nothing is playing — the live half was not exercised"
                     : "no music player installed — skipped")
+        }
+        if let livePlayer {
+            await pause(
+                upTo: 3.0,
+                until: {
+                    zip(model.activeRoutes, model.routeLevels).contains { route, level in
+                        model.application(of: route)?.bundleID == livePlayer.bundleID
+                            && level > toneFloor
+                    }
+                })
+            let capturedPeak =
+                zip(model.activeRoutes, model.routeLevels)
+                .filter { route, _ in
+                    model.application(of: route)?.bundleID == livePlayer.bundleID
+                }
+                .map(\.1)
+                .max() ?? 0
+            note(
+                String(
+                    format: "%@ tap %.1f dBFS", livePlayer.name,
+                    decibels(capturedPeak)))
+            check("the playing application's tap carries audio", capturedPeak > toneFloor)
         }
         // The matching is the part that decides whether the feature is usable,
         // because a file somebody downloaded is called whatever its author
@@ -2720,6 +2848,23 @@ enum UIFlowCheck {
         // — twenty of them is four seconds — and two would have measured only
         // that nothing had arrived yet.
         await pause(upTo: 5.0, until: { model.songKey != nil })
+        let analysisStats = model.analysisStatistics
+        note(
+            String(
+                format:
+                    "analysis: %u written, %u waiting, %llu dropped; %d chroma windows, %.1f energy",
+                analysisStats.written, analysisStats.available, analysisStats.dropped,
+                model.chromaWindows, model.chromaEnergy))
+        if livePlayer != nil {
+            check("singing enables the output analyser", analysisStats.isEnabled)
+            check("the playing track reaches the output analyser", analysisStats.written > 0)
+            check("the analyser keeps up without gaps", analysisStats.dropped == 0)
+            check(
+                "four seconds of music reach the key detector",
+                model.chromaWindows >= KeyDetector.leastWindowsForAKey)
+            check("the playing track produces spectral energy", model.chromaEnergy > 0)
+            check("the playing track produces a key", model.songKey != nil)
+        }
         if let key = model.songKey {
             note(
                 String(
@@ -2736,7 +2881,38 @@ enum UIFlowCheck {
                 note("nobody has sung yet, so there is nothing to move it towards")
             }
         } else {
-            note("nothing musical is playing — the key was not measured")
+            note(
+                livePlayer == nil
+                    ? "nothing musical is playing — the key was not measured"
+                    : "music was playing, but the key detector produced no answer")
+        }
+        if ProcessInfo.processInfo.environment["YUNAUDIO_RECOGNISE_PLAYERS"] == "1",
+            livePlayer != nil
+        {
+            await pause(
+                upTo: 15,
+                until: {
+                    model.nowPlaying?.identity.hasPrefix("shazam:") == true
+                        || model.musicRecognitionProblem != nil
+                })
+            if let problem = model.musicRecognitionProblem { note(problem) }
+            if let recognised = model.nowPlaying,
+                recognised.identity.hasPrefix("shazam:")
+            {
+                note(
+                    "captured audio recognised \(recognised.artist) — \(recognised.title) "
+                        + "at \(Int(recognised.position))s")
+                check(
+                    "captured audio identifies a player with no scripting dictionary",
+                    true)
+            } else {
+                check(
+                    "an unsigned catalogue build says exactly what must be enabled",
+                    model.musicRecognitionProblem
+                        == loc(
+                            "This build is not signed for the Shazam catalogue. Enable ShazamKit for the App ID to identify players without scripting support."
+                        ))
+            }
         }
 
         // Pitch is switched on only while somebody is looking, which is what
@@ -2744,6 +2920,10 @@ enum UIFlowCheck {
         check("looking at it asks for the pitch", !model.analysisIsIdle)
         model.isSingingVisible = false
         check("and looking away clears the track", model.nowPlaying == nil)
+        if model.capturedAppBundleIDs != capturesBeforeSinging {
+            model.capturedAppBundleIDs = capturesBeforeSinging
+            await settle(model, timeout: 15)
+        }
 
         try section("output tone")
         // Ten bands at Razer's own centres, which is a real claim: somebody
@@ -2988,10 +3168,38 @@ enum UIFlowCheck {
         // route survives that and that the value is what the system was told.
         check("only outputs in the path are offered", !model.alignableOutputs.isEmpty)
         if let output = model.alignableOutputs.first {
+            await waitUntil(
+                "the route is settled before alignment",
+                { model.isRunning && !model.isBusy }, timeout: 10)
             let before = model.outputDelay(of: output.uid)
-            model.setOutputDelay(12, for: output.uid)
+            let restartsBeforeDrag = model.restartCount
+            let dragBegan = DispatchTime.now().uptimeNanoseconds
+            for step in 1...40 {
+                model.previewOutputDelay(12 * Double(step) / 40, for: output.uid)
+            }
+            let dragMilliseconds =
+                Double(DispatchTime.now().uptimeNanoseconds - dragBegan) / 1_000_000
+            note(
+                String(
+                    format: "40 alignment pointer updates took %.2f ms",
+                    dragMilliseconds))
+            check(
+                "dragging alignment does not rebuild the audio device",
+                model.restartCount == restartsBeforeDrag)
+            model.commitOutputDelays()
+            note(
+                "\(model.restartCount - restartsBeforeDrag) rebuild(s) "
+                    + "after the alignment drag")
+            check(
+                "releasing alignment commits one rebuild",
+                model.restartCount == restartsBeforeDrag + 1)
+            check(
+                "forty alignment updates stay below one frame",
+                dragMilliseconds < 8)
             check("it reads back", abs(model.outputDelay(of: output.uid) - 12) < 0.001)
-            await waitUntil("the route came back up", { model.isRunning }, timeout: 10)
+            await waitUntil(
+                "the route came back up",
+                { model.isRunning && !model.isBusy }, timeout: 10)
             check("no error was reported", model.lastError == nil)
             // Waited for rather than read: the counter starts again with the
             // new aggregate, so reading it the instant the route reports itself
@@ -3006,7 +3214,9 @@ enum UIFlowCheck {
                 model.outputDelay(of: output.uid) == RouterModel.maximumOutputDelay)
             model.setOutputDelay(before, for: output.uid)
             check("and zero means none at all", model.outputDelay(of: output.uid) == before)
-            await waitUntil("still running afterwards", { model.isRunning }, timeout: 10)
+            await waitUntil(
+                "still running afterwards",
+                { model.isRunning && !model.isBusy }, timeout: 10)
         }
 
         try section("remote control")
@@ -3191,7 +3401,15 @@ enum UIFlowCheck {
         // The project's central claim, and until now it could only be made from
         // a terminal: somebody who installs the app had no way to find out
         // whether their own path is bit-exact.
-        if !model.canCheckIntegrity {
+        if !inWantedSection {
+            // This task can legitimately take sixteen seconds. A skimmed
+            // section only waits six, so starting it here lets its restore stop
+            // arrive in a later section and tear down whatever that section is
+            // measuring. It is self-contained and leaves no state later checks
+            // depend on, so a filtered run skips the work rather than leaking
+            // it across section boundaries.
+            note("the self-contained integrity run was not started while skimmed")
+        } else if !model.canCheckIntegrity {
             note("the destination has no input to read back from — skipped")
         } else {
             // The check restores what it found: it stops the route afterwards
@@ -3498,7 +3716,14 @@ enum UIFlowCheck {
             "\(model.singers.count) singer(s) on \(model.engineTranscriptTaps) tap(s) "
                 + "for \(model.sourceGroups.count) source(s)")
         if let problem = model.singingError { note(problem) }
-        check("one singer per source", model.singers.count == model.sourceGroups.count)
+        let microphones = model.sourceGroups.filter {
+            model.representative(of: $0).flatMap(model.application(of:)) == nil
+        }
+        check("one singer per microphone", model.singers.count == microphones.count)
+        check(
+            "captured applications are not shown as singers",
+            model.singers.allSatisfy { singer in microphones.contains { $0.uid == singer.uid } }
+        )
         note(
             "singers: "
                 + model.singers.map(\.name).joined(separator: ", ")
@@ -3708,11 +3933,10 @@ enum UIFlowCheck {
         }
 
         // Two sources are on the bus now — the microphone and the player — so
-        // this is where the duet's mechanism can be exercised. Not two people:
-        // there is one microphone on this machine and no way to conjure a
-        // second. What is checked is the part that was actually built, which is
-        // that each source gets its own pitch track keyed on its own ring
-        // rather than one tracker over the mix.
+        // this is where their independent pitch tracks can be exercised. Not
+        // two people: there is one microphone on this machine and no way to
+        // conjure a second. A captured player is the backing track, and calling
+        // it a singer would award the original recording its own score.
         if model.sourceGroups.count > 1 {
             // Off and on again. The switch only starts the scoring on a change,
             // so arriving here with it already on from an earlier section left
@@ -3725,10 +3949,21 @@ enum UIFlowCheck {
             await pause(1.5)
             if let reason = model.singingError { note("scoring refused: \(reason)") }
             note("\(model.sourceGroups.count) source group(s) on the bus")
-            check("a second source is a second singer", model.singers.count > 1)
+            let microphones = model.sourceGroups.filter {
+                model.representative(of: $0).flatMap(model.application(of:)) == nil
+            }
+            check("only microphones are singers", model.singers.count == microphones.count)
             check(
-                "and they are different sources",
-                Set(model.singers.map(\.id)).count == model.singers.count)
+                "and the captured player has its own non-singer track",
+                model.sourceGroups.contains {
+                    model.representative(of: $0).flatMap(model.application(of:)) != nil
+                        && model.scoringSource(uid: $0.uid) != nil
+                })
+            if model.singers.count > 1 {
+                check(
+                    "and the singers are different sources",
+                    Set(model.singers.map(\.id)).count == model.singers.count)
+            }
             note(
                 "singers: "
                     + model.singers.map { "\($0.name) \($0.note ?? "—")" }
@@ -3755,8 +3990,8 @@ enum UIFlowCheck {
     /// disagreement would be about arithmetic rather than about the chain.
     private static let chainNotes = [69, 71, 72, 74, 76, 74]
     private static let chainNoteSeconds = 1.0
-    /// The gap between passes of the tune in the scoring take, and how many
-    /// passes there are.
+    /// The unpitched carrier between passes of the tune in the scoring take,
+    /// and how many passes there are.
     ///
     /// The tune is played over and over rather than once after a long lead-in,
     /// and both numbers were arrived at by measurement.
@@ -3767,18 +4002,18 @@ enum UIFlowCheck {
     /// lead-in long enough to cover the worst of that lost the race:
     /// `resolved to no running process`.
     ///
-    /// *A short gap*, because a process tap built while the process is
-    /// rendering silence publishes no channels, so there is nothing to route
-    /// and the capture never becomes a source. With eight-second gaps that hit
-    /// on more runs than not — the tap was built, CoreAudio refused nothing,
-    /// the process was alive, and the bus carried the microphone alone. At a
-    /// second and a half against six seconds of tune the capture lands in
-    /// audio five times out of six, and the retry covers the sixth.
+    /// *A short unpitched carrier*, because a process tap built while the
+    /// process is rendering zeroes publishes no channels, so there is nothing
+    /// to route and the capture never becomes a source. Low-level deterministic
+    /// noise keeps a real channel alive while the pitch tracker truthfully
+    /// answers zero. At a second and a half against six seconds of tune the
+    /// capture lands in pitched audio five times out of six, and the retry
+    /// covers the sixth.
     ///
-    /// The gap still has to be long enough to be seen as one, because the take
-    /// is anchored on a gap ending rather than on the file starting: the poll
-    /// is 50 ms and a tracker frame is 43.
-    private static let chainSilence = 1.5
+    /// The carrier still has to be long enough to be seen as unpitched, because
+    /// the take is anchored on its ending rather than on the file starting: the
+    /// poll is 50 ms and a tracker frame is 43.
+    private static let chainUnpitchedSeconds = 1.5
     private static let chainPasses = 8
 
     /// The words and the score, end to end, on audio a real process is playing.
@@ -3817,7 +4052,8 @@ enum UIFlowCheck {
             && (try? toneWave(notes: chainNotes, secondsEach: chainNoteSeconds)
                 .write(to: audio)) != nil
             && (try? toneWave(
-                notes: chainNotes, secondsEach: chainNoteSeconds, leadIn: chainSilence,
+                notes: chainNotes, secondsEach: chainNoteSeconds,
+                unpitchedLeadIn: chainUnpitchedSeconds,
                 passes: chainPasses
             ).write(to: leadIn)) != nil
 
@@ -3999,11 +4235,14 @@ enum UIFlowCheck {
             note("routing would not start — the live half was not exercised")
             return
         }
+        let previousInspector = model.inspectorTab
+        model.inspectorTab = .singing
         model.isSingingVisible = true
         defer {
             model.isScoringSinging = false
             model.closeWords()
             model.isSingingVisible = false
+            model.inspectorTab = previousInspector
         }
         let opened = model.openWords(at: words)
         check("the words and the tune are loaded", opened && model.melody != nil)
@@ -4041,7 +4280,8 @@ enum UIFlowCheck {
         // microphone alone, and the section blamed the tap.
         func backingSource() -> RouterModel.SourceGroup? {
             model.sourceGroups.first {
-                model.representative(of: $0).flatMap(model.application(of:)) != nil
+                model.representative(of: $0).flatMap(model.application(of:))?.bundleID
+                    == captured.bundleID
             }
         }
         // And retried, because `AudioHardwareCreateProcessTap` refuses one
@@ -4085,13 +4325,23 @@ enum UIFlowCheck {
             return
         }
         note("the backing track is on the bus as \(model.sourceGroups.count) source(s)")
+        // A previous section may have left the switch on after returning early.
+        // Assigning true to an already-true property does not start anything,
+        // so every self-contained flow section first creates the edge it is
+        // meant to exercise.
+        model.isScoringSinging = false
+        await pause(0.2)
         model.isScoringSinging = true
         await pause(upTo: 1.0, until: { model.isScoringSinging })
         check("scoring started", model.isScoringSinging)
+        check("the exact MIDI tune is the scoring reference", model.hasExactScoringReference)
         if let problem = model.singingError { note(problem) }
         note(
             "\(model.singers.count) singer(s) on \(model.engineTranscriptTaps) tap(s) "
                 + "for \(model.sourceGroups.count) source(s)")
+        check(
+            "the backing application is not called a singer",
+            !model.singers.contains { $0.uid == backing.uid })
 
         // Anchored on the audio rather than on a stopwatch. afplay takes an
         // unknown couple of hundred milliseconds to open a device and the
@@ -4099,18 +4349,26 @@ enum UIFlowCheck {
         // process was launched would be measuring that latency rather than the
         // chain.
         //
-        // The gap first, then the note after it. Waiting only for a pitch would
-        // catch whichever note the file happened to be in the middle of when
-        // the capture finally came up, and score a tune against itself shifted
-        // by however far in that was.
+        // First prove audio has reached the tracker, then observe a whole gap
+        // and the note after it. A tracker starts at zero, so waiting for zero
+        // first accepted that initial value without having observed a gap at
+        // all; the next pitch was whichever note the capture happened to join,
+        // and a correct tune was then compared with MIDI shifted by several
+        // notes.
         func backingHertz() -> Float {
-            model.singers.first { $0.uid == backing.uid }?.hertz ?? 0
+            model.scoringSource(uid: backing.uid)?.hertz ?? 0
         }
         let tuneSeconds = Double(chainNotes.count) * chainNoteSeconds
-        await pause(upTo: tuneSeconds + 2, until: { backingHertz() == 0 })
         await waitUntil(
             "the captured player reached the tap",
-            { backingHertz() > 0 }, timeout: chainSilence + tuneSeconds + 2)
+            { backingHertz() > 0 }, timeout: chainUnpitchedSeconds + tuneSeconds + 2)
+        await waitUntil(
+            "a complete pass reached its following gap",
+            { backingHertz() == 0 }, timeout: tuneSeconds + 2)
+        await waitUntil(
+            "the next pass started at its first note",
+            { backingHertz() > 0 }, timeout: chainUnpitchedSeconds + 2)
+        let restartsBeforeTake = model.restartCount
         model.runWords(from: 0)
 
         // Read while the tune is actually sounding. The three numbers below are
@@ -4119,12 +4377,34 @@ enum UIFlowCheck {
         // all and looks like it said something.
         await pause(tuneSeconds / 2)
         let mixHertz = model.analysis.pitchHertz
-        let bandHertz = model.singers.first { $0.uid == backingSource()?.uid }?.hertz ?? 0
+        let bandHertz =
+            backingSource().flatMap {
+                model.scoringSource(uid: $0.uid)?.hertz
+            } ?? 0
         let voiceHertz = model.singerHertz
+        let midScore = model.scoringSource(uid: backing.uid)?.score
         // The whole tune, plus a moment for the last frame to be paired.
         await pause(tuneSeconds / 2 + 1.0)
 
-        guard let scored = model.singers.first(where: { $0.uid == backingSource()?.uid })
+        note(
+            "score state: \(model.isScoringSinging ? "on" : "off"), "
+                + "routing \(model.isRunning ? "up" : "down"), "
+                + "MIDI \(model.hasExactScoringReference ? "loaded" : "missing"), "
+                + "\(model.restartCount - restartsBeforeTake) route restart(s), "
+                + "player \(take.isRunning ? "running" : "exited"), "
+                + "error \(model.lastError ?? "none")")
+        if let midScore {
+            let midError = midScore.meanErrorSemitones ?? .nan
+            note(
+                String(
+                    format: "halfway score was %.0f%% (error %.2f), covered %.1f s of tune "
+                        + "and %.1f s of input",
+                    midScore.percentage, midError, midScore.referenceSeconds,
+                    midScore.sungSeconds))
+        }
+        check("scoring stayed active for the whole take", model.isScoringSinging)
+        guard let backingNow = backingSource(),
+            let scored = model.scoringSource(uid: backingNow.uid)
         else {
             note(
                 "singers: "
@@ -4219,13 +4499,24 @@ enum UIFlowCheck {
     /// asked about the frame containing one has every right to answer something
     /// else — which would be measuring the fixture rather than the chain.
     private static func toneWave(
-        notes: [Int], secondsEach: Double, leadIn: Double = 0, passes: Int = 1
+        notes: [Int], secondsEach: Double, unpitchedLeadIn: Double = 0,
+        passes: Int = 1
     ) -> Data {
         let rate = 44100.0
         var samples: [Int16] = []
         let ramp = Int(0.01 * rate)
+        var noiseState: UInt64 = 0x9E37_79B9_7F4A_7C15
         for _ in 0..<max(1, passes) {
-            samples += [Int16](repeating: 0, count: Int(leadIn * rate))
+            for _ in 0..<Int(unpitchedLeadIn * rate) {
+                // Deterministic broadband audio keeps the process tap's
+                // channel published, while having no autocorrelation peak the
+                // pitch tracker could call a note.
+                noiseState ^= noiseState << 13
+                noiseState ^= noiseState >> 7
+                noiseState ^= noiseState << 17
+                let signed = Int32(truncatingIfNeeded: noiseState >> 32)
+                samples.append(Int16(clamping: signed / 500_000))
+            }
             for note in notes {
                 let hertz = 440 * pow(2, (Double(note) - 69) / 12)
                 let count = Int(secondsEach * rate)
@@ -5921,9 +6212,6 @@ enum UIFlowCheck {
             for kind in effectsBefore { model.setEffect(kind, enabled: false) }
             await settle(model, timeout: 15)
         }
-        defer {
-            for kind in effectsBefore { model.setEffect(kind, enabled: true) }
-        }
 
         model.selectedSourceUID = toneDevice.uid
         await settle(model, timeout: 15)
@@ -6053,7 +6341,8 @@ enum UIFlowCheck {
             await waitUntil(
                 "the route came back up with two inputs",
                 { model.isRunning && !model.isBusy }, timeout: 20)
-            check("the second input is in the route", model.activeSourceUIDs.contains(second.uid))
+            check(
+                "the second input is in the route", model.activeSourceUIDs.contains(second.uid))
             check("and it was not dropped", model.droppedExtraInputNames.isEmpty)
             check(
                 "its channels resolved inside the aggregate",
@@ -6106,6 +6395,17 @@ enum UIFlowCheck {
         }
         model.selectedDestinationUID = originalDestination
         model.selectedSourceUID = originalSource
+        // Part of leaving it as found, not a `defer`. `setEffect` publishes a
+        // graph asynchronously; restoring the stages after this function
+        // returned let the next section take its cycle baseline while that
+        // publication was still queued. The counter then restarted under the
+        // assertion and "audio kept flowing" failed even though this section
+        // was the one still changing the path.
+        model.batched {
+            for kind in effectsBefore {
+                model.setEffect(kind, enabled: true)
+            }
+        }
         await settle(model, timeout: 15)
         await waitUntil(
             "the route is left as it was found",
@@ -6233,6 +6533,7 @@ enum UIFlowCheck {
 
         private let deviceID: AudioDeviceID
         private var procID: AudioDeviceIOProcID?
+        private let cycles: OpaquePointer
 
         /// Shared with the IO thread, so it is a pointer rather than a
         /// property: the block cannot capture `self` mutably and the phase has
@@ -6241,9 +6542,11 @@ enum UIFlowCheck {
 
         init?(deviceUID: String) {
             guard let device = try? AudioDevices.device(uid: deviceUID) ?? nil,
-                let rate = device.currentSampleRate, rate > 0
+                let rate = device.currentSampleRate, rate > 0,
+                let cycles = yun_rt_cell_create(nil)
             else { return nil }
             deviceID = device.id
+            self.cycles = cycles
             phase = UnsafeMutablePointer<Double>.allocate(capacity: 1)
             phase.initialize(to: 0)
 
@@ -6251,6 +6554,7 @@ enum UIFlowCheck {
             // signal it has to work on would be measuring the limiter.
             let increment = 2 * Double.pi * Self.hertz / rate
             let phase = self.phase
+            let cycleCounter = self.cycles
             let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, nil) {
                 _, _, _, outputData, _ in
                 let buffers = UnsafeMutableAudioBufferListPointer(outputData)
@@ -6274,11 +6578,34 @@ enum UIFlowCheck {
                     // advances once rather than once per buffer.
                     if index == buffers.count - 1 { phase.pointee = running }
                 }
+                yun_rt_cell_retire(cycleCounter)
             }
-            guard status == noErr, let procID, AudioDeviceStart(device.id, procID) == noErr
-            else {
+            guard status == noErr, let procID else {
                 phase.deallocate()
                 if let procID { AudioDeviceDestroyIOProcID(device.id, procID) }
+                yun_rt_cell_free(cycles)
+                self.procID = nil
+                return nil
+            }
+
+            // CoreAudio can accept `AudioDeviceStart` and never call the IOProc.
+            // That exact state made nine later signal checks read as unrelated
+            // failures. Prove two callbacks happened, and retry the unchanged
+            // setup once just as the shipping route does.
+            var isWriting = false
+            for _ in 0..<2 {
+                guard AudioDeviceStart(device.id, procID) == noErr else { continue }
+                if yun_rt_cell_wait_for_swap(cycles, 750) {
+                    isWriting = true
+                    break
+                }
+                AudioDeviceStop(device.id, procID)
+            }
+            guard isWriting else {
+                AudioDeviceStop(device.id, procID)
+                AudioDeviceDestroyIOProcID(device.id, procID)
+                phase.deallocate()
+                yun_rt_cell_free(cycles)
                 self.procID = nil
                 return nil
             }
@@ -6290,6 +6617,7 @@ enum UIFlowCheck {
             AudioDeviceDestroyIOProcID(deviceID, procID)
             self.procID = nil
             phase.deallocate()
+            yun_rt_cell_free(cycles)
         }
     }
 
@@ -6305,6 +6633,7 @@ enum UIFlowCheck {
     /// folded in.
     ///
     /// - Parameter model: The live model, mid-route.
+    /// - Throws: `StopEarly` when a narrowed run has reached its final section.
     private static func checkApplicationList(model: RouterModel) async throws {
         try section("application list, with audio running")
 

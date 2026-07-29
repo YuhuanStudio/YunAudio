@@ -118,15 +118,10 @@ public final class VoiceActivityWatcher: @unchecked Sendable {
     ///   which case the system uses the default output.
     public static func suggestedReferenceDeviceUID(for device: AudioObjectID) -> String? {
         guard #available(macOS 27, *) else { return nil }
-        var address = address(kAudioDevicePropertySuggestedReferenceDevice)
-        guard AudioObjectHasProperty(device, &address) else { return nil }
-        var value: CFString? = nil
-        var size = UInt32(MemoryLayout<CFString?>.size)
-        guard
-            AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr,
-            let value
-        else { return nil }
-        return value as String
+        let property = AudioProperty<CFString>(
+            kAudioDevicePropertySuggestedReferenceDevice,
+            scope: kAudioObjectPropertyScopeInput)
+        return device.optionalString(of: property)
     }
 
     /// Switches detection on and calls back whenever the answer changes.

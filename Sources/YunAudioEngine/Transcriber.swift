@@ -141,9 +141,8 @@ public actor Transcriber {
     ///   anybody can act on.
     public func start(now: Double) async throws {
         guard !isRunning else { return }
-        guard #available(macOS 27, *), SpeechTranscriber.isAvailable else {
-            throw Unavailable.noModel
-        }
+        guard #available(macOS 27, *) else { throw Unavailable.needsNewerSystem }
+        guard SpeechTranscriber.isAvailable else { throw Unavailable.noModel }
 
         // The language actually offered may not be the one asked for: a system
         // set to en_GB is served by whatever variant the model ships.
@@ -170,14 +169,12 @@ public actor Transcriber {
             }
         }
 
-        var converter: AnyObject?
-        if #available(macOS 27, *) {
-            do {
-                converter = try await AnalyzerInputConverter.converter(
-                    compatibleWith: [transcriber])
-            } catch {
-                throw Unavailable.failed(error.localizedDescription)
-            }
+        let converter: AnyObject?
+        do {
+            converter = try await AnalyzerInputConverter.converter(
+                compatibleWith: [transcriber])
+        } catch {
+            throw Unavailable.failed(error.localizedDescription)
         }
 
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()

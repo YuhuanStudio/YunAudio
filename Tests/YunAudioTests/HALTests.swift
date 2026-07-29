@@ -32,6 +32,19 @@ struct FourCharTests {
     }
 }
 
+// MARK: - CoreAudio object strings
+
+@Suite("CoreAudio object strings")
+struct AudioObjectStringTests {
+    @Test("a retained device UID reads back byte for byte")
+    func deviceUID() throws {
+        let device = try #require(try AudioDevices.all().first)
+        let value = try device.id.string(of: .deviceUID)
+        #expect(value == device.uid)
+        #expect(value.utf8.count == device.uid.utf8.count)
+    }
+}
+
 // MARK: - Sample rate ranges
 
 @Suite("Sample rate ranges")
@@ -292,6 +305,61 @@ struct RazerLightingTests {
         #expect(Array(frame[14...16]) == [255, 0, 0])
         // Everything after the first LED stays dark.
         #expect(Array(frame[17...49]).allSatisfy { $0 == 0 })
+    }
+}
+
+@Suite("Handing the light ring to a new render thread")
+struct LightingRenderStateTests {
+    /// A mode change starts a new renderer. The old renderer must see one
+    /// indivisible generation change and stop; otherwise both loops write HID
+    /// frames and each frame takes the device lock away from the other.
+    @Test("only the current generation can take a frame")
+    func generationHandover() throws {
+        let state = LightingRenderState()
+        let first = state.advanceGeneration()
+        state.update(mode: .level)
+        state.update(colour: (12, 34, 56))
+        state.update(level: 0.625, isMuted: true)
+
+        let before = try #require(state.snapshot(for: first))
+        #expect(before.mode == .level)
+        #expect(before.colour == (12, 34, 56))
+        #expect(before.level == 0.625)
+        #expect(before.isMuted)
+
+        let second = state.advanceGeneration()
+        #expect(second == first + 1)
+        #expect(state.snapshot(for: first) == nil)
+        let after = try #require(state.snapshot(for: second))
+        #expect(after.level == 0.625)
+        #expect(after.isMuted)
+    }
+}
+
+@Suite("Lighting frame traffic")
+struct LightingFrameTrafficTests {
+    @Test("an unchanged solid ring is sent once, not thirty times a second")
+    func solidFrameIsDeduplicated() {
+        var gate = LightingFrameGate()
+        let solid = RazerRing.solid((12, 34, 56))
+        let writes = (0..<900).count { _ in gate.shouldSend(solid) }
+        // Thirty seconds of an unmoving ring used to be 900 HID request/reply
+        // transactions, including 4.5 seconds of firmware waits.
+        #expect(writes == 1)
+    }
+
+    @Test("a visible LED change still goes out immediately")
+    func changedFramePasses() {
+        var gate = LightingFrameGate()
+        let silence = gate.shouldSend(
+            RazerRing.level(0, colour: (0, 120, 255), isMuted: false))
+        let voice = gate.shouldSend(
+            RazerRing.level(0.5, colour: (0, 120, 255), isMuted: false))
+        let repeatedVoice = gate.shouldSend(
+            RazerRing.level(0.5, colour: (0, 120, 255), isMuted: false))
+        #expect(silence)
+        #expect(voice)
+        #expect(!repeatedVoice)
     }
 }
 
@@ -1305,7 +1373,31 @@ struct MIDIBindingTests {
         controller.bind(address, to: .fader(.input))
         #expect(controller.binding(for: .fader(.master)) == nil)
         #expect(controller.binding(for: .fader(.input)) == address)
+        #expect(controller.target(for: address) == .fader(.input))
         #expect(Set(controller.bindings.values).count == controller.bindings.count)
+    }
+
+    @MainActor
+    @Test("the receive index follows replacement, forgetting and restore")
+    func receiveIndexStaysCoherent() {
+        let controller = MIDIController()
+        let first = MIDIAddress(channel: 0, kind: .controlChange(7))
+        let second = MIDIAddress(channel: 0, kind: .controlChange(8))
+        controller.bind(first, to: .fader(.master))
+        controller.bind(second, to: .fader(.master))
+        #expect(controller.target(for: first) == nil)
+        #expect(controller.target(for: second) == .fader(.master))
+
+        controller.forget(.fader(.master))
+        #expect(controller.target(for: second) == nil)
+
+        controller.restore([
+            MIDITarget.fader(.input).storageKey: first.storageKey,
+            MIDITarget.fader(.monitor).storageKey: second.storageKey,
+        ])
+        #expect(controller.target(for: first) == .fader(.input))
+        #expect(controller.target(for: second) == .fader(.monitor))
+        #expect(controller.bindings.count == 2)
     }
 
     @MainActor
@@ -2130,6 +2222,7 @@ struct StatusMarkChangeTests {
 /// immediately behind it, which was already saying where nothing is the right
 /// answer. Found by rendering the window and looking at it under a caption that
 /// said, in words, 平坦.
+@MainActor
 @Suite("The bar on an equaliser band")
 struct VerticalSliderFillTests {
 
@@ -2880,6 +2973,7 @@ struct ControlArgumentsTests {
         for verb in [
             "selftest", "soak", "dsp", "route", "capture", "tone", "light", "apps",
             "tap", "volume", "aec", "bench", "mic", "vad", "swap", "timing",
+            "audio-start",
         ] {
             #expect(ControlArguments.parse([verb]) == .notMine, "\(verb)")
         }
@@ -3175,7 +3269,6 @@ struct FailureMessageTests {
     }
 }
 
-
 /// Every public reader of the realtime graph takes the lock before it does.
 ///
 /// This is a source check rather than a runtime one, because the failure it
@@ -3390,14 +3483,14 @@ struct ScrollFadeTests {
 struct ChannelNameOwnershipTests {
 
     @Test("a device with a known topology gets its own names")
-    func knownDeviceIsNamed() {
-        let names = DeviceChannelNames.channels(
-            modelUID: nil, name: "Razer Seiren V3 Pro",
-            scope: kAudioObjectPropertyScopeInput)
-        let channels = try? #require(names)
-        #expect(channels?.count == 3)
+    func knownDeviceIsNamed() throws {
+        let channels = try #require(
+            DeviceChannelNames.channels(
+                modelUID: nil, name: "Razer Seiren V3 Pro",
+                scope: kAudioObjectPropertyScopeInput))
+        #expect(channels.count == 3)
         // Three taps of one capsule, which is the whole reason these are named.
-        #expect(channels?.contains { $0.isDefault } == true)
+        #expect(channels.contains { $0.isDefault })
     }
 
     /// The case that was wrong. Nothing about one device may describe another.
@@ -3526,13 +3619,13 @@ struct PreferencesCompletenessTests {
         // with no sensible nil, and those are the non-optional ones.
         let required = declared.filter { field in
             source.contains("var \(field): ") && !source.contains("var \(field): String?")
-                && !source.contains("var \(field): Bool?") && !source.contains("var \(field): Float?")
+                && !source.contains("var \(field): Bool?")
+                && !source.contains("var \(field): Float?")
         }
         let missing = required.filter { !body.contains("\($0):") }
         #expect(missing.isEmpty, "not in Preferences.default: \(missing)")
     }
 }
-
 
 /// macOS 26 added `CATapDescription.bundleIDs` and `processRestoreEnabled`,
 /// which together are the answer to OBS's issue #9144 — "Application Capture
@@ -3618,6 +3711,57 @@ struct ProcessTapRestoreTests {
     }
 }
 
+@Suite("Diagnosing a tap the HAL did not return")
+struct ProcessTapCreationSnapshotTests {
+    /// These are CoreAudio object IDs, not Unix process IDs. Calling the number
+    /// a PID made the only evidence from an intermittent failure point at the
+    /// wrong process, while repeating a synthetic `pid:` identity under
+    /// "bundle" claimed it had been handed to the HAL after it was filtered.
+    @Test("the report says exactly which identifiers crossed the API")
+    func exactIdentifiers() {
+        let snapshot = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [803],
+            requestedBundleIDs: [],
+            ignoredBundleIDs: ["pid:64291"],
+            processIDsBefore: [100, 803],
+            processIDsAfter: [803],
+            tapIDsBefore: [20],
+            tapIDsAfter: [20],
+            newTaps: [])
+
+        #expect(
+            snapshot.diagnostic
+                == "process object(s) 803; before: all present; after: all present; "
+                + "bundle(s) none; ignored non-bundle identity(s) pid:64291; "
+                + "new tap object(s) none")
+        #expect(!snapshot.diagnostic.contains("pid(s)"))
+    }
+
+    /// A success status with an empty returned ID might still have left a tap
+    /// behind. Its system-held description is included so that case reads as a
+    /// leaked object rather than as another unexplained empty answer.
+    @Test("a newly appeared tap carries the description read back from the HAL")
+    func newTapDescription() {
+        let snapshot = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [803],
+            requestedBundleIDs: ["com.example.player"],
+            ignoredBundleIDs: [],
+            processIDsBefore: [803],
+            processIDsAfter: [803],
+            tapIDsBefore: [20],
+            tapIDsAfter: [20, 21],
+            newTaps: [
+                .init(
+                    id: 21, processIDs: [803],
+                    bundleIDs: ["com.example.player"])
+            ])
+
+        #expect(
+            snapshot.diagnostic.contains(
+                "new tap object(s) 21 [processes 803; bundles com.example.player]"))
+    }
+}
+
 /// The channel somebody chose, against the device they chose it for.
 ///
 /// `applyChannelDefaults()` ran on every source change and put the choice back
@@ -3670,7 +3814,6 @@ struct ChannelChoiceMemoryTests {
         #expect(!(6 < 1), "channel 6 is not available on a one-channel device")
     }
 }
-
 
 /// The words and the player are on two different clocks, and the whole of the
 /// singing panel's timing rests on the arithmetic that joins them.
@@ -3777,7 +3920,6 @@ struct TrackClockTests {
     }
 }
 
-
 /// More than one input and more than one output.
 ///
 /// Until this existed a second microphone could only be had by building an
@@ -3791,7 +3933,9 @@ struct TrackClockTests {
 @Suite("Two of each")
 struct MultiDeviceRoutingTests {
 
-    private func mono(_ uid: String, channels: Int = 1, at channel: Int = 0)
+    private func mono(
+        _ uid: String, channels: Int = 1, at channel: Int = 0
+    )
         -> RouterModel.SourceWiring
     {
         RouterModel.SourceWiring(
@@ -3876,7 +4020,8 @@ struct MultiDeviceRoutingTests {
         // microphone that now has one. Reading channel 6 of a one-channel
         // device is a read past the end of the buffer, so this is not a
         // tidiness matter.
-        let routes = RouterModel.routes(from: [mono("mic", channels: 1, at: 6)], to: [("out", 2)])
+        let routes = RouterModel.routes(
+            from: [mono("mic", channels: 1, at: 6)], to: [("out", 2)])
         #expect(routes.allSatisfy { $0.source.channel == 0 })
     }
 
@@ -3896,7 +4041,6 @@ struct MultiDeviceRoutingTests {
         #expect(routes.count == 2)
     }
 }
-
 
 /// An extra device that will not start must not cost somebody the route.
 ///
@@ -3985,7 +4129,6 @@ struct AdditionalDeviceFallbackTests {
     }
 }
 
-
 /// Asking a player where it is, from the thread that is allowed to wait.
 ///
 /// The whole point of `NowPlaying`'s asynchronous half is that the Apple event
@@ -4047,6 +4190,73 @@ struct NowPlayingIsolationTests {
     }
 }
 
+@Suite("Player and first-launch permissions")
+struct PermissionRequestTests {
+    @Test("a player query cannot hold the queue beyond two seconds")
+    func playerQueryIsBounded() {
+        let script = NowPlaying.boundedScript("return \"ok\"")
+        #expect(script.contains("with timeout of 2 seconds"))
+        #expect(script.contains("return \"ok\""))
+        #expect(script.hasSuffix("end timeout"))
+    }
+
+    @Test("Apple Event failures remain actionable")
+    func playerFailures() {
+        #expect(
+            NowPlaying.queryFailure(application: "Spotify", code: Int(errAETimeout))
+                == .timedOut(application: "Spotify"))
+        #expect(
+            NowPlaying.queryFailure(
+                application: "Spotify", code: Int(errAEEventNotPermitted))
+                == .denied(application: "Spotify"))
+        #expect(
+            NowPlaying.queryFailure(application: "Spotify", code: -50)
+                == .failed(application: "Spotify", code: -50))
+    }
+
+    @Test("permission prompts run once and never in verification processes")
+    func firstLaunchOnly() {
+        #expect(FirstLaunchPermissions.shouldRequest(storedVersion: 0, environment: [:]))
+        #expect(!FirstLaunchPermissions.shouldRequest(storedVersion: 1, environment: [:]))
+        #expect(
+            !FirstLaunchPermissions.shouldRequest(
+                storedVersion: 0, environment: ["YUNAUDIO_FLOWCHECK": "1"]))
+        #expect(
+            !FirstLaunchPermissions.shouldRequest(
+                storedVersion: 0, environment: ["YUNAUDIO_RENDER": "out"]))
+    }
+
+    @Test("the first launch asks for every protected input in sequence")
+    func firstLaunchSequence() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/FirstLaunchPermissions.swift", encoding: .utf8)
+        let microphone = try #require(source.range(of: "requestAccess(for: .audio)"))
+        let systemAudio = try #require(source.range(of: "requestCaptureAccess()"))
+        let automation = try #require(
+            source.range(of: "requestAutomationPermission(for: bundleID)"))
+        #expect(microphone.lowerBound < systemAudio.lowerBound)
+        #expect(systemAudio.lowerBound < automation.lowerBound)
+        #expect(source.contains("defaults.set(currentVersion"))
+    }
+
+    @Test("the system-audio prompt reads and mutes nothing")
+    func capturePromptDescription() {
+        let description = ProcessTap.capturePermissionDescription()
+        #expect(description.isPrivate)
+        #expect(description.processes.isEmpty)
+        #expect(description.muteBehavior == .unmuted)
+    }
+
+    @Test("the signed application may request Automation")
+    func automationEntitlement() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "App/build-app.sh", encoding: .utf8)
+        #expect(source.contains("com.apple.security.automation.apple-events"))
+        #expect(source.contains("com.apple.security.device.audio-input"))
+    }
+}
 
 /// Nothing the IO thread can be holding is freed without letting it past.
 ///
@@ -4108,7 +4318,6 @@ struct RingTeardownDisciplineTests {
             "the wait no longer waits for anything")
     }
 }
-
 
 /// A row of buttons must not be able to make the column it lives in wider.
 ///
@@ -4176,7 +4385,8 @@ struct SegmentedWidthTests {
         let many = heightAtPanelWidth(channelPicker(16, wraps: true))
         #expect(
             many > one,
-            "sixteen buttons occupied \(many) points and three occupied \(one), so the row did not wrap and is overflowing sideways instead")
+            "sixteen buttons occupied \(many) points and three occupied \(one), so the row did not wrap and is overflowing sideways instead"
+        )
     }
 
     @Test("and the same row without wrapping is the defect, several times over")
@@ -4188,7 +4398,8 @@ struct SegmentedWidthTests {
         let width = minimumWidth(channelPicker(16, wraps: false))
         #expect(
             width > panelWidth,
-            "an unwrapped row of sixteen fitted in \(width) points of \(panelWidth), so the wrap is no longer what is holding the layout together")
+            "an unwrapped row of sixteen fitted in \(width) points of \(panelWidth), so the wrap is no longer what is holding the layout together"
+        )
     }
 
     @Test("three channels were always fine, which is why nobody saw it")

@@ -24,7 +24,15 @@ let package = Package(
             // a release.
             resources: [.copy("Resources/Devices")]),
 
-        .target(name: "YunAudioEngine", dependencies: ["YunAudioHAL", "YunAudioRT"]),
+        .target(
+            name: "YunAudioEngine",
+            dependencies: ["YunAudioHAL", "YunAudioRT"],
+            swiftSettings: [
+                // Accelerate's current CBLAS declarations remove the macOS
+                // 13.3 deprecation from the strided realtime copy while
+                // retaining the 32-bit interface this bounded frame count uses.
+                .unsafeFlags(["-Xcc", "-DACCELERATE_NEW_LAPACK"])
+            ]),
 
         .target(name: "YunDesign"),
 

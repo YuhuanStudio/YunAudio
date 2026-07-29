@@ -56,7 +56,9 @@
 
 ```
 AudioHardwareCreateProcessTap returned noErr and no tap for
-  pid(s) 803, bundle(s) pid:64291
+  process object(s) 803; before: all present; after: all present;
+  bundle(s) none; ignored non-bundle identity(s) pid:64291;
+  new tap object(s) none
 ```
 
 已經確定的：
@@ -75,8 +77,16 @@ AudioHardwareCreateProcessTap returned noErr and no tap for
 `pid:` 開頭的識別碼濾掉：沒有套件的行程本來就不可能有「還原」，因為沒有任何穩定的東
 西可以記住它。
 
-**下一步**：在 HAL 層加儀器 —— 建 tap 前後各讀一次 `kAudioHardwarePropertyProcessObjectList`，
-確認那個 process object 在那個瞬間還在，並把 `CATapDescription` 讀回來比對。
+**儀器現在已經在 HAL 層**：建 tap 前後各讀一次
+`kAudioHardwarePropertyProcessObjectList` 與 `kAudioHardwarePropertyTapList`。下一次
+空 ID 會直接說被要求的 process object 在呼叫前後是否都還存在，以及 HAL 是否其實新增
+了一個沒交回來的 tap；後者會連系統持有的 `CATapDescription` 一起列出。也修正了一個
+會把調查帶歪的名稱：那個數字是 CoreAudio object ID，從來不是 Unix PID，而且被濾掉的
+`pid:` 合成身分現在明講是「未交給 HAL」，不再謊稱它是 bundle ID 參數。
+
+**下一步**：重現一次，看上面四個讀數把它分到「process object 在呼叫中消失」、
+「HAL 留下一個沒回傳的 tap」或「兩張表都沒動」哪一類，再針對那一類處理。沒有這筆新
+證據以前不要猜 rate limit 或 teardown 時序。
 
 ### 停止錄音會在即時執行緒裡 segfault —— **已修**，而且是先前就存在的 [本機實測]
 
@@ -116,6 +126,68 @@ AudioHardwareCreateProcessTap returned noErr and no tap for
    `receivePosition` 現在也擋 `isHandRun`。
 
 形狀值得記得：**把一件事變成非同步，等於替每一個「現在還算不算數」的判斷開一扇窗**。
+
+### 燈環換模式時，兩條執行緒可能同時寫 HID —— **已修** [編譯器 + 數值測試]
+
+`LightingController` 的 render loop 在背景執行緒讀 `level`、`isMuted`、`generation`、
+`renderMode`、`renderColour`，主執行緒同時寫；五個欄位標成 `nonisolated(unsafe)`，
+但這個標記在那個位置**完全沒有效果**，Swift 6 編譯器逐項警告了。最壞的不是一顆 LED
+撕裂一幀：舊 loop 可能看不到 generation 已改，換模式後跟新 loop 一起活著，兩條各以
+30 Hz 搶同一把 device lock，讓燈光卡頓並延長每一次 HID 操作。
+
+現在 render thread 每幀只拿一次鎖定快照；generation 交接與五個值在同一個
+`LightingRenderState` 裡同步。測試斷言 generation 從 N 變成 N+1 後，N 取得 frame 的
+結果是 `nil`，而 N+1 同一幀讀到完整的模式、顏色、0.625 電平與 mute 狀態。原本六個
+燈光 concurrency warning（五個無效標記加一個非 Sendable device capture）也都消失。
+
+### 硬體驗收前置檢查其實會跑五分鐘 —— **已修** [本機實測]
+
+`verify.sh --full` 原本拿 `yunaudio-cli soak` 當「三秒內確認 CoreAudio 能否啟動」。
+但 `soak` 的預設時間是五分鐘，輸出又被 pipe 緩衝；實測等了 **90 秒仍沒有一行**，
+看起來跟 `coreaudiod` 卡死完全一樣。這不只浪費時間：人會照驗收腳本的診斷去重啟整台
+機器的音訊服務。
+
+現在 CLI 有一個只做這件事的 `audio-start`：建立真實 input → virtual output 路由，
+等 **0.5 秒**，以 `cycles > 0` 判定；驗收腳本另設 **10 秒**硬上限。第一次完整驗收量到
+它正常結束，接著 bit-exact 與 realtime 0 allocations 都通過。
+
+### 多輸入輸出檢查把效果器留給下一節恢復 —— **已修** [本機實測]
+
+`more than one input and one output` 為了送 440 Hz 測試音會暫時拿掉效果器，但原本在
+函式的 `defer` 裡逐個打開。`setEffect` 發佈新 graph 是非同步的，所以這個函式已經回傳、
+下一節已經記下 cycle baseline，前一節才開始換 graph；結果 `input trim and master`
+報 `audio kept flowing` 失敗，之後直接監聽與完整性檢查也被同一份未定狀態連鎖污染。
+
+現在效果器在該節返回前用一個 `batched` 重建恢復，並等到 route running 且不 busy。
+同一個 binary 針對三個原始失敗重跑 **120 秒**：input trim 的 cycle 繼續前進、壞監聽
+拿掉後音訊仍流動、完整性檢查比較 **261,384 samples** 並找回 **1,016 frames** 延遲，
+三節全過。
+
+### 讀 Voice Activity 建議參照裝置會把 Swift Optional 當 C 緩衝區 —— **已修** [編譯器 + 數值測試]
+
+`AudioObjectGetPropertyData` 原本直接寫進 `CFString?`，編譯器明確警告 Optional 可能含
+物件參照，形成 `UnsafeMutableRawPointer` 很可能不正確。這是 ARC 管理的 Swift 容器，
+不是 CoreAudio 要的 `CFStringRef *`；一旦系統真的回傳 macOS 27 的建議 echo reference，
+結果可能是壞參照或錯誤的 retain/release。
+
+現在走共用的 `AudioObjectID.string`，以 `Unmanaged<CFString>` 接 +1 參照。測試從真實
+CoreAudio 裝置讀 UID，斷言回傳內容與 UTF-8 byte count 都逐字相同；原警告消失。
+
+### 即時分析還在呼叫已棄用的 CBLAS 宣告 —— **已修且量過** [release benchmark]
+
+單聲道 analysis fold 的 strided copy 用 `cblas_scopy`，但 target 沒開 Accelerate 13.3
+以後的 header，所以每次 build 都警告舊介面已棄用。不能用「反正只是警告」留著，也不
+能為了安靜就換掉即時路徑：曾量過這一段，選 CBLAS 是有效能理由的。
+
+release `bench` 的同機 A/B：
+
+- 舊 CBLAS 宣告：**305.4 ns/cycle**
+- `vDSP_mmov` 替代：**309.1、311.9 ns/cycle**，所以撤回
+- 新 CBLAS 宣告、相同函式：**305.8 ns/cycle**
+
+Package 現在只替 `YunAudioEngine` 的 Clang importer 開
+`ACCELERATE_NEW_LAPACK`，仍用適合 bounded frame count 的 32-bit 介面。11 個案例的
+checksum 全與基線相同，每一個 realtime allocation 都是 **0**，棄用警告消失。
 
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
@@ -261,16 +333,45 @@ flow check 的「more than one input and one output」一節在真實硬體上�
 ### 1. KTV 的下半 [提案]
 
 已完成：Music 與 Spotify 的 now playing（走 scripting dictionary，不是私有的
-MediaRemote）、`.lrc` 逐字歌詞（掃過去的高亮）、音高顯示、**調性偵測與建議移調**
-（Krumhansl-Schmuckler，信心度是與第二名的差距而不是相關係數本身）。
+MediaRemote）、本機與線上 `.lrc` 逐字歌詞（掃過去的高亮）、音高顯示、**調性偵測與
+建議移調**（Krumhansl-Schmuckler，信心度是與第二名的差距而不是相關係數本身）。
 
-還沒做的：
+歌詞同時問 LRCLIB、QQ 音樂、網易雲音樂與 lyrics.ovh；Music 自己的歌詞先用，本機
+`.lrc` 永遠優先。四條請求是並行的，第一份有效時間軸會取消其餘請求。繁簡中文、節目版
+與 `Live` 後綴會配對；原曲不會誤拿同名伴奏。Spotify 的黃霄雲〈年少心動雨季〉本機實
+測：Spotify 自己沒有歌詞欄位，QQ 找到 **63 行**時間軸，網易雲找到 **61 行**，兩份長
+度都約 **265 秒**；LRCLIB 當時只有伴奏版而被正確拒絕。
 
-- **分數。** 唱對了多少時間。旋律要從某處來 —— `.lrc` 只有詞跟時間、沒有音高 ——
-  所以需要旁邊放一個 MIDI 旋律檔，或者用人聲隔離把原唱抽出來量。
-- **對唱模式。** 兩支麥克風、兩個顏色、兩份分數。**每個來源本來就是分開的**，這是
-  結構上白拿的。
-- **調性偵測還沒在真的有音樂在播時驗證過** —— 上次跑的時候 Spotify 是暫停的。
+分數與對唱也已完成。每支麥克風一條 pitch history、一份分數；被擷取的 Spotify／QQ
+音樂不會再被列成「歌手」。可信度分三層：
+
+- 同名 `.mid`：精確旋律與逐行分數。
+- 已擷取的原唱：自動取歌詞段落內的人聲音高當音訊參考，介面明講它不如 MIDI 精確。
+- 只有伴奏或沒有可用旋律：依偵測出的調性、音準、歌詞段落與實際演唱時間評分。伴奏
+  有和弦與節拍但沒有原唱旋律，所以不把它冒充精確旋律。
+
+還沒完成的是**沒有 scripting dictionary 的播放器目前歌曲辨識**。程式已接上公開
+ShazamKit，直接吃現有 application tap 的聲音，所以 QQ 音樂、網易雲、瀏覽器都走同一
+條路；真實 Spotify〈年少心動雨季〉驗證時，tap 為 **−6.4 dBFS**、259,584 samples
+寫入、0 dropped，但 ad-hoc 建置的 Shazam 目錄回 `ShazamCore 102`。這不是音訊或簽名
+格式失敗：Apple 要求在 Developer 帳號的 App ID 先啟用 ShazamKit。正式簽章完成前，
+這條路徑只顯示可行動的理由，且一次失敗後停止重試；QQ／網易雲的歌詞來源不受影響。
+- **調性偵測已經在真的 Spotify 音訊上驗證過。** 不是播放器說「playing」就算：
+  flow check 同時量到 Spotify tap **−8.5 dBFS**、analysis ring 寫入
+  **244,480 samples**、等待 512、丟棄 **0**，20 個 chroma 視窗合計能量
+  **16,704.8**，最後報 C♯、信心 34%。歌曲資訊同一輪讀到歌手、歌名與 146 秒位置，
+  所以 `.lrc` 配對與時間線的上游也真的有回答。
+
+這次修的是兩個後來才加進去的回歸，不是補一個從未存在的功能。最初版已經會從
+Spotify 讀歌名、歌手、播放位置與長度，再按名稱配本機 `.lrc`；後來把問答挪到背景後，
+Spotify 接受 Apple Event 卻不回答時會永久占住串列佇列，`isAskingThePlayer` 也永遠不
+會清。現在每次腳本有 **2 秒**上限，timeout、Automation 被拒與其他 Apple Event 錯誤
+分開，暫時失敗保留上一首歌與歌詞而不是把面板清空。
+
+另一個回歸在更底下：`AudioDeviceStart` 實測會回 `noErr`，但一次 IOProc 都不呼叫。
+當時 preset 後 cycle count 是 **0**，所以 Spotify tap、錄音、分析器一起讀到靜音，看
+起來卻只像 KTV 壞掉。每次 start 現在必須在 **750 ms** 內完成至少兩個 IO cycle；
+否則先以完全相同的配置重試一次，仍失敗才具名報錯並完整拆除。
 
 ### 2. MIDI 的另一半 [本機實測]
 

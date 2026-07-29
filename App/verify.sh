@@ -50,7 +50,7 @@ for argument in "$@"; do
 verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
-  tests                          607 of them                          ~7 s
+  tests                          642 of them                          ~7 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build-app.sh                        ~50 s
   offscreen render               every panel, no window server       ~20 s
@@ -87,6 +87,7 @@ wanted() {
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT
+rm -f build/verify-last-failure.log
 FAILED=()
 SKIPPED=()
 
@@ -104,6 +105,8 @@ step() {
 	fi
 	echo "FAILED"
 	FAILED+=("${name}")
+	mkdir -p build
+	cp "${WORK}/last.txt" build/verify-last-failure.log
 	# Diagnostics only. A failing `swift build` prints the whole frontend
 	# invocation — several thousand characters of `-Xcc` flags — and burying
 	# the one line that says what is wrong under that is how a gate stops being
@@ -121,19 +124,25 @@ step() {
 	# nobody reads, which is the whole reason it exists.
 	local errors
 	errors=$( {
-		grep -aE "error: |✘" "${WORK}/last.txt"
-		sed -n '/flow(s) failed/,$p' "${WORK}/last.txt"
+		tr '\r' '\n' <"${WORK}/last.txt" | grep -aE "error: |✘"
+		tr '\r' '\n' <"${WORK}/last.txt" | sed -n '/flow(s) failed/,$p'
 	} | grep -avE "^\s+(builtin-|/Applications/|cd /)" | cut -c1-200 | head -20)
 	if [[ -n "${errors}" ]]; then
 		diagnostics="${errors}"
 	else
-		diagnostics=$(grep -aE "warning: " "${WORK}/last.txt" | cut -c1-200 | head -8)
+		diagnostics=$(
+			tr '\r' '\n' <"${WORK}/last.txt" |
+				grep -aE "warning: " |
+				cut -c1-200 |
+				head -8
+		)
 	fi
 	if [[ -n "${diagnostics}" ]]; then
 		sed 's/^/      /' <<<"${diagnostics}"
 	else
 		sed 's/^/      /' <<<"$(tail -8 "${WORK}/last.txt" | cut -c1-200)"
 	fi
+	echo "      full output: build/verify-last-failure.log"
 	return 1
 }
 
@@ -189,11 +198,12 @@ tests_ran_and_did_not_shrink() {
 
 step "tests" tests_ran_and_did_not_shrink
 step "strings" ./App/check-strings.sh
-step "app bundle" ./App/build-app.sh
+APP_BUNDLE_FAILED=0
+step "app bundle" ./App/build-app.sh || APP_BUNDLE_FAILED=1
 
 # An unbuilt bundle makes every check below meaningless rather than failing, so
 # stop here rather than reporting a stale binary as verified.
-if [[ ${#FAILED[@]} -gt 0 ]]; then
+if [[ "${APP_BUNDLE_FAILED}" == "1" ]]; then
 	echo
 	echo "stopping: nothing below can be trusted against a bundle that did not build"
 	printf 'failed: %s\n' "${FAILED[*]}"
@@ -325,8 +335,26 @@ nobody_else_has_the_devices() {
 }
 
 audio_can_start() {
+	local output="${WORK}/audio-start.txt"
+	.build/debug/yunaudio-cli audio-start >"${output}" 2>&1 &
+	local probe=$!
+	local waited=0
+	while kill -0 "${probe}" 2>/dev/null && [[ "${waited}" -lt 10 ]]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 "${probe}" 2>/dev/null; then
+		kill "${probe}" 2>/dev/null
+		wait "${probe}" 2>/dev/null
+		echo "error: the CoreAudio start probe did not return within ${waited}s"
+		return 1
+	fi
+	local status=0
+	wait "${probe}" || status=$?
+	cat "${output}"
+	[[ "${status}" == "0" ]] || return 1
 	local rate
-	rate=$(.build/debug/yunaudio-cli soak 2>/dev/null | grep "cycle rate" | grep -oE '[0-9]+\.[0-9]' | head -1)
+	rate=$(grep "cycle rate" "${output}" | grep -oE '[0-9]+\.[0-9]' | head -1)
 	[[ -n "${rate}" && "${rate}" != "0.0" ]]
 }
 

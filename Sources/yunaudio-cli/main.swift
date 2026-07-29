@@ -1081,6 +1081,51 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
     exit(0)
 }
 
+// One bounded answer to the question every live measurement depends on.
+//
+// Reusing `soak` for this looked economical and was not: soak waits ten
+// seconds, samples every fifteen, runs for five minutes by default, and stdout
+// is block-buffered when the gate pipes it. The supposed three-second
+// preflight consequently sat in command substitution until the whole soak
+// ended — or forever when coreaudiod stopped answering.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "audio-start" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard
+        let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let destination = all.first(where: {
+            $0.uid == ClockAnchorPublisher.driverDeviceUID
+        }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
+    else {
+        print("need a real input and a loopback output")
+        exit(1)
+    }
+
+    let routes = (0..<min(2, destination.outputChannels)).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    }
+    let engine = RoutingEngine()
+    do {
+        try engine.start(
+            sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid,
+            routes: routes, preferredSampleRate: 48000)
+    } catch {
+        print("could not start: \(error)")
+        exit(1)
+    }
+    let before = engine.cycleCount
+    let began = Date()
+    Thread.sleep(forTimeInterval: 0.5)
+    let elapsed = Date().timeIntervalSince(began)
+    let cycles = engine.cycleCount - before
+    engine.stop()
+
+    let rate = elapsed > 0 ? Double(cycles) / elapsed : 0
+    print(String(format: "cycle rate %.1f/s over %llu cycles", rate, cycles))
+    exit(cycles > 0 ? 0 : 1)
+}
+
 // Routes for a long time and watches for the things that only appear after one.
 //
 // Everything else here measures a few seconds. This application is meant to
@@ -1923,7 +1968,6 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "dsp" {
     exit(0)
 }
 
-
 /// Whether the detector actually fires, proved without a room.
 ///
 /// The awkward part of asserting anything about a voice detector is that it
@@ -1935,9 +1979,11 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "dsp" {
 /// The header's caveat is the reason for the IOProc that does nothing — with
 /// input not running, the state reads 0 whatever is being said.
 private func proveVoiceActivity(deviceMatch: String) -> Bool {
-    guard let device = (try? AudioDevices.all())?.first(where: {
-        $0.hasInput && $0.name.localizedCaseInsensitiveContains(deviceMatch)
-    }) else {
+    guard
+        let device = (try? AudioDevices.all())?.first(where: {
+            $0.hasInput && $0.name.localizedCaseInsensitiveContains(deviceMatch)
+        })
+    else {
         print("no input device matched \(deviceMatch)")
         return false
     }
@@ -2054,7 +2100,9 @@ private func proveVoiceActivity(deviceMatch: String) -> Bool {
         String(
             format: "  %d buffer(s) of speech played, peak at the input %.3f, %d change(s)",
             scheduled, level.peak, seen.changeCount))
-    print(seen.heardVoice ? "  the detector reported voice" : "  the detector never reported voice")
+    print(
+        seen.heardVoice
+            ? "  the detector reported voice" : "  the detector never reported voice")
     engine.stop()
     return seen.heardVoice
 }
@@ -2143,10 +2191,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "vad" {
         }
         let changes = Changes()
         guard
-            let watcher = VoiceActivityWatcher(device: device.id, onChange: { speaking in
-                changes.bump()
-                print("  \(speaking ? "voice" : "silence")")
-            })
+            let watcher = VoiceActivityWatcher(
+                device: device.id,
+                onChange: { speaking in
+                    changes.bump()
+                    print("  \(speaking ? "voice" : "silence")")
+                })
         else {
             print("this device does not publish the detector")
             exit(1)

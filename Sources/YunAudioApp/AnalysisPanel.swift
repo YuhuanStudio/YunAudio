@@ -56,7 +56,6 @@ struct SpectrumView: View {
         }
         .frame(height: 72)
         .opacity(isRunning ? 1 : 0.35)
-        .animation(.linear(duration: 0.05), value: bands)
     }
 
     /// A frequency axis.

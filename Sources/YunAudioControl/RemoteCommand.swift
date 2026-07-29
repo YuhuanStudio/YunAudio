@@ -114,7 +114,6 @@ public enum RemoteCommand: Equatable, Sendable {
         return URL(string: "\(scheme)://\(noun)/\(escaped)")!
     }
 
-
     /// The commands worth putting a physical button on, in the toggle form a
     /// button without a light has to ask for.
     ///

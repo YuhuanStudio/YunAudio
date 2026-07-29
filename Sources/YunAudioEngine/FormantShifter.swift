@@ -61,11 +61,13 @@ public final class FormantShifter {
     private var real: [Float]
     private var imaginary: [Float]
     private var frame: [Float]
+    private var magnitudes: [Float]
     private var logMagnitude: [Float]
     private var cepstrumReal: [Float]
     private var cepstrumImaginary: [Float]
     private var envelope: [Float]
     private var warped: [Float]
+    private var symmetric: [Float]
 
     public init?() {
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
@@ -92,11 +94,13 @@ public final class FormantShifter {
         real = [Float](repeating: 0, count: half)
         imaginary = [Float](repeating: 0, count: half)
         frame = [Float](repeating: 0, count: Self.windowSize)
+        magnitudes = [Float](repeating: 0, count: half)
         logMagnitude = [Float](repeating: 0, count: Self.windowSize)
         cepstrumReal = [Float](repeating: 0, count: half)
         cepstrumImaginary = [Float](repeating: 0, count: half)
         envelope = [Float](repeating: 0, count: half)
         warped = [Float](repeating: 0, count: half)
+        symmetric = [Float](repeating: 0, count: Self.windowSize)
     }
 
     deinit { vDSP_destroy_fftsetup(setup) }
@@ -125,8 +129,17 @@ public final class FormantShifter {
         let hop = Self.hop
 
         // Slide the analysis window along and take the new hop.
-        input.removeFirst(hop)
-        input.append(contentsOf: UnsafeBufferPointer(start: samples, count: hop))
+        input.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            // This is a realtime stage. Array remove/append leaves its storage
+            // and copy-on-write decisions to the standard library; this makes
+            // the fixed O(window) slide explicit. The overlap is intentional,
+            // so `memmove` rather than `memcpy` carries the retained samples.
+            memmove(
+                base, base + hop,
+                (size - hop) * MemoryLayout<Float>.stride)
+            (base + size - hop).update(from: samples, count: hop)
+        }
 
         // Identity is a real setting, not a special case: somebody switching the
         // stage on before deciding what to do with it should hear the latency
@@ -139,7 +152,17 @@ public final class FormantShifter {
             return
         }
 
-        vDSP.multiply(input, window, result: &frame)
+        input.withUnsafeBufferPointer { inputBuffer in
+            window.withUnsafeBufferPointer { windowBuffer in
+                frame.withUnsafeMutableBufferPointer { frameBuffer in
+                    vDSP_vmul(
+                        inputBuffer.baseAddress!, 1,
+                        windowBuffer.baseAddress!, 1,
+                        frameBuffer.baseAddress!, 1,
+                        vDSP_Length(size))
+                }
+            }
+        }
 
         let half = size / 2
         real.withUnsafeMutableBufferPointer { realBuffer in
@@ -165,23 +188,39 @@ public final class FormantShifter {
         }
 
         // Window again and overlap-add.
-        vDSP.multiply(frame, window, result: &frame)
+        frame.withUnsafeMutableBufferPointer { frameBuffer in
+            window.withUnsafeBufferPointer { windowBuffer in
+                vDSP_vmul(
+                    frameBuffer.baseAddress!, 1,
+                    windowBuffer.baseAddress!, 1,
+                    frameBuffer.baseAddress!, 1,
+                    vDSP_Length(size))
+            }
+        }
         var scale = overlapScale
-        vDSP_vsmul(frame, 1, &scale, &frame, 1, vDSP_Length(size))
+        frame.withUnsafeMutableBufferPointer { frameBuffer in
+            vDSP_vsmul(
+                frameBuffer.baseAddress!, 1, &scale,
+                frameBuffer.baseAddress!, 1, vDSP_Length(size))
+        }
 
         for index in 0..<(size - hop) { output[index] += frame[index] }
         for index in (size - hop)..<size { output[index] = frame[index] }
 
         for index in 0..<hop { samples[index] = output[index] }
-        output.removeFirst(hop)
-        output.append(contentsOf: [Float](repeating: 0, count: hop))
+        output.withUnsafeMutableBufferPointer { buffer in
+            let base = buffer.baseAddress!
+            memmove(
+                base, base + hop,
+                (size - hop) * MemoryLayout<Float>.stride)
+            (base + size - hop).update(repeating: 0, count: hop)
+        }
     }
 
     /// Replaces the spectral envelope with a stretched copy of itself.
     private func shapeSpectrum(_ split: inout DSPSplitComplex, half: Int) {
         // Magnitudes. Bin 0 packs DC and Nyquist together in this form and is
         // left out of the envelope entirely — it is not a frequency.
-        var magnitudes = [Float](repeating: 0, count: half)
         magnitudes.withUnsafeMutableBufferPointer { output in
             vDSP_zvabs(&split, 1, output.baseAddress!, 1, vDSP_Length(half))
         }
@@ -200,7 +239,6 @@ public final class FormantShifter {
         // The log spectrum is real and even, so it is transformed as a real
         // signal of length `half` — mirrored into the second half first, which
         // is what makes the result real rather than complex.
-        var symmetric = [Float](repeating: 0, count: Self.windowSize)
         for index in 0..<half {
             symmetric[index] = logMagnitude[index]
             symmetric[Self.windowSize - 1 - index] = logMagnitude[index]

@@ -282,6 +282,8 @@ public struct YunWrap: Layout {
     private let fills: Bool
 
     /// - Parameters:
+    ///   - spacing: Horizontal distance between neighbouring items.
+    ///   - lineSpacing: Vertical distance between lines.
     ///   - balanced: Spread the items evenly over the lines rather than filling
     ///     each in turn.
     ///   - fills: Stretch every item on a line to share the width equally.
@@ -313,14 +315,16 @@ public struct YunWrap: Layout {
     private func lines(within maxWidth: CGFloat, subviews: Subviews) -> [Line] {
         let widths = subviews.indices.map { subviews[$0].sizeThatFits(.unspecified).width }
         let heights = subviews.indices.map { subviews[$0].sizeThatFits(.unspecified).height }
-        return Self.breaks(widths: widths, within: maxWidth, spacing: spacing, balanced: balanced)
-            .map { indices in
-                Line(
-                    indices: indices,
-                    width: indices.map { widths[$0] }.reduce(0, +)
-                        + spacing * CGFloat(max(0, indices.count - 1)),
-                    height: indices.map { heights[$0] }.max() ?? 0)
-            }
+        return Self.breaks(
+            widths: widths, within: maxWidth, spacing: spacing, balanced: balanced
+        )
+        .map { indices in
+            Line(
+                indices: indices,
+                width: indices.map { widths[$0] }.reduce(0, +)
+                    + spacing * CGFloat(max(0, indices.count - 1)),
+                height: indices.map { heights[$0] }.max() ?? 0)
+        }
     }
 
     /// Where the lines break, as a pure function of the widths.
@@ -332,9 +336,14 @@ public struct YunWrap: Layout {
     /// mistake rather than as a row that wrapped. Balanced, the same six go
     /// three and three and it reads as deliberate.
     ///
-    /// - Parameter balanced: Spread the items evenly over as few lines as
-    ///   greedy packing would have used. Never uses *more* lines than greedy:
-    ///   the point is the shape of the wrap, not a different amount of wrapping.
+    /// - Parameters:
+    ///   - widths: The natural width of each item.
+    ///   - maxWidth: The space available to one line.
+    ///   - spacing: Horizontal distance between neighbouring items.
+    ///   - balanced: Spread the items evenly over as few lines as greedy packing
+    ///     would have used. Never uses *more* lines than greedy: the point is the
+    ///     shape of the wrap, not a different amount of wrapping.
+    /// - Returns: The item indices assigned to each line.
     static func breaks(
         widths: [CGFloat], within maxWidth: CGFloat, spacing: CGFloat, balanced: Bool
     ) -> [[Int]] {

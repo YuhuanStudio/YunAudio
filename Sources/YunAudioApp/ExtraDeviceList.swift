@@ -247,7 +247,9 @@ struct ExtraDeviceList: View {
         Menu {
             ForEach(devices, id: \.uid) { device in
                 Button {
-                    if isInput { model.addSource(device.uid) } else {
+                    if isInput {
+                        model.addSource(device.uid)
+                    } else {
                         model.addDestination(device.uid)
                     }
                 } label: {
@@ -273,7 +275,8 @@ struct ExtraDeviceList: View {
         .help(
             isInput
                 ? loc(
-                    "Mix a second microphone or line input into the same route. It gets its own fader, mute and level.")
+                    "Mix a second microphone or line input into the same route. It gets its own fader, mute and level."
+                )
                 : loc(
                     "Send the same mix to another output as well. For a separate mix with its own levels, use the monitor below."
                 ))

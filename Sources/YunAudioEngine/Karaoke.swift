@@ -272,13 +272,143 @@ extension KaraokeScore {
             lines: lines)
     }
 
+    /// Scores intonation in the detected key when no melody file exists.
+    ///
+    /// This is intentionally not called a melody score: it cannot know whether
+    /// the singer chose the written note, only whether the note was in tune
+    /// with this song and whether the timed phrases were actually sung. That
+    /// is still a useful, reproducible answer for streaming tracks whose lyric
+    /// databases carry words and time but no score.
+    ///
+    /// - Parameters:
+    ///   - sung: Pitched samples from one microphone.
+    ///   - key: The key measured from the backing track.
+    ///   - lyrics: Timed phrases used to count silence.
+    ///   - through: Where the performance has reached on the song clock.
+    /// - Returns: The intonation and phrase-timing score.
+    public static func keyScore(
+        sung: [PitchSample], key: KeyDetector.Key, lyrics: [Lyrics.Line],
+        through: Double
+    ) -> KaraokeScore {
+        let sung = sung.sorted { $0.time < $1.time }
+        let step = typicalStep(of: sung)
+        guard step > 0 else { return .none }
+
+        let degrees =
+            key.isMinor ? [0, 2, 3, 5, 7, 8, 10] : [0, 2, 4, 5, 7, 9, 11]
+        let pitchClasses = degrees.map { Double((key.pitchClass + $0) % 12) }
+        let onThreshold = 0.5
+        let nearThreshold = 0.9
+
+        var onSeconds = 0.0
+        var nearSeconds = 0.0
+        var errorTotal = 0.0
+        var onPerLine = [Double](repeating: 0, count: lyrics.count)
+        var nearPerLine = [Double](repeating: 0, count: lyrics.count)
+        for sample in sung {
+            let error =
+                pitchClasses
+                .map { semitoneError(sung: sample.midi, reference: $0) }
+                .min { abs($0) < abs($1) } ?? 0
+            errorTotal += error
+            let line = lyricIndex(at: sample.time, lyrics: lyrics)
+            if abs(error) <= onThreshold {
+                onSeconds += step
+                if let line { onPerLine[line] += step }
+            } else if abs(error) <= nearThreshold {
+                nearSeconds += step
+                if let line { nearPerLine[line] += step }
+            }
+        }
+
+        let sungSeconds = Double(sung.count) * step
+        let expectedSeconds =
+            lyrics.isEmpty
+            ? sungSeconds
+            : lyrics.indices.reduce(0) { total, index in
+                let start = lyrics[index].time
+                let next = index + 1 < lyrics.count ? lyrics[index + 1].time : start + 4
+                let end = min(through, next, start + 4)
+                return total + max(0, end - start)
+            }
+        let denominator = max(sungSeconds, expectedSeconds)
+        let credit = onSeconds + nearSeconds * nearPitchCredit
+        let percentage =
+            denominator > 0 ? max(0, min(100, credit / denominator * 100)) : 0
+
+        var lineScores: [Line] = []
+        for index in lyrics.indices {
+            let start = lyrics[index].time
+            let end =
+                min(
+                    through,
+                    index + 1 < lyrics.count ? lyrics[index + 1].time : start + 4,
+                    start + 4)
+            let total = max(0, end - start)
+            let lineCredit = onPerLine[index] + nearPerLine[index] * nearPitchCredit
+            lineScores.append(
+                Line(
+                    index: index, time: start, text: lyrics[index].text,
+                    referenceSeconds: total, onPitchSeconds: onPerLine[index],
+                    nearPitchSeconds: nearPerLine[index],
+                    percentage: total > 0
+                        ? max(0, min(100, lineCredit / total * 100)) : 0))
+        }
+
+        return KaraokeScore(
+            percentage: percentage, onPitchSeconds: onSeconds,
+            nearPitchSeconds: nearSeconds,
+            silentSeconds: max(0, denominator - sungSeconds),
+            referenceSeconds: denominator, sungSeconds: sungSeconds,
+            meanErrorSemitones: sung.isEmpty ? nil : errorTotal / Double(sung.count),
+            lines: lineScores)
+    }
+
+    /// Keeps the pitched part of captured player audio that overlaps words.
+    ///
+    /// This is the automatic reference used when an original recording is
+    /// already one of the routed application sources. Instrumental gaps are
+    /// excluded by the lyric phrases, and pitches outside any practical human
+    /// range are excluded so a bass line cannot become the tune merely because
+    /// it was the loudest periodic sound in the mix.
+    ///
+    /// This is still an audio-derived reference, not a score file. The
+    /// interface says so and continues to call MIDI the exact source.
+    public static func capturedReference(
+        _ samples: [PitchSample], lyrics: [Lyrics.Line], through: Double
+    ) -> [PitchSample] {
+        guard !lyrics.isEmpty else { return [] }
+        return samples.filter { sample in
+            sample.time <= through
+                && (36...96).contains(sample.midi)
+                && lyricIndex(at: sample.time, lyrics: lyrics) != nil
+        }
+    }
+
+    private static func lyricIndex(
+        at time: Double, lyrics: [Lyrics.Line]
+    ) -> Int? {
+        guard let first = lyrics.first, time >= first.time else { return nil }
+        var low = 0
+        var high = lyrics.count - 1
+        while low < high {
+            let middle = (low + high + 1) / 2
+            if lyrics[middle].time <= time { low = middle } else { high = middle - 1 }
+        }
+        let end =
+            min(
+                low + 1 < lyrics.count ? lyrics[low + 1].time : lyrics[low].time + 4,
+                lyrics[low].time + 4)
+        return time < end ? low : nil
+    }
+
     /// The median gap between samples, which is how long one of them stands
     /// for.
     ///
     /// The median rather than the mean, because a series with one rest in the
     /// middle of it has one enormous gap and a mean that says every sample is
     /// worth twice what it is.
-    static func typicalStep(of samples: [PitchSample]) -> Double {
+    public static func typicalStep(of samples: [PitchSample]) -> Double {
         guard samples.count > 1 else { return 0 }
         var gaps: [Double] = []
         gaps.reserveCapacity(samples.count - 1)
@@ -329,7 +459,12 @@ public final class SingerPitch {
     private let tracker: PitchTracker?
     private let sampleRate: Double
     /// Samples waiting for a whole tracker frame.
-    private var pending: [Float] = []
+    ///
+    /// A growable array plus `removeFirst` used to allocate two frame arrays
+    /// and move the whole unread tail every 43 ms. The input arrives in order,
+    /// so one fixed frame and a fill count are the complete queue.
+    private let pending: UnsafeMutablePointer<Float>
+    private var pendingCount = 0
     /// Whole frames consumed since the anchor, which is the clock.
     private var frames = 0
     private var anchor: Double = 0
@@ -338,12 +473,15 @@ public final class SingerPitch {
         guard let tracker = PitchTracker(sampleRate: sampleRate) else { return nil }
         self.tracker = tracker
         self.sampleRate = sampleRate
+        pending = .allocate(capacity: PitchTracker.frameSize)
     }
+
+    deinit { pending.deallocate() }
 
     /// Starts again from a moment on the song's clock.
     public func reset(at seconds: Double) {
         samples.removeAll(keepingCapacity: true)
-        pending.removeAll(keepingCapacity: true)
+        pendingCount = 0
         hertz = 0
         frames = 0
         anchor = seconds
@@ -360,27 +498,42 @@ public final class SingerPitch {
     /// drift against them at all; the player is asked once, for where the song
     /// was when scoring started.
     public func add(_ block: [Float]) {
+        block.withUnsafeBufferPointer { add($0) }
+    }
+
+    /// Takes a borrowed block without making an intermediate array.
+    public func add(_ block: UnsafeBufferPointer<Float>) {
         guard let tracker else { return }
-        pending.append(contentsOf: block)
-        while pending.count >= PitchTracker.frameSize {
-            let frame = Array(pending.prefix(PitchTracker.frameSize))
-            let found = tracker.track(frame: frame)
-            hertz = found
-            if found > 0 {
-                // The middle of the frame, because that is what an estimate
-                // over a frame is about. Half a frame is 21 ms at 48 kHz and
-                // the pairing window is 60, so it matters at a note boundary.
-                let centre =
-                    anchor
-                    + (Double(frames) * Double(PitchTracker.frameSize)
-                        + Double(PitchTracker.frameSize) / 2) / sampleRate
-                let midi = PitchSample.midi(fromHertz: Double(found))
-                rangeTotal += midi
-                rangeCount += 1
-                if keepsHistory { samples.append(PitchSample(time: centre, midi: midi)) }
+        guard let blockAddress = block.baseAddress else { return }
+        var consumed = 0
+        while consumed < block.count {
+            let copied = min(PitchTracker.frameSize - pendingCount, block.count - consumed)
+            pending.advanced(by: pendingCount).update(
+                from: blockAddress.advanced(by: consumed), count: copied)
+            pendingCount += copied
+            consumed += copied
+
+            if pendingCount == PitchTracker.frameSize {
+                let found = tracker.track(
+                    frame: UnsafeBufferPointer(
+                        start: pending, count: PitchTracker.frameSize))
+                hertz = found
+                if found > 0 {
+                    // The middle of the frame, because that is what an estimate
+                    // over a frame is about. Half a frame is 21 ms at 48 kHz and
+                    // the pairing window is 60, so it matters at a note boundary.
+                    let centre =
+                        anchor
+                        + (Double(frames) * Double(PitchTracker.frameSize)
+                            + Double(PitchTracker.frameSize) / 2) / sampleRate
+                    let midi = PitchSample.midi(fromHertz: Double(found))
+                    rangeTotal += midi
+                    rangeCount += 1
+                    if keepsHistory { samples.append(PitchSample(time: centre, midi: midi)) }
+                }
+                pendingCount = 0
+                frames += 1
             }
-            pending.removeFirst(PitchTracker.frameSize)
-            frames += 1
         }
     }
 

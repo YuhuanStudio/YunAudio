@@ -74,6 +74,69 @@ public struct AudioProcess: Sendable, Identifiable, Hashable {
     }
 }
 
+/// What the HAL knew immediately around one process-tap creation call.
+///
+/// `AudioHardwareCreateProcessTap` has been measured returning `noErr` and an
+/// unknown object ID. A status and an empty ID cannot distinguish a process
+/// disappearing during the call from the HAL creating an object and failing to
+/// return it, so both object lists are sampled on either side of the call.
+public struct ProcessTapCreationSnapshot: Sendable, Equatable {
+    public struct ObservedTap: Sendable, Equatable {
+        public let id: AudioObjectID
+        public let processIDs: [AudioObjectID]?
+        public let bundleIDs: [String]?
+    }
+
+    public let requestedProcessIDs: [AudioObjectID]
+    public let requestedBundleIDs: [String]
+    public let ignoredBundleIDs: [String]
+    public let processIDsBefore: [AudioObjectID]?
+    public let processIDsAfter: [AudioObjectID]?
+    public let tapIDsBefore: [AudioObjectID]?
+    public let tapIDsAfter: [AudioObjectID]?
+    public let newTaps: [ObservedTap]
+
+    var diagnostic: String {
+        func list(_ values: [AudioObjectID]?) -> String {
+            guard let values else { return "unavailable" }
+            return values.isEmpty ? "none" : values.map(String.init).joined(separator: ", ")
+        }
+        func presence(
+            of requested: [AudioObjectID], in available: [AudioObjectID]?
+        ) -> String {
+            guard let available else { return "unavailable" }
+            let present = Set(available)
+            let missing = requested.filter { !present.contains($0) }
+            return missing.isEmpty
+                ? "all present"
+                : "missing \(missing.map(String.init).joined(separator: ", "))"
+        }
+        let observed =
+            newTaps.isEmpty
+            ? "none"
+            : newTaps.map { tap in
+                let processes = list(tap.processIDs)
+                let bundles =
+                    tap.bundleIDs.map {
+                        $0.isEmpty ? "none" : $0.joined(separator: ", ")
+                    } ?? "unavailable"
+                return "\(tap.id) [processes \(processes); bundles \(bundles)]"
+            }.joined(separator: ", ")
+        let bundles =
+            requestedBundleIDs.isEmpty ? "none" : requestedBundleIDs.joined(separator: ", ")
+        let ignored =
+            ignoredBundleIDs.isEmpty
+            ? ""
+            : "; ignored non-bundle identity(s) \(ignoredBundleIDs.joined(separator: ", "))"
+        return
+            "process object(s) \(list(requestedProcessIDs)); "
+            + "before: \(presence(of: requestedProcessIDs, in: processIDsBefore)); "
+            + "after: \(presence(of: requestedProcessIDs, in: processIDsAfter)); "
+            + "bundle(s) \(bundles)\(ignored); "
+            + "new tap object(s) \(observed)"
+    }
+}
+
 /// A live capture of one or more applications' audio.
 ///
 /// Built on `AudioHardwareCreateProcessTap`, which lands the tapped audio on a
@@ -86,6 +149,8 @@ public final class ProcessTap {
     public let uid: String
     /// Format the tap presents. Reported so the aggregate can be built to match.
     public let format: AudioStreamBasicDescription?
+    /// The process and tap object lists immediately around creation.
+    public let creationSnapshot: ProcessTapCreationSnapshot
 
     private var isDestroyed = false
 
@@ -95,6 +160,30 @@ public final class ProcessTap {
     /// The bundle identifiers this tap was told to hold on to. Empty when the
     /// tap is by process object alone.
     public let bundleIDs: [String]
+
+    /// Triggers macOS's system-audio capture consent without starting IO.
+    ///
+    /// There is no standalone request API for this permission. CoreAudio asks
+    /// when a process tap is created, so the least invasive request is a
+    /// private global tap that is destroyed before it ever joins an aggregate.
+    /// It neither mutes nor reads another application.
+    public static func requestCaptureAccess() -> OSStatus {
+        let description = capturePermissionDescription()
+        var tapID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateProcessTap(description, &tapID)
+        if tapID != kAudioObjectUnknown {
+            AudioHardwareDestroyProcessTap(tapID)
+        }
+        return status
+    }
+
+    static func capturePermissionDescription() -> CATapDescription {
+        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        description.name = "YunAudio Permission Check"
+        description.isPrivate = true
+        description.muteBehavior = .unmuted
+        return description
+    }
 
     /// - Parameters:
     ///   - processIDs: `AudioObjectID`s of the processes to capture.
@@ -165,6 +254,7 @@ public final class ProcessTap {
         let realBundleIDs = bundleIDs.filter {
             !$0.hasPrefix(AudioApplications.pidIdentityPrefix) && !$0.isEmpty
         }
+        let ignoredBundleIDs = bundleIDs.filter { !realBundleIDs.contains($0) }
         let restoring = !realBundleIDs.isEmpty
         if restoring {
             description.bundleIDs = realBundleIDs
@@ -173,8 +263,16 @@ public final class ProcessTap {
         restoresProcesses = restoring
         self.bundleIDs = realBundleIDs
 
+        let processIDsBefore = try? AudioObjectID.system.array(of: .processList)
+        let tapIDsBefore = try? AudioObjectID.system.array(of: .tapList)
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
+        let snapshot = Self.snapshot(
+            requestedProcessIDs: processIDs,
+            requestedBundleIDs: realBundleIDs,
+            ignoredBundleIDs: ignoredBundleIDs,
+            processIDsBefore: processIDsBefore,
+            tapIDsBefore: tapIDsBefore)
         guard status == noErr else { throw ProcessTapError.creationFailed(status) }
         // Succeeded, and handed back nothing.
         //
@@ -190,9 +288,9 @@ public final class ProcessTap {
         // instead, because that is what the next person needs and it is a fact
         // rather than a theory.
         guard tapID != kAudioObjectUnknown else {
-            throw ProcessTapError.noTapReturned(
-                processIDs: processIDs, bundleIDs: bundleIDs)
+            throw ProcessTapError.noTapReturned(snapshot)
         }
+        creationSnapshot = snapshot
         id = tapID
         uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
         format = tapID.optionalValue(of: .tapFormat)
@@ -225,6 +323,32 @@ public final class ProcessTap {
         }
         guard status == noErr, let unmanaged else { return nil }
         return unmanaged.takeRetainedValue()
+    }
+
+    private static func snapshot(
+        requestedProcessIDs: [AudioObjectID],
+        requestedBundleIDs: [String],
+        ignoredBundleIDs: [String],
+        processIDsBefore: [AudioObjectID]?,
+        tapIDsBefore: [AudioObjectID]?
+    ) -> ProcessTapCreationSnapshot {
+        let processIDsAfter = try? AudioObjectID.system.array(of: .processList)
+        let tapIDsAfter = try? AudioObjectID.system.array(of: .tapList)
+        let oldTaps = Set(tapIDsBefore ?? [])
+        let newTaps = (tapIDsAfter ?? []).filter { !oldTaps.contains($0) }.map { id in
+            let held = description(of: id)
+            return ProcessTapCreationSnapshot.ObservedTap(
+                id: id, processIDs: held?.processes, bundleIDs: held?.bundleIDs)
+        }
+        return ProcessTapCreationSnapshot(
+            requestedProcessIDs: requestedProcessIDs,
+            requestedBundleIDs: requestedBundleIDs,
+            ignoredBundleIDs: ignoredBundleIDs,
+            processIDsBefore: processIDsBefore,
+            processIDsAfter: processIDsAfter,
+            tapIDsBefore: tapIDsBefore,
+            tapIDsAfter: tapIDsAfter,
+            newTaps: newTaps)
     }
 
     deinit { destroy() }
@@ -267,16 +391,15 @@ public enum ProcessTapError: Error, CustomStringConvertible {
     /// The HAL accepted the description, returned `noErr`, and produced no tap
     /// object. The arguments it was given, because the cause is not known and
     /// they are what would identify it.
-    case noTapReturned(processIDs: [AudioObjectID], bundleIDs: [String])
+    case noTapReturned(ProcessTapCreationSnapshot)
 
     public var description: String {
         switch self {
         case let .creationFailed(status):
             "AudioHardwareCreateProcessTap failed with \(fourCharDescription(status))"
-        case let .noTapReturned(processIDs, bundleIDs):
-            "AudioHardwareCreateProcessTap returned noErr and no tap for "
-                + "pid(s) \(processIDs.map(String.init).joined(separator: ", ")), "
-                + "bundle(s) \(bundleIDs.isEmpty ? "none" : bundleIDs.joined(separator: ", "))"
+        case let .noTapReturned(snapshot):
+            "AudioHardwareCreateProcessTap returned noErr and no tap; "
+                + snapshot.diagnostic
         }
     }
 }

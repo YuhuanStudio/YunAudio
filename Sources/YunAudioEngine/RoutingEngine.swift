@@ -352,10 +352,28 @@ public final class RoutingEngine: @unchecked Sendable {
         return isolationUnit != nil ? [.voiceIsolation] : []
     }
 
+    /// The installed stages when they can be inspected without waiting for a
+    /// replacement Audio Unit graph to finish building.
+    public var activeEffectStagesIfAvailable: [EffectKind]? {
+        // SwiftUI reads this while `updateEffects` is building Audio Units on
+        // the engine queue. That build owns the same lock and takes tens of
+        // milliseconds, so waiting here turns a background hot swap into a
+        // frozen frame on the main thread. Nil lets the main-actor snapshot
+        // retain the last answer until the publication has finished.
+        guard stateLock.try() else { return nil }
+        defer { stateLock.unlock() }
+        if let effectChain { return effectChain.stages }
+        return isolationUnit != nil ? [.voiceIsolation] : []
+    }
+
     /// How much a dynamics stage is pulling the signal down right now, in
-    /// decibels. Zero when the stage is not in the chain.
-    public func gainReduction(of kind: EffectKind) -> Float {
-        stateLock.lock()
+    /// decibels. Zero when the stage is not in the chain, and nil when a graph
+    /// change owns the state long enough that reading it would block.
+    public func gainReduction(of kind: EffectKind) -> Float? {
+        // Polled by the interface at 20 Hz, including while the chain is being
+        // swapped. Nil tells the main-actor snapshot to hold its last reading;
+        // zero would make the meter visibly blink during every instantiation.
+        guard stateLock.try() else { return nil }
         defer { stateLock.unlock() }
         return effectChain?.gainReduction(of: kind) ?? 0
     }
@@ -363,6 +381,15 @@ public final class RoutingEngine: @unchecked Sendable {
     /// What the hosted plugins say their controls are, by plugin id.
     public func pluginParameters(_ id: String) -> [EffectParameter] {
         stateLock.lock()
+        defer { stateLock.unlock() }
+        return effectChain?.parameters(ofPlugin: id) ?? []
+    }
+
+    /// The same metadata without making an interface redraw wait for a chain
+    /// publication. A plugin's parameter list is structural, so the caller can
+    /// keep the last successful answer while a replacement unit is built.
+    public func pluginParametersIfAvailable(_ id: String) -> [EffectParameter]? {
+        guard stateLock.try() else { return nil }
         defer { stateLock.unlock() }
         return effectChain?.parameters(ofPlugin: id) ?? []
     }
@@ -551,12 +578,29 @@ public final class RoutingEngine: @unchecked Sendable {
     private func startLocked(_ configuration: StartConfiguration) throws {
         droppedMonitor = nil
         droppedExtras = []
-        let failure: Error
+        var failure: Error
         do {
             try startAttempt(configuration)
             return
         } catch let thrown {
             failure = thrown
+        }
+
+        // `AudioDeviceStart` can return `noErr` without the device ever calling
+        // its IOProc. Measured after a preset rebuild: the model said Running,
+        // while the cycle count, recorder, analyser and Spotify tap all stayed
+        // at zero. The same configuration came up on the next attempt.
+        //
+        // Retry that exact request before the fallback ladder. Dropping a
+        // monitor or an extra source would hide a stalled device as a feature
+        // that "could not be used", when none of the main mix ran either.
+        if case RoutingError.noIOCycles = failure {
+            do {
+                try startAttempt(configuration)
+                return
+            } catch let retryFailure {
+                failure = retryFailure
+            }
         }
 
         // What the route can afford to lose, in the order it can afford to lose
@@ -595,6 +639,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // Nothing additional was what was wrong. The first failure is the one
         // that describes the route the caller actually asked for, so that is
         // the one they are told about; the retries were this layer's own idea.
+        stopLocked()
         throw failure
     }
 
@@ -651,7 +696,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // inputs and outputs is one device and must be added once.
         let extras =
             (additionalSourceUIDs + additionalDestinationUIDs
-                + (monitorDeviceUID.map { [$0] } ?? []))
+            + (monitorDeviceUID.map { [$0] } ?? []))
             .filter { $0 != sourceDeviceUID && $0 != destinationDeviceUID }
             .reduce(into: [String]()) { seen, uid in
                 if !seen.contains(uid) { seen.append(uid) }
@@ -998,7 +1043,7 @@ public final class RoutingEngine: @unchecked Sendable {
             graph.pointee.cancelledRing = bridge.ring
         }
 
-        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
         graphCell = cell
 
         var procID: AudioDeviceIOProcID?
@@ -1014,6 +1059,12 @@ public final class RoutingEngine: @unchecked Sendable {
             throw RoutingError.startFailed(startStatus)
         }
         isRunning = true
+        // A success status only means CoreAudio accepted the request. It does
+        // not mean an IOProc ran. Two completed cycles are the first numeric
+        // proof that both the callback and its retirement path are alive.
+        guard yun_rt_cell_wait_for_swap(cell, 750) else {
+            throw RoutingError.noIOCycles
+        }
 
         // A restart builds a fresh graph, which starts at unity. Without this
         // every reconfiguration would quietly undo the trim and the master.
@@ -1347,6 +1398,32 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         graph?.pointee.analysisEnabled = enabled ? 1 : 0
+    }
+
+    /// A snapshot of the analyser hand-off, for diagnostics and acceptance checks.
+    ///
+    /// The fill level alone cannot distinguish an idle producer from a consumer
+    /// that kept up. `written` makes that distinction, while `dropped` proves
+    /// whether a reading silently contains holes.
+    public struct AnalysisStatistics: Sendable {
+        public let isEnabled: Bool
+        public let written: UInt32
+        public let available: UInt32
+        public let dropped: UInt64
+    }
+
+    public var analysisStatistics: AnalysisStatistics {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let graph, let ring = graph.pointee.analysisRing else {
+            return AnalysisStatistics(
+                isEnabled: false, written: 0, available: 0, dropped: 0)
+        }
+        return AnalysisStatistics(
+            isEnabled: graph.pointee.analysisEnabled != 0,
+            written: yun_rt_ring_written(ring),
+            available: yun_rt_ring_available(ring),
+            dropped: yun_rt_ring_dropped(ring))
     }
 
     /// Takes whatever the IO thread has folded to mono since the last call.
@@ -2143,6 +2220,7 @@ public final class RoutingEngine: @unchecked Sendable {
     ///   - timeout: How long to wait in total. The capture is a fixed number of
     ///     frames, so a generous multiple of the time it should take is the
     ///     right shape of limit.
+    ///   - poll: How often to check progress.
     ///   - onProgress: Called on each poll, for a caller that wants to say so.
     /// - Returns: True when the capture filled. False means it stalled, and the
     ///   caller should say that rather than grading whatever partial data
@@ -2200,9 +2278,9 @@ public final class RoutingEngine: @unchecked Sendable {
         // in `Dictionary(uniqueKeysWithValues:)` with "Duplicate values for key".
         // A device listed twice is still that device, so there is nothing to
         // decide between; trapping on it is the one wrong answer.
-        let byUID = Dictionary(members.map { ($0.uid, $0) }, uniquingKeysWith: { first, _ in
-            first
-        })
+        let byUID = Dictionary(
+            members.map { ($0.uid, $0) },
+            uniquingKeysWith: { first, _ in first })
 
         // Taps are appended after the sub-devices on the input side, in the
         // order they were listed, and contribute no output channels. A tap's
@@ -2432,6 +2510,7 @@ public enum RoutingError: Error, CustomStringConvertible {
     case aggregateUnavailable
     case ioProcFailed(OSStatus)
     case startFailed(OSStatus)
+    case noIOCycles
     case echoCancellerFailed
 
     public var description: String {
@@ -2448,6 +2527,8 @@ public enum RoutingError: Error, CustomStringConvertible {
             "AudioDeviceCreateIOProcID failed with \(fourCharDescription(status))"
         case let .startFailed(status):
             "AudioDeviceStart failed with \(fourCharDescription(status))"
+        case .noIOCycles:
+            "AudioDeviceStart returned success but no IO cycle ran within 750 ms"
         case .echoCancellerFailed:
             "the echo canceller could not take the microphone and the speaker"
         }

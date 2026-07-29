@@ -107,13 +107,16 @@ public struct YunSegmented<Value: Hashable>: View {
     @Binding private var selection: Value
     @FocusState private var focused: Value?
 
-    /// - Parameter wraps: Lets the row run onto a second line rather than
-    ///   squeezing. A row of six in a 370-point column truncated its first two
-    ///   labels to "…" — two tabs that were no longer possible to tell apart,
-    ///   in a control whose entire job is telling them apart. An offscreen
-    ///   render cannot show it, because it is given whatever width makes the
-    ///   content look complete; the photograph of the real window at its
-    ///   minimum size is what said so.
+    /// - Parameters:
+    ///   - selection: The currently selected value.
+    ///   - options: Values and the labels shown for them.
+    ///   - wraps: Lets the row run onto a second line rather than squeezing. A
+    ///     row of six in a 370-point column truncated its first two labels to
+    ///     "…" — two tabs that were no longer possible to tell apart, in a
+    ///     control whose entire job is telling them apart. An offscreen render
+    ///     cannot show it, because it is given whatever width makes the content
+    ///     look complete; the photograph of the real window at its minimum size
+    ///     is what said so.
     public init(
         selection: Binding<Value>, options: [(value: Value, title: String)],
         wraps: Bool = false
@@ -139,53 +142,53 @@ public struct YunSegmented<Value: Hashable>: View {
     }
 
     @ViewBuilder private var buttons: some View {
-            ForEach(options, id: \.value) { option in
-                let isSelected = option.value == selection
-                Button {
-                    selection = option.value
-                } label: {
-                    Text(option.title)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(
-                            isSelected ? Yun.Palette.textPrimary : Yun.Palette.textTertiary
-                        )
-                        .lineLimit(1)
-                        // Centred and allowed to take whatever width it is
-                        // given: when the row fills, each cell is an equal
-                        // share, and a label that kept its own width would sit
-                        // against the left edge of its cell.
-                        .frame(maxWidth: wraps ? .infinity : nil)
-                        .padding(.horizontal, wraps ? 6 : 12)
-                        .padding(.vertical, 5)
-                        .background(
-                            isSelected
-                                ? Yun.Palette.accentSubtle
-                                : Yun.Palette.elevated.opacity(0.5),
-                            in: .rect(cornerRadius: Yun.Radius.control)
-                        )
-                        .overlay {
-                            RoundedRectangle(cornerRadius: Yun.Radius.control)
-                                .strokeBorder(
-                                    isSelected
-                                        ? Yun.Palette.borderStrong : Yun.Palette.border,
-                                    lineWidth: 1)
-                        }
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(option.title))
-                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-                .focused($focused, equals: option.value)
-                // The system focus effect is a blue ring, which would be the
-                // only saturated colour in an otherwise monochrome panel. The
-                // source system draws its own ring in --border-strong instead.
-                .focusEffectDisabled()
-                .overlay {
-                    if focused == option.value {
-                        RoundedRectangle(cornerRadius: Yun.Radius.control + 2)
-                            .strokeBorder(Yun.Palette.borderStrong, lineWidth: 2)
-                            .padding(-2)
+        ForEach(options, id: \.value) { option in
+            let isSelected = option.value == selection
+            Button {
+                selection = option.value
+            } label: {
+                Text(option.title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(
+                        isSelected ? Yun.Palette.textPrimary : Yun.Palette.textTertiary
+                    )
+                    .lineLimit(1)
+                    // Centred and allowed to take whatever width it is
+                    // given: when the row fills, each cell is an equal
+                    // share, and a label that kept its own width would sit
+                    // against the left edge of its cell.
+                    .frame(maxWidth: wraps ? .infinity : nil)
+                    .padding(.horizontal, wraps ? 6 : 12)
+                    .padding(.vertical, 5)
+                    .background(
+                        isSelected
+                            ? Yun.Palette.accentSubtle
+                            : Yun.Palette.elevated.opacity(0.5),
+                        in: .rect(cornerRadius: Yun.Radius.control)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: Yun.Radius.control)
+                            .strokeBorder(
+                                isSelected
+                                    ? Yun.Palette.borderStrong : Yun.Palette.border,
+                                lineWidth: 1)
                     }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(option.title))
+            .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+            .focused($focused, equals: option.value)
+            // The system focus effect is a blue ring, which would be the
+            // only saturated colour in an otherwise monochrome panel. The
+            // source system draws its own ring in --border-strong instead.
+            .focusEffectDisabled()
+            .overlay {
+                if focused == option.value {
+                    RoundedRectangle(cornerRadius: Yun.Radius.control + 2)
+                        .strokeBorder(Yun.Palette.borderStrong, lineWidth: 2)
+                        .padding(-2)
                 }
+            }
         }
     }
 }
@@ -455,10 +458,14 @@ public struct YunFader: View {
 /// what it needs from a control is a position, not an opinion about loudness.
 public struct YunSlider: View {
     @Binding private var fraction: Double
+    private let onEditingEnded: () -> Void
     @State private var isHovering = false
 
-    public init(fraction: Binding<Double>) {
+    public init(
+        fraction: Binding<Double>, onEditingEnded: @escaping () -> Void = {}
+    ) {
         _fraction = fraction
+        self.onEditingEnded = onEditingEnded
     }
 
     public var body: some View {
@@ -484,7 +491,8 @@ public struct YunSlider: View {
             .onHover { isHovering = $0 }
             .gesture(
                 DragGesture(minimumDistance: 0)
-                    .onChanged { fraction = max(0, min(1, $0.location.x / width)) })
+                    .onChanged { fraction = max(0, min(1, $0.location.x / width)) }
+                    .onEnded { _ in onEditingEnded() })
         }
         .frame(height: 12)
         .accessibilityElement()
@@ -495,6 +503,7 @@ public struct YunSlider: View {
             case .decrement: fraction = max(0, fraction - 0.05)
             @unknown default: break
             }
+            onEditingEnded()
         }
     }
 }

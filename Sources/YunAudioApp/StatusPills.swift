@@ -75,7 +75,9 @@ extension StatusPills {
                     id: "integrity", label: loc(quality.integrityKey),
                     tone: quality.isBitExact ? .success : .warning, showsDot: true))
             pills.append(
-                Pill(id: "rate", label: loc("Rate"), value: Format.sampleRate(quality.sampleRate)))
+                Pill(
+                    id: "rate", label: loc("Rate"), value: Format.sampleRate(quality.sampleRate)
+                ))
             pills.append(
                 Pill(id: "buffer", label: loc("Buffer"), value: "\(quality.bufferFrames) f"))
             pills.append(
@@ -196,7 +198,6 @@ extension StatusPills {
         if model.isBusy { return loc("Working") }
         return loc(model.isRunning ? "Routing" : "Idle")
     }
-
 
     /// How long, and how loud. The duration on its own says a file is growing;
     /// it does not say whether anything is in it.

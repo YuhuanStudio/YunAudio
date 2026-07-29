@@ -424,6 +424,10 @@ final class MIDIController {
     var onBindingsChanged: (() -> Void)?
 
     @ObservationIgnored private var pickups: [MIDITarget: MIDIPickup] = [:]
+    /// The receive path runs for every controller message. Bindings are shown
+    /// by target, but incoming messages arrive by address; keeping both indices
+    /// avoids scanning every bound fader for every MIDI word.
+    @ObservationIgnored private var targetsByAddress: [MIDIAddress: MIDITarget] = [:]
     @ObservationIgnored private var client = MIDIClientRef()
     @ObservationIgnored private var port = MIDIPortRef()
     @ObservationIgnored private var connected: Set<MIDIEndpointRef> = []
@@ -439,11 +443,15 @@ final class MIDIController {
     /// recording is not a configuration anybody meant — and refusing would
     /// leave somebody guessing which of a dozen rows already owns CC 7.
     func bind(_ address: MIDIAddress, to target: MIDITarget) {
-        for (other, held) in bindings where held == address && other != target {
+        if let previous = bindings[target], previous != address {
+            targetsByAddress[previous] = nil
+        }
+        if let other = targetsByAddress[address], other != target {
             bindings[other] = nil
             pickups[other] = nil
         }
         bindings[target] = address
+        targetsByAddress[address] = target
         // A fresh binding starts disengaged, so the first thing a newly
         // learned fader does is nothing.
         pickups[target] = MIDIPickup()
@@ -451,7 +459,8 @@ final class MIDIController {
     }
 
     func forget(_ target: MIDITarget) {
-        guard bindings.removeValue(forKey: target) != nil else { return }
+        guard let address = bindings.removeValue(forKey: target) else { return }
+        targetsByAddress[address] = nil
         pickups[target] = nil
         onBindingsChanged?()
     }
@@ -478,6 +487,7 @@ final class MIDIController {
             restored[target] = address
         }
         bindings = restored
+        targetsByAddress = restored.reduce(into: [:]) { $0[$1.value] = $1.key }
         pickups = restored.keys.reduce(into: [:]) { $0[$1] = MIDIPickup() }
     }
 
@@ -499,9 +509,7 @@ final class MIDIController {
         }
 
         let address = message.address
-        guard let target = bindings.first(where: { $0.value == address })?.key else {
-            return
-        }
+        guard let target = target(for: address) else { return }
         var pickup = pickups[target] ?? MIDIPickup()
         let action = MIDIAction.decide(
             for: message, target: target,
@@ -509,6 +517,12 @@ final class MIDIController {
         pickups[target] = pickup
         guard action != .ignore else { return }
         perform?(target, action)
+    }
+
+    /// The constant-time receive index, internal so tests can prove it stays
+    /// coherent when a control is stolen, replaced or restored.
+    func target(for address: MIDIAddress) -> MIDITarget? {
+        targetsByAddress[address]
     }
 
     /// True when the control is currently allowed to move the software value.

@@ -82,6 +82,8 @@ cat >build/yunaudio.entitlements <<'PLIST'
 <dict>
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<key>com.apple.security.automation.apple-events</key>
+	<true/>
 </dict>
 </plist>
 PLIST

@@ -18,21 +18,20 @@ struct RouteStrip: View {
     /// The panel is 340 points wide; the window has room for the readout.
     var isCompact = false
 
+    @ViewBuilder
     var body: some View {
-        BodyCount.tick("RouteStrip")
-        guard let route = model.representative(of: group) else {
-            return AnyView(EmptyView())
-        }
-        let muted = model.isMuted(group)
-        let silenced = model.isSilenced(group)
-        let soloed = model.soloedGroup == group.uid
-        let level = model.level(of: group)
-        let hold = model.peakHold(of: group)
-        let clipping = model.isClipped(group)
-        return AnyView(
+        let _ = BodyCount.tick("RouteStrip")
+        if let route = model.representative(of: group) {
+            let muted = model.isMuted(group)
+            let silenced = model.isSilenced(group)
+            let soloed = model.soloedGroup == group.uid
+            let level = model.level(of: group)
+            let hold = model.peakHold(of: group)
+            let clipping = model.isClipped(group)
             strip(
                 route: route, muted: muted, silenced: silenced, soloed: soloed,
-                level: level, hold: hold, clipping: clipping))
+                level: level, hold: hold, clipping: clipping)
+        }
     }
 
     private func strip(

@@ -252,8 +252,8 @@ uint64_t yun_rt_tripwire_violations(void);
 
 #include <JavaScriptCore/JavaScriptCore.h>
 
-typedef bool (*YunJSShouldTerminate)(JSContextRef ctx, void *context);
-
 extern void JSContextGroupSetExecutionTimeLimit(
-    JSContextGroupRef group, double limit, YunJSShouldTerminate callback, void *context);
-extern void JSContextGroupClearExecutionTimeLimit(JSContextGroupRef group);
+    JSContextGroupRef _Nonnull group, double limit,
+    bool (* _Nullable callback)(JSContextRef _Nonnull ctx, void * _Nullable context),
+    void * _Nullable context);
+extern void JSContextGroupClearExecutionTimeLimit(JSContextGroupRef _Nonnull group);
