@@ -498,6 +498,9 @@ final class RouterModel: ScriptTarget {
         melody = nil
         lyricLine = nil
         lyricProgress = 0
+        // Due again, so re-opening the panel asks straight away rather than
+        // showing whatever the clock has extrapolated from an old answer.
+        pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
     }
 
     // MARK: Scoring, and duets
@@ -584,7 +587,10 @@ final class RouterModel: ScriptTarget {
         scoringNames = groups.map {
             representative(of: $0).map(routeTitle) ?? loc("Source")
         }
-        let anchor = nowPlaying?.position ?? 0
+        // The extrapolated position rather than the last answer: the player is
+        // asked twice a second now, and anchoring a singer's clock to an answer
+        // up to half a second old would put every score that far out.
+        let anchor = trackPosition
         singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
         for track in singerTracks { track.reset(at: anchor) }
         rebuildScoringReference()
@@ -672,27 +678,74 @@ final class RouterModel: ScriptTarget {
     /// while nobody is looking would be paying for a feature nobody asked for.
     func refreshNowPlaying() {
         guard isSingingVisible else { return }
-        let track = NowPlaying.current()
+        pollsSinceNowPlaying += 1
+        if pollsSinceNowPlaying >= Self.nowPlayingEveryNPolls, !isAskingNowPlaying {
+            pollsSinceNowPlaying = 0
+            isAskingNowPlaying = true
+            NowPlaying.currentAsynchronously { [weak self] track in
+                self?.receiveNowPlaying(track)
+            }
+        }
+        updateLyricPosition()
+    }
+
+    /// How often a music player is actually asked, in polls of the
+    /// twenty-a-second timer.
+    ///
+    /// See `NowPlaying.currentAsynchronously`: one ask is 62 ms of somebody
+    /// else's process, and it was on every poll. Twice a second is faster than
+    /// anybody changes a track, and what the panel needs at the meter's rate —
+    /// where in the song we are — is carried by the clock in between.
+    private static let nowPlayingEveryNPolls = 10
+
+    /// Starts due, so opening the panel asks at once rather than in half a
+    /// second. Not `Int.max`, which the increment below would trap on.
+    @ObservationIgnored private var pollsSinceNowPlaying = RouterModel.nowPlayingEveryNPolls
+    /// Set while an ask is in flight, so a player that answers slowly cannot
+    /// have a second question put to it before it has answered the first.
+    @ObservationIgnored private var isAskingNowPlaying = false
+    /// When the answer being carried arrived, on the monotonic clock.
+    @ObservationIgnored private var nowPlayingAnsweredAt: TimeInterval = 0
+
+    private func receiveNowPlaying(_ track: NowPlaying.Track?) {
+        isAskingNowPlaying = false
         if track?.title != nowPlaying?.title || track?.artist != nowPlaying?.artist {
             lyrics = track.flatMap(Self.findLyrics)
             melody = track.flatMap(Self.findMelody)
             if isScoringSinging { rebuildScoringReference() }
         }
         nowPlaying = track
+        nowPlayingAnsweredAt = ProcessInfo.processInfo.systemUptime
+        if let track { reanchorIfSeeked(to: track) }
+        updateLyricPosition()
+    }
 
-        guard let track else {
+    /// Where in the song the panel thinks we are.
+    ///
+    /// The player's last answer plus the time since it arrived, while it is
+    /// playing. Asking again would be truer by a few tens of milliseconds, cost
+    /// 62 of them, and arrive with the jitter of an Apple event round trip on
+    /// it — and a lyric line is about a second wide.
+    var trackPosition: Double {
+        guard let track = nowPlaying else { return 0 }
+        guard track.isPlaying else { return track.position }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - nowPlayingAnsweredAt)
+        guard track.duration > 0 else { return track.position + elapsed }
+        return min(track.duration, track.position + elapsed)
+    }
+
+    private func updateLyricPosition() {
+        guard nowPlaying != nil, let lyrics else {
             lyricLine = nil
             lyricProgress = 0
             return
         }
-        reanchorIfSeeked(to: track)
-        guard let lyrics else {
-            lyricLine = nil
-            lyricProgress = 0
-            return
-        }
-        lyricLine = lyrics.index(at: track.position)
-        lyricProgress = lyrics.progress(at: track.position)
+        let position = trackPosition
+        // Through `publish` for the reason every other poll write is: these are
+        // read by the lyrics view, and assigning the same line number twenty
+        // times a second would invalidate it twenty times a second.
+        publish(lyrics.index(at: position), to: \.lyricLine)
+        publish(lyrics.progress(at: position), to: \.lyricProgress)
     }
 
     /// Finds an `.lrc` for a track by name.

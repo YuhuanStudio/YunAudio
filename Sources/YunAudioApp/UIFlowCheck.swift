@@ -4496,7 +4496,35 @@ enum UIFlowCheck {
                 analysing.cost.polls, analysing.microseconds,
                 analysing.microseconds / 50_000 * 100))
         model.isAnalysisVisible = visible
+
+        // And the state that used to cost an Apple event on every tick. The
+        // singing panel asks a music player where it is in the song, and it is
+        // Spotify or Music that answers, on its own main thread, when it gets
+        // round to it — measured at **62 ms a time on this machine**, asked
+        // twenty times a second, synchronously, on this application's main
+        // actor. The poll could not run at all, and neither could the window.
+        let singing = model.isSingingVisible
+        model.isSingingVisible = true
+        await pause(0.6)
+        let lyrics = await measure()
+        note(
+            String(
+                format: "singing open: %d polls, %.0f µs each — %.2f%% of one core",
+                lyrics.cost.polls, lyrics.microseconds,
+                lyrics.microseconds / 50_000 * 100))
+        // Said out loud, because it decides what the number above is worth: with
+        // no player running there is nothing to wait for and the poll would look
+        // innocent however it was written.
+        note(
+            model.nowPlaying == nil
+                ? "no music player answered, so that is a floor rather than a measurement"
+                : "a music player answered, so the round trip is in that number")
+        model.isSingingVisible = singing
         model.measuresPollBreakdown = false
+        // An order of magnitude below one round trip. What it has to catch is a
+        // poll that waits on another application — measured at 62000 µs a tick
+        // — rather than a poll that is a little slower than it was.
+        check("the poll does not wait on a music player", lyrics.microseconds < 5000)
 
         // The verdict is re-read twice a second rather than twenty times, so it
         // has to be shown to still be there — a stale pill claiming a clean
