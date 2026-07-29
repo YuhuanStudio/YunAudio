@@ -3754,6 +3754,31 @@ enum UIFlowCheck {
         model.isAnalysisVisible = true
         await pause(0.5)
 
+        // The menu bar panel is opened and shut again first, and the counting
+        // happens with it shut.
+        //
+        // Without that this measures nothing: a popover that has never been
+        // shown has no view and no view graph, so "the closed panel drew
+        // nothing" would be true of a panel that does not exist. Shut is the
+        // state that was costing 36% of a core — the popover's window is
+        // ordered out rather than released, and SwiftUI goes on evaluating and
+        // laying out a tree nobody can see.
+        let statusItem = StatusItemController.current
+        statusItem?.setPanelOpenForCheck(true)
+        await pause(0.6)
+        let panelOpened = statusItem?.isPanelShownForCheck ?? false
+        statusItem?.setPanelOpenForCheck(false)
+        // Long enough for the close animation to finish, or the panel is still
+        // shown when this is read and the check disqualifies itself.
+        await pause(1.0)
+        let panelClosed = panelOpened && !(statusItem?.isPanelShownForCheck ?? true)
+        if !panelClosed {
+            note(
+                statusItem == nil
+                    ? "no status item, so the menu bar panel was not exercised"
+                    : "the menu bar panel would not open and shut here — not exercised")
+        }
+
         // Whole-process processor time across the same window. Body counts say
         // what is being re-derived; this says what it costs, which is the only
         // figure that settles whether any of it was worth changing. It includes
@@ -3812,6 +3837,16 @@ enum UIFlowCheck {
         check(
             "the meters are still redrawing",
             Double(counts["RouteStrip"] ?? 0) > poll / 4)
+        // And the one nobody was looking at. The window is on screen here and
+        // the panel is not, so a body count for the panel at all is the whole
+        // finding: measured at 20.0 Hz — one full evaluation of the header, the
+        // pickers, the mixer and the processing section per poll — for a
+        // popover that had been closed an hour.
+        if panelClosed {
+            check(
+                "nor the menu bar panel, which is shut",
+                counts["PanelView"] ?? 0 == 0)
+        }
 
         // Two reads the window body was making on every one of those
         // evaluations. Timed rather than guessed: one of them turned out to
