@@ -827,6 +827,35 @@ struct PreferencesWindow: View {
                 }
             }
 
+            // Whether anything outside this application can reach it, and why
+            // not when it cannot. The failure was written to `stderr`, which
+            // nobody reads for a menu bar application launched from the Finder
+            // — so the state the code's own comment said "the user can fix once
+            // they are told about it" was one they were never told about. The
+            // symptom is `yunaudio-cli` and an MCP client both insisting the
+            // application is not running while it is plainly on screen.
+            heading(loc("Remote control"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    if let problem = ControlServer.startError {
+                        YunDetailRow(
+                            loc("Control socket"), value: loc("unavailable"), tone: .warning)
+                        Text(problem)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.danger)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        YunDetailRow(
+                            loc("Control socket"), value: loc("listening"), tone: .success)
+                    }
+                    Text(ControlSocket.defaultPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .textSelection(.enabled)
+                }
+            }
+
             heading(loc("Realtime safety"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {

@@ -29,17 +29,30 @@ enum ControlServer {
     /// a feature that is unavailable, not a reason for the audio router to
     /// refuse to launch — and the one likely cause, another copy already
     /// listening, is a state the user can fix once they are told about it.
+    /// Why the socket is not there, when it is not.
+    ///
+    /// Kept, because the comment above promised the user would be told and the
+    /// only telling was `stderr` — which nobody reads for an `LSUIElement`
+    /// application launched from the Finder. So the state the user could fix
+    /// once told about it was one they were never told about, and the symptom
+    /// is `yunaudio-cli` and `yunaudio-mcp` saying the application is not
+    /// running while it is plainly on screen.
+    private(set) static var startError: String?
+
     static func start(model: RouterModel) -> ControlListener? {
         let listener = ControlListener()
         do {
             try listener.start { request in answer(request, model: model) }
         } catch let error as ControlError {
+            startError = error.message
             FileHandle.standardError.write(Data("yunaudio: \(error.message)\n".utf8))
             return nil
         } catch {
+            startError = "\(error)"
             FileHandle.standardError.write(Data("yunaudio: control socket: \(error)\n".utf8))
             return nil
         }
+        startError = nil
         return listener
     }
 

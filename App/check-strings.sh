@@ -134,6 +134,33 @@ if "en" in tables:
             if key not in tables["en"]:
                 failures.append(f"{language}: {key!r} is not in the English table")
 
+# A translation that is just the English again.
+#
+# `loc()` falls back to the key when a table has no entry, so a heading nobody
+# translated renders in English beside translated ones and nothing complains —
+# the key is present in both files, the format specifiers match, every check
+# here passes. It was found by looking at a screenshot, which is not a check.
+#
+# Units and proper nouns are the same in both languages and are named rather
+# than guessed at, because a rule that silently allows anything short would let
+# a real heading through.
+SAME_IN_BOTH = {"YunAudio", "LUFS", "dBFS", "%d LUFS", "MIT", "MIDI", "OBS", "dB", "Hz"}
+
+if "en" in tables:
+    for language, table in tables.items():
+        if language == "en":
+            continue
+        for key, value in table.items():
+            if key != value or key in SAME_IN_BOTH:
+                continue
+            # Only where there is something to translate: a key that is all
+            # punctuation, digits or format specifiers has no words in it.
+            if not re.search(r"[A-Za-z]{3}", re.sub(r"%[-+ #0-9.]*[a-zA-Z@]", "", key)):
+                continue
+            failures.append(
+                f"{language}: {key!r} is the English again — untranslated, "
+                f"and loc() will show it beside translated text")
+
 if failures:
     print("user-facing literals not passed through loc():\n")
     for failure in failures:

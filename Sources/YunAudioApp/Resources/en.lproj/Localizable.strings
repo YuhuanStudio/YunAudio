@@ -534,3 +534,7 @@
 "paper" = "Paper";
 "mist" = "Mist";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password.";
+"Control socket" = "Control socket";
+"listening" = "listening";
+"unavailable" = "unavailable";
+"Remote control" = "Remote control";

@@ -534,3 +534,7 @@
 "paper" = "紙白";
 "mist" = "薄霧";
 "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password." = "移除會重啟 coreaudiod，所以所有音訊會中斷一下，而且需要管理員密碼。";
+"Control socket" = "控制通訊端";
+"listening" = "正在接聽";
+"unavailable" = "無法使用";
+"Remote control" = "遠端控制";
