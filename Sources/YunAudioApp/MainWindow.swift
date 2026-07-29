@@ -14,11 +14,23 @@ import YunDesign
 /// on a machine that is not a phone.
 struct MainWindow: View {
     @Bindable var model: RouterModel
-    @State private var inspectorTab: Inspector
 
-    init(model: RouterModel, initialInspector: Inspector = .sound, isRendering: Bool = false) {
+    /// Which tab is showing, on the model rather than in `@State`.
+    ///
+    /// Two reasons, and the second is why it moved. It is worth remembering
+    /// across launches — coming back to the tab you were working in is the
+    /// ordinary expectation. And the photograph of the real window had no way
+    /// to reach it: the offscreen renderer builds a fresh view per tab and
+    /// cycles them, but the live window is built once by the scene, so five of
+    /// the six tabs had never been photographed at all. A tab nobody
+    /// photographs is a tab where anything can be wrong.
+    private var inspectorTab: Binding<Inspector> {
+        Binding(get: { model.inspectorTab }, set: { model.inspectorTab = $0 })
+    }
+
+    init(model: RouterModel, initialInspector: Inspector? = nil, isRendering: Bool = false) {
         self.model = model
-        _inspectorTab = State(initialValue: initialInspector)
+        if let initialInspector { model.inspectorTab = initialInspector }
         self.isRendering = isRendering
     }
 
@@ -1058,11 +1070,11 @@ struct MainWindow: View {
                 // "…" — two tabs nobody could tell apart, in a control whose
                 // whole job is telling them apart.
                 YunSegmented(
-                    selection: $inspectorTab,
+                    selection: inspectorTab,
                     options: Inspector.allCases.map { ($0, $0.title) },
                     wraps: true)
 
-                switch inspectorTab {
+                switch model.inspectorTab {
                 case .sound: soundTab
                 case .plugins: pluginsTab
                 case .singing: singingTab

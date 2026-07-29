@@ -118,6 +118,20 @@ photographed_the_real_window() {
 		echo "only ${count} photographs taken"
 		return 1
 	}
+	# One photograph per inspector tab, checked against the tabs the source
+	# declares rather than against a number. This is the assertion that would
+	# have caught a whole feature shipping with no tab at all: the count would
+	# have been right, because the tab that was missing was missing from both
+	# the row and the list of things to photograph.
+	local tab missing=()
+	while read -r tab; do
+		[[ -f "${WORK}/shot/live-tab-${tab}-dark.png" ]] || missing+=("${tab}")
+	done < <(sed -n '/enum Inspector: String/,/^    }/p' Sources/YunAudioApp/MainWindow.swift |
+		grep -oE '^        case [a-z]+' | awk '{print $2}')
+	[[ ${#missing[@]} -eq 0 ]] || {
+		echo "no photograph of tab(s): ${missing[*]}"
+		return 1
+	}
 	# Copied out, because a picture nobody looks at is not a check. The path is
 	# printed at the end.
 	rm -rf build/screenshots

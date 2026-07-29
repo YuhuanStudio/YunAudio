@@ -44,6 +44,29 @@ enum WindowCapture {
         }
         YunTheme.shared.style = .flat
 
+        // Every tab, because five of the six had never been photographed. The
+        // offscreen renderer cycles them by building a fresh view per tab; the
+        // live window is built once by the scene, so whatever tab it opened on
+        // was the only one anybody ever saw a photograph of — and a tab nobody
+        // photographs is a tab where anything can be wrong. It is where the
+        // scripting panel turned out to have no tab at all, and where six tabs
+        // turned out not to fit across the column.
+        //
+        // One appearance each rather than two: what these are for is layout —
+        // clipping, overflow, a control that does not fit — and the colour
+        // question is already answered by the two full passes above.
+        if let model {
+            let wasShowing = model.inspectorTab
+            for tab in MainWindow.Inspector.allCases {
+                model.inspectorTab = tab
+                settle(turns: 12)
+                photograph(
+                    window, sizes: [("tab-\(tab.rawValue)", CGSize(width: 980, height: 600))],
+                    into: directory, appearances: [.darkAqua])
+            }
+            model.inspectorTab = wasShowing
+        }
+
         // The state that matters most is the one nothing else can show: meters
         // moving, the status strip carrying real numbers, a mixer with strips
         // in it. Every capture until now was of an idle window, which is the
@@ -74,11 +97,11 @@ enum WindowCapture {
 
     private static func photograph(
         _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String,
-        suffix: String = ""
+        suffix: String = "", appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
     ) {
         for (label, size) in sizes {
             window.setContentSize(size)
-            for scheme in [NSAppearance.Name.aqua, .darkAqua] {
+            for scheme in appearances {
                 let isLight = scheme == .aqua
                 let name = "live-\(label)\(suffix)-\(isLight ? "light" : "dark").png"
 

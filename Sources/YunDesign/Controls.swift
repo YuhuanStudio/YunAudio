@@ -126,7 +126,7 @@ public struct YunSegmented<Value: Hashable>: View {
     public var body: some View {
         Group {
             if wraps {
-                YunWrap(spacing: 6, lineSpacing: 6) { buttons }
+                YunWrap(spacing: 6, lineSpacing: 6, balanced: true, fills: true) { buttons }
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 HStack(spacing: 6) {
@@ -150,7 +150,12 @@ public struct YunSegmented<Value: Hashable>: View {
                             isSelected ? Yun.Palette.textPrimary : Yun.Palette.textTertiary
                         )
                         .lineLimit(1)
-                        .padding(.horizontal, 12)
+                        // Centred and allowed to take whatever width it is
+                        // given: when the row fills, each cell is an equal
+                        // share, and a label that kept its own width would sit
+                        // against the left edge of its cell.
+                        .frame(maxWidth: wraps ? .infinity : nil)
+                        .padding(.horizontal, wraps ? 6 : 12)
                         .padding(.vertical, 5)
                         .background(
                             isSelected

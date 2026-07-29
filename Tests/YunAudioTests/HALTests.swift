@@ -2186,3 +2186,82 @@ struct ScriptEventTests {
         #expect(target.performed == [.mute(false)])
     }
 }
+
+/// Where a wrapping row breaks.
+///
+/// Greedy packing is right for a row of pills that happens to be long: it fills
+/// each line and the ragged end is nobody's business. It is wrong for a tab
+/// bar. Six tabs across a column that fits five leaves one alone on a second
+/// line, which reads as a mistake rather than as a row that wrapped — and that
+/// is exactly what adding a sixth tab produced, found by photographing the real
+/// window at its minimum size.
+@Suite("Where a wrapping row breaks")
+struct WrapBreakTests {
+
+    /// Pills of equal width, which is what a row of two-character tabs is.
+    private func even(_ count: Int, _ width: CGFloat = 48) -> [CGFloat] {
+        [CGFloat](repeating: width, count: count)
+    }
+
+    @Test("one line stays one line")
+    func noWrapNeeded() {
+        let lines = YunWrap.breaks(
+            widths: even(4), within: 400, spacing: 6, balanced: true)
+        #expect(lines.count == 1)
+        #expect(lines[0].count == 4)
+    }
+
+    /// The case this exists for: six where five fit.
+    @Test("six across a row that fits five goes three and three")
+    func sixGoesThreeAndThree() {
+        let width: CGFloat = 5 * 48 + 4 * 6
+        let lines = YunWrap.breaks(
+            widths: even(6), within: width, spacing: 6, balanced: true)
+        #expect(lines.count == 2)
+        #expect(lines.map(\.count) == [3, 3])
+    }
+
+    /// Greedy leaves the orphan, which is what was on screen. Kept as a case so
+    /// the difference between the two is stated rather than assumed.
+    @Test("greedy leaves the orphan that balancing removes")
+    func greedyOrphans() {
+        let width: CGFloat = 5 * 48 + 4 * 6
+        let lines = YunWrap.breaks(
+            widths: even(6), within: width, spacing: 6, balanced: false)
+        #expect(lines.map(\.count) == [5, 1])
+    }
+
+    /// Balancing must never cost a line. The point is the shape of the wrap,
+    /// not more wrapping — a tab bar that grew a third row to look tidy would
+    /// be a worse trade than the orphan.
+    @Test("balancing never uses more lines than greedy")
+    func neverCostsALine() {
+        for count in 1...12 {
+            for fits in 1...6 {
+                let width = CGFloat(fits) * 48 + CGFloat(fits - 1) * 6
+                let widths = even(count)
+                let greedy = YunWrap.breaks(
+                    widths: widths, within: width, spacing: 6, balanced: false)
+                let balanced = YunWrap.breaks(
+                    widths: widths, within: width, spacing: 6, balanced: true)
+                #expect(balanced.count <= greedy.count, "\(count) items, \(fits) per line")
+                // And nothing is lost or duplicated on the way.
+                #expect(balanced.flatMap { $0 } == Array(0..<count))
+            }
+        }
+    }
+
+    /// Uneven widths still have to fit. Balancing counts items, so a line of
+    /// wide ones could overflow if the count were the only rule — it is not.
+    @Test("a wide item still breaks the line it does not fit on")
+    func wideItemsStillFit() {
+        let widths: [CGFloat] = [200, 40, 40, 200, 40, 40]
+        let lines = YunWrap.breaks(widths: widths, within: 300, spacing: 6, balanced: true)
+        for line in lines {
+            let used =
+                line.map { widths[$0] }.reduce(0, +) + 6 * CGFloat(max(0, line.count - 1))
+            #expect(used <= 300, "a line came to \(used)")
+        }
+        #expect(lines.flatMap { $0 } == Array(0..<widths.count))
+    }
+}

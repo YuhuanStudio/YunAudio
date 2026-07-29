@@ -278,10 +278,30 @@ private struct PillSurface: ViewModifier {
 public struct YunWrap: Layout {
     private let spacing: CGFloat
     private let lineSpacing: CGFloat
+    private let balanced: Bool
+    private let fills: Bool
 
-    public init(spacing: CGFloat = Yun.Space.sm, lineSpacing: CGFloat = 6) {
+    /// - Parameters:
+    ///   - balanced: Spread the items evenly over the lines rather than filling
+    ///     each in turn.
+    ///   - fills: Stretch every item on a line to share the width equally.
+    ///
+    /// The two together are what makes a wrapped row look like a control rather
+    /// than like a row that broke. Six tabs across a column that fits five,
+    /// packed greedily at their natural widths, gave five and then a lone
+    /// sixth; balanced, it gave three and three with a ragged right edge on
+    /// both — tidier and still obviously an accident. Filling squares both
+    /// edges, and then it reads as a two-by-three grid somebody drew on
+    /// purpose. Judged by looking at it, which is the only way this kind of
+    /// thing can be judged.
+    public init(
+        spacing: CGFloat = Yun.Space.sm, lineSpacing: CGFloat = 6,
+        balanced: Bool = false, fills: Bool = false
+    ) {
         self.spacing = spacing
         self.lineSpacing = lineSpacing
+        self.balanced = balanced
+        self.fills = fills
     }
 
     private struct Line {
@@ -291,32 +311,81 @@ public struct YunWrap: Layout {
     }
 
     private func lines(within maxWidth: CGFloat, subviews: Subviews) -> [Line] {
-        var lines: [Line] = []
-        var current = Line()
-        for index in subviews.indices {
-            let size = subviews[index].sizeThatFits(.unspecified)
-            let advance = current.indices.isEmpty ? size.width : size.width + spacing
-            if !current.indices.isEmpty, current.width + advance > maxWidth {
-                lines.append(current)
-                current = Line(indices: [index], width: size.width, height: size.height)
-                continue
+        let widths = subviews.indices.map { subviews[$0].sizeThatFits(.unspecified).width }
+        let heights = subviews.indices.map { subviews[$0].sizeThatFits(.unspecified).height }
+        return Self.breaks(widths: widths, within: maxWidth, spacing: spacing, balanced: balanced)
+            .map { indices in
+                Line(
+                    indices: indices,
+                    width: indices.map { widths[$0] }.reduce(0, +)
+                        + spacing * CGFloat(max(0, indices.count - 1)),
+                    height: indices.map { heights[$0] }.max() ?? 0)
             }
-            current.indices.append(index)
-            current.width += advance
-            current.height = max(current.height, size.height)
+    }
+
+    /// Where the lines break, as a pure function of the widths.
+    ///
+    /// Pulled out so it can be asserted. Greedy packing is right for a row of
+    /// pills that happens to be long — it fills each line and the ragged end is
+    /// nobody's business. It is wrong for a tab bar: six tabs across a column
+    /// that fits five leaves one alone on a second line, which reads as a
+    /// mistake rather than as a row that wrapped. Balanced, the same six go
+    /// three and three and it reads as deliberate.
+    ///
+    /// - Parameter balanced: Spread the items evenly over as few lines as
+    ///   greedy packing would have used. Never uses *more* lines than greedy:
+    ///   the point is the shape of the wrap, not a different amount of wrapping.
+    static func breaks(
+        widths: [CGFloat], within maxWidth: CGFloat, spacing: CGFloat, balanced: Bool
+    ) -> [[Int]] {
+        func pack(_ perLine: Int?) -> [[Int]] {
+            var lines: [[Int]] = []
+            var current: [Int] = []
+            var width: CGFloat = 0
+            for index in widths.indices {
+                let advance = current.isEmpty ? widths[index] : widths[index] + spacing
+                let full = perLine.map { current.count >= $0 } ?? false
+                if !current.isEmpty, full || width + advance > maxWidth {
+                    lines.append(current)
+                    current = [index]
+                    width = widths[index]
+                    continue
+                }
+                current.append(index)
+                width += advance
+            }
+            if !current.isEmpty { lines.append(current) }
+            return lines
         }
-        if !current.indices.isEmpty { lines.append(current) }
-        return lines
+
+        let greedy = pack(nil)
+        guard balanced, greedy.count > 1 else { return greedy }
+        // As even as it goes without needing another line. Rounding up, because
+        // rounding down would need one more line than greedy used.
+        let perLine = Int((Double(widths.count) / Double(greedy.count)).rounded(.up))
+        let even = pack(perLine)
+        // Only if it did not cost a line. A balanced shape that wraps more is
+        // not the trade being made here.
+        return even.count <= greedy.count ? even : greedy
     }
 
     public func sizeThatFits(
         proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
     ) -> CGSize {
-        let lines = lines(within: proposal.width ?? .infinity, subviews: subviews)
+        let available = proposal.width ?? .infinity
+        let lines = lines(within: available, subviews: subviews)
         let height =
             lines.map(\.height).reduce(0, +)
             + lineSpacing * CGFloat(max(0, lines.count - 1))
-        return CGSize(width: lines.map(\.width).max() ?? 0, height: height)
+        // Filling means taking the whole width, and saying so here is what makes
+        // it happen: reporting the natural width instead made the parent size
+        // the layout to the pills' own total, so "an equal share of the width"
+        // was an equal share of a row that had already shrunk to fit them, and
+        // the space to the right of it stayed empty. Visible immediately in the
+        // photograph, and invisible in every number.
+        let width =
+            fills && available.isFinite ? available : (lines.map(\.width).max() ?? 0)
+        return CGSize(width: width, height: height)
     }
 
     public func placeSubviews(
@@ -325,8 +394,15 @@ public struct YunWrap: Layout {
         var y = bounds.minY
         for line in lines(within: bounds.width, subviews: subviews) {
             var x = bounds.minX
+            // Equal shares of the whole width when filling, so both edges of
+            // every line are flush and the wrap looks like a grid.
+            let share =
+                fills && !line.indices.isEmpty
+                ? (bounds.width - spacing * CGFloat(line.indices.count - 1))
+                    / CGFloat(line.indices.count) : nil
             for index in line.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
+                var size = subviews[index].sizeThatFits(.unspecified)
+                if let share { size.width = share }
                 subviews[index].place(
                     at: CGPoint(x: x, y: y + (line.height - size.height) / 2),
                     proposal: ProposedViewSize(size))

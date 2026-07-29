@@ -3930,6 +3930,13 @@ final class RouterModel: ScriptTarget {
         if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
     }
 
+    /// Which inspector tab is showing.
+    ///
+    /// On the model so it survives a launch, and so the window photographer can
+    /// reach it — the live window is built once by the scene, so before this
+    /// five of the six tabs had never been photographed.
+    var inspectorTab: MainWindow.Inspector = .sound
+
     /// What resident handlers have said, most recent last.
     private(set) var scriptLog: [String] = []
 
