@@ -217,6 +217,11 @@ enum UIFlowCheck {
         // Read on the first line so it is the launch that is measured and not
         // the wait for the lock below, which is somebody else's flow check.
         _ = launchSeconds
+        guard model.prepareForAutomatedAudioUse() else {
+            print(
+                "no local input is available; refusing to wake a Continuity Capture device")
+            exit(2)
+        }
         await takeTheHardware()
         // A filtered run ends by throwing out of whichever section was the last
         // one anybody asked for, which lands here. The summary is printed
@@ -249,6 +254,9 @@ enum UIFlowCheck {
         }
         check("devices were enumerated", !model.inputDevices.isEmpty)
         check("an input is preselected", model.selectedSourceUID != nil)
+        check(
+            "automation did not select a phone microphone",
+            model.selectedSource?.transport.requiresExplicitInputSelection != true)
         if !model.isDriverInstalled {
             note("the virtual device is not installed — the panel shows the install card")
             check("an install button is offered", model.canInstallDriver)
@@ -1912,6 +1920,7 @@ enum UIFlowCheck {
             check("routes still resolve", !model.activeRoutes.isEmpty && faderPerRoute)
             await pause(1.5)
             let produced = model.echoStatus?.produced ?? 0
+            note("\(produced) cancelled frame(s) before the liveness window")
             // The status getter deliberately uses `tryLock`: a SwiftUI read
             // must not freeze behind graph publication. Consequently nil here
             // can mean "the engine lock was busy for this instant", not "the
@@ -1923,6 +1932,16 @@ enum UIFlowCheck {
                     guard let status = model.echoStatus else { return false }
                     return status.produced > produced
                 }, timeout: 2)
+            note(
+                "\(model.echoStatus?.produced ?? 0) cancelled frame(s) after the liveness window"
+            )
+            if let status = model.echoStatus {
+                note(
+                    "\(status.inputCallbacks) input callback(s), "
+                        + "\(status.farEndCallbacks) far-end callback(s), "
+                        + "\(status.renderFailures) render failure(s), last "
+                        + fourCharDescription(status.lastRenderStatus))
+            }
 
             model.cancelsEcho = false
             await waitUntil(
@@ -2640,7 +2659,9 @@ enum UIFlowCheck {
         // still present its outputs, and not take its inputs into the
         // aggregate. If the HAL refused this, every Bluetooth destination would
         // stop working and the failure would look like the headset.
-        if let withInputs = model.inputDevices.first(where: { $0.hasOutput }) {
+        if let withInputs = model.automaticallySelectableInputDevices.first(where: {
+            $0.hasOutput
+        }) {
             let unrestricted = try? AggregateDevice(
                 name: "YunAudio Restriction Check A",
                 subDevices: [.init(uid: withInputs.uid, driftCompensation: true)],
@@ -2655,7 +2676,9 @@ enum UIFlowCheck {
             // Does the key cap at all, or is it ignored? A device with three
             // inputs asked for one answers that in a way zero cannot: zero
             // could always be read as "no opinion".
-            if let many = model.inputDevices.first(where: { $0.inputChannels > 1 }),
+            if let many = model.automaticallySelectableInputDevices.first(where: {
+                $0.inputChannels > 1
+            }),
                 let capped = try? AggregateDevice(
                     name: "YunAudio Restriction Check C",
                     subDevices: [
@@ -3021,9 +3044,20 @@ enum UIFlowCheck {
         // somebody's Sound settings. So what they were is taken first and put
         // back at the end, whatever happens in between — this check runs on a
         // machine somebody is using.
-        let systemInputBefore = (try? AudioDevices.defaultInput())??.uid
+        let systemInputDeviceBefore = try? AudioDevices.defaultInput()
+        let systemInputBefore = systemInputDeviceBefore?.uid
         let systemOutputBefore = (try? AudioDevices.defaultOutput())??.uid
         let sourceBefore = model.selectedSourceUID
+        // A setup is applied repeatedly below. If the machine happens to use a
+        // phone as its system default, repeatedly restoring that UID is an
+        // unattended Continuity Capture request. Exercise the same setup logic
+        // with the already-running local source, then put the original default
+        // back once at the end as promised.
+        if systemInputDeviceBefore?.transport.requiresExplicitInputSelection == true,
+            let sourceBefore
+        {
+            _ = try? AudioDevices.setDefault(sourceBefore, forInput: true)
+        }
         model.saveQuickConfig(named: "Flow check setup")
         check(
             "it was saved", model.quickConfigs.contains { $0.name == "Flow check setup" })
@@ -3035,8 +3069,9 @@ enum UIFlowCheck {
             check("and the system's own defaults", saved.systemOutputUID != nil)
 
             // Move somewhere else, then come back.
-            if let elsewhere = model.inputDevices.map(\.uid).first(where: { $0 != sourceBefore }
-            ) {
+            if let elsewhere = model.automaticallySelectableInputDevices.map(\.uid)
+                .first(where: { $0 != sourceBefore })
+            {
                 model.selectedSourceUID = elsewhere
                 let outcome = model.apply(saved)
                 check("applying put the source back", model.selectedSourceUID == sourceBefore)
@@ -4401,6 +4436,15 @@ enum UIFlowCheck {
                         + "and %.1f s of input",
                     midScore.percentage, midError, midScore.referenceSeconds,
                     midScore.sungSeconds))
+            // A live score is through this moment, not against the complete
+            // MIDI file. The old scorer called the second half "silent" before
+            // it happened, so a perfect halfway performance displayed 50%.
+            check("the halfway score does not charge the future", midScore.percentage > 60)
+            check(
+                "and its denominator stops near halfway",
+                midScore.referenceSeconds < tuneSeconds - 0.5)
+        } else {
+            check("a halfway score was published", false)
         }
         check("scoring stayed active for the whole take", model.isScoringSinging)
         guard let backingNow = backingSource(),
@@ -5927,6 +5971,7 @@ enum UIFlowCheck {
         let originalMode = model.channelMode
         let originalChannel = model.monoChannel
         let originalTrim = model.inputDecibels
+        let originalEffects = model.enabledEffects
 
         // Every loopback rather than the first one, and loopbacks only. A
         // display's audio endpoint takes twelve seconds to refuse a start and
@@ -5954,9 +5999,16 @@ enum UIFlowCheck {
         }
         note("feeding \(toneDevice.name) a \(Int(LoopbackTone.hertz)) Hz tone at half scale")
 
-        // Unity through the whole chain, so what lands on the destination bus
-        // is the tone and not a number this section invented.
+        // Unity and no processing, so what lands on the destination bus is the
+        // tone and not a number this section invented. A saved voice isolator
+        // or gate removes a steady sine correctly, which used to make the first
+        // half of this check depend on somebody's preferences and then recover
+        // mysteriously when the chain test below rebuilt the path.
         model.inputDecibels = 0
+        for kind in originalEffects {
+            model.setEffect(kind, enabled: false)
+        }
+        await settle(model, timeout: 15)
         model.selectedSourceUID = toneDevice.uid
         await settle(model, timeout: 15)
         await waitUntil(
@@ -6002,6 +6054,7 @@ enum UIFlowCheck {
         // machine goes.
         let microphones = model.inputDevices.filter {
             $0.uid != toneDevice.uid && $0.inputChannels > 0 && !$0.transport.isVirtual
+                && !$0.transport.requiresExplicitInputSelection
                 && !model.isSamePhysicalDevice($0.uid, model.selectedDestinationUID ?? "")
         }
         if microphones.isEmpty { note("no real input on this machine — not exercised") }
@@ -6091,7 +6144,6 @@ enum UIFlowCheck {
             // buffer rather than the device's, and which route does that is
             // decided from the *first* route's source — which is exactly what a
             // source change moves.
-            let effectsBefore = model.enabledEffects
             model.setEffect(.gate, enabled: true)
             model.setEffect(.compressor, enabled: true)
             await settle(model, timeout: 15)
@@ -6099,7 +6151,7 @@ enum UIFlowCheck {
                 "the chain came up", { model.isRunning && !model.isBusy }, timeout: 15)
             note("with a gate and a compressor in the path")
             await roundTrip(model, from: toneDevice, via: microphone, label: "with a chain")
-            for kind in EffectKind.allCases where !effectsBefore.contains(kind) {
+            for kind in EffectKind.allCases {
                 model.setEffect(kind, enabled: false)
             }
             await settle(model, timeout: 15)
@@ -6147,6 +6199,11 @@ enum UIFlowCheck {
         model.inputDecibels = originalTrim
         model.selectedDestinationUID = originalDestination
         model.selectedSourceUID = originalSource
+        model.batched {
+            for kind in originalEffects {
+                model.setEffect(kind, enabled: true)
+            }
+        }
         await settle(model, timeout: 15)
         await waitUntil(
             "the route is left as it was found",

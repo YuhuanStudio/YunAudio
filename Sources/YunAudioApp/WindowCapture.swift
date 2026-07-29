@@ -80,7 +80,9 @@ enum WindowCapture {
         // moving, the status strip carrying real numbers, a mixer with strips
         // in it. Every capture until now was of an idle window, which is the
         // state a user spends the least time looking at.
-        guard let model, model.selectedDestination != nil, !model.isRunning else { return }
+        guard let model, model.selectedDestination != nil, !model.isRunning,
+            model.prepareForAutomatedAudioUse()
+        else { return }
         model.start()
         for _ in 0..<80 where !model.isRunning {
             try? await Task.sleep(for: .milliseconds(100))

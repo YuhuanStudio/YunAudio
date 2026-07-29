@@ -26,8 +26,17 @@ func transportLabel(_ transport: AudioTransport) -> String {
     case .pci: "PCI"
     case .fireWire: "FireWire"
     case .avb: "AVB"
+    case .continuityCapture: "Continuity Capture"
     case let .other(raw): "other \(fourCharDescription(raw))"
     case .unknown: "unknown"
+    }
+}
+
+/// A clock master automation may open without waking a nearby phone or tablet.
+func automaticPhysicalInput(in devices: [AudioDevice]) -> AudioDevice? {
+    devices.first {
+        $0.hasInput && !$0.transport.isVirtual
+            && !$0.transport.requiresExplicitInputSelection
     }
 }
 
@@ -430,7 +439,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
     let appMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Discord"
     let deviceMatch = CommandLine.arguments.count > 3 ? CommandLine.arguments[3] : "MacBook"
     let all = (try? AudioDevices.all()) ?? []
-    guard let clock = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+    guard let clock = automaticPhysicalInput(in: all),
         let target = all.first(where: { $0.name.contains(deviceMatch) && $0.hasOutput })
     else {
         print("need an input to act as clock master and an output to send to")
@@ -489,7 +498,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "capture" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
     let all = (try? AudioDevices.all()) ?? []
     // Any input will do; the USB microphone is often unplugged.
-    guard let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+    guard let source = automaticPhysicalInput(in: all),
         let destination = all.first(where: { $0.transport.isVirtual && $0.hasOutput })
     else {
         print("need an input and a virtual output")
@@ -708,6 +717,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "reset" {
     do {
         for device in try AudioDevices.all() {
             guard device.availableSampleRates.contains(target),
+                !device.transport.requiresExplicitInputSelection,
                 let current = device.currentSampleRate, current != target
             else { continue }
             do {
@@ -814,8 +824,8 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
         // Route the tap's stereo pair into the virtual device and watch the
         // meters: proof that an application's audio is reachable as a routing
         // source, not merely that a tap object can be created.
-        guard let mic = try AudioDevices.defaultInput() else {
-            print("no default input to act as clock master")
+        guard let mic = automaticPhysicalInput(in: (try? AudioDevices.all()) ?? []) else {
+            print("no local input to act as clock master")
             exit(1)
         }
         let engine = RoutingEngine()
@@ -1091,7 +1101,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "audio-start" {
     let all = (try? AudioDevices.all()) ?? []
     guard
-        let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let source = automaticPhysicalInput(in: all),
         let destination = all.first(where: {
             $0.uid == ClockAnchorPublisher.driverDeviceUID
         }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
@@ -1137,7 +1147,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
     let minutes = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
     let all = (try? AudioDevices.all()) ?? []
     guard
-        let source = all.first(where: { $0.hasInput && !$0.transport.isVirtual }),
+        let source = automaticPhysicalInput(in: all),
         let destination = all.first(where: {
             $0.uid == ClockAnchorPublisher.driverDeviceUID
         }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
@@ -1842,11 +1852,18 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec" {
     // Three configurations, because the interesting question is not "does it
     // work" but "which binding does it accept".
-    print("— system defaults (no device set) —")
-    print(EchoCancellation.probe(inputDeviceUID: nil).summary)
-
     let devices = (try? AudioDevices.all()) ?? []
-    for device in devices where device.hasInput {
+    if let defaultInput = try? AudioDevices.defaultInput(),
+        !defaultInput.transport.requiresExplicitInputSelection
+    {
+        print("— system defaults (no device set) —")
+        print(EchoCancellation.probe(inputDeviceUID: nil).summary)
+    } else {
+        print("— system defaults skipped: the default input is Continuity Capture —")
+    }
+
+    for device in devices
+    where device.hasInput && !device.transport.requiresExplicitInputSelection {
         let duplex = device.hasOutput ? "duplex" : "input-only"
         print("\n— \(device.name)  (\(duplex)) —")
         print(EchoCancellation.probe(inputDeviceUID: device.uid).summary)
@@ -2171,8 +2188,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "vad" {
 
     if CommandLine.arguments.contains("--watch") {
         let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
+        let candidates =
+            match.isEmpty
+            ? devices.filter { !$0.transport.requiresExplicitInputSelection }
+            : devices
         guard
-            let device = devices.first(where: {
+            let device = candidates.first(where: {
                 match.isEmpty || $0.name.localizedCaseInsensitiveContains(match)
             })
         else {

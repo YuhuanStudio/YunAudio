@@ -118,6 +118,22 @@ struct TransportTests {
     func absent() {
         #expect(AudioTransport(rawValue: nil) == .unknown)
     }
+
+    @Test("Continuity Capture always requires a person's explicit choice")
+    func continuityCaptureIsOptIn() {
+        let continuityTypes: [UInt32] = [
+            kAudioDeviceTransportTypeContinuityCaptureWired,
+            kAudioDeviceTransportTypeContinuityCaptureWireless,
+            0x6363_6170,  // 'ccap', published before CoreAudio split wired and wireless.
+        ]
+        for raw in continuityTypes {
+            let transport = AudioTransport(rawValue: raw)
+            #expect(transport == .continuityCapture)
+            #expect(transport.requiresExplicitInputSelection)
+        }
+        #expect(!AudioTransport.usb.requiresExplicitInputSelection)
+        #expect(!AudioTransport.builtIn.requiresExplicitInputSelection)
+    }
 }
 
 // MARK: - Razer report framing
@@ -201,7 +217,9 @@ struct SampleRateRestorationTests {
     @Test("aligning reports what each device was set to beforehand")
     func reportsPreviousRates() throws {
         let devices = try AudioDevices.all().filter {
-            $0.availableSampleRates.contains(48000) && $0.availableSampleRates.count > 1
+            !$0.transport.requiresExplicitInputSelection
+                && $0.availableSampleRates.contains(48000)
+                && $0.availableSampleRates.count > 1
         }
         try #require(!devices.isEmpty, "needs a device offering more than one rate")
 

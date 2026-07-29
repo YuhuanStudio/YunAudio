@@ -34,6 +34,60 @@ final class RouterModel: ScriptTarget {
     private(set) var inputDevices: [AudioDevice] = []
     private(set) var outputDevices: [AudioDevice] = []
 
+    /// Inputs automation may open without waking another personal device.
+    ///
+    /// Continuity Capture remains in `inputDevices` so a person can choose it
+    /// deliberately. It is absent here so launch defaults, recovery and
+    /// verification cannot turn a nearby phone into a microphone.
+    var automaticallySelectableInputDevices: [AudioDevice] {
+        inputDevices.filter { !$0.transport.requiresExplicitInputSelection }
+    }
+
+    /// Whether the remembered route contains an input that must not auto-start.
+    private var routeRequiresExplicitInputSelection: Bool {
+        activeSourceUIDs.contains { uid in
+            inputDevices.first(where: { $0.uid == uid })?.transport
+                .requiresExplicitInputSelection == true
+        }
+    }
+
+    /// Verification is unattended and must neither open saved hardware nor
+    /// rewrite the person's saved route while it drives a temporary one.
+    private static let isVerificationProcess: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        return environment["YUNAUDIO_FLOWCHECK"] != nil
+            || environment["YUNAUDIO_SCREENSHOT"] != nil
+            || environment["YUNAUDIO_RENDER"] != nil
+            || environment["YUNAUDIO_ICON"] != nil
+    }()
+
+    /// The user's real input choices while a verification route is temporary.
+    @ObservationIgnored private var verificationSourceUID: String?
+    @ObservationIgnored private var verificationAdditionalSourceUIDs: [String]?
+
+    /// Moves verification away from inputs that wake a nearby phone or tablet.
+    ///
+    /// The ordinary picker remains untouched. Automated runs have no person at
+    /// the point of capture to consent to Continuity Capture, so they either use
+    /// a local input or decline to open audio at all.
+    @discardableResult
+    func prepareForAutomatedAudioUse() -> Bool {
+        if Self.isVerificationProcess, verificationAdditionalSourceUIDs == nil {
+            verificationSourceUID = selectedSourceUID
+            verificationAdditionalSourceUIDs = additionalSourceUIDs
+        }
+        additionalSourceUIDs.removeAll { uid in
+            inputDevices.first(where: { $0.uid == uid })?.transport
+                .requiresExplicitInputSelection == true
+        }
+        if selectedSource?.transport.requiresExplicitInputSelection == true {
+            selectedSourceUID =
+                automaticallySelectableInputDevices.first { !$0.transport.isVirtual }?.uid
+                ?? automaticallySelectableInputDevices.first?.uid
+        }
+        return selectedSource != nil && !routeRequiresExplicitInputSelection
+    }
+
     var selectedSourceUID: String? {
         didSet {
             guard oldValue != selectedSourceUID else { return }
@@ -896,6 +950,10 @@ final class RouterModel: ScriptTarget {
     /// samples for a five-minute song and it does not change while it plays.
     @ObservationIgnored private var scoringReference: [PitchSample] = []
     @ObservationIgnored private var pollsSinceScore = 0
+    private struct CapturedScoringReference {
+        let samples: [PitchSample]
+        let step: Double
+    }
 
     /// True when the score is against an exact MIDI tune rather than the
     /// detected-key fallback used by ordinary streaming tracks.
@@ -1055,19 +1113,25 @@ final class RouterModel: ScriptTarget {
         // line the file stamps at 30 s is sung at 30 s minus the offset — and
         // the melody file is on the recording's clock, not the words'.
         let shift = lyrics?.offset ?? 0
-        let lines = (lyrics?.lines ?? []).map {
-            Lyrics.Line(time: $0.time - shift, text: $0.text)
-        }
+        // Lyrics do not change between tuner refreshes. Building the whole
+        // shifted list at 20 Hz made the four-Hz score cadence mostly cosmetic
+        // on a song with hundreds of lines.
+        let lines =
+            rescore
+            ? (lyrics?.lines ?? []).map {
+                Lyrics.Line(time: $0.time - shift, text: $0.text)
+            }
+            : []
 
         let previous = Dictionary(uniqueKeysWithValues: singers.map { ($0.uid, $0.score) })
         let capturedReference =
             rescore && scoringReference.isEmpty
             ? automaticCapturedReference(lines: lines)
-            : []
+            : nil
         if rescore {
             if !scoringReference.isEmpty {
                 scoringReferenceMode = .midi
-            } else if !capturedReference.isEmpty {
+            } else if capturedReference != nil {
                 scoringReferenceMode = .capturedPlayer
             } else if songKey != nil {
                 scoringReferenceMode = .key
@@ -1114,7 +1178,7 @@ final class RouterModel: ScriptTarget {
             Lyrics.Line(time: $0.time - shift, text: $0.text)
         }
         let reference =
-            scoringReference.isEmpty ? automaticCapturedReference(lines: lines) : []
+            scoringReference.isEmpty ? automaticCapturedReference(lines: lines) : nil
         let score = scoreForTrack(
             singerTracks[index], lines: lines, capturedReference: reference)
         return Singer(
@@ -1124,19 +1188,26 @@ final class RouterModel: ScriptTarget {
 
     private func scoreForTrack(
         _ track: SingerPitch, lines: [Lyrics.Line],
-        capturedReference: [PitchSample] = []
+        capturedReference: CapturedScoringReference? = nil
     ) -> KaraokeScore {
         if !scoringReference.isEmpty {
-            return KaraokeScore.score(
-                sung: track.samples, reference: scoringReference, lyrics: lines)
+            return KaraokeScore.scoreChronological(
+                sung: track.samples, sungStep: track.sampleInterval,
+                reference: scoringReference,
+                referenceStep: KaraokeScore.referenceInterval,
+                lyrics: lines, through: track.elapsed)
         }
-        if !capturedReference.isEmpty {
-            return KaraokeScore.score(
-                sung: track.samples, reference: capturedReference, lyrics: lines)
+        if let capturedReference {
+            return KaraokeScore.scoreChronological(
+                sung: track.samples, sungStep: track.sampleInterval,
+                reference: capturedReference.samples,
+                referenceStep: capturedReference.step,
+                lyrics: lines, through: track.elapsed)
         }
         guard let songKey else { return .none }
-        return KaraokeScore.keyScore(
-            sung: track.samples, key: songKey, lyrics: lines,
+        return KaraokeScore.keyScoreChronological(
+            sung: track.samples, sungStep: track.sampleInterval,
+            key: songKey, lyrics: lines,
             through: track.elapsed)
     }
 
@@ -1147,7 +1218,9 @@ final class RouterModel: ScriptTarget {
     /// "which note should the singer sing". Calling its dominant instrument an
     /// exact melody would manufacture a confident bad score, so those tracks
     /// deliberately fall through to the key-and-timing mode.
-    private func automaticCapturedReference(lines: [Lyrics.Line]) -> [PitchSample] {
+    private func automaticCapturedReference(
+        lines: [Lyrics.Line]
+    ) -> CapturedScoringReference? {
         guard !lines.isEmpty,
             let track = nowPlaying,
             !OnlineLyrics.isBackingTitle(track.title),
@@ -1162,15 +1235,14 @@ final class RouterModel: ScriptTarget {
                     && $0 < scoringApplicationIDs.count
                     && scoringApplicationIDs[$0] == expectedApplication
             })
-        else { return [] }
+        else { return nil }
         let reference = KaraokeScore.capturedReference(
             singerTracks[index].samples, lyrics: lines,
             through: singerTracks[index].elapsed)
-        let step = KaraokeScore.typicalStep(of: reference)
-        guard step > 0,
-            Double(reference.count) * step >= KaraokeScore.leastSeconds
-        else { return [] }
-        return reference
+        let step = singerTracks[index].sampleInterval
+        guard Double(reference.count) * step >= KaraokeScore.leastSeconds
+        else { return nil }
+        return CapturedScoringReference(samples: reference, step: step)
     }
 
     /// Puts every singer's clock back where the player says the song is.
@@ -4072,6 +4144,13 @@ final class RouterModel: ScriptTarget {
     }
     private(set) var levels: [Float] = []
     private(set) var pathQuality: PathQuality?
+    /// A HAL-backed verdict read already queued on the engine serial queue.
+    ///
+    /// The read costs about three milliseconds and used to run synchronously
+    /// on the main actor every half second. Keeping one request in flight
+    /// preserves the same update cadence without stacking work when
+    /// `coreaudiod` is slow.
+    @ObservationIgnored private var pathQualityReadInFlight = false
     private(set) var isClockLocked = false
     private(set) var measuredRateRatio: Double = 1
     private(set) var clockLockFailed = false
@@ -4275,7 +4354,10 @@ final class RouterModel: ScriptTarget {
         installHotkeys()
         installMIDI()
 
-        if autoStart, selectedSource != nil, selectedDestination != nil {
+        if !Self.isVerificationProcess, autoStart,
+            selectedSource != nil, selectedDestination != nil,
+            !routeRequiresExplicitInputSelection
+        {
             start()
         }
     }
@@ -4551,7 +4633,8 @@ final class RouterModel: ScriptTarget {
         guard !isRestoring, !isApplyingPreset, !isAutoAdjusting else { return }
         PreferencesStore.save(
             Preferences(
-                sourceDeviceUID: selectedSourceUID,
+                sourceDeviceUID: verificationAdditionalSourceUIDs == nil
+                    ? selectedSourceUID : verificationSourceUID,
                 destinationDeviceUID: selectedDestinationUID,
                 channelMode: channelMode.rawValue,
                 monoChannel: monoChannel,
@@ -4619,7 +4702,7 @@ final class RouterModel: ScriptTarget {
                 // triggers — wrote the script away as nothing.
                 residentScript: residentScript,
                 sourceChannelChoices: sourceChannelChoices,
-                additionalSourceUIDs: additionalSourceUIDs,
+                additionalSourceUIDs: verificationAdditionalSourceUIDs ?? additionalSourceUIDs,
                 additionalDestinationUIDs: additionalDestinationUIDs,
                 outputTrims: outputTrims,
                 sourceLevels: sourceLevels,
@@ -4658,13 +4741,15 @@ final class RouterModel: ScriptTarget {
             // nothing to suggest what to change.
             let systemInput = try? AudioDevices.defaultInput()
             let realInput = systemInput.flatMap { device in
-                device.transport.isVirtual ? nil : device
+                device.transport.isVirtual || device.transport.requiresExplicitInputSelection
+                    ? nil : device
             }
+            let automatic = automaticallySelectableInputDevices
             selectedSourceUID =
                 realInput.map(\.uid)
-                ?? inputDevices.first { $0.transport == .usb }?.uid
-                ?? inputDevices.first { !$0.transport.isVirtual }?.uid
-                ?? inputDevices.first?.uid
+                ?? automatic.first { $0.transport == .usb }?.uid
+                ?? automatic.first { !$0.transport.isVirtual }?.uid
+                ?? automatic.first?.uid
         }
         // Whatever the source ended up as, it must not also be the destination.
         // Two faces of one headset count as the same device here too, or the
@@ -4674,10 +4759,12 @@ final class RouterModel: ScriptTarget {
             isSamePhysicalDevice(source, destination)
         {
             selectedSourceUID =
-                inputDevices.first {
+                automaticallySelectableInputDevices.first {
                     !$0.transport.isVirtual && !isSamePhysicalDevice($0.uid, destination)
                 }?.uid
-                ?? inputDevices.first { !isSamePhysicalDevice($0.uid, destination) }?.uid
+                ?? automaticallySelectableInputDevices.first {
+                    !isSamePhysicalDevice($0.uid, destination)
+                }?.uid
         }
         if selectedDestinationUID == nil {
             // Our own device first, then any other loopback endpoint. Never a
@@ -4874,7 +4961,8 @@ final class RouterModel: ScriptTarget {
         // moment it is plugged in again — not a stopped router and an error.
         if sourceGone, let lost = selectedSourceUID,
             let replacement = Self.replacement(
-                for: lost, recent: recentSourceUIDs, available: inputDevices.map(\.uid))
+                for: lost, recent: recentSourceUIDs,
+                available: automaticallySelectableInputDevices.map(\.uid))
         {
             let name = deviceNames[lost]
             substituting {
@@ -4933,7 +5021,10 @@ final class RouterModel: ScriptTarget {
     }
 
     private func restoreDisplacedDevices() {
-        if let wanted = displacedSourceUID, inputDevices.contains(where: { $0.uid == wanted }) {
+        if let wanted = displacedSourceUID,
+            let device = inputDevices.first(where: { $0.uid == wanted }),
+            !device.transport.requiresExplicitInputSelection
+        {
             substituting {
                 displacedSourceUID = nil
                 displacedSourceName = nil
@@ -5089,6 +5180,13 @@ final class RouterModel: ScriptTarget {
     ///   sequence, so it is never on for ordinary routing.
     func start(selftest: Bool) {
         guard !isBusy else { return }
+        // `prepareForAutomatedAudioUse()` chooses a local input before either
+        // harness starts. This guard is the last line of defence for a future
+        // test that forgets: failing that test is preferable to waking a phone.
+        guard !(Self.isVerificationProcess && routeRequiresExplicitInputSelection) else {
+            startFailed = true
+            return
+        }
         guard let source = selectedSourceUID, let destination = selectedDestinationUID else {
             startFailed = true
             lastError = loc("Pick an input and an output first.")
@@ -5321,6 +5419,7 @@ final class RouterModel: ScriptTarget {
         engineQueue.async {
             engine.allowClockLockRetry()
             var failure: String?
+            var startedQuality: PathQuality?
             do {
                 try engine.start(
                     sourceDeviceUID: source,
@@ -5338,10 +5437,15 @@ final class RouterModel: ScriptTarget {
                     echoCancellation: echo,
                     outputLatencyTrim: trim,
                     selftest: selftest)
+                // This asks CoreAudio several synchronous questions. The
+                // engine queue is already paying for device startup; carrying
+                // the answer across avoids adding a final main-actor stall just
+                // as the interface becomes interactive again.
+                startedQuality = engine.pathQuality
             } catch {
                 failure = String(describing: error)
             }
-            Task { @MainActor [failure] in
+            Task { @MainActor [failure, startedQuality] in
                 self.isBusy = false
                 self.isStarting = false
                 if let failure {
@@ -5432,7 +5536,8 @@ final class RouterModel: ScriptTarget {
                 // one carrying zero, which is what a device that has not
                 // settled reports — and zero was the rate that took the whole
                 // application down from inside the FFT setup.
-                let reported = self.engine.pathQuality?.sampleRate ?? 0
+                self.pathQuality = startedQuality
+                let reported = startedQuality?.sampleRate ?? 0
                 self.startAnalysis(
                     sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
                 // After the graph exists, not before: a correction names an
@@ -6106,6 +6211,28 @@ final class RouterModel: ScriptTarget {
         self[keyPath: keyPath] = value
     }
 
+    /// Reads the HAL-backed path verdict without stopping the main actor.
+    private func refreshPathQualityAsynchronously() {
+        guard !pathQualityReadInFlight else { return }
+        pathQualityReadInFlight = true
+        let engine = engine
+        let destination = selectedDestination
+        engineQueue.async {
+            let quality = engine.pathQuality
+            let latency =
+                destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+            Task { @MainActor in
+                self.pathQualityReadInFlight = false
+                // A queued read can finish after Stop. Publishing that route's
+                // verdict again would resurrect a stale "bit-exact" pill over
+                // an idle application.
+                guard self.isRunning else { return }
+                self.publish(quality, to: \.pathQuality)
+                self.publish(latency, to: \.destinationLatencyFrames)
+            }
+        }
+    }
+
     private func poll() {
         guard isRunning else { return }
         let started = DispatchTime.now().uptimeNanoseconds
@@ -6128,13 +6255,7 @@ final class RouterModel: ScriptTarget {
         pollsSincePathQuality += 1
         if pathQuality == nil || pollsSincePathQuality >= Self.pathQualityEveryNPolls {
             pollsSincePathQuality = 0
-            lap("pathQuality") {
-                publish(engine.pathQuality, to: \.pathQuality)
-                publish(
-                    selectedDestination?.latencyFrames(
-                        scope: kAudioObjectPropertyScopeOutput) ?? 0,
-                    to: \.destinationLatencyFrames)
-            }
+            lap("pathQuality") { refreshPathQualityAsynchronously() }
             // For the same reason, and far less often. Everything this
             // application does to these refreshes them on the spot — a
             // selection, a device arriving, the window opening — so the only

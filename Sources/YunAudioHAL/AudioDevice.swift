@@ -81,6 +81,8 @@ extension AudioProperty {
 public enum AudioTransport: Sendable, Hashable {
     case builtIn, usb, thunderbolt, hdmi, displayPort, bluetooth, airPlay, virtual, aggregate
     case pci, fireWire, avb, other(UInt32), unknown
+    /// An iPhone or iPad offered to the Mac through Continuity Capture.
+    case continuityCapture
     /// Bluetooth LE Audio, kept apart from classic Bluetooth on purpose.
     ///
     /// It is the one case where the answer to "why does my headset sound like a
@@ -108,6 +110,10 @@ public enum AudioTransport: Sendable, Hashable {
         case kAudioDeviceTransportTypePCI: self = .pci
         case kAudioDeviceTransportTypeFireWire: self = .fireWire
         case kAudioDeviceTransportTypeAVB: self = .avb
+        case kAudioDeviceTransportTypeContinuityCaptureWired,
+            kAudioDeviceTransportTypeContinuityCaptureWireless,
+            0x6363_6170:  // 'ccap', used by macOS 13 before wired and wireless split.
+            self = .continuityCapture
         case .some(let raw): self = .other(raw)
         case nil: self = .unknown
         }
@@ -145,6 +151,14 @@ public enum AudioTransport: Sendable, Hashable {
     /// What can be done is not to open the microphone. That is what this
     /// application is for.
     public var losesOutputQualityToItsMicrophone: Bool { self == .bluetooth }
+
+    /// Whether opening an input should require a person's explicit choice.
+    ///
+    /// Continuity Capture turns a nearby iPhone or iPad into a CoreAudio input,
+    /// but merely opening it wakes the device and presents a capture request.
+    /// It remains available in the picker; defaults, failure recovery and
+    /// automated checks must not turn somebody's phone into a microphone.
+    public var requiresExplicitInputSelection: Bool { self == .continuityCapture }
 }
 
 // MARK: - Device
