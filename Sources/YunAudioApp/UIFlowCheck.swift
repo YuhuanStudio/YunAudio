@@ -304,6 +304,24 @@ enum UIFlowCheck {
             "the in-window shortcuts are listed too",
             model.hotkeyDescriptions.contains { !$0.isGlobal })
 
+        // Settings existed only on the menu bar item's right-click menu, so the
+        // whole of the preferences window — language, buffer size, shortcuts,
+        // the MIDI map — was unreachable from the application's own window.
+        // The header sends this; so does the menu item. What is asserted is that
+        // a responder takes it, because with no `Settings` scene installed the
+        // send is a silent no-op and the button would look exactly the same.
+        check("the window's settings button reaches a handler", SettingsWindow.open())
+        let settingsWindow = NSApp.windows.first {
+            $0.identifier?.rawValue.contains("Settings") == true
+                || $0.title.localizedCaseInsensitiveContains("settings")
+                || $0.title.contains("設定")
+        }
+        check("and a settings window came up", settingsWindow != nil)
+        // Shut again, or every screenshot after this is taken with a settings
+        // window sitting over the one being photographed.
+        settingsWindow?.close()
+        NSApp.windows.first { $0.title == "YunAudio" }?.makeKeyAndOrderFront(nil)
+
         // The menu bar glyph is the only part of this application most people
         // look at, and it showed nothing at all while muted — which is exactly
         // the state worth knowing about at a glance.

@@ -279,6 +279,24 @@ struct MainWindow: View {
                     .help(error)
             }
 
+            // Settings had no way in from this window at all: they were on the
+            // menu bar item's right-click menu and nowhere else, so somebody who
+            // opened the application and never right-clicked a menu bar icon had
+            // no route to the language, the buffer size, the shortcuts or the
+            // MIDI map. ⌘, is the shortcut macOS trains everybody to try, and it
+            // did nothing here.
+            Button {
+                SettingsWindow.open()
+            } label: {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11))
+                    .frame(width: 14)
+            }
+            .buttonStyle(YunButtonStyle(.ghost, small: true))
+            .keyboardShortcut(",", modifiers: [.command])
+            .help(loc("Settings (⌘,)"))
+            .accessibilityLabel(Text(loc("Settings")))
+
             // The one action the window exists for, in the corner the eye goes
             // to last and reaches for first. It used to sit in a tall bar along
             // the bottom, which spent forty points of height on a single button.

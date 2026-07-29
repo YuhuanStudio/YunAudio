@@ -3086,6 +3086,11 @@ final class RouterModel: ScriptTarget {
         entries.append((loc("Start / stop routing"), "⌘↩", false))
         entries.append((loc("Record"), "⌘R", false))
         entries.append((loc("Mute / unmute"), "⌘M", false))
+        // Listed because this page is where somebody looks for it, and because
+        // the shortcut is new: settings used to be reachable only from the menu
+        // bar item's right-click menu, so ⌘, — the combination macOS teaches
+        // everybody to try first — did nothing in the application's own window.
+        entries.append((loc("Settings"), "⌘,", false))
         for (index, preset) in RoutePreset.builtIn.enumerated() {
             entries.append((preset.name, "⌘\(index + 1)", false))
         }
