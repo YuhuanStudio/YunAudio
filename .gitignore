@@ -6,3 +6,4 @@ build/
 
 # Agent worktrees live here and are not part of the project.
 .claude/worktrees/
+build/screenshots/

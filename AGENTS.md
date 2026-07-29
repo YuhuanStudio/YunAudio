@@ -157,6 +157,51 @@ you genuinely want to wait. A run that did not happen is a fact somebody can
 act on; a run that silently started fifteen minutes late is a mystery about why
 the machine was unusable.
 
+## The acceptance gate
+
+```bash
+./App/verify.sh          # everything that does not need the audio hardware
+./App/verify.sh --full   # and the flow check, which takes it for four minutes
+```
+
+**Run it before you say something is done.** Not the steps individually — the
+gate. It exists because the checks used to be a list in this file, and a list in
+a file is a list somebody skips. Two things went wrong in one afternoon and both
+were the procedure rather than the code:
+
+- **A whole feature shipped with no interface at all.** The scripting engine had
+  unit tests, a flow-check section and an offscreen render, all green, and there
+  was no tab for it in the window. None of those three can see that: the render
+  draws whichever tab is *selected*, so a tab missing from the row is invisible
+  to it by construction. The photograph of the real window is the only thing
+  that shows it, and the photograph was the step that got skipped.
+
+- **A build failure was hidden by a grep.** `swift build 2>&1 | grep error:`
+  with a pattern that did not match the driver's own failure line printed
+  nothing, was read as success, and a stale binary was photographed and
+  believed for three rounds. **Exit codes decide. Output is for people.** The
+  gate never greps for success.
+
+What it does, and why each is not redundant with the others:
+
+| step | what only it can catch |
+|---|---|
+| `swift build` | it compiles — and nothing after this means anything without it, so a failure stops the run |
+| `swift test` | the arithmetic, and every rule that can be a pure function |
+| `check-strings.sh` | a literal that never reaches a translator, a duplicate key, a `%@` lost in translation |
+| `build-app.sh` | the bundle is assembled — resources, translations, the driver |
+| offscreen render | colour and spacing, in both appearances, on every panel |
+| **photograph the real window** | the title bar, clipping at the minimum size, whether a control is *missing*, whether a row of six fits |
+| flow check (`--full`) | real devices, real routes, real audio |
+
+The summary at the end says what it did **not** check, every time. A green run
+that quietly omitted the only check touching real hardware is worse than a red
+one, so a run without `--full` says so in as many words.
+
+And then **look at `build/screenshots`.** The gate can tell you a photograph was
+taken; it cannot tell you the first two tabs came out as "…". That one was found
+by opening the picture.
+
 ### A targeted run is not evidence about anything else
 
 `check()` returns without recording when the section is outside the filter.

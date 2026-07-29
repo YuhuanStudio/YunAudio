@@ -103,16 +103,42 @@ public struct YunButtonStyle: ButtonStyle {
 /// near-white, so tinting a selection would be the one loud thing in the panel.
 public struct YunSegmented<Value: Hashable>: View {
     private let options: [(value: Value, title: String)]
+    private let wraps: Bool
     @Binding private var selection: Value
     @FocusState private var focused: Value?
 
-    public init(selection: Binding<Value>, options: [(value: Value, title: String)]) {
+    /// - Parameter wraps: Lets the row run onto a second line rather than
+    ///   squeezing. A row of six in a 370-point column truncated its first two
+    ///   labels to "…" — two tabs that were no longer possible to tell apart,
+    ///   in a control whose entire job is telling them apart. An offscreen
+    ///   render cannot show it, because it is given whatever width makes the
+    ///   content look complete; the photograph of the real window at its
+    ///   minimum size is what said so.
+    public init(
+        selection: Binding<Value>, options: [(value: Value, title: String)],
+        wraps: Bool = false
+    ) {
         _selection = selection
         self.options = options
+        self.wraps = wraps
     }
 
     public var body: some View {
-        HStack(spacing: 6) {
+        Group {
+            if wraps {
+                YunWrap(spacing: 6, lineSpacing: 6) { buttons }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                HStack(spacing: 6) {
+                    buttons
+                    Spacer(minLength: 0)
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.15), value: selection)
+    }
+
+    @ViewBuilder private var buttons: some View {
             ForEach(options, id: \.value) { option in
                 let isSelected = option.value == selection
                 Button {
@@ -155,10 +181,7 @@ public struct YunSegmented<Value: Hashable>: View {
                             .padding(-2)
                     }
                 }
-            }
-            Spacer(minLength: 0)
         }
-        .animation(.easeOut(duration: 0.15), value: selection)
     }
 }
 

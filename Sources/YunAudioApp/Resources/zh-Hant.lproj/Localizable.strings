@@ -512,3 +512,8 @@
 "Script ran." = "腳本執行完畢。";
 "The interpreter could not be started." = "直譯器無法啟動。";
 "The application is no longer there." = "應用程式已經不在了。";
+"Script" = "腳本";
+"JavaScript that stays loaded and reacts. Register a handler with yun.on(event, function), and drive the router with yun.routing(), yun.mute(), yun.preset(name) and the rest." = "常駐並且會反應的 JavaScript。用 yun.on(事件, 函式) 註冊處理器，用 yun.routing()、yun.mute()、yun.preset(名稱) 等驅動路由器。";
+"Loaded." = "已載入。";
+"What it has said" = "它說了什麼";
+"Events" = "事件";

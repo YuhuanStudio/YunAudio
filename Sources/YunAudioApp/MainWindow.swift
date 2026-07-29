@@ -1033,6 +1033,7 @@ struct MainWindow: View {
         case plugins
         case singing
         case recording
+        case scripting
         case hardware
 
         var id: String { rawValue }
@@ -1043,6 +1044,7 @@ struct MainWindow: View {
             case .plugins: loc("Plugins")
             case .singing: loc("Sing")
             case .recording: loc("Record")
+            case .scripting: loc("Script")
             case .hardware: loc("Device")
             }
         }
@@ -1051,15 +1053,21 @@ struct MainWindow: View {
     private var inspector: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                // Wrapping, because six of them do not fit across this column
+                // at the window's minimum width and the first two came out as
+                // "…" — two tabs nobody could tell apart, in a control whose
+                // whole job is telling them apart.
                 YunSegmented(
                     selection: $inspectorTab,
-                    options: Inspector.allCases.map { ($0, $0.title) })
+                    options: Inspector.allCases.map { ($0, $0.title) },
+                    wraps: true)
 
                 switch inspectorTab {
                 case .sound: soundTab
                 case .plugins: pluginsTab
                 case .singing: singingTab
                 case .recording: recordingTab
+                case .scripting: scriptingTab
                 case .hardware: hardwareTab
                 }
             }
@@ -1592,6 +1600,93 @@ struct MainWindow: View {
     private static func clock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "--:--" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+
+    /// The script that stays loaded.
+    ///
+    /// It had no interface at all when it shipped — the whole feature was
+    /// reachable only from a URL, which is a feature nobody finds. The real
+    /// screenshot is what said so: the offscreen render draws whatever tab is
+    /// selected and is structurally incapable of noticing that a tab is
+    /// missing from the row.
+    private var scriptingTab: some View {
+        Group {
+            sectionHeading(loc("Script"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Text(
+                        loc(
+                            "JavaScript that stays loaded and reacts. Register a handler with yun.on(event, function), and drive the router with yun.routing(), yun.mute(), yun.preset(name) and the rest."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+
+                    // A plain editor rather than anything clever. Syntax
+                    // colouring is somebody's week and this is a text field
+                    // that has to accept a paste.
+                    TextEditor(text: $model.residentScript)
+                        .font(.system(size: 12, design: .monospaced))
+                        .scrollContentBackground(.hidden)
+                        .frame(minHeight: 120)
+                        .padding(Yun.Space.xs)
+                        .background(
+                            Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.control))
+
+                    // The error goes next to the script rather than in a
+                    // status bar somewhere else: a syntax error is about the
+                    // thing on screen, and a script that failed to load is
+                    // otherwise indistinguishable from one that never fires.
+                    if let problem = model.residentScriptError {
+                        Text(problem)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.danger)
+                            .textSelection(.enabled)
+                    } else if !model.residentScript.isEmpty {
+                        Text(loc("Loaded."))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.success)
+                    }
+
+                    // What the handlers have said. Without it a script that
+                    // logs is writing to nowhere, and the first thing anybody
+                    // does with a new scripting interface is print something.
+                    if !model.scriptLog.isEmpty {
+                        Divider().overlay(Yun.Palette.border)
+                        Text(loc("What it has said"))
+                            .font(Yun.Text.label)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 2) {
+                                ForEach(Array(model.scriptLog.suffix(12).enumerated()), id: \.offset) {
+                                    _, line in
+                                    Text(line)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundStyle(Yun.Palette.textSecondary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
+                        }
+                        .frame(maxHeight: 120)
+                    }
+                }
+            }
+
+            sectionHeading(loc("Events"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.xs) {
+                    // Listed rather than documented elsewhere. The names are a
+                    // closed set and a typo is refused at load, so the one
+                    // thing somebody needs is the list.
+                    Text(
+                        ScriptHost.Event.allCases.map(\.rawValue).sorted()
+                            .joined(separator: "   "))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Yun.Palette.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
     }
 
     private var recordingTab: some View {

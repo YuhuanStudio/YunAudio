@@ -512,3 +512,8 @@
 "Script ran." = "Script ran.";
 "The interpreter could not be started." = "The interpreter could not be started.";
 "The application is no longer there." = "The application is no longer there.";
+"Script" = "Script";
+"JavaScript that stays loaded and reacts. Register a handler with yun.on(event, function), and drive the router with yun.routing(), yun.mute(), yun.preset(name) and the rest." = "JavaScript that stays loaded and reacts. Register a handler with yun.on(event, function), and drive the router with yun.routing(), yun.mute(), yun.preset(name) and the rest.";
+"Loaded." = "Loaded.";
+"What it has said" = "What it has said";
+"Events" = "Events";
