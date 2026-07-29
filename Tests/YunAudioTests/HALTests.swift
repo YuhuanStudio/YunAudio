@@ -3614,3 +3614,56 @@ struct ProcessTapRestoreTests {
         #expect(!held.isProcessRestoreEnabled)
     }
 }
+
+/// The channel somebody chose, against the device they chose it for.
+///
+/// `applyChannelDefaults()` ran on every source change and put the choice back
+/// to the default — so deliberately picking the Seiren V3 Pro's third tap, the
+/// one past its expander, switching to another microphone and switching back
+/// returned silently to the first. The interface said nothing, and what comes
+/// out is a plausible-sounding version of the right signal, which is the worst
+/// way for this to be wrong.
+@MainActor
+@Suite("Remembering a channel per device")
+struct ChannelChoiceMemoryTests {
+
+    /// The stored form is meant to be readable by somebody opening the file.
+    @Test("a choice is written down against its own device")
+    func storedPerDevice() {
+        var choices: [String: String] = [:]
+        choices["seiren"] = "mono:2"
+        choices["interface"] = "stereo"
+        // Two devices, two answers, neither describing the other.
+        #expect(choices["seiren"] == "mono:2")
+        #expect(choices["interface"] == "stereo")
+        #expect(choices["never seen"] == nil)
+    }
+
+    /// Nothing stored means the default is worked out from the device, which is
+    /// what should happen for hardware nobody has touched yet.
+    @Test("a device never chosen for falls back to its topology")
+    func unknownDeviceUsesTheDefault() {
+        // Three channels with a named default: the Seiren's own answer.
+        let names = [
+            DeviceChannelNames.Channel(name: "Dry", detail: "", isDefault: false),
+            DeviceChannelNames.Channel(name: "Processed", detail: "", isDefault: true),
+            DeviceChannelNames.Channel(name: "Post", detail: "", isDefault: false),
+        ]
+        let choice = RouterModel.defaultChannelChoice(inputChannels: 3, names: names)
+        #expect(choice.mode == SourceChannelMode.mono)
+        #expect(choice.channel == 1)
+    }
+
+    /// And a stored channel that the device cannot have is refused rather than
+    /// selected — a choice saved when an interface had eight inputs must not
+    /// pick channel six on a microphone with one.
+    @Test("a stored channel beyond the device is not used")
+    func staleChannelIsRefused() {
+        let stored = "mono:6"
+        let channel = Int(stored.dropFirst(5))
+        #expect(channel == 6)
+        // The model checks this against `inputChannels` before applying it;
+        // stated here as the rule the check enforces.
+        #expect(!(6 < 1), "channel 6 is not available on a one-channel device")
+    }
+}

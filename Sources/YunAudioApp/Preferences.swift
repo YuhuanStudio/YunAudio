@@ -129,6 +129,12 @@ struct Preferences: Codable, Equatable, Sendable {
     /// not, every setting after it in the file was silently lost.
     var residentScript: String?
 
+    /// Which channel of each source somebody chose, by device UID.
+    ///
+    /// Per device because it is a fact about that device: without it, every
+    /// source change put the choice back to the default.
+    var sourceChannelChoices: [String: String]?
+
     /// Where OBS is, and which of its inputs reads this application.
     ///
     /// The password is deliberately absent. `UserDefaults` is a plain file in
@@ -188,6 +194,7 @@ struct Preferences: Codable, Equatable, Sendable {
         midiBindings: [:],
         tapMuteBehavior: TapMuteBehavior.unmuted.storageKey,
         residentScript: nil,
+        sourceChannelChoices: [:],
         obsHost: "127.0.0.1",
         obsPort: 4455,
         obsInputName: "",

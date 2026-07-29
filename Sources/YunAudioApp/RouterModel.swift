@@ -46,7 +46,9 @@ final class RouterModel: ScriptTarget {
                 displacedSourceUID = nil
                 displacedSourceName = nil
             }
-            applyChannelDefaults()
+            // What was chosen for *this* device, and only otherwise the
+            // default worked out from its topology.
+            if !restoreChannelChoice() { applyChannelDefaults() }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -887,6 +889,7 @@ final class RouterModel: ScriptTarget {
     var channelMode: SourceChannelMode = .mono {
         didSet {
             guard oldValue != channelMode else { return }
+            rememberChannelChoice()
             persist()
             // Only the channel map moves, so this can be swapped in silently.
             if !reconfigureIfPossible() { restartIfRunning() }
@@ -896,9 +899,60 @@ final class RouterModel: ScriptTarget {
     var monoChannel: Int = 0 {
         didSet {
             guard oldValue != monoChannel else { return }
+            rememberChannelChoice()
             persist()
             if !reconfigureIfPossible() { restartIfRunning() }
         }
+    }
+
+    /// Which channel of each source somebody chose, by device UID.
+    ///
+    /// Kept per device because it is a fact about that device. Without it,
+    /// `applyChannelDefaults()` ran on every source change and put the choice
+    /// back to the default — so deliberately picking the Seiren V3 Pro's third
+    /// tap, the one past its expander, switching to another microphone and
+    /// switching back returned silently to the first. The interface said
+    /// nothing, and the signal is a plausible-sounding version of the right
+    /// one, which is the worst way for this to be wrong.
+    ///
+    /// Stored as "stereo" or "mono:2" rather than as two maps: the preferences
+    /// file is meant to be readable by somebody opening it, and one line per
+    /// device says more than two halves of a decision in different places.
+    var sourceChannelChoices: [String: String] = [:]
+
+    private func rememberChannelChoice() {
+        // Not while the model is being put back together or driven by a preset:
+        // those are the application choosing, and only a person's choice is
+        // worth remembering against their device.
+        guard !isRestoring, !isApplyingPreset, !isAutoAdjusting,
+            let uid = selectedSourceUID
+        else { return }
+        sourceChannelChoices[uid] =
+            channelMode == .stereo ? "stereo" : "mono:\(monoChannel)"
+    }
+
+    /// Puts back what was chosen for this device, if anything ever was.
+    ///
+    /// - Returns: False when this device has never been set by hand, so the
+    ///   caller falls back to working the default out from its topology.
+    private func restoreChannelChoice() -> Bool {
+        guard let uid = selectedSourceUID, let stored = sourceChannelChoices[uid] else {
+            return false
+        }
+        if stored == "stereo" {
+            channelMode = .stereo
+            return true
+        }
+        guard stored.hasPrefix("mono:"), let channel = Int(stored.dropFirst(5)) else {
+            return false
+        }
+        // Checked against the device as it is now: a profile somebody saved
+        // when the interface had eight inputs must not select channel six on a
+        // microphone that has one.
+        guard channel < (selectedSource?.inputChannels ?? 0) else { return false }
+        channelMode = .mono
+        monoChannel = channel
+        return true
     }
 
     /// Registered with the system, not mirrored locally — the login item state
@@ -3262,6 +3316,7 @@ final class RouterModel: ScriptTarget {
         // below, once the rest of the model is in place. A handler that fired
         // during a restore would be looking at half an arrangement.
         residentScript = saved.residentScript ?? ""
+        sourceChannelChoices = saved.sourceChannelChoices ?? [:]
         preferredSampleRate = saved.preferredSampleRate
         bufferFrames =
             Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
@@ -3356,6 +3411,7 @@ final class RouterModel: ScriptTarget {
                 // save — including the one the script editor's own `didSet`
                 // triggers — wrote the script away as nothing.
                 residentScript: residentScript,
+                sourceChannelChoices: sourceChannelChoices,
                 obsHost: obsLink.host,
                 obsPort: obsLink.port,
                 obsInputName: obsLink.inputName,
