@@ -47,10 +47,21 @@ public final class EchoCancellingCapture {
     /// reaches it from a realtime thread through an unowned reference, and a
     /// non-zero value has to be reportable rather than merely not crashing.
     private let truncatedBlocks: UnsafeMutablePointer<UInt64>
+    private struct CallbackDiagnostics {
+        var inputCallbacks: UInt64 = 0
+        var farEndCallbacks: UInt64 = 0
+        var renderFailures: UInt64 = 0
+        var lastRenderStatus: OSStatus = noErr
+    }
+    private let callbackDiagnostics: UnsafeMutablePointer<CallbackDiagnostics>
 
     /// Non-zero means the device handed over more frames per pull than this
     /// object was sized for, and some audio was dropped.
     public var truncatedBlockCount: UInt64 { truncatedBlocks.pointee }
+    public var inputCallbackCount: UInt64 { callbackDiagnostics.pointee.inputCallbacks }
+    public var farEndCallbackCount: UInt64 { callbackDiagnostics.pointee.farEndCallbacks }
+    public var renderFailureCount: UInt64 { callbackDiagnostics.pointee.renderFailures }
+    public var lastRenderStatus: OSStatus { callbackDiagnostics.pointee.lastRenderStatus }
 
     /// Boxed so the C render callbacks can reach them through a raw pointer
     /// without any Swift object being retained on the realtime thread.
@@ -153,6 +164,8 @@ public final class EchoCancellingCapture {
         captureBuffer.initialize(repeating: 0, count: capacity)
         truncatedBlocks = .allocate(capacity: 1)
         truncatedBlocks.initialize(to: 0)
+        callbackDiagnostics = .allocate(capacity: 1)
+        callbackDiagnostics.initialize(to: CallbackDiagnostics())
         bufferList = AudioBufferList.allocate(maximumBuffers: 1)
         bufferList[0] = AudioBuffer(
             mNumberChannels: 1,
@@ -213,6 +226,7 @@ public final class EchoCancellingCapture {
                 // Pull the cancelled microphone out of element 1.
                 let owner = box.owner
                 guard let owner else { return noErr }
+                owner.callbackDiagnostics.pointee.inputCallbacks &+= 1
                 // Never render more than the buffer holds.
                 //
                 // `frameCount` comes from the device, and the buffer was sized
@@ -231,7 +245,11 @@ public final class EchoCancellingCapture {
                 let status = AudioUnitRender(
                     owner.unit, flags, timestamp, bus, UInt32(frames),
                     owner.bufferList.unsafeMutablePointer)
-                guard status == noErr else { return status }
+                guard status == noErr else {
+                    owner.callbackDiagnostics.pointee.renderFailures &+= 1
+                    owner.callbackDiagnostics.pointee.lastRenderStatus = status
+                    return status
+                }
                 handler(owner.captureBuffer, frames, timestamp.pointee)
                 return noErr
             },
@@ -244,6 +262,7 @@ public final class EchoCancellingCapture {
             inputProc: { refCon, _, _, _, frameCount, ioData -> OSStatus in
                 guard let ioData else { return noErr }
                 let box = Unmanaged<Callbacks>.fromOpaque(refCon).takeUnretainedValue()
+                box.owner?.callbackDiagnostics.pointee.farEndCallbacks &+= 1
                 let buffers = UnsafeMutableAudioBufferListPointer(ioData)
                 for index in 0..<buffers.count {
                     guard let data = buffers[index].mData else { continue }
@@ -269,6 +288,10 @@ public final class EchoCancellingCapture {
         guard AudioUnitInitialize(unit) == noErr else {
             AudioComponentInstanceDispose(unit)
             captureBuffer.deallocate()
+            truncatedBlocks.deinitialize(count: 1)
+            truncatedBlocks.deallocate()
+            callbackDiagnostics.deinitialize(count: 1)
+            callbackDiagnostics.deallocate()
             free(bufferList.unsafeMutablePointer)
             return nil
         }
@@ -282,6 +305,8 @@ public final class EchoCancellingCapture {
         captureBuffer.deallocate()
         truncatedBlocks.deinitialize(count: 1)
         truncatedBlocks.deallocate()
+        callbackDiagnostics.deinitialize(count: 1)
+        callbackDiagnostics.deallocate()
         free(bufferList.unsafeMutablePointer)
     }
 

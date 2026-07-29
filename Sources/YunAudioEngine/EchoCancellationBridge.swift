@@ -152,24 +152,38 @@ public final class EchoCancellationBridge: @unchecked Sendable {
             ring: cancelledRing, scratch: farEndScratch,
             scratchCapacity: farEndScratchCapacity, farEnd: farEnd)
 
-        let started = capture.start(
-            capture: { samples, count, _ in
-                _ = yun_rt_ring_write(handles.ring, samples, UInt32(count))
-            },
-            farEnd: { buffer, frames in
-                guard let reference = handles.farEnd else { return 0 }
-                let wanted = min(frames, handles.scratchCapacity)
-                let taken = reference.read(into: handles.scratch, frames: wanted)
-                buffer.update(from: handles.scratch, count: taken)
-                return taken
-            })
-
-        guard started else {
-            farEnd?.stop()
-            return false
+        // `AudioOutputUnitStart` can return success without ever driving a
+        // callback. Observed in the full flow: the route advertised a live
+        // canceller and its produced-frame count stayed at zero indefinitely.
+        // Success is two callbacks, not the return code; retry the unchanged
+        // unit once, as CoreAudio commonly recovers on the second start.
+        for _ in 0..<2 {
+            let writtenBefore = producedFrames
+            let started = capture.start(
+                capture: { samples, count, _ in
+                    _ = yun_rt_ring_write(handles.ring, samples, UInt32(count))
+                },
+                farEnd: { buffer, frames in
+                    guard let reference = handles.farEnd else { return 0 }
+                    let wanted = min(frames, handles.scratchCapacity)
+                    let taken = reference.read(into: handles.scratch, frames: wanted)
+                    buffer.update(from: handles.scratch, count: taken)
+                    return taken
+                })
+            if started {
+                let deadline = Date().addingTimeInterval(0.75)
+                while Date() < deadline, producedFrames == writtenBefore {
+                    Thread.sleep(forTimeInterval: 0.01)
+                }
+                if producedFrames > writtenBefore {
+                    isRunning = true
+                    return true
+                }
+                capture.stop()
+            }
         }
-        isRunning = true
-        return true
+        farEnd?.stop()
+        return false
     }
 
     public func stop() {
@@ -191,6 +205,10 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     public var farEndProducedFrames: UInt32 { farEnd?.producedFrames ?? 0 }
     /// Blocks cut short because the device asked for more than fits.
     public var truncatedBlocks: UInt64 { capture.truncatedBlockCount }
+    public var inputCallbacks: UInt64 { capture.inputCallbackCount }
+    public var farEndCallbacks: UInt64 { capture.farEndCallbackCount }
+    public var renderFailures: UInt64 { capture.renderFailureCount }
+    public var lastRenderStatus: OSStatus { capture.lastRenderStatus }
 
     /// Turns the cancellation off while leaving the same path in place, which
     /// is what makes its effect measurable rather than merely asserted.
@@ -227,4 +245,10 @@ public struct EchoCancellationStatus: Sendable, Hashable {
     /// had to be cut short. Should be zero; anything else means the device
     /// changed its buffer size underneath the unit.
     public let truncatedBlocks: UInt64
+    /// Callback counts distinguish a stopped unit from a microphone render
+    /// that is still being asked for and failing.
+    public let inputCallbacks: UInt64
+    public let farEndCallbacks: UInt64
+    public let renderFailures: UInt64
+    public let lastRenderStatus: OSStatus
 }

@@ -464,7 +464,11 @@ public final class RoutingEngine: @unchecked Sendable {
             buffered: bridge.bufferedFrames,
             dropped: bridge.droppedFrames,
             hasReference: bridge.hasFarEndReference && !bridge.farEndReferenceFailed,
-            truncatedBlocks: bridge.truncatedBlocks)
+            truncatedBlocks: bridge.truncatedBlocks,
+            inputCallbacks: bridge.inputCallbacks,
+            farEndCallbacks: bridge.farEndCallbacks,
+            renderFailures: bridge.renderFailures,
+            lastRenderStatus: bridge.lastRenderStatus)
     }
 
     public init() {}
