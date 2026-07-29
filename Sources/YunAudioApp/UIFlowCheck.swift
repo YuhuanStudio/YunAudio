@@ -3764,15 +3764,37 @@ enum UIFlowCheck {
         // ordered out rather than released, and SwiftUI goes on evaluating and
         // laying out a tree nobody can see.
         let statusItem = StatusItemController.current
-        statusItem?.setPanelOpenForCheck(true)
-        await pause(0.6)
-        let panelOpened = statusItem?.isPanelShownForCheck ?? false
-        statusItem?.setPanelOpenForCheck(false)
-        // Long enough for the close animation to finish, or the panel is still
-        // shown when this is read and the check disqualifies itself.
-        await pause(1.0)
-        let panelClosed = panelOpened && !(statusItem?.isPanelShownForCheck ?? true)
-        if !panelClosed {
+
+        /// Opens the panel, counts what it draws while it is up, and shuts it.
+        ///
+        /// - Returns: How many `PanelView` bodies ran while it was open, or nil
+        ///   when it would not open and shut here at all — in which case
+        ///   nothing below has been exercised and the caller must say so.
+        func openAndShutPanel() async -> Int? {
+            statusItem?.setPanelOpenForCheck(true)
+            BodyCount.reset()
+            BodyCount.isCounting = true
+            await pause(0.6)
+            BodyCount.isCounting = false
+            guard statusItem?.isPanelShownForCheck == true else { return nil }
+            let drawn = BodyCount.counts["PanelView"] ?? 0
+            statusItem?.setPanelOpenForCheck(false)
+            // Long enough for the close animation to finish, or the panel is
+            // still shown when this is read and the check disqualifies itself.
+            await pause(1.0)
+            return statusItem?.isPanelShownForCheck == false ? drawn : nil
+        }
+
+        // Twice. The panel is detached from the popover when it shuts, so the
+        // second open is the one that proves it goes back — and what it drew is
+        // counted rather than assumed, because an empty panel and a panel that
+        // costs nothing look exactly alike from outside.
+        let firstOpen = await openAndShutPanel()
+        let secondOpen = firstOpen == nil ? nil : await openAndShutPanel()
+        let panelClosed = secondOpen != nil
+        if let drawn = secondOpen {
+            check("the menu bar panel still draws when it is opened again", drawn > 0)
+        } else {
             note(
                 statusItem == nil
                     ? "no status item, so the menu bar panel was not exercised"
