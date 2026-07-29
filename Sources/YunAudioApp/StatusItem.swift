@@ -225,13 +225,31 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     //
     // The mark stops short of the top and bottom edges: Apple's own menu bar
     // symbols sit inside about sixteen points of the eighteen, and a glyph that
-    // touches the edge reads as too large next to them. It sits a point left of
-    // centre so that the meter column beside it does not push the pair off
-    // balance — and a point, at this size, is not a thing anybody sees.
+    // touches the edge reads as too large next to them.
     private static let canvas = NSSize(width: 18, height: 18)
-    private static let markHeight: CGFloat = 14
-    private static let markCentre = NSPoint(x: 8, y: 9)
-    private static let meter = NSRect(x: 13.3, y: 2, width: 2.1, height: 14)
+    private static let markHeight: CGFloat = 15
+    private static let markCentre = NSPoint(x: 9, y: 9)
+
+    /// What is left of the mark above the waterline.
+    ///
+    /// Not nothing: an empty meter has to still be a mark, or a quiet room
+    /// empties the menu bar of the icon somebody is watching. Not much either,
+    /// or the fill has nothing to be brighter than.
+    private static let emptyStrength: CGFloat = 0.3
+
+    /// A stopped router draws a dimmed mark.
+    ///
+    /// Because otherwise idle and full scale are the same picture: both are the
+    /// mark, solid, and nothing tells them apart. Capping the fill so a sliver
+    /// stays dim was tried first and measured — it moved 3.7% of the ink, which
+    /// at eighteen points is not a difference anybody sees. Dimming the whole
+    /// thing moves all of it, and "inactive is grey" is what the rest of the
+    /// menu bar already says.
+    private static let idleStrength: CGFloat = 0.6
+
+    /// The fill never quite empties while a route is up, so a silent room still
+    /// shows the bright tail that says the route is there at all.
+    private static let minimumFill: CGFloat = 0.08
 
     /// How full the meter is, from a peak level.
     ///
@@ -269,10 +287,17 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     ///
     /// So every state here is a *shape*:
     ///
-    ///   - routing, with a level: a column beside the mark, filled by length
+    ///   - stopped: the mark, dimmed whole, with no waterline in it
+    ///   - routing: the mark filled from the bottom like a vessel, by area
     ///   - muted: a slash cut through the mark, with a gap around it so the bar
     ///     reads as a slash rather than as a scratch
     ///   - muted while speaking: the same glyph, blinking
+    ///
+    /// The meter used to be a separate column standing beside the mark. Making
+    /// the mark itself the meter removes the second object — every neighbour in
+    /// a menu bar is one thing, not two — and it costs nothing, because the fill
+    /// is a rectangle composited against a silhouette that was going to be drawn
+    /// anyway.
     ///
     /// The blink is the one that earns its keep. Talking into a muted
     /// microphone is the single most expensive mistake this application can let
@@ -362,25 +387,34 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             slash.lineWidth = 1.5
             slash.stroke()
         } else if let level {
-            // Length rather than alpha. A meter drawn as a fading dot says
-            // nothing in monochrome — a faint dot and a small one are the same
-            // pixel — where a column that grows is read at a glance.
-            let intensity = meterIntensity(level)
-            NSGraphicsContext.saveGraphicsState()
-            NSBezierPath(roundedRect: meter, xRadius: meter.width / 2, yRadius: meter.width / 2)
-                .setClip()
-            // A track behind it, so a quiet room still says "running" rather
-            // than looking like a route that has stopped.
-            NSColor.black.withAlphaComponent(0.2).setFill()
-            meter.fill()
-            NSColor.black.setFill()
-            NSRect(
-                x: meter.minX, y: meter.minY, width: meter.width,
-                // Never shorter than it is wide, or the bottom of the meter is
-                // a squashed ellipse rather than the end of a column.
-                height: max(meter.width, meter.height * intensity)
-            ).fill()
-            NSGraphicsContext.restoreGraphicsState()
+            // The mark *is* the meter: it fills from the bottom like a vessel,
+            // and what is above the waterline is dimmed rather than drawn as a
+            // second object. A separate column said the same thing in a shape
+            // that had nothing to do with this application, and put two things
+            // in a menu bar where every neighbour is one.
+            //
+            // Filled by area, not by height. The mark is a tapered shape and
+            // its ink is nowhere near evenly spread up it: measured, the bottom
+            // third of the height carries eleven per cent of the ink, so a
+            // waterline driven straight off the level would have crept through
+            // the whole quiet half of the range without lighting anything.
+            // `waterline(forFilled:)` inverts the mark's own profile so that
+            // asking for a third lit lights a third.
+            let filled = max(minimumFill, meterIntensity(level))
+            let line = markBox.minY + markBox.height * YunAppIcon.waterline(forFilled: filled)
+            context.setBlendMode(.destinationOut)
+            // `destinationOut` scales what is already there, so this is the
+            // amount to *remove* to leave the empty part at `emptyStrength`.
+            NSColor.black.withAlphaComponent(1 - emptyStrength).setFill()
+            NSRect(x: 0, y: line, width: canvas.width, height: canvas.height - line).fill()
+            context.setBlendMode(.normal)
+        } else if !isMuted {
+            // Stopped. Dimmed whole, so it cannot be mistaken for a route
+            // running at full scale — see `idleStrength`.
+            context.setBlendMode(.destinationOut)
+            NSColor.black.withAlphaComponent(1 - idleStrength).setFill()
+            NSRect(origin: .zero, size: canvas).fill()
+            context.setBlendMode(.normal)
         }
     }
 

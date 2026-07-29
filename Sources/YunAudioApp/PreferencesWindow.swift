@@ -912,6 +912,33 @@ struct PreferencesWindow: View {
                         value: loc(
                             model.isDriverInstalled ? "installed" : "not installed"),
                         tone: model.isDriverInstalled ? .success : .warning)
+                    // The way back out. The application offered to install a
+                    // driver and gave no way at all to remove one — the command
+                    // was in the README and nowhere in the interface, which
+                    // makes an installation somebody cannot undo without going
+                    // to look something up.
+                    if model.isDriverInstalled {
+                        HStack {
+                            Text(
+                                loc(
+                                    "Removing it restarts coreaudiod, so all audio stops for a moment, and it needs an administrator password."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                            Spacer(minLength: Yun.Space.sm)
+                            Button(loc("Remove")) { model.removeDriver() }
+                                .buttonStyle(.plain)
+                                .disabled(model.isInstallingDriver)
+                                .foregroundStyle(Yun.Palette.danger)
+                        }
+                        if let message = model.driverMessage {
+                            Text(message)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.danger)
+                                .textSelection(.enabled)
+                        }
+                    }
                     YunDetailRow(loc("Licence"), value: "MIT")
                 }
             }

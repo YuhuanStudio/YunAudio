@@ -89,6 +89,78 @@ enum YunAppIcon {
     /// Height over width of the ink, so a caller can size a box for it.
     static var inkAspect: CGFloat { inkBounds.width / max(inkBounds.height, 0.0001) }
 
+    /// How much of the mark's ink lies below each height, measured from the
+    /// bottom of the ink box. One entry per `1 / (profileSteps)` of the height.
+    ///
+    /// This exists so the menu bar can fill the mark like a vessel and have the
+    /// filled part mean something. The mark is a tapered shape — wide at the
+    /// top, a thin tail at the bottom — so filling it by *height* is not filling
+    /// it by anything anybody can see: measured, the bottom third of the height
+    /// holds **eleven per cent** of the ink, so a meter driven that way would sit
+    /// visually dead through the whole lower half of its range.
+    static let inkProfile: [CGFloat] = image.map(inkProfile(of:)) ?? [0, 1]
+
+    private static let profileSteps = 256
+
+    private static func inkProfile(of image: NSImage) -> [CGFloat] {
+        let side = profileSteps
+        guard
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: side * 4, bitsPerPixel: 32),
+            let context = NSGraphicsContext(bitmapImageRep: rep)
+        else { return [0, 1] }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        // Fitted to the whole square so the profile is indexed by the *ink's*
+        // own height rather than by the file's padding.
+        draw(inkFitting: NSRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side)))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let pixels = rep.bitmapData else { return [0, 1] }
+
+        // Rows run downwards in a bitmap and the mark fills upwards.
+        var cumulative: [CGFloat] = [0]
+        cumulative.reserveCapacity(side + 1)
+        var total: CGFloat = 0
+        for row in stride(from: side - 1, through: 0, by: -1) {
+            let base = row * rep.bytesPerRow
+            var line: CGFloat = 0
+            for column in 0..<side { line += CGFloat(pixels[base + column * 4 + 3]) / 255 }
+            total += line
+            cumulative.append(total)
+        }
+        guard total > 0 else { return [0, 1] }
+        return cumulative.map { $0 / total }
+    }
+
+    /// The height, as a fraction of the ink box, at which `filled` of the mark's
+    /// ink lies below the line.
+    ///
+    /// The inverse of `inkProfile`, so a meter can ask for "a third of the mark
+    /// lit" and get the waterline that actually lights a third of it.
+    static func waterline(forFilled filled: CGFloat) -> CGFloat {
+        let target = min(1, max(0, filled))
+        if target <= 0 { return 0 }
+        if target >= 1 { return 1 }
+        let profile = inkProfile
+        guard profile.count > 2 else { return target }
+        // The profile rises monotonically, so the first entry at or above the
+        // target brackets it; the position between it and the one below is
+        // interpolated rather than snapped, or the meter would climb in visible
+        // steps of one two-hundred-and-fifty-sixth.
+        var low = 0, high = profile.count - 1
+        while low < high {
+            let middle = (low + high) / 2
+            if profile[middle] < target { low = middle + 1 } else { high = middle }
+        }
+        guard low > 0 else { return 0 }
+        let above = profile[low], below = profile[low - 1]
+        let span = above - below
+        let withinStep = span > 0 ? (target - below) / span : 0
+        return (CGFloat(low - 1) + withinStep) / CGFloat(profile.count - 1)
+    }
+
     /// Draws the mark so that its *ink* lands exactly on `target`.
     ///
     /// Every other placement in this application goes through here. Drawing the

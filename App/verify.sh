@@ -59,10 +59,21 @@ step() {
 	# many there were, so a pattern that matches only the header prints a count
 	# and no names — which is what it did, and a count nobody can act on is
 	# worse than silence. Everything from that line to the end comes too.
-	diagnostics=$( {
-		grep -aE "(error|warning): |✘" "${WORK}/last.txt"
+	# Errors first, and warnings only when there were none. Every build here
+	# carries a handful of nullability warnings from a C header, and taking the
+	# first dozen matching lines meant those crowded out the line that said what
+	# actually went wrong — a gate whose failures are unreadable is a gate
+	# nobody reads, which is the whole reason it exists.
+	local errors
+	errors=$( {
+		grep -aE "error: |✘" "${WORK}/last.txt"
 		sed -n '/flow(s) failed/,$p' "${WORK}/last.txt"
 	} | grep -avE "^\s+(builtin-|/Applications/|cd /)" | cut -c1-200 | head -20)
+	if [[ -n "${errors}" ]]; then
+		diagnostics="${errors}"
+	else
+		diagnostics=$(grep -aE "warning: " "${WORK}/last.txt" | cut -c1-200 | head -8)
+	fi
 	if [[ -n "${diagnostics}" ]]; then
 		sed 's/^/      /' <<<"${diagnostics}"
 	else
@@ -83,7 +94,45 @@ if ! step "build" swift build; then
 	echo "stopping: it does not compile, so nothing below would be measuring this change"
 	exit 1
 fi
-step "tests" swift test
+# The count as well as the result, because **a deleted test cannot fail.**
+#
+# A merge resolution took the wrong side of a hunk and removed a whole suite —
+# the one asserting that every reader of the realtime graph takes the lock,
+# written an hour earlier precisely because that mistake is easy to make again.
+# The run stayed green and the number went down, and nothing was looking at the
+# number. A floor is crude, and crude is the point: it cannot be satisfied by
+# a test that quietly stopped existing.
+tests_ran_and_did_not_shrink() {
+	local output count floor
+	output=$(swift test 2>&1) || {
+		echo "${output}"
+		return 1
+	}
+	# Only the failures and the summary; a passing run prints one line per test.
+	echo "${output}" | grep -aE "✘" | head -6
+	echo "${output}" | grep -aE "Test run with" | tail -1
+	count=$(grep -aoE "Test run with [0-9]+ tests" <<<"${output}" | grep -oE "[0-9]+" | head -1)
+	[[ -n "${count}" ]] || {
+		echo "the run did not say how many tests it ran"
+		return 1
+	}
+	floor=$(cat App/test-floor.txt 2>/dev/null || echo 0)
+	if [[ "${count}" -lt "${floor}" ]]; then
+		# Prefixed so the diagnostic filter keeps it. Without that the compiler's
+		# own warnings, which every build has, crowd out the one line that says
+		# what went wrong — which is the mistake this gate was built to stop
+		# making.
+		echo "error: ${count} tests ran, and there were ${floor}. Something was deleted."
+		echo "error: if that was deliberate, lower App/test-floor.txt in the same commit."
+		return 1
+	fi
+	# Raised on the way past, so the floor follows the high-water mark without
+	# anybody having to remember.
+	[[ "${count}" -gt "${floor}" ]] && echo "${count}" >App/test-floor.txt
+	return 0
+}
+
+step "tests" tests_ran_and_did_not_shrink
 step "strings" ./App/check-strings.sh
 step "app bundle" ./App/build-app.sh
 

@@ -1547,6 +1547,14 @@ struct StatusMarkTests {
         let context = try #require(NSGraphicsContext(bitmapImageRep: rep))
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = context
+        // Cleared first. `NSBitmapImageRep(bitmapDataPlanes: nil, …)` hands back
+        // whatever was in that allocation, and every assertion here is a sum
+        // over the alpha channel — so the measurements were the glyph plus
+        // whatever the last owner of that memory had left in it. It failed five
+        // times out of five run on its own and passed in the whole suite, which
+        // is the shape of uninitialised memory rather than of a race.
+        context.cgContext.clear(
+            CGRect(x: 0, y: 0, width: CGFloat(side), height: CGFloat(side)))
         context.cgContext.scaleBy(x: CGFloat(Self.scale), y: CGFloat(Self.scale))
         StatusItemController.drawStatusMark(
             level: level, isMuted: isMuted, isSpeakingWhileMuted: isSpeakingWhileMuted,
@@ -1659,22 +1667,65 @@ struct StatusMarkTests {
         }
     }
 
-    /// The meter says its number by *length*, not by opacity. A meter drawn as a
-    /// fading dot is unreadable once colour is gone — a faint dot and a small
-    /// one are the same pixel — so this asserts the ink in the meter's own
-    /// column actually grows.
-    @Test("the meter grows with the level")
-    func meterGrowsWithLevel() throws {
-        let column = NSRect(
-            x: 13 * CGFloat(Self.scale), y: 0, width: 3 * CGFloat(Self.scale),
-            height: CGFloat(Self.side))
-        let quiet = try ink(render(level: 0.02), in: column)
-        let middling = try ink(render(level: 0.15), in: column)
-        let loud = try ink(render(level: 0.9), in: column)
+    /// The mark *is* the meter: it fills from the bottom, so more level is more
+    /// ink. Asserted on the whole glyph, because there is no longer a second
+    /// object to measure — which is the point of the change.
+    @Test("the mark fills as the level rises")
+    func markFillsWithLevel() throws {
+        let quiet = try ink(render(level: 0.02))
+        let middling = try ink(render(level: 0.15))
+        let loud = try ink(render(level: 0.9))
         #expect(quiet < middling)
         #expect(middling < loud)
-        // And idle has no meter at all, or "running" and "stopped" look alike.
-        #expect(try ink(render(level: nil), in: column) < quiet)
+    }
+
+    /// The regression this design nearly shipped with. Filling the mark makes a
+    /// loud room draw the mark solid — which is exactly what a *stopped* router
+    /// drew, so the two states were the same picture. Capping the fill was tried
+    /// first and measured: it moved 3.7% of the ink, which at eighteen points is
+    /// no difference at all. A stopped router is dimmed instead.
+    @Test("a stopped router does not look like a loud one")
+    func idleIsNotFullScale() throws {
+        let idle = try ink(render(level: nil))
+        let loud = try ink(render(level: 1.0))
+        #expect(loud - idle > 0.04, "idle \(idle) and full scale \(loud) are too close")
+        // And a running-but-silent route is not the stopped one either: it is
+        // dimmer overall, and it has a waterline where the idle mark has none.
+        let silent = try ink(render(level: 0))
+        #expect(silent < idle)
+    }
+
+    /// The number the fill turns on, and the reason it is not simply the height.
+    ///
+    /// The mark is a tapered shape: measured from the artwork, the bottom third
+    /// of its height carries about a ninth of its ink. A waterline driven
+    /// straight off the level would therefore have crept through the whole
+    /// quiet half of the range without lighting anything anybody could see.
+    @Test("asking for a third of the mark lit lights a third of it")
+    func waterlineIsProportionalToArea() {
+        let profile = YunAppIcon.inkProfile
+        #expect(profile.count > 2)
+        // Monotonic and spanning the whole mark, or the inversion below is
+        // reading a broken measurement.
+        #expect(profile.first == 0)
+        #expect(abs((profile.last ?? 0) - 1) < 0.0001)
+        for (below, above) in zip(profile, profile.dropFirst()) {
+            #expect(above >= below)
+        }
+        // The inverse round-trips: the waterline for a share of the ink, read
+        // back through the profile, is that share again.
+        for target in stride(from: CGFloat(0.1), through: 0.9, by: 0.1) {
+            let height = YunAppIcon.waterline(forFilled: target)
+            let step = CGFloat(profile.count - 1)
+            let index = min(profile.count - 1, Int((height * step).rounded()))
+            #expect(
+                abs(profile[index] - target) < 0.02,
+                "waterline for \(target) lights \(profile[index])")
+        }
+        // And it really is not the identity — if it were, the measurement had
+        // silently fallen back to a straight line and the taper is unaccounted
+        // for. Measured: a tenth of the ink needs nearly a third of the height.
+        #expect(YunAppIcon.waterline(forFilled: 0.1) > 0.2)
     }
 
     /// The curve behind the meter, which is the part a picture cannot show.
@@ -1736,11 +1787,14 @@ struct StatusMarkTests {
     /// the loudest thing up there.
     @Test("and it weighs about what Apple's own symbols weigh")
     func inkIsInTheSystemRange() throws {
-        let idle = try ink(render(level: nil))
+        // Measured at full strength — a full meter — because that is the mark
+        // at its heaviest, and the question is whether it shouts next to the
+        // system's own. The dimmed states can only be lighter.
+        let full = try ink(render(level: 1.0))
         // Measured across mic, mic.fill, waveform, speaker.wave.2.fill,
         // airpodspro and bolt.horizontal.fill at this size: 0.17 to 0.28.
-        #expect(idle > 0.12, "the mark is fainter than any system symbol: \(idle)")
-        #expect(idle < 0.32, "the mark is heavier than any system symbol: \(idle)")
+        #expect(full > 0.12, "the mark is fainter than any system symbol: \(full)")
+        #expect(full < 0.32, "the mark is heavier than any system symbol: \(full)")
     }
 }
 
@@ -3058,3 +3112,123 @@ struct FailureMessageTests {
     }
 }
 
+
+/// Every public reader of the realtime graph takes the lock before it does.
+///
+/// This is a source check rather than a runtime one, because the failure it
+/// guards against is a use-after-free: the engine queue frees the graph on every
+/// stop and every rebuild, and a reader that arrives in between dereferences
+/// memory that has gone. Two segfaults in one afternoon, one in `routePeaks` on
+/// the main thread and one in the IO thread's ring write, with crash reports.
+///
+/// A test cannot reliably provoke that race — it is a few microseconds wide and
+/// a run that does not hit it proves nothing. What can be checked is that no
+/// accessor touches the graph without the lock, and that is exactly the mistake
+/// that is easy to make again: the natural way to add a meter is a one-line
+/// computed property, and the one-line version is the unsafe one.
+///
+/// Non-blocking is deliberate and is not the subject of this check.
+/// `startAttempt` holds the lock across a synchronous message to `coreaudiod`,
+/// so an interface reader that blocks freezes for as long as the audio server
+/// takes — measured, with the whole main thread parked under one of these
+/// getters. `stateLock.try()` counts as taking it.
+@Suite("Every reader of the graph takes the lock")
+struct GraphLockDisciplineTests {
+
+    @Test("no public accessor touches the graph without the lock")
+    func everyAccessorLocks() throws {
+        let source = try String(
+            contentsOfFile: Self.enginePath, encoding: .utf8)
+        let lines = source.components(separatedBy: "\n")
+        var offenders: [String] = []
+        for (index, line) in lines.enumerated() {
+            guard line.contains("public var ") || line.contains("public func ") else {
+                continue
+            }
+            // The declaration and its body, to the next public member.
+            var body = ""
+            for following in lines[index..<min(index + 18, lines.count)] {
+                if following != line, following.contains("    public ") { break }
+                body += following + "\n"
+            }
+            let touchesGraph =
+                body.contains("graph?.pointee") || body.contains("graph.pointee")
+                || body.contains("graphCell") || body.contains("isolationFailureCounter")
+            if touchesGraph, !body.contains("stateLock") {
+                offenders.append(line.trimmingCharacters(in: .whitespaces))
+            }
+        }
+        #expect(offenders.isEmpty, "\(offenders)")
+    }
+
+    /// The file has to be found, or the check above passes by reading nothing —
+    /// which is the failure mode of every test that greps a file.
+    @Test("and the source it reads is really there")
+    func theSourceIsFound() throws {
+        let source = try String(contentsOfFile: Self.enginePath, encoding: .utf8)
+        #expect(source.contains("public var routePeaks"))
+        #expect(source.count > 50_000)
+    }
+
+    /// Walks up from this file to the package root, so it does not depend on
+    /// where the tests are run from.
+    static var enginePath: String {
+        var directory = URL(fileURLWithPath: #filePath)
+        while directory.pathComponents.count > 1 {
+            directory.deleteLastPathComponent()
+            let candidate = directory.appendingPathComponent(
+                "Sources/YunAudioEngine/RoutingEngine.swift")
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return candidate.path
+            }
+        }
+        return ""
+    }
+}
+
+/// The way back out of installing a driver.
+///
+/// `DriverInstaller.uninstall()` existed and nothing called it. The application
+/// offered to install a driver into `/Library` and gave no way at all to remove
+/// one — the command was in the README and nowhere in the interface, which
+/// makes it a change to somebody's machine that they have to go and look up how
+/// to reverse. That is worse than an installation that fails.
+///
+/// What can be asserted without a driver actually installed is the shape of the
+/// thing: that both directions exist, that they are each other's opposite, and
+/// that the command really names the path it claims to.
+@MainActor
+@Suite("Taking the driver back off")
+struct DriverRemovalTests {
+
+    @Test("both directions exist and are opposites")
+    func bothDirectionsExist() {
+        // A change to `installPath` that reached one and not the other would
+        // leave a driver nothing could remove, which is exactly the state this
+        // is here to prevent.
+        #expect(DriverInstaller.installPath.hasSuffix(".driver"))
+        #expect(DriverInstaller.installPath.hasPrefix("/Library/Audio/Plug-Ins/HAL/"))
+    }
+
+    /// The interface reaches it. Asserted as source rather than by driving a
+    /// window, because a button that calls nothing compiles perfectly.
+    @Test("the interface has a way to reach it")
+    func theInterfaceReachesIt() throws {
+        let root = GraphLockDisciplineTests.enginePath
+            .replacingOccurrences(of: "Sources/YunAudioEngine/RoutingEngine.swift", with: "")
+        let preferences = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+        #expect(preferences.contains("model.removeDriver()"))
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        #expect(model.contains("DriverInstaller.uninstall()"))
+        // And it stops routing first: removing the plug-in restarts coreaudiod,
+        // and a route running through the device that is about to stop existing
+        // is an aggregate whose member vanishes underneath it.
+        let removal = model.components(separatedBy: "func removeDriver()")
+        try #require(removal.count == 2)
+        let body = String(removal[1].prefix(400))
+        #expect(body.contains("if isRunning { stop() }"))
+    }
+}

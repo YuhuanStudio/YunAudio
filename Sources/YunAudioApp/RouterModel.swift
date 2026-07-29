@@ -2025,6 +2025,44 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Takes the driver back off.
+    ///
+    /// It existed and nothing called it. The application offered to install a
+    /// driver and gave no way at all to remove one — which is worse than the
+    /// other way round, because an installation somebody cannot undo is a
+    /// change to a machine they have to look up how to reverse. The command was
+    /// in the README and nowhere in the interface.
+    ///
+    /// Routing is stopped first, deliberately. Removing the plug-in restarts
+    /// `coreaudiod`, and a route running through the device that is about to
+    /// stop existing is an aggregate whose member disappears underneath it.
+    func removeDriver() {
+        if isRunning { stop() }
+        isInstallingDriver = true
+        driverMessage = nil
+        let outcome = DriverInstaller.uninstall()
+        isInstallingDriver = false
+        driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
+        switch outcome {
+        case .removed:
+            driverMessage = nil
+            // The device goes with it, so anything pointing at it has to be let
+            // go rather than left as a UID that resolves to nothing.
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(2))
+                self.refreshDevices()
+                if self.selectedDestinationUID == ClockAnchorPublisher.driverDeviceUID {
+                    self.selectedDestinationUID = nil
+                    self.selectDefaults()
+                }
+            }
+        case let .failed(reason):
+            driverMessage = reason
+        case .installed, .cancelled:
+            driverMessage = nil
+        }
+    }
+
     func refreshApps() {
         // Anything already captured is listed whether or not it happens to be
         // audible at this instant. A process with no bundle identifier is listed
@@ -3228,7 +3266,7 @@ final class RouterModel: ScriptTarget {
         for device in all { deviceNames[device.uid] = device.name }
     }
 
-    private func selectDefaults() {
+    func selectDefaults() {
         if selectedSourceUID == nil {
             // Prefer the system input, but never a loopback — and least of all
             // our own device.
