@@ -22,7 +22,7 @@ struct PanelView: View {
     /// otherwise shows the onboarding card whenever the driver is absent, which
     /// hides everything worth inspecting.
     var forcesRoutedLayout = false
-    @Environment(\.openWindow) private var openWindow
+    var openMainWindow: @MainActor () -> Void = {}
 
     // Only the live card and the quick switches start open: they are what the
     // panel is opened for. Devices open on first run, when there is nothing
@@ -524,7 +524,7 @@ struct PanelView: View {
 
     private var footer: some View {
         HStack(spacing: Yun.Space.sm) {
-            Button(loc("Open YunAudio")) { openWindow(id: "main") }
+            Button(loc("Open YunAudio"), action: openMainWindow)
                 .buttonStyle(YunButtonStyle(.secondary, small: true))
 
             Spacer()

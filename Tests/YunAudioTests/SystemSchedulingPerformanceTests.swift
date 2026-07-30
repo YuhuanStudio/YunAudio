@@ -256,6 +256,25 @@ struct SystemSchedulingPerformanceTests {
         #expect(factory.ranges(of: "NSHostingController").count == 1)
     }
 
+    @Test("opening the status panel does not take another application's key window")
+    func statusPanelDoesNotForceActivation() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/StatusItem.swift",
+            encoding: .utf8)
+        let showStart = try #require(source.range(of: "private func showPanel("))
+        let showEnd = try #require(
+            source.range(
+                of: "private func makePanelHost()",
+                range: showStart.upperBound..<source.endIndex))
+        let show = source[showStart.lowerBound..<showEnd.lowerBound]
+
+        #expect(show.contains("popover.show("))
+        #expect(!show.contains(".makeKey("))
+        #expect(!show.contains(".makeKeyAndOrderFront("))
+        #expect(!show.contains("NSApp.activate("))
+    }
+
     @Test("headphone files are parsed off MainActor only when needed")
     func headphoneProfilesAreLazy() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests

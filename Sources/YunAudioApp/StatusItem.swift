@@ -56,7 +56,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// well. Weak, so this is not what keeps the controller alive.
     private(set) static weak var current: StatusItemController?
 
-    init(model: RouterModel, openMainWindow: @escaping @MainActor () -> Void) {
+    init(model: RouterModel, openMainWindow: (@MainActor () -> Void)? = nil) {
         self.model = model
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         super.init()
@@ -118,6 +118,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var muteItem: NSMenuItem?
     private var configItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
+
+    func setOpenMainWindow(_ action: @escaping @MainActor () -> Void) {
+        openMainWindow = action
+    }
 
     /// Observes the discrete state that can change while the level timer is
     /// asleep.
@@ -540,7 +544,12 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         if panelHost == nil { panelHost = makePanelHost() }
         popover.contentViewController = panelHost
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
-        popover.contentViewController?.view.window?.makeKey()
+        // A status-bar popover is already interactive after `show`. Forcing its
+        // private window key activates this LSUIElement process, then AppKit
+        // restores another application's key window when the transient popover
+        // closes. What the user sees is an unrelated application jumping to the
+        // front after clicking YunAudio. Let AppKit move key focus only when a
+        // control actually needs it.
     }
 
     private func makePanelHost() -> NSViewController {
@@ -551,7 +560,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // say so, because a popover clips rather than scrolls.
         let host = NSHostingController(
             rootView: ScrollView {
-                PanelView(model: model)
+                PanelView(model: model) { [weak self] in
+                    self?.openMainWindow?()
+                }
             }
             .scrollIndicators(.never)
             .frame(width: Self.panelWidth)
@@ -595,8 +606,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func openWindow() {
+        guard let openMainWindow else { return }
         popover.performClose(nil)
-        openMainWindow?()
+        openMainWindow()
     }
 
     @objc private func openSettings() {

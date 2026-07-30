@@ -122,6 +122,25 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     }
 }
 
+/// Carries the Window scene's opener into the AppKit-owned menu bar panel.
+///
+/// Reading `openWindow` on the `App` itself returns the default action rather
+/// than one belonging to this scene. This zero-sized view is mounted inside the
+/// Window content and therefore receives the action belonging to that scene.
+private struct MainWindowOpenerInjector: View {
+    @Environment(\.openWindow) private var openWindow
+    let inject: @MainActor (OpenWindowAction) -> Void
+
+    var body: some View {
+        Color.clear
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+            .onChange(of: false, initial: true) { _, _ in
+                inject(openWindow)
+            }
+    }
+}
+
 @main
 struct YunAudioApp: App {
     @State private var model: RouterModel
@@ -236,17 +255,37 @@ struct YunAudioApp: App {
         // preferences window has been opened looks exactly like one that was
         // never saved.
         model.applyIconStyle()
-        termination.statusItem = StatusItemController(model: model) {
-            NSApp.activate(ignoringOtherApps: true)
-            for window in NSApp.windows where window.title == "YunAudio" {
-                window.makeKeyAndOrderFront(nil)
-                return
-            }
-        }
+        termination.statusItem = StatusItemController(model: model)
         // Present only after the re-entrancy guard above owns a status item.
         // Ordering a window can evaluate the scene again in the same run-loop
         // turn; presenting earlier could install a second socket and menu item.
         FirstLaunchPermissions.presentGuideIfNeeded(model: model)
+    }
+
+    /// Updates the status item with the real Window scene action.
+    ///
+    /// The item itself is installed independently so a scene that has not
+    /// mounted yet still leaves the application controllable from the menu bar.
+    @MainActor
+    private func injectMainWindowOpener(_ openWindow: OpenWindowAction) {
+        installStatusItem()
+        termination.statusItem?.setOpenMainWindow {
+            openWindow(id: "main")
+            // Scene presentation completes after the action returns. Looking in
+            // the same stack frame can miss a window that opens correctly and
+            // turn this back into a no-op. On the next actor turn, activation is
+            // conditional on SwiftUI having produced something visible.
+            Task { @MainActor in
+                await Task.yield()
+                guard
+                    let window = NSApp.windows.first(where: {
+                        $0.title == "YunAudio" && $0.isVisible
+                    })
+                else { return }
+                NSApp.activate(ignoringOtherApps: true)
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
     }
 
     var body: some Scene {
@@ -254,6 +293,10 @@ struct YunAudioApp: App {
         // and signal path side by side — not a tall column.
         Window("YunAudio", id: "main") {
             MainWindow(model: model)
+                .background(
+                    MainWindowOpenerInjector { openWindow in
+                        injectMainWindowOpener(openWindow)
+                    })
         }
         // The window drew "YunAudio" in its title bar and the header drew it
         // again eight points below, with a rule between them. Hiding the system
@@ -262,7 +305,6 @@ struct YunAudioApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1000, height: 620)
         .windowResizability(.contentMinSize)
-
         .onChange(of: hasLaunched, initial: true) { _, _ in installStatusItem() }
 
     }
