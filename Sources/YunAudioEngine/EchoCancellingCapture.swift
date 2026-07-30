@@ -296,15 +296,21 @@ public final class EchoCancellingCapture {
                 let buffers = UnsafeMutableAudioBufferListPointer(ioData)
                 for index in 0..<buffers.count {
                     guard let data = buffers[index].mData else { continue }
-                    let destination = data.assumingMemoryBound(to: Float.self)
-                    let written = box.farEnd?(destination, Int(frameCount)) ?? 0
-                    if written < Int(frameCount) {
-                        // Silence the tail rather than leaving whatever the
-                        // buffer held: stale audio here becomes a phantom the
-                        // canceller then tries to remove from the microphone.
-                        destination.advanced(by: written)
-                            .update(repeating: 0, count: Int(frameCount) - written)
+                    let buffer = buffers[index]
+                    guard buffer.mNumberChannels == 1 else {
+                        // The unit is explicitly configured as mono. If it ever
+                        // hands over another layout, silence only the storage it
+                        // actually supplied rather than guessing a stride.
+                        memset(data, 0, Int(buffer.mDataByteSize))
+                        continue
                     }
+                    let destination = data.assumingMemoryBound(to: Float.self)
+                    _ = EchoCancellingCapture.fillFarEnd(
+                        into: destination,
+                        requestedFrames: Int(frameCount),
+                        sampleCapacity: Int(buffer.mDataByteSize)
+                            / MemoryLayout<Float>.size,
+                        provider: box.farEnd)
                 }
                 return noErr
             },
@@ -353,6 +359,40 @@ public final class EchoCancellingCapture {
         return shared.contains(48_000) ? 48_000 : shared.max()
     }
 
+    /// Fills one mono far-end buffer without trusting either side of the
+    /// callback boundary to describe more storage than exists.
+    ///
+    /// `frameCount` is the unit's request; `mDataByteSize` is the buffer's hard
+    /// memory bound. A provider's return value is only a report and can be
+    /// negative or larger than the request. Clamping all three facts before
+    /// clearing the tail keeps a short read from becoming an underwrite or
+    /// overwrite.
+    @inline(__always)
+    static func fillFarEnd(
+        into destination: UnsafeMutablePointer<Float>,
+        requestedFrames: Int,
+        sampleCapacity: Int,
+        provider: FarEndProvider?
+    ) -> FarEndFillResult {
+        let request = max(0, requestedFrames)
+        let capacity = max(0, sampleCapacity)
+        let frames = min(request, capacity)
+        let reported = frames > 0 ? (provider?(destination, frames) ?? 0) : 0
+        let written = min(max(0, reported), frames)
+
+        // Silence the tail rather than leaving stale audio there: stale
+        // reference becomes a phantom the canceller then tries to remove from
+        // the microphone.
+        if written < frames {
+            destination.advanced(by: written)
+                .update(repeating: 0, count: frames - written)
+        }
+        return FarEndFillResult(
+            requestedFrames: request,
+            bufferFrames: frames,
+            writtenFrames: written)
+    }
+
     deinit {
         stop()
         AggregateDevice.restoreSampleRates(restorableRates)
@@ -399,4 +439,10 @@ public final class EchoCancellingCapture {
     /// True when the unit is bound to an aggregate built for it, rather than
     /// riding the system defaults.
     public var isBoundToDedicatedDevice: Bool { aggregate != nil }
+}
+
+struct FarEndFillResult: Sendable, Equatable {
+    let requestedFrames: Int
+    let bufferFrames: Int
+    let writtenFrames: Int
 }
