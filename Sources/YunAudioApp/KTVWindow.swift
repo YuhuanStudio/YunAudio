@@ -268,10 +268,17 @@ struct KTVStage: View {
                 .background {
                     GeometryReader { column in
                         Color.clear.onAppear {
+                            // Where, as well as how big. Four rounds measured
+                            // the column's size — 496 in a 619-point stage,
+                            // which fits — and concluded the photograph showing
+                            // it clipped must be a timing artefact. It is not:
+                            // an extra 400 ms of real suspension changed
+                            // nothing. The size was never the question.
+                            let frame = column.frame(in: .global)
                             SongArtwork.record(
-                                "column \(Int(column.size.height)) in stage"
-                                    + " \(Int(stageHeight)), tile"
-                                    + " \(Int(Self.artworkSide(columnWidth: columnWidth, stageHeight: stageHeight)))")
+                                "column \(Int(column.size.height)) at"
+                                    + " y=\(Int(frame.minY)) in stage"
+                                    + " \(Int(stageHeight))")
                         }
                     }
                 }
@@ -399,6 +406,60 @@ struct KTVStage: View {
         .frame(height: tile)
     }
 
+    /// Nudges the words against the music, and says where they are.
+    ///
+    /// Shown whenever there are words, not only once something is wrong: a
+    /// correction nobody can find is a correction nobody makes, and the reading
+    /// is what stops a shifted song being silently shifted for ever. At rest it
+    /// says nothing but its two arrows.
+    @ViewBuilder
+    private var lyricAlignment: some View {
+        if model.lyrics != nil {
+            let offset = model.lyricOffsetSeconds
+            HStack(spacing: Yun.Space.sm) {
+                Button {
+                    model.nudgeLyricOffset(by: -0.5)
+                } label: {
+                    Image(systemName: "arrow.left.to.line")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .frame(width: 24, height: 24)
+                        .background(.white.opacity(0.10), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(loc("Hold the words back"))
+                .accessibilityIdentifier("KTVLyricsEarlier")
+
+                // Only once it is not zero, so the row is two arrows at rest.
+                if abs(offset) >= 0.01 {
+                    Button {
+                        model.clearLyricOffset()
+                    } label: {
+                        Text(String(format: "%+.1f s", offset))
+                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                            .foregroundStyle(Yun.Palette.accent.opacity(0.92))
+                    }
+                    .buttonStyle(.plain)
+                    .help(loc("Put the words back where the file had them"))
+                    .accessibilityIdentifier("KTVLyricsOffset")
+                }
+
+                Button {
+                    model.nudgeLyricOffset(by: 0.5)
+                } label: {
+                    Image(systemName: "arrow.right.to.line")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.72))
+                        .frame(width: 24, height: 24)
+                        .background(.white.opacity(0.10), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(loc("Send the words forward"))
+                .accessibilityIdentifier("KTVLyricsLater")
+            }
+        }
+    }
+
     /// Previous, play or pause, next — driving the player the stage is showing.
     ///
     /// The glyph here was a picture of the state and nothing else: a stage that
@@ -487,6 +548,7 @@ struct KTVStage: View {
 
             HStack(spacing: Yun.Space.sm) {
                 transportControls(track)
+                lyricAlignment
                 Text(track.application)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.66))

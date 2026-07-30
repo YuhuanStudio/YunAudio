@@ -226,6 +226,14 @@ enum WindowCapture {
             ("ktv-window-short", CGSize(width: 1180, height: 420)),
         ] {
             settle(turns: 12)
+            // And a real suspension after the resize as well as before the
+            // window opens. Resizing re-runs the layout, the artwork's arrival
+            // re-runs it again, and a shutter between the two catches a column
+            // that has not been placed yet — which is what a photograph showing
+            // the transport row outside a window that measures 496 points in a
+            // 619-point stage actually is. The probe and the picture disagreed
+            // twice, and twice the picture was the one that was wrong.
+            try? await Task.sleep(for: .milliseconds(400))
             wroteEverything =
                 photograph(
                     ktv, sizes: [(label, size)],
