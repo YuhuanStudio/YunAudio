@@ -196,12 +196,40 @@ enum WindowCapture {
             FileHandle.standardError.write(Data("could not open KTV for capture\n".utf8))
             return false
         }
-        settle(turns: 12)
-        wroteEverything =
-            photograph(
-                ktv,
-                sizes: [("ktv-window", CGSize(width: 1080, height: 720))],
-                into: directory, appearances: [.darkAqua]) && wroteEverything
+        // Three shapes, photographed rather than rendered. `KTVStageLayout` has
+        // three arrangements and only the first was ever looked at here, and
+        // the offscreen renderer — which is what the other two were judged
+        // from — hands the stage an explicit size and so cannot reproduce a
+        // reader that disagrees with its window.
+        for (label, size) in [
+            ("ktv-window", CGSize(width: 1080, height: 720)),
+            ("ktv-window-narrow", CGSize(width: 760, height: 900)),
+            ("ktv-window-short", CGSize(width: 1180, height: 420)),
+        ] {
+            settle(turns: 12)
+            wroteEverything =
+                photograph(
+                    ktv, sizes: [(label, size)],
+                    into: directory, appearances: [.darkAqua]) && wroteEverything
+            // What the stage's own reader thinks it has, against what it has.
+            // A stage laid out for a taller box than the window sinks its
+            // content past the bottom edge, which is what every live capture
+            // of this window shows and no render of it does.
+            let measured = KTVStage.lastMeasuredStageSize
+            let content = ktv.contentView?.frame.size ?? .zero
+            if abs(measured.height - content.height) > 1
+                || abs(measured.width - content.width) > 1
+            {
+                FileHandle.standardError.write(
+                    Data(
+                        "\(label): the stage measured \(Int(measured.width))×\(Int(measured.height))"
+                            .appending(
+                                " in a content view of \(Int(content.width))×\(Int(content.height))"
+                                    + " — not accepted\n"
+                            ).utf8))
+                wroteEverything = false
+            }
+        }
         ktv.close()
         return wroteEverything
     }

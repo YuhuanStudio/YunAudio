@@ -120,8 +120,21 @@ struct KTVStage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var isRendering = false
 
+    /// The last size the stage's reader was given, for the capture gate to
+    /// compare against the window it was measured in.
+    ///
+    /// The offscreen renderer hands `KTVStage` an explicit size, so it cannot
+    /// disagree with itself; the live window puts the same view inside an
+    /// `NSHostingView` whose safe-area region has been cleared. Judging the
+    /// arrangement from renders alone was therefore structurally blind to a
+    /// reader that reports something other than the window — which is what the
+    /// live stage looks like it is doing, with every arrangement sunk towards
+    /// the bottom of the frame and the top half empty.
+    nonisolated(unsafe) static var lastMeasuredStageSize: CGSize = .zero
+
     var body: some View {
         GeometryReader { proxy in
+            let _ = { Self.lastMeasuredStageSize = proxy.size }()
             ZStack {
                 // Sized by the ZStack rather than by `proxy.size`, which would
                 // pin it to whatever the reader was proposed at the time.
