@@ -122,6 +122,110 @@ struct LiveSpectrum: View {
     }
 }
 
+/// Four quantities that keep each number attached to its unit.
+///
+/// A type of its own so the constrained 316-point state can be rendered and
+/// measured without constructing a router or opening any audio device.
+struct LoudnessFigures: View {
+    let shortTerm: Double
+    let integrated: Double
+    let peak: Double
+    let pitchHertz: Float
+
+    var body: some View {
+        // The middle column has 316 points inside this card at the window's
+        // minimum width. These four figures need about 340 points in Traditional
+        // Chinese, so an HStack did not fit: SwiftUI split −18.6 and 147 over
+        // two lines to preserve the row. A balanced wrap makes that constrained
+        // state an intentional two-by-two readout while retaining one row in a
+        // wider window.
+        YunWrap(
+            spacing: Self.horizontalSpacing, lineSpacing: Yun.Space.md,
+            balanced: true, fills: true
+        ) {
+            LoudnessFigure(
+                title: loc("Short-term"), value: shortTerm, unit: loc("LUFS"),
+                isPrimary: true)
+            LoudnessFigure(
+                title: loc("Integrated"), value: integrated, unit: loc("LUFS"))
+            LoudnessFigure(title: loc("Peak"), value: peak, unit: loc("dBFS"))
+            LoudnessPitchFigure(hertz: pitchHertz)
+        }
+    }
+
+    /// The measured content width at the 980-point minimum window.
+    static let compactContentWidth: CGFloat = 316
+    static let horizontalSpacing = Yun.Space.lg
+}
+
+/// One readout token; wrapping is a decision between tokens, never within one.
+struct LoudnessFigure: View {
+    let title: String
+    let value: Double
+    let unit: String
+    var isPrimary = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(value.isFinite ? String(format: "%.1f", value) : "—")
+                    .font(
+                        .system(
+                            size: isPrimary ? 22 : 15,
+                            weight: isPrimary ? .semibold : .medium,
+                            design: .monospaced)
+                    )
+                    .foregroundStyle(
+                        value.isFinite ? Yun.Palette.textPrimary : Yun.Palette.textMuted
+                    )
+                    // A number that changes width as it crosses −10 makes the
+                    // whole row jitter twenty times a second.
+                    .monospacedDigit()
+                Text(unit)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textMuted)
+            }
+            // The enclosing YunWrap decides where a metric goes. If this row
+            // compresses first, the minus sign and decimal can still be split
+            // before the layout gets a chance to move the whole figure.
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+}
+
+/// The fundamental and its note name, kept together as one readout token.
+struct LoudnessPitchFigure: View {
+    let hertz: Float
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(loc("Pitch"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                Text(hertz > 0 ? String(format: "%.0f", hertz) : "—")
+                    .font(.system(size: 15, weight: .medium, design: .monospaced))
+                    .foregroundStyle(
+                        hertz > 0 ? Yun.Palette.textPrimary : Yun.Palette.textMuted
+                    )
+                    .monospacedDigit()
+                Text(loc("Hz"))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textMuted)
+                if let note = PitchTracker.noteName(hertz) {
+                    YunBadge(note)
+                }
+            }
+            // A metric is one token. Let the collection move it to another row
+            // rather than breaking 147 Hz D3 into three unrelated fragments.
+            .fixedSize(horizontal: true, vertical: false)
+        }
+    }
+}
+
 /// Loudness to the broadcast standard, and how far it is from the platform the
 /// user is aiming at.
 struct LoudnessReadout: View {
@@ -132,25 +236,19 @@ struct LoudnessReadout: View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             outgoing
             YunDivider()
-            HStack(alignment: .firstTextBaseline, spacing: Yun.Space.lg) {
-                figure(
-                    loc("Short-term"), model.analysis.shortTerm, unit: loc("LUFS"),
-                    isPrimary: true)
+            LoudnessFigures(
+                shortTerm: model.analysis.shortTerm,
                 // Held back until the gate has enough material to mean
                 // anything. Showing −54.6 with "not meaningful yet" written
                 // directly underneath asks the reader to believe two things at
                 // once, and the number is the one they will believe.
-                figure(
-                    loc("Integrated"),
+                integrated:
                     model.loudnessOffset == nil ? -.infinity : model.analysis.integrated,
-                    unit: loc("LUFS"))
-                figure(loc("Peak"), model.analysis.peak, unit: loc("dBFS"))
+                peak: model.analysis.peak,
                 // The note being sung or spoken, which nothing else in this
                 // category shows and which anybody using the voice presets
                 // wants: it is the number the shift is relative to.
-                pitchFigure
-                Spacer(minLength: 0)
-            }
+                pitchHertz: model.analysis.pitchHertz)
 
             YunDivider()
 
@@ -339,37 +437,6 @@ struct LoudnessReadout: View {
         }
     }
 
-    /// The fundamental, with the note it corresponds to.
-    ///
-    /// Hertz alone means something to about one person in fifty; the note name
-    /// beside it means something to anybody who has ever touched an
-    /// instrument, and it is the same number.
-    private var pitchFigure: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(loc("Pitch"))
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(
-                    model.analysis.pitchHertz > 0
-                        ? String(format: "%.0f", model.analysis.pitchHertz) : "—"
-                )
-                .font(.system(size: 15, weight: .medium, design: .monospaced))
-                .foregroundStyle(
-                    model.analysis.pitchHertz > 0
-                        ? Yun.Palette.textPrimary : Yun.Palette.textMuted
-                )
-                .monospacedDigit()
-                Text(loc("Hz"))
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textMuted)
-                if let note = PitchTracker.noteName(model.analysis.pitchHertz) {
-                    YunBadge(note)
-                }
-            }
-        }
-    }
-
     /// The level actually leaving, and a sentence about it.
     ///
     /// This is the first thing in the card because it is the first thing to
@@ -512,31 +579,4 @@ struct LoudnessReadout: View {
                 amount, model.loudnessTarget.title)
     }
 
-    private func figure(
-        _ title: String, _ value: Double, unit: String, isPrimary: Bool = false
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(value.isFinite ? String(format: "%.1f", value) : "—")
-                    .font(
-                        .system(
-                            size: isPrimary ? 22 : 15,
-                            weight: isPrimary ? .semibold : .medium,
-                            design: .monospaced)
-                    )
-                    .foregroundStyle(
-                        value.isFinite ? Yun.Palette.textPrimary : Yun.Palette.textMuted
-                    )
-                    // A number that changes width as it crosses −10 makes the
-                    // whole row jitter twenty times a second.
-                    .monospacedDigit()
-                Text(unit)
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textMuted)
-            }
-        }
-    }
 }
