@@ -134,6 +134,14 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Maps a device channel onto the (buffer, channel) pair the IOProc sees.
     private var inputMap: [ChannelRef: (buffer: Int32, channel: Int32)] = [:]
     private var outputMap: [ChannelRef: (buffer: Int32, channel: Int32)] = [:]
+    /// The exact format the current realtime graph was built to consume.
+    ///
+    /// Reading it back through HAL for every EQ pointer event took synchronous
+    /// IPC while the state lock was held. Coefficients need to agree with the
+    /// graph, not rediscover the device property, so the construction value is
+    /// the stronger answer as well as the cheaper one.
+    private var graphSampleRate: Double = 48000
+    private var graphBufferFrames = 128
     private var clockPublisher: ClockAnchorPublisher?
     private var selftestBlock: UnsafeMutablePointer<RTSelftest>?
     /// Retained here so the unit outlives the unmanaged pointer the IO thread
@@ -735,6 +743,8 @@ public final class RoutingEngine: @unchecked Sendable {
             throw RoutingError.noCommonSampleRate
         }
         sampleRateMismatch = mismatched
+        graphSampleRate = rate
+        graphBufferFrames = Int(bufferFrames)
         // Remembered so the devices go back the way they were found. Merged
         // rather than replaced: a restart must not forget what the first start
         // changed.
@@ -1175,6 +1185,8 @@ public final class RoutingEngine: @unchecked Sendable {
         effectChain = nil
         voiceIsolationLatencyFrames = 0
         effectLatencyFrames = 0
+        graphSampleRate = 48000
+        graphBufferFrames = 128
 
         inputMap.removeAll()
         outputMap.removeAll()
@@ -1375,7 +1387,7 @@ public final class RoutingEngine: @unchecked Sendable {
             wanted[buffer] = curve
         }
 
-        let rate = aggregate?.device?.currentSampleRate ?? 48000
+        let rate = graphSampleRate
         var installed = 0
         for slot in 0..<RTGraph.maximumEQBuffers {
             if let curve = wanted[slot] {
@@ -1877,14 +1889,14 @@ public final class RoutingEngine: @unchecked Sendable {
         defer { stateLock.unlock() }
 
         guard isRunning, let cell = graphCell, let previous = graph,
-            let device = aggregate?.device, !activeRoutes.isEmpty
+            aggregate != nil, !activeRoutes.isEmpty
         else { return false }
 
         // What the device settled on rather than what was asked for. A chain
         // built for a smaller block than the IOProc delivers would process only
         // part of every cycle and pass the rest through.
-        let rate = device.currentSampleRate ?? 48000
-        let frames = Int(device.currentBufferFrameSize ?? 128)
+        let rate = graphSampleRate
+        let frames = graphBufferFrames
 
         // Held so that assigning the new ones below does not release units the
         // IO thread is still rendering through. They go at the end, once the

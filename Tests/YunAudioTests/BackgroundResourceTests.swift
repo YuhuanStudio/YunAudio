@@ -21,6 +21,19 @@ struct BackgroundResourceTests {
         }
     }
 
+    private final class Values<Element: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Element] = []
+
+        func append(_ value: Element) {
+            lock.withLock { values.append(value) }
+        }
+
+        var snapshot: [Element] {
+            lock.withLock { values }
+        }
+    }
+
     @Test("a hundred HAL notifications become one device refresh")
     func deviceChangeBurstIsCoalesced() throws {
         let queue = DispatchQueue(label: "yunaudio.test.device-change")
@@ -110,6 +123,109 @@ struct BackgroundResourceTests {
         try await Task.sleep(for: .milliseconds(100))
         #expect(snapshotsBuilt == 1)
         #expect(written == [99])
+    }
+
+    @MainActor
+    @Test("a hundred expensive publications apply the first and latest values only")
+    func latestValuePublication() async throws {
+        let queue = DispatchQueue(label: "yunaudio.test.latest-value")
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let applied = Values<Int>()
+        var published: [Int] = []
+        let applier = LatestValueApplier<Int, Int>(
+            queue: queue,
+            apply: { value in
+                applied.append(value)
+                if value == 0 {
+                    _ = releaseFirst.wait(timeout: .now() + 1)
+                }
+                return value
+            },
+            publish: { published.append($0) })
+
+        applier.submit(0)
+        for _ in 0..<100 where applied.snapshot.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [0])
+        for value in 1..<100 { applier.submit(value) }
+        releaseFirst.signal()
+
+        for _ in 0..<100 where published != [99] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [0, 99])
+        #expect(published == [99])
+    }
+
+    @Test("a correction snapshot builds only its named buses")
+    func correctionSnapshot() {
+        let profile = ParametricEQ(
+            name: "Headphones",
+            filters: [.init(kind: .peaking, hertz: 1000, decibels: -2, q: 1)])
+        let snapshot = RouterModel.CorrectionSnapshot(
+            busIDs: ["send", "monitor", "gone"],
+            graphic: [
+                "send": [0, 0, 0, 0, 0, 4, 0, 0, 0, 0],
+                "monitor": [Float](repeating: 0, count: 10),
+            ],
+            profileNames: ["monitor": "Headphones", "gone": "Missing"],
+            profiles: [profile])
+
+        let curves = RouterModel.correctionCurves(from: snapshot)
+        #expect(Set(curves.keys) == ["send", "monitor"])
+        #expect(
+            abs((curves["send"]?.response(atHertz: 1000, sampleRate: 48000) ?? 0) - 4)
+                < 0.4)
+        #expect(
+            abs((curves["monitor"]?.response(atHertz: 1000, sampleRate: 48000) ?? 0) + 2)
+                < 0.2)
+    }
+
+    /// The UI is responsive only if the expensive half stays behind the
+    /// coalescer. The engine check closes the other end: moving it to a queue
+    /// but continuing to ask HAL for the graph's fixed format on every value
+    /// would still waste the shared audio server.
+    @Test("EQ gestures neither install on MainActor nor re-read their graph format")
+    func correctionGestureBoundary() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let setterStart = try #require(
+            model.range(
+                of: "func setGraphicBand(_ decibels: Float, at index: Int, forBus id: String)"
+            ))
+        let setterEnd = try #require(
+            model.range(
+                of: "func headphoneProfileName(forBus",
+                range: setterStart.upperBound..<model.endIndex))
+        let setters = model[setterStart.lowerBound..<setterEnd.lowerBound]
+        #expect(setters.ranges(of: "scheduleCorrections()").count == 2)
+        #expect(setters.ranges(of: "applyCorrections()").count == 0)
+        #expect(setters.ranges(of: "engine.setCorrections").count == 0)
+
+        let engine = try String(
+            contentsOfFile: root + "Sources/YunAudioEngine/RoutingEngine.swift",
+            encoding: .utf8)
+        let correctionStart = try #require(
+            engine.range(of: "public func setCorrections("))
+        let correctionEnd = try #require(
+            engine.range(
+                of: "public func setAnalysisEnabled",
+                range: correctionStart.upperBound..<engine.endIndex))
+        let correction = engine[correctionStart.lowerBound..<correctionEnd.lowerBound]
+        #expect(correction.ranges(of: "currentSampleRate").count == 0)
+        #expect(correction.ranges(of: "graphSampleRate").count == 1)
+
+        let effectsStart = try #require(engine.range(of: "public func updateEffects("))
+        let effectsEnd = try #require(
+            engine.range(
+                of: "// MARK: Live control",
+                range: effectsStart.upperBound..<engine.endIndex))
+        let effects = engine[effectsStart.lowerBound..<effectsEnd.lowerBound]
+        #expect(effects.ranges(of: "currentSampleRate").count == 0)
+        #expect(effects.ranges(of: "currentBufferFrameSize").count == 0)
     }
 
     @Test("a deferred snapshot keeps the state from the user event")
@@ -390,6 +506,16 @@ struct BackgroundResourceTests {
             model.ranges(of: "private(set) var headsetInCallQuality: AudioDevice?").count
                 == 1)
         #expect(model.ranges(of: "publish(headset, to: \\.headsetInCallQuality)").count == 2)
+
+        let latencyStart = try #require(
+            model.range(of: "var monitorLatencyMilliseconds: Double"))
+        let latencyEnd = try #require(
+            model.range(
+                of: "private func applyMonitorGain",
+                range: latencyStart.upperBound..<model.endIndex))
+        let latency = model[latencyStart.lowerBound..<latencyEnd.lowerBound]
+        #expect(latency.ranges(of: ".latencyFrames(").count == 0)
+        #expect(latency.ranges(of: "monitorLatencyFrames").count == 2)
     }
 
     @Test("one source meter pass returns all three channel reductions")

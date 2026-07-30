@@ -333,6 +333,18 @@ final class RouterModel: ScriptTarget {
     /// The headphone correction chosen for each bus, by file name.
     private(set) var busHeadphoneProfiles: [String: String] = [:]
 
+    /// Value-semantic input to an off-main correction build.
+    ///
+    /// The collections are copy-on-write snapshots. Slider events therefore
+    /// retain their moment cheaply while the latest-value applier decides which
+    /// moment is actually worth turning into biquad coefficients.
+    struct CorrectionSnapshot: Sendable {
+        let busIDs: [String]
+        let graphic: [String: [Float]]
+        let profileNames: [String: String]
+        let profiles: [ParametricEQ]
+    }
+
     /// The tone control for one bus, ten bands, flat when it has never been set.
     func graphicEQ(forBus id: String) -> [Float] {
         let bands = busGraphicEQ[id] ?? []
@@ -353,14 +365,14 @@ final class RouterModel: ScriptTarget {
         bands[index] = clamped
         busGraphicEQ[id] = bands
         persist()
-        applyCorrections()
+        scheduleCorrections()
     }
 
     func resetGraphicEQ(forBus id: String) {
         guard !graphicEQIsFlat(forBus: id) else { return }
         busGraphicEQ[id] = [Float](repeating: 0, count: 10)
         persist()
-        applyCorrections()
+        scheduleCorrections()
     }
 
     func headphoneProfileName(forBus id: String) -> String? { busHeadphoneProfiles[id] }
@@ -373,7 +385,7 @@ final class RouterModel: ScriptTarget {
         guard busHeadphoneProfiles[id] != name else { return }
         busHeadphoneProfiles[id] = name
         persist()
-        applyCorrections()
+        scheduleCorrections()
     }
 
     /// What is actually run on one bus: its correction, its tone control, or
@@ -482,7 +494,7 @@ final class RouterModel: ScriptTarget {
         if !stale.isEmpty {
             for id in stale.keys { busHeadphoneProfiles[id] = nil }
             persist()
-            applyCorrections()
+            scheduleCorrections()
         }
     }
 
@@ -507,7 +519,49 @@ final class RouterModel: ScriptTarget {
     /// tracked is what actually reached the graph, so a check can ask.
     @discardableResult
     func applyCorrections() -> Int {
-        let reached = engine.setCorrections(busCurves)
+        correctionApplier.flush(correctionSnapshot)
+    }
+
+    /// One cheap COW snapshot per gesture event. Curves and coefficients are
+    /// built only for values the latest-value applier does not coalesce away.
+    private var correctionSnapshot: CorrectionSnapshot {
+        CorrectionSnapshot(
+            busIDs: buses.map(\.id),
+            graphic: busGraphicEQ,
+            profileNames: busHeadphoneProfiles,
+            profiles: headphoneProfiles)
+    }
+
+    nonisolated static func correctionCurves(
+        from snapshot: CorrectionSnapshot
+    ) -> [String: ParametricEQ] {
+        let profiles = Dictionary(
+            snapshot.profiles.map { ($0.name, $0) },
+            uniquingKeysWith: { first, _ in first })
+        var result: [String: ParametricEQ] = [:]
+        result.reserveCapacity(snapshot.busIDs.count)
+        for id in snapshot.busIDs {
+            var curves: [ParametricEQ] = []
+            if let name = snapshot.profileNames[id], let profile = profiles[name] {
+                curves.append(profile)
+            }
+            if let bands = snapshot.graphic[id], bands.count == 10,
+                bands.contains(where: { abs($0) >= 0.05 })
+            {
+                curves.append(.graphic(bands))
+            }
+            if let curve = ParametricEQ.combined(curves, name: "Output") {
+                result[id] = curve
+            }
+        }
+        return result
+    }
+
+    private func scheduleCorrections() {
+        correctionApplier.submit(correctionSnapshot)
+    }
+
+    private func publishCorrectionCount(_ reached: Int) {
         if reached > 0 {
             appliedToGraph.insert(.headphoneCorrection)
         } else {
@@ -515,7 +569,6 @@ final class RouterModel: ScriptTarget {
             // profile left selected after the headphones were unplugged.
             appliedToGraph.remove(.headphoneCorrection)
         }
-        return reached
     }
 
     /// Reads per-bus processing out of a saved file, old shape or new.
@@ -2615,6 +2668,7 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != monitorDeviceUID else { return }
             persist()
+            refreshHeadsetQualityAsynchronously()
             // A monitor the engine itself gave up on is already out of a route
             // that is running. Restarting would take a working mix down to
             // arrive exactly where it already is — and the start it would run
@@ -2820,13 +2874,11 @@ final class RouterModel: ScriptTarget {
         let rate = pathQuality?.sampleRate ?? 48000
         guard rate > 0 else { return 0 }
         let bufferFrames = Double(pathQuality?.bufferFrames ?? Int(self.bufferFrames))
-        let device = monitorDeviceUID.flatMap { uid in
-            outputDevices.first(where: { $0.uid == uid })
-        }
-        let deviceFrames = Double(
-            device?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0)
-        return (bufferFrames + deviceFrames) / rate * 1000
+        return (bufferFrames + Double(monitorLatencyFrames)) / rate * 1000
     }
+
+    /// The monitor's reported latency and safety offset, read off MainActor.
+    private(set) var monitorLatencyFrames = 0
 
     private func applyMonitorGain() {
         // The microphone's own send follows the monitor level unless somebody
@@ -3345,12 +3397,18 @@ final class RouterModel: ScriptTarget {
     private func refreshHeadsetQualityAsynchronously() {
         let outputs = outputDevices
         let preferred = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
+        let monitor = monitorDeviceUID.flatMap { uid in
+            outputs.first(where: { $0.uid == uid })
+        }
         engineQueue.async {
             let headset = Self.headsetInCallQuality(
                 outputDevices: outputs,
                 preferredUIDs: preferred)
+            let latency =
+                monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
             Task { @MainActor in
                 self.publish(headset, to: \.headsetInCallQuality)
+                self.publish(latency, to: \.monitorLatencyFrames)
             }
         }
     }
@@ -4349,6 +4407,20 @@ final class RouterModel: ScriptTarget {
     /// main actor that is a visible stall every time someone hits the button.
     private let engineQueue = DispatchQueue(
         label: "com.yuhuanstudio.yunaudio.engine", qos: .userInitiated)
+    /// Builds and installs only the newest output curve in a slider burst.
+    ///
+    /// Lazy because its completion publishes back into this model, which does
+    /// not exist to capture during stored-property initialisation.
+    @ObservationIgnored private lazy var correctionApplier = LatestValueApplier<
+        CorrectionSnapshot, Int
+    >(
+        queue: engineQueue,
+        apply: { [engine] snapshot in
+            engine.setCorrections(Self.correctionCurves(from: snapshot))
+        },
+        publish: { [weak self] reached in
+            self?.publishCorrectionCount(reached)
+        })
 
     /// Applies a control immediately unless an engine rebuild already owns the
     /// state lock.
@@ -4872,9 +4944,6 @@ final class RouterModel: ScriptTarget {
         let all = (try? AudioDevices.all()) ?? []
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
-        headsetInCallQuality = Self.headsetInCallQuality(
-            outputDevices: outputDevices,
-            preferredUIDs: [selectedDestinationUID, monitorDeviceUID].compactMap { $0 })
         for device in all { deviceNames[device.uid] = device.name }
         // An extra input or output that has been unplugged, or has since become
         // an end of the main route, is not one any more.
@@ -4882,6 +4951,7 @@ final class RouterModel: ScriptTarget {
         // A new device list can mean a new selected device, and what that
         // device publishes is what the window draws.
         refreshDeviceControls()
+        refreshHeadsetQualityAsynchronously()
     }
 
     func selectDefaults() {
@@ -6498,12 +6568,17 @@ final class RouterModel: ScriptTarget {
         pathQualityReadInFlight = true
         let engine = engine
         let destination = selectedDestination
+        let monitor = monitorDeviceUID.flatMap { uid in
+            outputDevices.first(where: { $0.uid == uid })
+        }
         let outputs = outputDevices
         let preferredHeadsets = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
         engineQueue.async {
             let quality = engine.pathQuality
             let latency =
                 destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+            let monitorLatency =
+                monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
             let headset = Self.headsetInCallQuality(
                 outputDevices: outputs,
                 preferredUIDs: preferredHeadsets)
@@ -6515,6 +6590,7 @@ final class RouterModel: ScriptTarget {
                 guard self.isRunning else { return }
                 self.publish(quality, to: \.pathQuality)
                 self.publish(latency, to: \.destinationLatencyFrames)
+                self.publish(monitorLatency, to: \.monitorLatencyFrames)
                 self.publish(headset, to: \.headsetInCallQuality)
             }
         }
