@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import YunAudioControl
 import YunDesign
@@ -348,7 +349,21 @@ struct YunAudioApp: App {
                     let window = NSApp.windows.first(where: {
                         $0.title == "YunAudio" && $0.isVisible
                     })
-                else { return }
+                else {
+                    // Said out loud. Reopening silently doing nothing is how
+                    // clicking the Dock icon came to bring Settings forward,
+                    // and a guard that returns without a word is a guard that
+                    // hides the reason for a year.
+                    FileHandle.standardError.write(
+                        Data(
+                            "reopen found no visible window titled YunAudio among "
+                                .appending(
+                                    NSApp.windows
+                                        .map { "\($0.title):\($0.isVisible)" }
+                                        .joined(separator: ", ") + "\n"
+                                ).utf8))
+                    return
+                }
                 NSApp.activate(ignoringOtherApps: true)
                 window.makeKeyAndOrderFront(nil)
             }
