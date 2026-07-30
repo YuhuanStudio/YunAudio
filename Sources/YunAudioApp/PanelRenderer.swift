@@ -178,6 +178,17 @@ enum PanelRenderer {
             basename: "ktv-narrow\(suffix)",
             directory: directory,
             size: CGSize(width: 720, height: 900))
+        // The column taken off the song. A wheel cannot be turned here, so
+        // without this seed the browsed state — a centred line that is not
+        // the one being sung, the fill still on the line that is, and the way
+        // back — would never appear in an image.
+        KTVStage.browsedLineForRendering = 2
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-browsing\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        KTVStage.browsedLineForRendering = nil
 
         for section in PreferencesWindow.Section.allCases {
             render(

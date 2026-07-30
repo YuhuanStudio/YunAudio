@@ -38,6 +38,11 @@ enum KTVWindow {
         controller?.window?.toggleFullScreen(nil)
     }
 
+    /// The stage's own window, for the one thing SwiftUI cannot express: a
+    /// scroll wheel. A local event monitor sees every window in the process,
+    /// so it has to be able to tell whether an event was meant for this one.
+    static var window: NSWindow? { controller?.window }
+
     private static func makeController(model: RouterModel) -> NSWindowController {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1080, height: 720),
@@ -119,6 +124,19 @@ struct KTVStage: View {
     @Bindable var model: RouterModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var isRendering = false
+
+    /// Seeds the browsed state for a capture.
+    ///
+    /// Neither gate can turn a wheel, so the column taken off the song is a
+    /// state no image would ever hold — and an interface state with no image
+    /// of it is one nobody has looked at. Set by the renderer only; the
+    /// running application never assigns it.
+    nonisolated(unsafe) static var browsedLineForRendering: Int?
+
+    /// Where the column is looking, when that is not where the song is.
+    @State private var browse = KTVLyricBrowse(line: KTVStage.browsedLineForRendering)
+    @State private var returnToTheSong: Task<Void, Never>?
+    @State private var wheel: Any?
 
     /// The last size the stage's reader was given, for the capture gate to
     /// compare against the window it was measured in.
@@ -231,6 +249,11 @@ struct KTVStage: View {
         // considered to have appeared would explain that without any of it
         // being about artwork.
         .task { SongArtwork.record("stage task ran") }
+        .onAppear { startWatchingTheWheel() }
+        .onDisappear { stopWatchingTheWheel() }
+        // Following again the moment the song changes: the lines somebody was
+        // reading belong to a song that is no longer playing.
+        .onChange(of: model.nowPlaying?.identity) { _, _ in followTheSongAgain() }
         .coordinateSpace(name: "ktv-stage")
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))
@@ -818,7 +841,12 @@ struct KTVStage: View {
     /// centre and the lines below grow down from it, which is what every player
     /// that does this well does.
     private func timedLyrics(_ lyrics: Lyrics, metrics: KTVLyricMetrics) -> some View {
-        let current = model.lyricLine ?? 0
+        // Two different lines, and the difference is the whole feature: the
+        // one the column is centred on, and the one the music is on. They are
+        // the same until somebody scrolls, and while they are not, the line
+        // being sung keeps its fill wherever it happens to sit.
+        let playing = model.lyricLine
+        let current = browse.centre(whilePlaying: playing) ?? 0
         let behind = Array(metrics.offsets.filter { $0 < 0 })
         let ahead = Array(metrics.offsets.filter { $0 > 0 })
         return VStack(alignment: .leading, spacing: 0) {
@@ -834,13 +862,94 @@ struct KTVStage: View {
                         .foregroundStyle(.white.opacity(0.40))
                 }
                 lyricGroup(
-                    lyrics, current: current, offsets: behind, metrics: metrics,
-                    alignment: .leading)
+                    lyrics, current: current, playing: playing, offsets: behind,
+                    metrics: metrics, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-            lyricGroup(lyrics, current: current, offsets: [0], metrics: metrics, alignment: .leading)
-            lyricGroup(lyrics, current: current, offsets: ahead, metrics: metrics, alignment: .topLeading)
+            lyricGroup(
+                lyrics, current: current, playing: playing, offsets: [0],
+                metrics: metrics, alignment: .leading)
+            lyricGroup(
+                lyrics, current: current, playing: playing, offsets: ahead,
+                metrics: metrics, alignment: .topLeading)
         }
+        .overlay(alignment: .bottomTrailing) { returnToTheSongButton }
+    }
+
+    /// The way back, shown only when the column has been taken off the song.
+    @ViewBuilder
+    private var returnToTheSongButton: some View {
+        if browse.isBrowsing {
+            Button {
+                followTheSongAgain()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "arrow.down.to.line")
+                    Text(loc("Back to the line being sung"))
+                }
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.88))
+                .padding(.horizontal, 13)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.42), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("KTVFollowTheSong")
+            .transition(.opacity)
+        }
+    }
+
+    /// Watches the wheel over the stage's window.
+    ///
+    /// A local monitor rather than a `ScrollView`: the column's three bands
+    /// exist to hold the line being sung on the centre line whatever the six
+    /// around it contain, and a scroll view would take that layout back. The
+    /// monitor also costs nothing when nobody scrolls, where a scroll view
+    /// would have every line of the song in its content.
+    private func startWatchingTheWheel() {
+        guard !isRendering, wheel == nil else { return }
+        wheel = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
+            guard let window = KTVWindow.window, event.window === window,
+                let lyrics = model.lyrics, lyrics.lines.count > 1
+            else { return event }
+            browse.scroll(
+                by: event.scrollingDeltaY, playing: model.lyricLine,
+                lineCount: lyrics.lines.count)
+            if browse.isBrowsing { startTheWayBack() }
+            // Swallowed: there is nothing else on this stage to scroll, and
+            // letting it through means the window server hands it to whatever
+            // is underneath.
+            return nil
+        }
+    }
+
+    private func stopWatchingTheWheel() {
+        if let wheel { NSEvent.removeMonitor(wheel) }
+        wheel = nil
+        returnToTheSong?.cancel()
+        returnToTheSong = nil
+    }
+
+    /// Returns to the song after a while, unless somebody scrolls again.
+    ///
+    /// A singer who looked ahead and then started singing should not have to
+    /// find their place again; somebody reading the last verse should not be
+    /// dragged away mid-sentence. Six seconds is the compromise, restarted on
+    /// every event.
+    private func startTheWayBack() {
+        returnToTheSong?.cancel()
+        returnToTheSong = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            followTheSongAgain()
+        }
+    }
+
+    private func followTheSongAgain() {
+        returnToTheSong?.cancel()
+        returnToTheSong = nil
+        guard browse.isBrowsing else { return }
+        browse.stop()
     }
 
     /// One band of the column: the lines behind, the line being sung, or the
@@ -848,7 +957,7 @@ struct KTVStage: View {
     /// middle one stays on the centre line whatever they contain.
     @ViewBuilder
     private func lyricGroup(
-        _ lyrics: Lyrics, current: Int, offsets: [Int],
+        _ lyrics: Lyrics, current: Int, playing: Int?, offsets: [Int],
         metrics: KTVLyricMetrics, alignment: Alignment
     ) -> some View {
         // Identified by the line, not by the slot it occupies. With the offset
@@ -887,7 +996,8 @@ struct KTVStage: View {
                         // exists to avoid.
                         lyricLine(
                             line.isInterlude ? Self.interludeMark : line.text,
-                            offset: offset, metrics: metrics)
+                            offset: offset, isPlaying: index == playing,
+                            metrics: metrics)
                         // Pronunciation, above the translation and below the
                         // words: the order a singer reads them in. Only for the
                         // line being sung and the one after it — further away
@@ -930,7 +1040,10 @@ struct KTVStage: View {
                     .id(index)
                     // The words are an index of the song; this is what makes
                     // it one you can use, and what says so before it is tried.
-                    .seekableLine { model.seekToLyricLine(index) }
+                    .seekableLine {
+                        model.seekToLyricLine(index)
+                        followTheSongAgain()
+                    }
                 }
             }
         }
@@ -950,11 +1063,23 @@ struct KTVStage: View {
 
     @ViewBuilder
     private func lyricLine(
-        _ text: String, offset: Int, metrics: KTVLyricMetrics
+        _ text: String, offset: Int, isPlaying: Bool, metrics: KTVLyricMetrics
     ) -> some View {
-        if offset == 0 {
-            CompositedLyricSurface(model: model, text: text, style: .stage(metrics.currentSize))
+        // The fill belongs to the line the music is on, wherever the column
+        // has been scrolled to. Drawing it on the middle row regardless would
+        // make browsing look like the song had jumped.
+        if isPlaying {
+            let size = offset == 0 ? metrics.currentSize : metrics.neighbourSize
+            CompositedLyricSurface(model: model, text: text, style: .stage(size))
                 .contentTransition(.opacity)
+        } else if offset == 0 {
+            // Centred but not being sung: prominent, and plainly not the one
+            // the music is on.
+            Text(text)
+                .font(.system(size: metrics.currentSize, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.62))
+                .contentTransition(.opacity)
+                .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
                 .font(.system(size: metrics.neighbourSize, weight: .semibold))

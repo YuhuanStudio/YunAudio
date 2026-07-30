@@ -656,6 +656,7 @@
 "The current line lights smoothly as the music moves." = "当前这一句会随着音乐平滑亮起。";
 "Try another lyric source" = "换一个歌词来源";
 "Play from this line" = "从这句开始播放";
+"Back to the line being sung" = "回到正在唱的那句";
 "Desktop lyrics" = "桌面歌词";
 "Nothing is playing" = "目前没有播放";
 "Show pronunciation" = "显示发音";
