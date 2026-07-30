@@ -1931,6 +1931,46 @@ struct LiveRecoveryConfigurationTests {
         #expect(effectUpdate.ranges(of: "rememberLiveEffects").count == 1)
     }
 
+    @Test("a live route edit carries the output correction bank before publication")
+    func routeEditCarriesCorrections() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let routesStart = try #require(source.range(of: "public func updateRoutes("))
+        let effectsStart = try #require(
+            source.range(
+                of: "public func updateEffects(",
+                range: routesStart.upperBound..<source.endIndex))
+        let update = source[routesStart.lowerBound..<effectsStart.lowerBound]
+        let allocation = try #require(update.range(of: "let next = RTGraph.allocate("))
+        let carry = try #require(update.range(of: "RTGraph.carryCorrections("))
+        let publication = try #require(update.range(of: "yun_rt_cell_publish"))
+
+        #expect(allocation.lowerBound < carry.lowerBound)
+        #expect(carry.lowerBound < publication.lowerBound)
+        #expect(update.ranges(of: "RTGraph.carryCorrections(").count == 1)
+    }
+
+    @Test("a live effect edit shares correction history before publication")
+    func effectEditCarriesCorrections() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let effectsStart = try #require(source.range(of: "public func updateEffects("))
+        let liveControl = try #require(
+            source.range(
+                of: "// MARK: Live control",
+                range: effectsStart.upperBound..<source.endIndex))
+        let update = source[effectsStart.lowerBound..<liveControl.lowerBound]
+        let allocation = try #require(update.range(of: "let next = RTGraph.allocate("))
+        let carry = try #require(update.range(of: "RTGraph.carryCorrections("))
+        let publication = try #require(update.range(of: "yun_rt_cell_publish"))
+
+        #expect(allocation.lowerBound < carry.lowerBound)
+        #expect(carry.lowerBound < publication.lowerBound)
+        #expect(update.ranges(of: "RTGraph.carryCorrections(").count == 1)
+    }
+
     @Test("clock recovery retains an analyser that was enabled after start")
     func analysisSurvivesRecoverySnapshot() throws {
         var snapshot = configuration()
@@ -5411,12 +5451,14 @@ struct ParametricEQTests {
 
         RTGraph.installCorrection(packed, preampGain: 1, onBuffer: 1, of: graph)
         // Stand in for a filter that has been running: any non-zero history.
-        let state = graph.pointee.eqState + RTGraph.eqStateOffset(slot: 1)
-        for index in 0..<4 { state[index] = Float(index + 1) * 0.25 }
+        let bank = RTGraph.correctionBank(of: graph)
+        for index in 0..<4 {
+            bank.setStateValue(Float(index + 1) * 0.25, slot: 1, index: index)
+        }
 
         RTGraph.installCorrection(packed, preampGain: 1, onBuffer: 1, of: graph)
-        #expect(state[0] == 0.25)
-        #expect(state[3] == 1.0)
+        #expect(bank.stateValue(slot: 1, index: 0) == 0.25)
+        #expect(bank.stateValue(slot: 1, index: 3) == 1.0)
 
         // A different curve is a different filter, and carrying the old tail
         // into it is the click this is avoiding in the other direction.
@@ -5424,8 +5466,8 @@ struct ParametricEQTests {
             name: "other", filters: [.init(kind: .peaking, hertz: 400, decibels: -3, q: 1)])
         RTGraph.installCorrection(
             other.coefficients(sampleRate: 48000), preampGain: 1, onBuffer: 1, of: graph)
-        #expect(state[0] == 0)
-        #expect(state[3] == 0)
+        #expect(bank.stateValue(slot: 1, index: 0) == 0)
+        #expect(bank.stateValue(slot: 1, index: 3) == 0)
     }
 
     /// Slots must not overlap. A stride computed one section short would put
@@ -5451,9 +5493,11 @@ struct ParametricEQTests {
         RTGraph.installCorrection(zeroes, preampGain: 1, onBuffer: 3, of: graph)
 
         for slot in 0..<RTGraph.maximumEQBuffers where slot != 3 {
-            let base = graph.pointee.eqCoefficients + RTGraph.eqCoefficientOffset(slot: slot)
-            #expect(base[0] == 1)
-            #expect(base[RTGraph.maximumEQStages * 5 - 1] == 1)
+            let bank = RTGraph.correctionBank(of: graph)
+            #expect(bank.coefficient(slot: slot, index: 0) == 1)
+            #expect(
+                bank.coefficient(
+                    slot: slot, index: RTGraph.maximumEQStages * 5 - 1) == 1)
         }
         // And a slot beyond the table is refused rather than written past the
         // end of the allocation.

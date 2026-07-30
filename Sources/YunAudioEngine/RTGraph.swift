@@ -397,49 +397,15 @@ struct RTGraph {
 
     // MARK: Per-bus correction
 
-    /// Sections to run on each output buffer, indexed by buffer; zero for none.
+    /// The independently published correction state for every output buffer.
     ///
-    /// One slot per output rather than one slot in total, and that is the whole
-    /// design decision. A headphone correction belongs on what *you* hear and
-    /// nowhere else — putting it on the main output would send the far end a
-    /// signal shaped for the deficiencies of your headphones, which is worse
-    /// than not correcting at all. But the converse is just as true: a stream
-    /// mix wants its own tone, and the reason VoiceMeeter is praised is that
-    /// its buses are shaped independently. One slot could express the first
-    /// rule and not the second.
-    ///
-    /// The slot index *is* the output buffer index. A separate table of "which
-    /// buffer does slot k belong to" would be one more thing the IO thread has
-    /// to read and one more thing that can be stale after a rebuild.
-    var eqStages: UnsafeMutablePointer<Int32>
-    /// Five per section per slot — b0, b1, b2, a1, a2 — already normalised by
-    /// a0, so the IO thread does no division. Slot-major, `maximumEQStages`
-    /// sections apart, so a slot's block is contiguous.
-    var eqCoefficients: UnsafeMutablePointer<Float>
-    /// Four per section per channel per slot: two inputs back, two outputs
-    /// back. Slot-major on the same stride argument.
-    var eqState: UnsafeMutablePointer<Float>
-    /// Headroom for the boost, per slot, applied first.
-    var eqPreampGain: UnsafeMutablePointer<Float>
-    static let maximumEQStages = 24
-    static let maximumEQChannels = 8
-    /// Outputs that can carry a curve at once.
-    ///
-    /// Fixed for the same reason the section count is: the whole table is
-    /// allocated once and handed to the IO thread, and a table that could grow
-    /// would mean allocating there. Eight is generous — an aggregate with more
-    /// than two output streams is already unusual, and the buses somebody
-    /// actually shapes are the two the mixer names.
-    static let maximumEQBuffers = 8
-
-    /// Where one slot's coefficients start.
-    static func eqCoefficientOffset(slot: Int) -> Int { slot * maximumEQStages * 5 }
-    /// Where one slot's filter history starts.
-    static func eqStateOffset(slot: Int) -> Int {
-        slot * maximumEQStages * maximumEQChannels * 4
-    }
-    /// Words of history one slot owns.
-    static var eqStateStride: Int { maximumEQStages * maximumEQChannels * 4 }
+    /// An unmanaged reference keeps ARC off the IO thread. Each graph owns one
+    /// retain; live graph swaps retain the same bank so its filter history
+    /// moves without being copied from under the callback.
+    var outputCorrections: UnsafeMutableRawPointer
+    static let maximumEQStages = OutputCorrectionBank.maximumStages
+    static let maximumEQChannels = OutputCorrectionBank.maximumChannels
+    static let maximumEQBuffers = OutputCorrectionBank.maximumSlots
 
     // MARK: Transcription
 
@@ -629,22 +595,10 @@ struct RTGraph {
             capacity: alignmentCapacity)
         alignmentScratchStorage.initialize(repeating: 0, count: alignmentCapacity)
 
-        // Every slot's worth, whether or not any of them is used: the IO thread
-        // cannot allocate, so the table for the second bus has to exist before
-        // anybody asks for a curve on it.
-        let eqStageStorage = UnsafeMutablePointer<Int32>.allocate(
-            capacity: maximumEQBuffers)
-        eqStageStorage.initialize(repeating: 0, count: maximumEQBuffers)
-        let eqPreampStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: maximumEQBuffers)
-        eqPreampStorage.initialize(repeating: 1, count: maximumEQBuffers)
-        let eqCoefficientCount = maximumEQBuffers * maximumEQStages * 5
-        let eqCoefficientStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: eqCoefficientCount)
-        eqCoefficientStorage.initialize(repeating: 0, count: eqCoefficientCount)
-        let eqStateCount = maximumEQBuffers * eqStateStride
-        let eqStateStorage = UnsafeMutablePointer<Float>.allocate(capacity: eqStateCount)
-        eqStateStorage.initialize(repeating: 0, count: eqStateCount)
+        let correctionBank = OutputCorrectionBank(
+            sampleRate: sampleRate, maximumFrames: max(bufferFrames, 4096))!
+        let correctionStorage =
+            Unmanaged.passRetained(correctionBank).toOpaque()
 
         let transcriptRingStorage = UnsafeMutablePointer<OpaquePointer?>.allocate(
             capacity: count)
@@ -755,10 +709,7 @@ struct RTGraph {
                 alignmentPositions: alignmentPositionStorage,
                 alignmentScratch: alignmentScratchStorage,
                 alignmentCapacity: Int32(alignmentCapacity),
-                eqStages: eqStageStorage,
-                eqCoefficients: eqCoefficientStorage,
-                eqState: eqStateStorage,
-                eqPreampGain: eqPreampStorage,
+                outputCorrections: correctionStorage,
                 transcriptRings: transcriptRingStorage,
                 transcriptScratch: transcriptScratchStorage,
                 transcriptCount: Int32(count),
@@ -816,15 +767,8 @@ struct RTGraph {
         graph.pointee.alignmentScratch.deinitialize(
             count: Int(graph.pointee.alignmentCapacity))
         graph.pointee.alignmentScratch.deallocate()
-        graph.pointee.eqStages.deinitialize(count: maximumEQBuffers)
-        graph.pointee.eqStages.deallocate()
-        graph.pointee.eqPreampGain.deinitialize(count: maximumEQBuffers)
-        graph.pointee.eqPreampGain.deallocate()
-        graph.pointee.eqCoefficients.deinitialize(
-            count: maximumEQBuffers * maximumEQStages * 5)
-        graph.pointee.eqCoefficients.deallocate()
-        graph.pointee.eqState.deinitialize(count: maximumEQBuffers * eqStateStride)
-        graph.pointee.eqState.deallocate()
+        Unmanaged<OutputCorrectionBank>
+            .fromOpaque(graph.pointee.outputCorrections).release()
         graph.pointee.transcriptRings.deinitialize(count: count)
         graph.pointee.transcriptRings.deallocate()
         graph.pointee.transcriptScratch.deinitialize(
@@ -844,17 +788,16 @@ struct RTGraph {
 
     // MARK: Installing a correction
 
-    /// Puts one output's cascade in place, from the control thread.
+    /// Puts one output's cascade into an unpublished graph.
     ///
     /// Here rather than in `RoutingEngine` because the slot arithmetic is the
     /// part that is easy to get wrong — an off-by-one in the stride would run
     /// bus A's curve on bus B's history and sound like nothing in particular —
     /// and it should exist in exactly one place.
     ///
-    /// The section count is written last and zeroed first. The IO thread reads
-    /// it before it reads anything else in the slot, so a cycle landing in the
-    /// middle of this sees either the old curve or no curve, never the old
-    /// count against the new coefficients.
+    /// Live changes go through `OutputCorrectionBank.publish`. Keeping this
+    /// setup-only entry point makes it impossible for a test or graph builder
+    /// to bypass the same slot bounds and coefficient validation.
     ///
     /// - Parameters:
     ///   - packed: Five coefficients per section, as `ParametricEQ` produces.
@@ -869,52 +812,24 @@ struct RTGraph {
         _ packed: [Float], preampGain: Float, onBuffer buffer: Int,
         of graph: UnsafeMutablePointer<RTGraph>
     ) -> Bool {
-        guard buffer >= 0, buffer < maximumEQBuffers else { return false }
-        let stages = min(packed.count / 5, maximumEQStages)
-        guard stages > 0, preampGain.isFinite, preampGain >= 0,
-            packed.prefix(stages * 5).allSatisfy(\.isFinite)
-        else {
-            clearCorrection(onBuffer: buffer, of: graph)
-            return false
-        }
-        let coefficients = graph.pointee.eqCoefficients + eqCoefficientOffset(slot: buffer)
-
-        // Whether the filter this slot runs actually changed. Reinstalling the
-        // same curve happens on every publish — moving bus A's tone control
-        // republishes bus B untouched — and resetting a filter's memory for
-        // that would be a click on an output nobody adjusted.
-        var changed =
-            Int(graph.pointee.eqStages[buffer]) != stages
-            || graph.pointee.eqPreampGain[buffer] != preampGain
-        if !changed {
-            for index in 0..<(stages * 5) where coefficients[index] != packed[index] {
-                changed = true
-                break
-            }
-        }
-
-        graph.pointee.eqStages[buffer] = 0
-        for index in 0..<(stages * 5) { coefficients[index] = packed[index] }
-        if changed {
-            // Carrying the history across a change of curve puts the tail of
-            // the old filter into the first milliseconds of the new one.
-            let state = graph.pointee.eqState + eqStateOffset(slot: buffer)
-            for index in 0..<eqStateStride { state[index] = 0 }
-        }
-        graph.pointee.eqPreampGain[buffer] = preampGain
-        graph.pointee.eqStages[buffer] = Int32(stages)
-        return stages > 0
+        let bank = correctionBank(of: graph)
+        let configuration = OutputCorrectionBank.Configuration(
+            coefficients: packed, preampGain: preampGain)
+        return bank.installImmediately(configuration, slot: buffer)
     }
 
-    /// Takes the correction off one output, leaving every other one alone.
+    /// Takes a correction off one unpublished output.
     static func clearCorrection(
         onBuffer buffer: Int, of graph: UnsafeMutablePointer<RTGraph>
     ) {
-        guard buffer >= 0, buffer < maximumEQBuffers else { return }
-        graph.pointee.eqStages[buffer] = 0
-        graph.pointee.eqPreampGain[buffer] = 1
-        let state = graph.pointee.eqState + eqStateOffset(slot: buffer)
-        for index in 0..<eqStateStride { state[index] = 0 }
+        _ = correctionBank(of: graph).installImmediately(nil, slot: buffer)
+    }
+
+    static func correctionBank(
+        of graph: UnsafeMutablePointer<RTGraph>
+    ) -> OutputCorrectionBank {
+        Unmanaged<OutputCorrectionBank>
+            .fromOpaque(graph.pointee.outputCorrections).takeUnretainedValue()
     }
 
     /// Carries one route's alignment delay line across a graph rebuild.
@@ -941,25 +856,22 @@ struct RTGraph {
         return true
     }
 
-    /// Copies every slot — curves and history alike — from one graph to another.
+    /// Shares every slot — curves and history alike — with a live replacement graph.
     ///
-    /// The history comes across with the coefficients on purpose: after a chain
-    /// swap it is the same filter continuing, and starting it again from
-    /// nothing is a click.
+    /// Retaining the bank rather than copying its live state removes the race
+    /// between this control-thread rebuild and the IO thread updating biquad
+    /// history. Live route and effect swaps both keep the aggregate's output
+    /// map, so a slot still names the same physical output in the replacement.
     static func carryCorrections(
         from previous: UnsafeMutablePointer<RTGraph>,
         to next: UnsafeMutablePointer<RTGraph>
     ) {
-        for slot in 0..<maximumEQBuffers {
-            next.pointee.eqStages[slot] = previous.pointee.eqStages[slot]
-            next.pointee.eqPreampGain[slot] = previous.pointee.eqPreampGain[slot]
-        }
-        for index in 0..<(maximumEQBuffers * maximumEQStages * 5) {
-            next.pointee.eqCoefficients[index] = previous.pointee.eqCoefficients[index]
-        }
-        for index in 0..<(maximumEQBuffers * eqStateStride) {
-            next.pointee.eqState[index] = previous.pointee.eqState[index]
-        }
+        let previousOwner = Unmanaged<OutputCorrectionBank>
+            .fromOpaque(previous.pointee.outputCorrections)
+        _ = previousOwner.retain()
+        Unmanaged<OutputCorrectionBank>
+            .fromOpaque(next.pointee.outputCorrections).release()
+        next.pointee.outputCorrections = previous.pointee.outputCorrections
     }
 
     /// Carries the complete output and recording stages across a graph swap.
@@ -1965,137 +1877,11 @@ func yunAudioIOProc(
     }
 
     // Per-bus correction, last of all and deliberately after the recorder and
-    // the stems have already taken their copies. A correction is a fault in
-    // somebody's headphones being undone and a bus tone is that bus's taste;
-    // baking either into a file would carry it to everybody who plays the file
-    // back somewhere else.
-    //
-    // Every output is offered its own cascade, so the monitor mix and the send
-    // mix can be shaped differently. The loop is over the outputs rather than
-    // over a list of installed curves: there are two of them in practice, the
-    // section count for a bus running nothing is one load and one predictable
-    // branch, and a list would need its own indirection to stay in step with a
-    // rebuild.
-    for slot in 0..<min(RTGraph.maximumEQBuffers, output.count) {
-        let eqStages = Int(graph.pointee.eqStages[slot])
-        guard eqStages > 0 else { continue }
-        let buffer = output[slot]
-        if let data = buffer.mData {
-            let channels = min(Int(buffer.mNumberChannels), RTGraph.maximumEQChannels)
-            let stride = Int(buffer.mNumberChannels)
-            let frames = Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * stride)
-            let samples = data.assumingMemoryBound(to: Float.self)
-            let coefficients =
-                graph.pointee.eqCoefficients + RTGraph.eqCoefficientOffset(slot: slot)
-            let state = graph.pointee.eqState + RTGraph.eqStateOffset(slot: slot)
-            let preamp = graph.pointee.eqPreampGain[slot]
-
-            // Section outermost and frames innermost — the transpose of the
-            // obvious nesting, and the whole reason this stage is affordable.
-            //
-            // Written the other way round, every sample of every section
-            // reloaded five coefficients and four state words from memory and
-            // wrote four back, for nine floating-point operations. Turned
-            // inside out, one section's coefficients and one channel's history
-            // stay in registers for the whole block and the only memory traffic
-            // is the block itself. A cascade is linear, so section k sees
-            // exactly the same sequence of values in exactly the same order
-            // either way; the result is identical, not merely equivalent.
-            //
-            // Two channels are run together in the same loop for the same
-            // reason a biquad is slow in the first place: each output feeds the
-            // next input, so the loop is bound by the latency of the multiply
-            // chain rather than by throughput, and a second independent chain
-            // fills the gaps for free.
-            //
-            // Measured at 128 frames on stereo, cascade only, against the same
-            // graph with the correction switched off: a ten-section curve went
-            // from 4572 ns a cycle to 3256, and a twenty-four-section one from
-            // 14894 to 7756. The long curve gains most, which is the tell that
-            // what was being paid for was the reloading and not the arithmetic.
-            for section in 0..<eqStages {
-                let c = coefficients + section * 5
-                // Direct form I: two input and two output history terms per
-                // section per channel. Form I rather than II because the state
-                // is per channel, and running the channels through a shared
-                // accumulator is the classic way to make a stereo filter sound
-                // like a mono one.
-                let b0 = c[0]
-                let b1 = c[1]
-                let b2 = c[2]
-                let a1 = c[3]
-                let a2 = c[4]
-                // The headroom for the boost belongs ahead of the first section
-                // only; every later one is handed what the previous produced.
-                let gain = section == 0 ? preamp : 1
-                let sectionState = state + section * RTGraph.maximumEQChannels * 4
-
-                var channel = 0
-                while channel + 1 < channels {
-                    let left = sectionState + channel * 4
-                    let right = left + 4
-                    var lx1 = left[0]
-                    var lx2 = left[1]
-                    var ly1 = left[2]
-                    var ly2 = left[3]
-                    var rx1 = right[0]
-                    var rx2 = right[1]
-                    var ry1 = right[2]
-                    var ry2 = right[3]
-                    var index = channel
-                    for _ in 0..<frames {
-                        let lx = samples[index] * gain
-                        let rx = samples[index + 1] * gain
-                        let ly = b0 * lx + b1 * lx1 + b2 * lx2 - a1 * ly1 - a2 * ly2
-                        let ry = b0 * rx + b1 * rx1 + b2 * rx2 - a1 * ry1 - a2 * ry2
-                        lx2 = lx1
-                        lx1 = lx
-                        ly2 = ly1
-                        ly1 = ly
-                        rx2 = rx1
-                        rx1 = rx
-                        ry2 = ry1
-                        ry1 = ry
-                        samples[index] = ly
-                        samples[index + 1] = ry
-                        index += stride
-                    }
-                    left[0] = lx1
-                    left[1] = lx2
-                    left[2] = ly1
-                    left[3] = ly2
-                    right[0] = rx1
-                    right[1] = rx2
-                    right[2] = ry1
-                    right[3] = ry2
-                    channel += 2
-                }
-
-                if channel < channels {
-                    let slot = sectionState + channel * 4
-                    var x1 = slot[0]
-                    var x2 = slot[1]
-                    var y1 = slot[2]
-                    var y2 = slot[3]
-                    var index = channel
-                    for _ in 0..<frames {
-                        let x = samples[index] * gain
-                        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
-                        x2 = x1
-                        x1 = x
-                        y2 = y1
-                        y1 = y
-                        samples[index] = y
-                        index += stride
-                    }
-                    slot[0] = x1
-                    slot[1] = x2
-                    slot[2] = y1
-                    slot[3] = y2
-                }
-            }
-        }
-    }
+    // stems took their copies. The unmanaged bank owns both live filter paths
+    // and performs its publication only at this cycle boundary.
+    let correctionBank = Unmanaged<OutputCorrectionBank>
+        .fromOpaque(graph.pointee.outputCorrections).takeUnretainedValue()
+    correctionBank.process(output)
 
     // Final safety stage, after every bus-specific correction and before any
     // sample reaches hardware. The detector is linked within each bus, so a

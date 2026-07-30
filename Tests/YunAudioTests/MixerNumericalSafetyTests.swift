@@ -60,7 +60,7 @@ struct MixerNumericalSafetyTests {
         #expect(
             !RTGraph.installCorrection(
                 [1, 0, .nan, 0, 0], preampGain: 1, onBuffer: 0, of: graph))
-        #expect(graph.pointee.eqStages[0] == 0)
+        #expect(RTGraph.correctionBank(of: graph).stageCount(slot: 0) == 0)
 
         let input = NumericalSafetyBus(channelCounts: [1], frames: frames)
         let output = NumericalSafetyBus(channelCounts: [1], frames: frames)
@@ -74,6 +74,31 @@ struct MixerNumericalSafetyTests {
         }
         #expect(graph.pointee.outputPeak == 0.25)
         #expect(graph.pointee.outputClipped == 0)
+    }
+
+    @Test("a bad sample cannot poison output correction history")
+    func invalidCorrectionInputIsContained() throws {
+        let bank = try #require(
+            OutputCorrectionBank(sampleRate: 48_000, maximumFrames: 8))
+        let stateful = try #require(
+            OutputCorrectionBank.Configuration(
+                coefficients: [0.5, 0.25, 0, -0.2, 0],
+                preampGain: 1))
+        #expect(bank.installImmediately(stateful, slot: 0))
+        let output = NumericalSafetyBus(channelCounts: [1], frames: 8)
+        output.set(0, 0, 0, to: .nan)
+        output.set(0, 0, 1, to: 1)
+
+        bank.process(output.list)
+
+        #expect(output.sample(0, 0, 0) == 0)
+        #expect(output.sample(0, 0, 1) == 0.5)
+        for frame in 0..<output.frames {
+            #expect(output.sample(0, 0, frame).isFinite)
+        }
+        for index in 0..<4 {
+            #expect(bank.stateValue(slot: 0, index: index)?.isFinite == true)
+        }
     }
 
     @Test("invalid routes cannot poison a healthy stereo pair")

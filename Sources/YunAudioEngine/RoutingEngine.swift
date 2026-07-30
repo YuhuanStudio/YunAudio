@@ -1608,34 +1608,44 @@ public final class RoutingEngine: @unchecked Sendable {
     @discardableResult
     public func setCorrections(_ curves: [String: ParametricEQ]) -> Int {
         stateLock.lock()
-        defer { stateLock.unlock() }
-        guard let graph else { return 0 }
+        guard let graph else {
+            stateLock.unlock()
+            return 0
+        }
 
         // Resolved to buffer indices first, on the control thread, so the loop
-        // below can walk the slots in order and leave each one in exactly one
-        // state. Two UIDs cannot claim one slot: the map is by device.
+        // below can leave each slot in exactly one state. Two UIDs cannot claim
+        // one slot: the map is by device.
         var wanted: [Int: ParametricEQ] = [:]
         for (uid, curve) in curves {
             guard let buffer = outputBufferIndex(forDeviceUID: uid) else { continue }
             wanted[buffer] = curve
         }
-
         let rate = graphSampleRate
-        var installed = 0
-        for slot in 0..<RTGraph.maximumEQBuffers {
-            if let curve = wanted[slot] {
-                let packed = curve.coefficients(sampleRate: rate)
-                let preamp = pow(10, curve.preampDecibels / 20)
-                if RTGraph.installCorrection(
-                    packed, preampGain: preamp, onBuffer: slot, of: graph)
-                {
-                    installed += 1
-                    continue
-                }
+        let owner = Unmanaged<OutputCorrectionBank>
+            .fromOpaque(graph.pointee.outputCorrections)
+        let correctionPointer = graph.pointee.outputCorrections
+        _ = owner.retain()
+        stateLock.unlock()
+        defer { owner.release() }
+
+        var configurations: [Int: OutputCorrectionBank.Configuration] = [:]
+        configurations.reserveCapacity(wanted.count)
+        for (slot, curve) in wanted {
+            let packed = curve.coefficients(sampleRate: rate)
+            let preamp = pow(10, curve.preampDecibels / 20)
+            if let configuration = OutputCorrectionBank.Configuration(
+                coefficients: packed, preampGain: preamp)
+            {
+                configurations[slot] = configuration
             }
-            RTGraph.clearCorrection(onBuffer: slot, of: graph)
         }
-        return installed
+        let installed = owner.takeUnretainedValue().publish(configurations)
+        stateLock.lock()
+        let reachedCurrentGraph =
+            self.graph?.pointee.outputCorrections == correctionPointer
+        stateLock.unlock()
+        return reachedCurrentGraph ? installed : 0
     }
 
     /// Which output buffer carries a device, if any of them do.
@@ -2146,6 +2156,11 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.isolationIsChain = previous.pointee.isolationIsChain
         next.pointee.selftest = previous.pointee.selftest
         RTGraph.carryOutputStages(from: previous, to: next)
+        // A live route edit changes only which source feeds an existing output
+        // map. Sharing the bank keeps both the per-bus identity and its running
+        // history; rebuilding it here would drop every correction until the
+        // model happened to publish the same settings again.
+        RTGraph.carryCorrections(from: previous, to: next)
         next.pointee.outputLimiterPreGain = outputLimiterPreGain
         next.pointee.cancelledRing = previous.pointee.cancelledRing
         // The scalar is the latest control truth even when its command is still
@@ -2457,11 +2472,9 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.duckGain = previous.pointee.duckGain
         next.pointee.masterExemptBuffer = previous.pointee.masterExemptBuffer
 
-        // And every bus's correction, which `updateRoutes` does not carry
-        // because the model reinstalls them after a route edit. Nothing
-        // reinstalls them after a chain swap, so dropping them here would mean
-        // somebody's correction quietly disappearing the moment they switched
-        // on a compressor.
+        // And every bus's correction. The output map is unchanged by this
+        // graph-only swap, so retaining the same bank preserves both its bus
+        // identity and the filter history being advanced by the callback.
         RTGraph.carryCorrections(from: previous, to: next)
 
         // The chain is what decides the alignment, so a chain swap is the one
