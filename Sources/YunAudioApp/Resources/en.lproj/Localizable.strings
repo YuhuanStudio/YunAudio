@@ -660,6 +660,11 @@
 "Used when a selected application is captured or supplies echo cancellation's far-end reference. macOS provides no passive status check, so YunAudio does not create a tap merely to inspect it." = "Used when a selected application is captured or supplies echo cancellation's far-end reference. macOS provides no passive status check, so YunAudio does not create a tap merely to inspect it.";
 "Music player Automation" = "Music player Automation";
 "Music and Spotify are not installed." = "Music and Spotify are not installed.";
+"Set up access" = "Set up access";
+"Requests microphone, system audio and installed music-player access one at a time. Nothing opens an audio device, but macOS requires a short-lived process tap for the system-audio prompt." = "Requests microphone, system audio and installed music-player access one at a time. Nothing opens an audio device, but macOS requires a short-lived process tap for the system-audio prompt.";
+"Request all access" = "Request all access";
+"Requesting access…" = "Requesting access…";
+"Access set up" = "Access set up";
 "Reads the current song and playback position for synchronised lyrics." = "Reads the current song and playback position for synchronised lyrics.";
 "System approval" = "System approval";
 "macOS may require approval in Login Items after this is enabled. YunAudio cannot approve itself." = "macOS may require approval in Login Items after this is enabled. YunAudio cannot approve itself.";

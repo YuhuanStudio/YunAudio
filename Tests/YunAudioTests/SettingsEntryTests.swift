@@ -51,6 +51,8 @@ struct SettingsEntryTests {
         #expect(presenter.contains("private static var delegate: Delegate?"))
         #expect(presenter.contains("window.contentViewController = host"))
         #expect(presenter.contains("controller.window?.contentViewController = host"))
+        #expect(presenter.contains("controller.window?.isVisible == true"))
+        #expect(presenter.contains("controller.window?.contentViewController === host"))
         #expect(
             presenter.contains(
                 "(notification.object as? NSWindow)?.contentViewController = nil"))

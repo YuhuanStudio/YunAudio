@@ -111,6 +111,103 @@ struct PermissionCentreTests {
         #expect(status.lowerBound < guide.lowerBound)
     }
 
+    @Test("the first-launch guide records only a visible window, exactly once")
+    func guideRecordsSuccessfulPresentation() {
+        var storedVersion = 0
+        var events: [String] = []
+        var canOpen = false
+
+        func present() -> Bool {
+            FirstLaunchPermissions.completeGuidePresentationIfNeeded(
+                storedVersion: storedVersion,
+                environment: [:],
+                open: {
+                    events.append("open")
+                    return canOpen
+                },
+                markPresented: {
+                    events.append("mark")
+                    storedVersion = FirstLaunchPermissions.currentGuideVersion
+                })
+        }
+
+        #expect(!present())
+        #expect(storedVersion == 0)
+        #expect(events == ["open"])
+
+        canOpen = true
+        #expect(present())
+        #expect(storedVersion == FirstLaunchPermissions.currentGuideVersion)
+        #expect(events == ["open", "open", "mark"])
+
+        #expect(!present())
+        #expect(events == ["open", "open", "mark"])
+    }
+
+    @MainActor
+    @Test("request all serialises only the missing grants in prompt order")
+    func requestAllIsSequential() async {
+        let music = NowPlaying.AutomationTarget(
+            name: "Music", bundleID: "com.apple.Music")
+        let spotify = NowPlaying.AutomationTarget(
+            name: "Spotify", bundleID: "com.spotify.client")
+        let plan = PermissionCentre.requestPlan(
+            microphone: .notDetermined,
+            systemAudio: .needsRequest,
+            automationTargets: [music, spotify],
+            automationStates: [
+                music.bundleID: .allowed,
+                spotify.bundleID: .notDetermined,
+            ])
+
+        #expect(
+            plan == [
+                .microphone,
+                .systemAudio,
+                .automation(bundleID: spotify.bundleID),
+            ])
+
+        var completed: [PermissionCentre.RequestStep] = []
+        await PermissionCentre.executeRequestPlan(plan) { step in
+            completed.append(step)
+        }
+        #expect(completed == plan)
+
+        #expect(
+            PermissionCentre.requestPlan(
+                microphone: .unavailable,
+                systemAudio: .unavailable,
+                automationTargets: [music, spotify],
+                automationStates: [
+                    music.bundleID: .unavailable,
+                    spotify.bundleID: .unavailable,
+                ]
+            ).isEmpty)
+    }
+
+    @Test("the first screen owns the only automatic-looking permission action")
+    func firstScreenUsesOneExplicitSequence() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let permissions = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PermissionCentre.swift",
+            encoding: .utf8)
+        let preferences = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+        let launch = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/FirstLaunchPermissions.swift",
+            encoding: .utf8)
+
+        #expect(preferences.ranges(of: "permissions.requestAll()").count == 1)
+        #expect(preferences.ranges(of: "loc(\"Request all access\")").count == 1)
+        #expect(permissions.contains("AVCaptureDevice.requestAccess(for: .audio)"))
+        #expect(permissions.contains("ProcessTap.requestCaptureAccess()"))
+        #expect(permissions.contains("NowPlaying.requestAutomationPermission(for: bundleID)"))
+        #expect(!launch.contains("requestAll()"))
+        #expect(!launch.contains("requestMicrophone()"))
+        #expect(!launch.contains("requestSystemAudio()"))
+    }
+
     @Test("automatic routing cannot become a deferred permission prompt")
     func autoStartPermissionGate() {
         #expect(

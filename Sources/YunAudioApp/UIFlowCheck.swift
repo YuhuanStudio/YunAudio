@@ -4818,9 +4818,12 @@ enum UIFlowCheck {
         ///   which case nothing below has been exercised and the caller must
         ///   say so.
         func openAndShutPanel() async -> (counts: [String: Int], wasAttached: Bool)? {
-            statusItem?.setPanelOpenForCheck(true)
             BodyCount.reset()
             BodyCount.isCounting = true
+            // `popover.show` can synchronously perform the first SwiftUI layout.
+            // Starting afterwards recorded zero for a correctly drawn panel and
+            // called the second open blank without having observed its draw.
+            statusItem?.setPanelOpenForCheck(true)
             await pause(0.6)
             BodyCount.isCounting = false
             guard statusItem?.isPanelShownForCheck == true else { return nil }
@@ -4856,6 +4859,9 @@ enum UIFlowCheck {
             check(
                 "the menu bar panel still has content when it is opened again",
                 secondOpen.wasAttached)
+            check(
+                "the menu bar panel still draws when it is opened again",
+                (openCounts["PanelView"] ?? 0) > 0)
             check(
                 "an open panel does not redraw with its meter",
                 (openCounts["PanelView"] ?? 0) < 10)

@@ -659,6 +659,11 @@
 "Used when a selected application is captured or supplies echo cancellation's far-end reference. macOS provides no passive status check, so YunAudio does not create a tap merely to inspect it." = "用于采集所选应用程序，或提供回声消除所需的远端参考。macOS 没有被动查询状态的 API，因此 YunAudio 不会仅为检查权限而创建 tap。";
 "Music player Automation" = "音乐播放器自动化";
 "Music and Spotify are not installed." = "尚未安装“音乐”和 Spotify。";
+"Set up access" = "一次设置所有权限";
+"Requests microphone, system audio and installed music-player access one at a time. Nothing opens an audio device, but macOS requires a short-lived process tap for the system-audio prompt." = "依次请求麦克风、系统音频及已安装音乐播放器的权限。这不会打开音频设备，但 macOS 的系统音频提示需要创建一个随即销毁的短暂进程 tap。";
+"Request all access" = "依次请求所有权限";
+"Requesting access…" = "正在依次请求权限…";
+"Access set up" = "权限已设置";
 "Reads the current song and playback position for synchronised lyrics." = "读取当前歌曲和播放位置，以同步显示歌词。";
 "System approval" = "系统批准";
 "macOS may require approval in Login Items after this is enabled. YunAudio cannot approve itself." = "启用后，macOS 可能要求你在“登录项”中批准；YunAudio 无法自行批准。";

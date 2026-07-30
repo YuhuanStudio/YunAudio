@@ -4511,8 +4511,11 @@ struct PermissionRequestTests {
             FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 0, environment: [:]))
         #expect(
-            !FirstLaunchPermissions.shouldPresentGuide(
+            FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 1, environment: [:]))
+        #expect(
+            !FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 2, environment: [:]))
         #expect(
             !FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 0,

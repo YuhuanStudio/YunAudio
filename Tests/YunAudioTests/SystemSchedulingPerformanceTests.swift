@@ -374,6 +374,70 @@ struct SystemSchedulingPerformanceTests {
         #expect(!show.contains("NSApp.activate("))
     }
 
+    @Test("the status button's left-click path reaches only the passive popover")
+    func statusButtonUsesPassivePopoverPath() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/StatusItem.swift",
+            encoding: .utf8)
+        let initStart = try #require(source.range(of: "init(model: RouterModel"))
+        let initEnd = try #require(
+            source.range(
+                of: "private var rightClickMenu",
+                range: initStart.upperBound..<source.endIndex))
+        let initialisation = source[initStart.lowerBound..<initEnd.lowerBound]
+        #expect(initialisation.contains("button.action = #selector(handleClick)"))
+        #expect(
+            initialisation.contains(
+                "button.sendAction(on: [.leftMouseUp, .rightMouseUp])"))
+
+        let clickStart = try #require(source.range(of: "@objc private func handleClick()"))
+        let clickEnd = try #require(
+            source.range(
+                of: "private func showMenu()",
+                range: clickStart.upperBound..<source.endIndex))
+        let click = source[clickStart.lowerBound..<clickEnd.lowerBound]
+        #expect(click.ranges(of: "togglePopover()").count == 1)
+        #expect(!click.contains("NSApp.activate("))
+
+        let toggleStart = try #require(source.range(of: "private func togglePopover()"))
+        let toggleEnd = try #require(
+            source.range(
+                of: "/// Attaches the panel",
+                range: toggleStart.upperBound..<source.endIndex))
+        let toggle = source[toggleStart.lowerBound..<toggleEnd.lowerBound]
+        #expect(toggle.ranges(of: "showPanel(from: button)").count == 1)
+        #expect(!toggle.contains("NSApp.activate("))
+    }
+
+    @Test("panel reopen counting begins before synchronous popover layout")
+    func panelReopenMeasurementIncludesFirstDraw() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/UIFlowCheck.swift",
+            encoding: .utf8)
+        let helperStart = try #require(
+            source.range(of: "func openAndShutPanel() async"))
+        let helperEnd = try #require(
+            source.range(
+                of: "// Twice.",
+                range: helperStart.upperBound..<source.endIndex))
+        let helper = source[helperStart.lowerBound..<helperEnd.lowerBound]
+        let counting = try #require(helper.range(of: "BodyCount.isCounting = true"))
+        let opening = try #require(
+            helper.range(of: "statusItem?.setPanelOpenForCheck(true)"))
+        #expect(counting.lowerBound < opening.lowerBound)
+
+        let secondOpen = try #require(
+            source.range(
+                of: "\"the menu bar panel still draws when it is opened again\""))
+        let positiveCount = try #require(
+            source.range(
+                of: "(openCounts[\"PanelView\"] ?? 0) > 0",
+                range: secondOpen.upperBound..<source.endIndex))
+        #expect(secondOpen.lowerBound < positiveCount.lowerBound)
+    }
+
     @Test("headphone files are parsed off MainActor only when needed")
     func headphoneProfilesAreLazy() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests

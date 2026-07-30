@@ -5,10 +5,13 @@ import Foundation
 /// Kept as a pure list because a future protected feature must make an explicit
 /// decision here. An empty list is the contract: opening YunAudio never asks
 /// TCC for microphone, system audio, Automation or anything else. The first
-/// ordinary launch opens Settings → Permissions once, where every request is a
-/// separate button press.
+/// ordinary launch opens Settings → Permissions once. One explicit action there
+/// serialises every missing grant; each grant also remains individually
+/// requestable.
 enum FirstLaunchPermissions {
-    static let currentGuideVersion = 1
+    // Version 1 could mark itself complete before a settings window existed.
+    // Advance once so affected installations receive the repaired guide.
+    static let currentGuideVersion = 2
     private static let guideVersionKey = "permissionGuideVersion"
 
     enum Capability: CaseIterable {
@@ -38,19 +41,38 @@ enum FirstLaunchPermissions {
             && environment["YUNAUDIO_ICON"] == nil
     }
 
+    /// Presents once, but only records a presentation that became visible.
+    ///
+    /// Marking before `open` meant one failed window order permanently skipped
+    /// the guide. The closure boundary keeps the ordering independently
+    /// measurable without constructing an application or touching TCC.
+    @discardableResult
+    static func completeGuidePresentationIfNeeded(
+        storedVersion: Int, environment: [String: String],
+        open: () -> Bool, markPresented: () -> Void
+    ) -> Bool {
+        guard
+            shouldPresentGuide(
+                storedVersion: storedVersion, environment: environment)
+        else { return false }
+        guard open() else { return false }
+        markPresented()
+        return true
+    }
+
     @MainActor
     static func presentGuideIfNeeded(
         model: RouterModel, defaults: UserDefaults = .standard,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        guard
-            shouldPresentGuide(
-                storedVersion: defaults.integer(forKey: guideVersionKey),
-                environment: environment)
-        else { return }
-        // Written before presenting. Closing the window is a completed tour,
-        // not an invitation to reopen it on every launch.
-        defaults.set(currentGuideVersion, forKey: guideVersionKey)
-        SettingsWindow.open(model: model, initialSection: .permissions)
+        completeGuidePresentationIfNeeded(
+            storedVersion: defaults.integer(forKey: guideVersionKey),
+            environment: environment,
+            open: {
+                SettingsWindow.open(model: model, initialSection: .permissions)
+            },
+            markPresented: {
+                defaults.set(currentGuideVersion, forKey: guideVersionKey)
+            })
     }
 }

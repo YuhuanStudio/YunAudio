@@ -79,6 +79,7 @@ enum SettingsWindow {
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         return controller.window?.isVisible == true
+            && controller.window?.contentViewController === host
     }
 
     /// Identity used by the flow check to prove reopening retains view state.
@@ -653,6 +654,40 @@ struct PreferencesWindow: View {
         VStack(alignment: .leading, spacing: Yun.Space.lg) {
             heading(loc("Audio access"))
             YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Text(loc("Set up access"))
+                        .font(Yun.Text.title)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                    Text(
+                        loc(
+                            "Requests microphone, system audio and installed music-player access one at a time. Nothing opens an audio device, but macOS requires a short-lived process tap for the system-audio prompt."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        permissions.requestAll()
+                    } label: {
+                        HStack(spacing: Yun.Space.sm) {
+                            if permissions.isRequestingAll {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(
+                                permissions.isRequestingAll
+                                    ? loc("Requesting access…")
+                                    : permissions.pendingRequestPlan.isEmpty
+                                        ? loc("Access set up")
+                                        : loc("Request all access"))
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(YunButtonStyle(.primary, small: true))
+                    .disabled(!permissions.canRequestAll)
+                }
+            }
+            YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
                     permissionRow(
                         title: loc("Microphone"),
@@ -679,13 +714,13 @@ struct PreferencesWindow: View {
             heading(loc("Music player Automation"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.md) {
-                    if NowPlaying.installedAutomationTargets.isEmpty {
+                    if permissions.automationTargets.isEmpty {
                         Text(loc("Music and Spotify are not installed."))
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.textTertiary)
                     } else {
                         ForEach(
-                            Array(NowPlaying.installedAutomationTargets.enumerated()),
+                            Array(permissions.automationTargets.enumerated()),
                             id: \.element.id
                         ) { index, target in
                             if index > 0 { YunDivider() }
