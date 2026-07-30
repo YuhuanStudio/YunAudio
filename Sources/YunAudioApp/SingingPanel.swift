@@ -630,6 +630,16 @@ struct SongArtwork: View {
                 }
             }
         }
+        // Whatever it is given, and no opinion of its own. A resizable image
+        // laid out by its aspect ratio reports a size, and that size arrives
+        // asynchronously — so a column built around this view was correct
+        // until the cover downloaded and wrong afterwards, with the transport
+        // row pushed outside the window. The placeholder never did this
+        // because a gradient has no intrinsic size, which is why every
+        // measurement taken before the artwork arrived agreed with the layout
+        // and every photograph taken after it did not.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .clipped()
         .task(id: url) {
             image = nil
             guard let url else {
