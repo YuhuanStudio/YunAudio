@@ -159,7 +159,23 @@ struct KTVStage: View {
                 // pin it to whatever the reader was proposed at the time.
                 // `makeHost` is what makes that the whole window frame,
                 // title-bar row included.
+                // Clamped to the reader, because `aspectRatio(.fill)` reports
+                // a size *larger* than the proposal in one dimension and
+                // `maxHeight: .infinity` does not pull it back. The `ZStack` is
+                // as tall as its tallest child, so a portrait cover grew the
+                // stack past the window — 1036 points inside 720 — and
+                // everything in it was re-centred 180 points lower, taking the
+                // track column's bottom out of the frame.
+                //
+                // Only ever with real artwork: a placeholder is a gradient with
+                // no aspect ratio to enforce, which is why every measurement
+                // taken before the cover arrived agreed with the layout and
+                // every photograph taken after it did not. Found by replacing
+                // each child of the stack in turn — the second substitution
+                // moved `473@303` to `473@123`, which is centring exactly.
                 stageBackground()
+                    .frame(width: proxy.size.width, height: proxy.size.height)
+                    .clipped()
 
                 if let track = model.nowPlaying {
                     let inset = max(34, proxy.size.height * 0.07)
