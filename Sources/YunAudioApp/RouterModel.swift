@@ -1076,6 +1076,9 @@ final class RouterModel: ScriptTarget {
         ProcessInfo.processInfo.environment["YUNAUDIO_RECOGNISE_PLAYERS"] == "1"
     /// Lyrics for it, when a file was found.
     private(set) var lyrics: Lyrics?
+    /// The `[offset:]` the file itself declared, kept apart from the nudge so
+    /// that clearing the nudge restores the file's own value rather than zero.
+    private var fileLyricOffset: Double = 0
     /// Words with no reliable timeline, used only when no timed copy exists.
     private(set) var plainLyrics: String?
     /// The source actually shown, so a fallback is visible rather than opaque.
@@ -2340,6 +2343,42 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Seconds this song's words have been nudged. Negative holds them back.
+    var lyricOffsetSeconds: Double {
+        guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else { return 0 }
+        return LyricOffsets.offset(for: identity)
+    }
+
+    /// Moves the words against the music and remembers it for this song.
+    ///
+    /// A published `.lrc` is timed against whatever master its author had.
+    /// 「慢冷」 arrives with no lead-in, so the stage lights its first line
+    /// before anyone sings and no better file exists to find.
+    func nudgeLyricOffset(by delta: Double) {
+        guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else { return }
+        LyricOffsets.nudge(identity, by: delta)
+        applyLyricOffset()
+    }
+
+    func clearLyricOffset() {
+        guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else { return }
+        LyricOffsets.clear(identity)
+        applyLyricOffset()
+    }
+
+    /// Puts the remembered nudge into the parsed lyric.
+    ///
+    /// Through `Lyrics.offset`, which already exists for the `[offset:]` tag
+    /// and is applied by `index(at:)` and `progress(at:)` alike — so one place
+    /// decides what time it is for the words, and the highlight and the sweep
+    /// cannot disagree.
+    func applyLyricOffset() {
+        guard var updated = lyrics else { return }
+        updated.offset = fileLyricOffset + lyricOffsetSeconds
+        lyrics = updated
+        followTheWords()
+    }
+
     /// Word times for the line being sung, when the file carried them.
     ///
     /// Read by the compositor to fill along the shape the words describe
@@ -2378,6 +2417,10 @@ final class RouterModel: ScriptTarget {
             .flatMap(Self.cachedLyricsAttribution)
         lyricsCopyright = cachedAttribution?.copyright
         lyricsRegion = cachedAttribution?.region
+        // The file's own declared shift, kept apart so that clearing a nudge
+        // restores it rather than zero — then the remembered nudge on top.
+        fileLyricOffset = lyrics?.offset ?? 0
+        applyLyricOffset()
         melody = track.flatMap(Self.findMelody)
         if let track {
             if let localURL = localLyrics?.url ?? localPlain?.url {
