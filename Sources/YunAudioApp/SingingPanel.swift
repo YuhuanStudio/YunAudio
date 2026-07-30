@@ -583,8 +583,23 @@ struct SongArtwork: View {
 
     @State private var image: NSImage?
 
-    /// What the most recent artwork fetch did, for the capture gate to report.
-    nonisolated(unsafe) static var lastTaskOutcome = "never started"
+    /// What the artwork fetches did, counted rather than last-one-wins.
+    ///
+    /// Recording only the most recent outcome could not tell "the image
+    /// arrived and a later rebuild overwrote the record" from "it never
+    /// arrived", which is exactly the question. Counts can.
+    nonisolated(unsafe) static var taskOutcomes: [String: Int] = [:]
+
+    nonisolated static func record(_ outcome: String) {
+        taskOutcomes[outcome, default: 0] += 1
+    }
+
+    nonisolated static var outcomeSummary: String {
+        taskOutcomes.isEmpty
+            ? "never started"
+            : taskOutcomes.sorted { $0.key < $1.key }
+                .map { "\($0.key) ×\($0.value)" }.joined(separator: ", ")
+    }
 
     var body: some View {
         Group {
@@ -610,7 +625,6 @@ struct SongArtwork: View {
         .task(id: url) {
             image = nil
             guard let url else { return }
-            SongArtwork.lastTaskOutcome = "started"
             guard
                 let decoded = await SongArtworkResources.shared.value(for: url),
                 !Task.isCancelled
@@ -619,15 +633,15 @@ struct SongArtwork: View {
                 // placeholder cannot say whether the decode returned nothing —
                 // a defect a user meets — or whether this task simply had not
                 // run yet, which is only the gate being impatient.
-                SongArtwork.lastTaskOutcome =
-                    Task.isCancelled ? "cancelled" : "no decoded value"
+                SongArtwork.record(
+                    Task.isCancelled ? "cancelled" : "no decoded value")
                 return
             }
             let loaded = NSImage(
                 cgImage: decoded.image,
                 size: NSSize(width: decoded.image.width, height: decoded.image.height))
             guard !Task.isCancelled else { return }
-            SongArtwork.lastTaskOutcome = "loaded"
+            SongArtwork.record("loaded")
             image = loaded
         }
     }
