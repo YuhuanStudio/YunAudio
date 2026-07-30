@@ -241,6 +241,103 @@ struct BackgroundResourceTests {
             RouterModel.echoReferenceProcessIDs(in: [playing, quiet], excluding: [])
                 == [11, 12])
     }
+
+    @MainActor
+    @Test("tuner jitter publishes at the four-hertz score cadence")
+    func singerPitchPublicationIsBounded() {
+        var displayed: Float = 220
+        var publications = 0
+        for poll in 0..<80 {
+            let measured = Float(220 + sin(Double(poll) * 0.7) * 2)
+            let previous = RouterModel.Singer(
+                uid: "mic",
+                name: "Singer",
+                hertz: displayed,
+                score: .none)
+            let next = RouterModel.singerDisplayHertz(
+                measured: measured,
+                previous: previous,
+                rescore: poll.isMultiple(of: 5))
+            if next != displayed {
+                publications += 1
+                displayed = next
+            }
+        }
+        // Four seconds at a twenty-hertz poll: at most sixteen score rounds,
+        // rather than eighty raw autocorrelation readings.
+        #expect(publications <= 16)
+
+        let previous = RouterModel.Singer(
+            uid: "mic",
+            name: "Singer",
+            hertz: 220,
+            score: .none)
+        #expect(
+            RouterModel.singerDisplayHertz(
+                measured: 235,
+                previous: previous,
+                rescore: false) == 235)
+    }
+
+    @Test("singing motion is isolated from the whole window")
+    func singingMotionHasItsOwnObservationBoundary() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let window = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/MainWindow.swift",
+            encoding: .utf8)
+        let singing = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
+            encoding: .utf8)
+        #expect(window.ranges(of: "SingingPanel(model: model)").count == 1)
+        #expect(window.ranges(of: "model.lyricProgress").count == 0)
+        #expect(window.ranges(of: "model.singers").count == 0)
+        #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
+        #expect(singing.ranges(of: "model.lyricProgress").count >= 2)
+        #expect(singing.ranges(of: "model.singers").count == 1)
+    }
+
+    /// `AudioDevice.hasFallenToCallQuality` reads the live sample rate through
+    /// HAL. The status strip is invalidated by meters, recording state and
+    /// pills, so putting that read in its body silently moved synchronous IPC
+    /// onto the main actor at the poll cadence.
+    @Test("status pills read the cached headset verdict only")
+    func statusPillsDoNotReadHAL() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let pills = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/StatusPills.swift",
+            encoding: .utf8)
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+
+        #expect(pills.ranges(of: "model.headsetInCallQuality").count == 1)
+        #expect(pills.ranges(of: ".hasFallenToCallQuality").count == 0)
+        #expect(pills.ranges(of: ".currentSampleRate").count == 0)
+        #expect(
+            model.ranges(of: "private(set) var headsetInCallQuality: AudioDevice?").count
+                == 1)
+        #expect(model.ranges(of: "publish(headset, to: \\.headsetInCallQuality)").count == 2)
+    }
+
+    @Test("one source meter pass returns all three channel reductions")
+    func sourceMeterReduction() {
+        let meter = RouterModel.sourceMeter(
+            routeIndices: [-1, 0, 2, 99],
+            levels: [0.2, 0.9, 0.7],
+            peakHolds: [0.5, 0.6, 0.8],
+            clipped: [false, false, true])
+        #expect(meter.level == 0.7)
+        #expect(meter.peakHold == 0.8)
+        #expect(meter.isClipped)
+
+        #expect(
+            RouterModel.sourceMeter(
+                routeIndices: [],
+                levels: [],
+                peakHolds: [],
+                clipped: [])
+                == RouterModel.SourceMeter(level: 0, peakHold: 0, isClipped: false))
+    }
 }
 
 /// The write coalescer is only useful if it also avoids the allocations needed
@@ -333,5 +430,85 @@ struct PreferenceSnapshotPerformanceTests {
             + (preferences.midiBindings ?? [:]).reduce(0) {
                 $0 &+ $1.key.utf8.count &+ $1.value.utf8.count
             }
+    }
+}
+
+@Suite("Source meter performance", .serialized)
+struct SourceMeterPerformanceTests {
+    #if DEBUG
+        @Test(
+            "ten thousand meter reductions allocate at most once",
+            .disabled("allocation evidence requires an optimised build"))
+    #else
+        @Test("ten thousand meter reductions allocate at most once")
+    #endif
+    func allocationFreeReduction() {
+        let indices = Array(0..<8)
+        let levels: [Float] = [0.1, 0.4, 0.2, 0.8, 0.3, 0.7, 0.5, 0.6]
+        let holds: [Float] = [0.2, 0.5, 0.3, 0.9, 0.4, 0.8, 0.6, 0.7]
+        let clipped = [false, false, false, true, false, false, false, false]
+
+        _ = RouterModel.sourceMeter(
+            routeIndices: indices,
+            levels: levels,
+            peakHolds: holds,
+            clipped: clipped)
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
+        RoutingEngine.enableAllocationTripwire()
+        defer { RoutingEngine.disableAllocationTripwire() }
+        yun_rt_tripwire_mark_realtime(true)
+        // Run the exact same caller before the baseline so lazy setup is not
+        // charged to the repeated twenty-hertz operation.
+        _ = Self.reduceMany(
+            indices: indices, levels: levels, holds: holds, clipped: clipped)
+        _ = Self.baselineMany()
+        let baselineBefore = RoutingEngine.allocationViolations
+        let baselineChecksum = Self.baselineMany()
+        let baselineAllocations = RoutingEngine.allocationViolations - baselineBefore
+        let before = RoutingEngine.allocationViolations
+        let checksum = Self.reduceMany(
+            indices: indices, levels: levels, holds: holds, clipped: clipped)
+        yun_rt_tripwire_mark_realtime(false)
+        let allocations = RoutingEngine.allocationViolations - before
+
+        print(
+            "10,000 source meter reductions: \(allocations) allocations "
+                + "(loop baseline \(baselineAllocations)), \(checksum)")
+        #expect(baselineChecksum > 10_000)
+        #expect(checksum > 26_000)
+        // The optimised caller records one allocation for the whole 10,000-call
+        // batch. The old two compactMap arrays per reduction record about
+        // 20,000; this bound catches that shape without calling the measured
+        // one zero.
+        #expect(allocations <= baselineAllocations + 1)
+    }
+
+    @inline(never)
+    private static func reduceMany(
+        indices: [Int],
+        levels: [Float],
+        holds: [Float],
+        clipped: [Bool]
+    ) -> Float {
+        var checksum: Float = 0
+        for _ in 0..<10_000 {
+            let meter = RouterModel.sourceMeter(
+                routeIndices: indices,
+                levels: levels,
+                peakHolds: holds,
+                clipped: clipped)
+            checksum += meter.level + meter.peakHold + (meter.isClipped ? 1 : 0)
+        }
+        return checksum
+    }
+
+    @inline(never)
+    private static func baselineMany() -> Float {
+        var checksum: Float = 0
+        for index in 0..<10_000 {
+            checksum += Float(index & 3)
+        }
+        return checksum
     }
 }

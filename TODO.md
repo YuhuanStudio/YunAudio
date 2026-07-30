@@ -245,6 +245,36 @@ Release 連續 20 次、這台機器 74 個 running apps：留在 main actor 的
 CoreAudio 從「start 成功但 750 ms 沒有 IO cycle」的系統狀態恢復，沒有拿未跑到的
 hardware half 冒充驗收。
 
+### 唱歌動畫讓整個主視窗重畫，閒置狀態列也永久喚醒 —— **已修且量過** [release benchmark]
+
+歌詞掃光與歌手音高原本直接由 `MainWindow` 讀取。兩者最高以 20 Hz 發布，所以右側一個
+mask 或一個看起來沒變的音名，會連左側裝置、接線盤、分析圖與其他分頁的共同父層一起
+失效。現在 KTV 的動態 Observation 邊界是獨立的 `SingingPanel`；結構測試斷言
+`MainWindow` 對 `lyricProgress` 與 `singers` 都是 **0 次讀取**。flow check 也已改為
+真的載入四行 timed `.lrc`、啟動掃光，並要求唱歌面板保持超過半個 poll rate、整個視窗
+低於半個 poll rate；這項需要真實 route 的數字仍等 CoreAudio 恢復後補跑，沒有拿結構
+檢查冒充動態量測。
+
+歌手列只畫音名，但先前每一個 autocorrelation hertz 微幅抖動都發布。現在同一個半音內
+把 raw hertz 留到 4 Hz 的評分週期更新，跨半音仍立即發布。四秒、80 個 20 Hz 模擬
+poll 的數值測試得到**最多 16 次發布**，不是 80 次。
+
+每個來源列原本為 level 與 peak hold 各建一次 `compactMap`，再第三次走訪 clipping；
+四個來源、20 Hz 是每秒 **160 個短命陣列**。現在三個結果在一個有界 while pass 中一起
+算。Release tripwire 實測 10,000 次 reduction 是**整批 1 次 allocation**、空迴圈基線
+0；舊形狀約 20,000 次。
+
+狀態列原本不論有沒有 route 都永久掛著 0.5 秒 timer：停止狀態每天 **172,800 次**
+main-run-loop callback。現在 Observation 只在 route running 時建立 timer，停止時是
+**nil／0 次喚醒**，mute 與 muted-speaking 仍即時更新。藍牙耳機是否跌到通話品質也不再
+由 SwiftUI pill body 同步讀 HAL sample rate；結果在 `engineQueue` 以 2 Hz 更新並快取，
+結構測試禁止 `StatusPills` 直接出現 `currentSampleRate` 或
+`hasFallenToCallQuality`。
+
+668 個單元測試、124 個套件與不碰硬體的 acceptance gate 全綠；深色唱歌分頁與最小
+尺寸淺色真實視窗截圖也已人工檢查，沒有裁切或遺失控制項。硬體 flow 仍因上述全機
+CoreAudio 狀態未執行。
+
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
 路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在

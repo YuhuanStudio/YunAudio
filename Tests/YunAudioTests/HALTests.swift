@@ -2229,6 +2229,15 @@ struct StatusMarkChangeTests {
         let speaking = Mark.of(level: 0.3, isMuted: false, isSpeakingWhileMuted: true)
         #expect(plain == speaking)
     }
+
+    @Test("a stopped route has no status timer to wake")
+    func idleHasNoTimer() throws {
+        #expect(StatusItemController.levelTimerInterval(isRunning: false) == nil)
+        let running = try #require(
+            StatusItemController.levelTimerInterval(isRunning: true))
+        #expect(running == 0.5)
+        #expect(Int(86_400 / running) == 172_800)
+    }
 }
 
 /// The bar on a vertical equaliser band.

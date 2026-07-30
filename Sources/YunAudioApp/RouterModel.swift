@@ -1123,7 +1123,7 @@ final class RouterModel: ScriptTarget {
             }
             : []
 
-        let previous = Dictionary(uniqueKeysWithValues: singers.map { ($0.uid, $0.score) })
+        let previous = Dictionary(uniqueKeysWithValues: singers.map { ($0.uid, $0) })
         let capturedReference =
             rescore && scoringReference.isEmpty
             ? automaticCapturedReference(lines: lines)
@@ -1149,18 +1149,40 @@ final class RouterModel: ScriptTarget {
             let uid = index < scoringUIDs.count ? scoringUIDs[index] : "\(index)"
             let score: KaraokeScore
             if !rescore, let held = previous[uid] {
-                score = held
+                score = held.score
             } else {
                 score = scoreForTrack(
                     track, lines: lines, capturedReference: capturedReference)
             }
+            let hertz = Self.singerDisplayHertz(
+                measured: track.hertz,
+                previous: previous[uid],
+                rescore: rescore)
             updated.append(
                 Singer(
                     uid: uid,
                     name: index < scoringNames.count ? scoringNames[index] : loc("Source"),
-                    hertz: track.hertz, score: score))
+                    hertz: hertz, score: score))
         }
         if updated != singers { singers = updated }
+    }
+
+    /// Keeps raw tuner jitter from becoming view state.
+    ///
+    /// The row displays a note name, not hertz. While the measured value stays
+    /// on that note, publishing every small autocorrelation wobble invalidates
+    /// the singing panel at 20 Hz without changing one pixel. A score refresh
+    /// still takes the exact current value at 4 Hz, and crossing a semitone is
+    /// published immediately.
+    static func singerDisplayHertz(
+        measured: Float,
+        previous: Singer?,
+        rescore: Bool
+    ) -> Float {
+        guard !rescore, let previous,
+            PitchTracker.noteName(previous.hertz) == PitchTracker.noteName(measured)
+        else { return measured }
+        return previous.hertz
     }
 
     /// A source's raw scoring result for verification, including accompaniment.
@@ -1710,7 +1732,8 @@ final class RouterModel: ScriptTarget {
         let heard = position + lyricNudge
         let index = lyrics.index(at: heard)
         if lyricLine != index { lyricLine = index }
-        lyricProgress = lyrics.progress(at: heard)
+        let progress = lyrics.progress(at: heard)
+        if lyricProgress != progress { lyricProgress = progress }
     }
 
     /// Finds an `.lrc` for a track by name.
@@ -2259,15 +2282,24 @@ final class RouterModel: ScriptTarget {
     /// leave the headset as an output and take the microphone from somewhere
     /// else. That is what this application is for, which is why the remedy is
     /// one line of interface rather than a feature.
-    var headsetInCallQuality: AudioDevice? {
-        let monitor = monitorDeviceUID.flatMap { uid in
+    private(set) var headsetInCallQuality: AudioDevice?
+
+    /// Reads the live sample rate off likely outputs first, then the rest.
+    ///
+    /// Synchronous HAL work, so callers run it on `engineQueue` except for the
+    /// one initial device enumeration. Keeping it out of the computed property
+    /// stops every recording-pill redraw from asking CoreAudio the same
+    /// question at 20 Hz.
+    nonisolated static func headsetInCallQuality(
+        outputDevices: [AudioDevice],
+        preferredUIDs: [String]
+    ) -> AudioDevice? {
+        let preferred = preferredUIDs.compactMap { uid in
             outputDevices.first { $0.uid == uid }
         }
-        let candidates: [AudioDevice] = [selectedDestination, monitor].compactMap { $0 }
-        // The route's own outputs first, then anything else that is in this
-        // state: a headset somebody is listening on but not routing to is still
-        // a headset that has quietly become a telephone.
-        return candidates.first(where: { $0.hasFallenToCallQuality })
+        // A headset somebody is listening on but not routing to still matters,
+        // which is why the rest remain a fallback.
+        return preferred.first(where: { $0.hasFallenToCallQuality })
             ?? outputDevices.first(where: { $0.hasFallenToCallQuality })
     }
 
@@ -3252,6 +3284,20 @@ final class RouterModel: ScriptTarget {
         // it, four routes and the key it was built in.
         availableApps = (try? AudioApplications.grouped(keeping: capturedAppBundleIDs)) ?? []
         appsRefreshedAt = Date()
+        refreshHeadsetQualityAsynchronously()
+    }
+
+    private func refreshHeadsetQualityAsynchronously() {
+        let outputs = outputDevices
+        let preferred = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
+        engineQueue.async {
+            let headset = Self.headsetInCallQuality(
+                outputDevices: outputs,
+                preferredUIDs: preferred)
+            Task { @MainActor in
+                self.publish(headset, to: \.headsetInCallQuality)
+            }
+        }
     }
 
     /// Resolves the saved bundle identifiers to the processes running right now.
@@ -3739,16 +3785,48 @@ final class RouterModel: ScriptTarget {
         return activeRoutes[first]
     }
 
-    func level(of group: SourceGroup) -> Float {
-        group.routes.compactMap { $0 < levels.count ? levels[$0] : nil }.max() ?? 0
+    struct SourceMeter: Sendable, Equatable {
+        let level: Float
+        let peakHold: Float
+        let isClipped: Bool
     }
 
-    func peakHold(of group: SourceGroup) -> Float {
-        group.routes.compactMap { $0 < peakHolds.count ? peakHolds[$0] : nil }.max() ?? 0
+    /// Reduces a logical source's channels in one allocation-free pass.
+    ///
+    /// RouteStrip draws all three values together. It used to ask for each one
+    /// separately, and the level and hold accessors each built a temporary
+    /// `compactMap` array: four sources at twenty hertz made 160 short-lived
+    /// arrays a second for two maxima over lists usually two elements long.
+    nonisolated static func sourceMeter(
+        routeIndices: [Int],
+        levels: [Float],
+        peakHolds: [Float],
+        clipped: [Bool]
+    ) -> SourceMeter {
+        var level: Float = 0
+        var peakHold: Float = 0
+        var isClipped = false
+        var routeIndex = 0
+        while routeIndex < routeIndices.count {
+            let index = routeIndices[routeIndex]
+            if index >= 0, index < levels.count { level = max(level, levels[index]) }
+            if index >= 0, index < peakHolds.count {
+                peakHold = max(peakHold, peakHolds[index])
+            }
+            if index >= 0, index < clipped.count {
+                isClipped = isClipped || clipped[index]
+            }
+            routeIndex += 1
+        }
+        return SourceMeter(level: level, peakHold: peakHold, isClipped: isClipped)
     }
 
-    func isClipped(_ group: SourceGroup) -> Bool {
-        group.routes.contains { $0 < clipped.count && clipped[$0] }
+    func meter(of group: SourceGroup) -> SourceMeter {
+        Self.sourceMeter(
+            routeIndices: group.routes,
+            levels: levels,
+            peakHolds: peakHolds,
+            clipped: clipped)
     }
 
     func isMuted(_ group: SourceGroup) -> Bool {
@@ -4706,6 +4784,9 @@ final class RouterModel: ScriptTarget {
         let all = (try? AudioDevices.all()) ?? []
         inputDevices = all.filter(\.hasInput)
         outputDevices = all.filter(\.hasOutput)
+        headsetInCallQuality = Self.headsetInCallQuality(
+            outputDevices: outputDevices,
+            preferredUIDs: [selectedDestinationUID, monitorDeviceUID].compactMap { $0 })
         for device in all { deviceNames[device.uid] = device.name }
         // An extra input or output that has been unplugged, or has since become
         // an end of the main route, is not one any more.
@@ -6324,10 +6405,15 @@ final class RouterModel: ScriptTarget {
         pathQualityReadInFlight = true
         let engine = engine
         let destination = selectedDestination
+        let outputs = outputDevices
+        let preferredHeadsets = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
         engineQueue.async {
             let quality = engine.pathQuality
             let latency =
                 destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+            let headset = Self.headsetInCallQuality(
+                outputDevices: outputs,
+                preferredUIDs: preferredHeadsets)
             Task { @MainActor in
                 self.pathQualityReadInFlight = false
                 // A queued read can finish after Stop. Publishing that route's
@@ -6336,6 +6422,7 @@ final class RouterModel: ScriptTarget {
                 guard self.isRunning else { return }
                 self.publish(quality, to: \.pathQuality)
                 self.publish(latency, to: \.destinationLatencyFrames)
+                self.publish(headset, to: \.headsetInCallQuality)
             }
         }
     }

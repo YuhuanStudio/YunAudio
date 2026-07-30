@@ -25,12 +25,10 @@ struct RouteStrip: View {
             let muted = model.isMuted(group)
             let silenced = model.isSilenced(group)
             let soloed = model.soloedGroup == group.uid
-            let level = model.level(of: group)
-            let hold = model.peakHold(of: group)
-            let clipping = model.isClipped(group)
+            let meter = model.meter(of: group)
             strip(
                 route: route, muted: muted, silenced: silenced, soloed: soloed,
-                level: level, hold: hold, clipping: clipping)
+                level: meter.level, hold: meter.peakHold, clipping: meter.isClipped)
         }
     }
 

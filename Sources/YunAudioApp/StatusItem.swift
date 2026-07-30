@@ -1,4 +1,5 @@
 import AppKit
+import Observation
 import SwiftUI
 import YunDesign
 
@@ -125,17 +126,57 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         rightClickMenu = menu
         self.openMainWindow = openMainWindow
 
-        // Redraw the glyph as the level moves. Twice a second is enough for a
-        // 15-point image and keeps an idle menu bar from waking the CPU.
-        levelObserver = Timer.scheduledTimer(
-            timeInterval: 0.5, target: self, selector: #selector(refreshImageOnTimer),
-            userInfo: nil, repeats: true)
+        observeStatus()
+        statusChanged()
     }
 
     private var rightClickMenu: NSMenu?
     private var muteItem: NSMenuItem?
     private var configItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
+
+    /// Observes the discrete state that can change while the level timer is
+    /// asleep.
+    ///
+    /// A permanent half-second timer is 172,800 main-thread wakeups a day while
+    /// routing is stopped. Observation starts that timer when a route comes up,
+    /// invalidates it when the route goes down, and still updates mute changes
+    /// immediately while idle.
+    private func observeStatus() {
+        withObservationTracking {
+            _ = model.isRunning
+            _ = model.isMuted
+            _ = model.isSpeakingWhileMuted
+        } onChange: { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observeStatus()
+                self.statusChanged()
+            }
+        }
+    }
+
+    private func statusChanged() {
+        if let interval = Self.levelTimerInterval(isRunning: model.isRunning) {
+            if levelObserver == nil {
+                // Twice a second is enough for an eighteen-point meter.
+                levelObserver = Timer.scheduledTimer(
+                    timeInterval: interval, target: self,
+                    selector: #selector(refreshImageOnTimer),
+                    userInfo: nil, repeats: true)
+            }
+        } else {
+            levelObserver?.invalidate()
+            levelObserver = nil
+        }
+        refreshImage()
+    }
+
+    /// Nil means no run-loop source at all, rather than a timer whose callback
+    /// wakes up only to decide there is nothing to do.
+    nonisolated static func levelTimerInterval(isRunning: Bool) -> TimeInterval? {
+        isRunning ? 0.5 : nil
+    }
 
     /// What the glyph is showing, in the only detail it can show.
     ///
@@ -490,6 +531,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     private func showMenu() {
         guard let menu = rightClickMenu, let button = item.button else { return }
+        // The timer is intentionally asleep while idle, so a setup saved since
+        // the last menu open is collected on demand.
+        refreshConfigs()
         // Attaching the menu to the item makes AppKit open it on the next click
         // rather than this one, so it is popped up directly and detached again.
         item.menu = menu

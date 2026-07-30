@@ -4744,6 +4744,28 @@ enum UIFlowCheck {
             return
         }
         model.isAnalysisVisible = true
+
+        // Force the moving karaoke case. The original version of this check
+        // happened to leave whichever inspector the previous section used on
+        // screen, so it could report a cheap window while never constructing
+        // the twenty-hertz lyric sweep this regression is about.
+        let previousInspector = model.inspectorTab
+        let lyricFixture = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "YunAudio-redraw-\(getpid()).lrc")
+        try """
+        [00:00.00]first moving line
+        [00:03.00]second moving line
+        [00:06.00]third moving line
+        [00:09.00]fourth moving line
+        """.write(to: lyricFixture, atomically: true, encoding: .utf8)
+        model.openWords(at: lyricFixture)
+        model.runWords()
+        model.inspectorTab = .singing
+        defer {
+            model.closeWords()
+            model.inspectorTab = previousInspector
+            try? FileManager.default.removeItem(at: lyricFixture)
+        }
         await pause(0.5)
 
         // The menu bar panel is opened and shut again first, and the counting
@@ -4840,6 +4862,9 @@ enum UIFlowCheck {
         check(
             "the whole window does not redraw with the meters",
             Double(counts["MainWindow"] ?? 0) < poll / 2)
+        check(
+            "the lyric sweep itself stayed live",
+            Double(counts["SingingPanel"] ?? 0) > poll / 2)
         check(
             "nor the patchbay, which nothing on the poll can change",
             Double(counts["RoutingCanvas"] ?? 0) < poll / 2)
