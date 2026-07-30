@@ -289,7 +289,10 @@ struct SingingPanel: View {
     @ViewBuilder
     private var handRun: some View {
         VStack(alignment: .leading, spacing: Yun.Space.sm) {
-            HStack(spacing: Yun.Space.sm) {
+            YunWrap(
+                spacing: Yun.Space.sm, lineSpacing: 6,
+                balanced: true
+            ) {
                 Button(model.isHandRun ? loc("Choose another") : loc("Choose the words…")) {
                     chooseWords()
                 }
@@ -305,11 +308,13 @@ struct SingingPanel: View {
                     )
                 }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
-                Spacer(minLength: 0)
             }
 
             if model.isHandRun || model.nowPlaying != nil {
-                HStack(spacing: Yun.Space.sm) {
+                YunWrap(
+                    spacing: Yun.Space.sm, lineSpacing: 6,
+                    balanced: true
+                ) {
                     if model.isHandRun {
                         if model.lyrics != nil {
                             Button(model.isRunningWords ? loc("Stop") : loc("Start")) {
@@ -346,7 +351,6 @@ struct SingingPanel: View {
                         NSWorkspace.shared.open(directory)
                     }
                     .buttonStyle(YunButtonStyle(.ghost, small: true))
-                    Spacer(minLength: 0)
                 }
             } else {
                 Button(loc("Open the folder")) {
