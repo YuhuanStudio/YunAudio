@@ -775,6 +775,12 @@ struct RTGraph {
     ) -> Bool {
         guard buffer >= 0, buffer < maximumEQBuffers else { return false }
         let stages = min(packed.count / 5, maximumEQStages)
+        guard stages > 0, preampGain.isFinite, preampGain >= 0,
+            packed.prefix(stages * 5).allSatisfy(\.isFinite)
+        else {
+            clearCorrection(onBuffer: buffer, of: graph)
+            return false
+        }
         let coefficients = graph.pointee.eqCoefficients + eqCoefficientOffset(slot: buffer)
 
         // Whether the filter this slot runs actually changed. Reinstalling the
@@ -1447,34 +1453,6 @@ func yunAudioIOProc(
         }
     }
 
-    // What actually leaves, measured after every gain stage.
-    //
-    // This is the only measurement in the whole graph taken after the multiply,
-    // and it exists because every other one is taken before it. Full scale in
-    // float is 1.0; anything at or past it has already been truncated by
-    // whatever converts downstream, so it is counted rather than merely peaked.
-    if mainIndex < output.count, let data = output[mainIndex].mData {
-        let samples = Int(output[mainIndex].mDataByteSize) / MemoryLayout<Float>.size
-        let pointer = data.assumingMemoryBound(to: Float.self)
-        var peak: Float = 0
-        if samples > 0 {
-            vDSP_maxmgv(pointer, 1, &peak, vDSP_Length(samples))
-        }
-        // Counting the truncated samples is a second pass, and the peak has
-        // already answered whether there is anything to count: nothing on the
-        // bus can be at or past full scale if the loudest thing on it is
-        // below. So the count runs only when something has actually gone wrong,
-        // which is the state nobody is in — and the common path stops paying a
-        // per-sample comparison for a number that is always zero.
-        var clipped: UInt64 = 0
-        if peak >= 0.999 {
-            for index in 0..<samples where abs(pointer[index]) >= 0.999 { clipped &+= 1 }
-        }
-        let previous = graph.pointee.outputPeak
-        graph.pointee.outputPeak = max(peak, previous * graph.pointee.peakDecay)
-        graph.pointee.outputClipped &+= clipped
-    }
-
     // Fold the output bus to mono for the analysers. After the master, because
     // a loudness reading that ignored the master would tell the far end's story
     // wrong, and before the self-test, which overwrites a channel with a test
@@ -1743,6 +1721,41 @@ func yunAudioIOProc(
                 }
             }
         }
+    }
+
+    // What actually leaves, after every gain and the main output's correction.
+    //
+    // This deliberately stays after the correction rather than beside the
+    // pre-correction analyser and recorder. A boost or a filter transient can
+    // take an otherwise clean bus over full scale, and a meter sampled before
+    // that stage would report healthy audio while the hardware receives
+    // clipping. Full scale in float is 1.0; anything at or past it is counted
+    // rather than merely peaked.
+    //
+    // This is telemetry, not a hidden clipper. The untouched route is allowed
+    // to stay bit-exact, and the limiter remains an explicitly enabled Audio
+    // Unit. Counting damage here makes the downstream boundary visible; it
+    // does not pretend a sample at 1.2 was repaired.
+    if mainIndex < output.count, let data = output[mainIndex].mData {
+        let samples = Int(output[mainIndex].mDataByteSize) / MemoryLayout<Float>.size
+        let pointer = data.assumingMemoryBound(to: Float.self)
+        var peak: Float = 0
+        if samples > 0 {
+            vDSP_maxmgv(pointer, 1, &peak, vDSP_Length(samples))
+        }
+        // Counting the truncated samples is a second pass, and the peak has
+        // already answered whether there is anything to count: nothing on the
+        // bus can be at or past full scale if the loudest thing on it is
+        // below. So the count runs only when something has actually gone wrong,
+        // which is the state nobody is in — and the common path stops paying a
+        // per-sample comparison for a number that is always zero.
+        var clipped: UInt64 = 0
+        if peak >= 0.999 {
+            for index in 0..<samples where abs(pointer[index]) >= 0.999 { clipped &+= 1 }
+        }
+        let previous = graph.pointee.outputPeak
+        graph.pointee.outputPeak = max(peak, previous * graph.pointee.peakDecay)
+        graph.pointee.outputClipped &+= clipped
     }
 
     // Capture the master's clock before bumping the counter: readers use the

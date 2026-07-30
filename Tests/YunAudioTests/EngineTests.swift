@@ -2463,6 +2463,11 @@ struct OutputMeasurementTests {
             for frame in 0..<frames { storage[buffer][frame * stride + channel] = value }
         }
 
+        func sample(_ buffer: Int, _ channel: Int, frame: Int) -> Float {
+            let stride = Int(list[buffer].mNumberChannels)
+            return storage[buffer][frame * stride + channel]
+        }
+
         deinit {
             for pointer in storage { pointer.deallocate() }
             free(list.unsafeMutablePointer)
@@ -2529,6 +2534,27 @@ struct OutputMeasurementTests {
         #expect(graph.pointee.outputClipped == 64)
     }
 
+    /// Output correction is downstream of the master. Its headroom and
+    /// transients therefore belong to the final-output measurement too.
+    @Test("output correction-induced clipping is counted")
+    func correctionClips() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        #expect(
+            RTGraph.installCorrection(
+                [1, 0, 0, 0, 0], preampGain: 2, onBuffer: 0, of: graph))
+        let input = Bus(channelCounts: [1], frames: 64)
+        input.set(0, 0, to: 0.6)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputClipped == 64)
+        #expect(abs(graph.pointee.outputPeak - 1.2) < 0.0001)
+        // Reporting is deliberately not hard clipping: replacing 1.2 with 1.0
+        // would distort the signal and silently process the default path.
+        #expect(output.sample(0, 0, frame: 0) == 1.2)
+    }
+
     /// And the input trim, which is applied before the routes read.
     @Test("trim-induced clipping is counted")
     func trimClips() {
@@ -2556,6 +2582,9 @@ struct OutputMeasurementTests {
         cycle(graph: graph, input: input, output: output, cycles: 10)
         #expect(graph.pointee.outputClipped == 0)
         #expect(abs(graph.pointee.outputPeak - 0.5) < 0.0001)
+        for frame in 0..<64 {
+            #expect(output.sample(0, 0, frame: frame) == 0.5)
+        }
     }
 
     /// The count latches across cycles: a clip two seconds ago is exactly the
@@ -4900,6 +4929,32 @@ struct ParametricEQTests {
         #expect(ParametricEQ.parse("", name: "x") == nil)
         // A preamp with no filters is not a correction.
         #expect(ParametricEQ.parse("Preamp: -3.0 dB", name: "x") == nil)
+    }
+
+    /// `Float` accepts the strings `nan` and `inf`. Letting either through an
+    /// imported correction poisons a biquad's history, so one bad line can
+    /// leave that output non-finite after the bad input itself is gone.
+    @Test("non-finite numbers in an imported correction never become coefficients")
+    func refusesNonFiniteNumbers() throws {
+        let text = """
+            Preamp: nan dB
+            Filter 1: ON PK Fc 1000 Hz Gain inf dB Q 1.0
+            Filter 2: ON PK Fc 2000 Hz Gain 3.0 dB Q nan
+            Filter 3: ON PK Fc 4000 Hz Gain 2.0 dB Q 0.7
+            """
+        let curve = try #require(ParametricEQ.parse(text, name: "finite"))
+        #expect(curve.preampDecibels == 0)
+        #expect(curve.filters.count == 1)
+        #expect(curve.coefficients(sampleRate: 48000).allSatisfy { $0.isFinite })
+
+        let invalid = ParametricEQ.section(
+            .init(kind: .peaking, hertz: 1000, decibels: .nan, q: 1),
+            sampleRate: 48000)
+        #expect(invalid == [1, 0, 0, 0, 0])
+        #expect(
+            ParametricEQ.section(
+                .init(kind: .peaking, hertz: 1000, decibels: 3, q: 1),
+                sampleRate: .infinity) == [1, 0, 0, 0, 0])
     }
 
     /// The assertion that would have caught a wrong cookbook form: a peaking

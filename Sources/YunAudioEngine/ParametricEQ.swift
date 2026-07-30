@@ -90,7 +90,7 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
             guard let first = fields.first else { continue }
 
             if first.lowercased().hasPrefix("preamp"), fields.count > 1,
-                let value = Float(fields[1])
+                let value = Float(fields[1]), value.isFinite
             {
                 preamp = value
                 continue
@@ -119,7 +119,8 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
             }
 
             guard let hertz = value(after: "Fc"), let gain = value(after: "Gain"),
-                let q = value(after: "Q"), hertz > 0, q > 0
+                let q = value(after: "Q"), hertz.isFinite, gain.isFinite, q.isFinite,
+                hertz > 0, q > 0
             else { continue }
 
             filters.append(Filter(kind: kind, hertz: hertz, decibels: gain, q: q))
@@ -208,7 +209,10 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
         // Above Nyquist a filter has nowhere to sit, and the arithmetic below
         // returns something that is not a filter rather than failing. A
         // pass-through is the honest substitute.
-        guard filter.hertz > 0, filter.hertz < rate / 2, filter.q > 0 else {
+        guard rate.isFinite, rate > 0, filter.hertz.isFinite,
+            filter.decibels.isFinite, filter.q.isFinite,
+            filter.hertz > 0, filter.hertz < rate / 2, filter.q > 0
+        else {
             return [1, 0, 0, 0, 0]
         }
 
@@ -253,8 +257,9 @@ public struct ParametricEQ: Sendable, Hashable, Codable {
             a2 = plus - minus * cosine - 2 * root * alpha
         }
 
-        guard a0 != 0 else { return [1, 0, 0, 0, 0] }
-        return [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+        guard a0.isFinite, a0 != 0 else { return [1, 0, 0, 0, 0] }
+        let normalised = [b0 / a0, b1 / a0, b2 / a0, a1 / a0, a2 / a0]
+        return normalised.allSatisfy(\.isFinite) ? normalised : [1, 0, 0, 0, 0]
     }
 
     // MARK: What it does to the signal

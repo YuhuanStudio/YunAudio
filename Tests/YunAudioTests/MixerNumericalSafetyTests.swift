@@ -46,6 +46,36 @@ private final class NumericalSafetyBus {
 
 @Suite("Realtime mixer numerical safety")
 struct MixerNumericalSafetyTests {
+    @Test("a non-finite output correction is refused before realtime")
+    func invalidCorrectionIsNotPublished() {
+        let frames = 8
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: frames)
+        defer { RTGraph.deallocate(graph) }
+
+        #expect(
+            !RTGraph.installCorrection(
+                [1, 0, .nan, 0, 0], preampGain: 1, onBuffer: 0, of: graph))
+        #expect(graph.pointee.eqStages[0] == 0)
+
+        let input = NumericalSafetyBus(channelCounts: [1], frames: frames)
+        let output = NumericalSafetyBus(channelCounts: [1], frames: frames)
+        for frame in 0..<frames {
+            input.set(0, 0, frame, to: 0.25)
+        }
+        cycle(graph: graph, input: input, output: output)
+
+        for frame in 0..<frames {
+            #expect(output.sample(0, 0, frame) == 0.25)
+        }
+        #expect(graph.pointee.outputPeak == 0.25)
+        #expect(graph.pointee.outputClipped == 0)
+    }
+
     @Test("invalid routes cannot poison a healthy stereo pair")
     func invalidRouteIsContained() {
         let frames = 8
