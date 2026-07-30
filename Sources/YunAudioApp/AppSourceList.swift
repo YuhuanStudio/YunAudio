@@ -182,7 +182,7 @@ private struct AppSourceRow: View {
 private struct AppIconView: View {
     let url: URL?
 
-    @MainActor private static var cache: [String: NSImage] = [:]
+    @MainActor private static let cache = AppIconCache()
 
     var body: some View {
         Group {
@@ -203,10 +203,89 @@ private struct AppIconView: View {
 
     @MainActor
     private static func icon(for url: URL?) -> NSImage? {
+        cache.image(for: url) { NSWorkspace.shared.icon(forFile: $0) }
+    }
+}
+
+/// Keeps only the pixels the sixteen-point application row can display.
+///
+/// `NSWorkspace` returns the complete icon, commonly with representations from
+/// 16 through 1024 pixels. The old static dictionary retained that whole image
+/// for every application ever seen by this process and had no eviction at all.
+/// A row needs neither property: 32 physical pixels cover a sixteen-point row
+/// on a Retina display, and sixty-four recent applications are more than both
+/// visible source lists can show.
+@MainActor
+final class AppIconCache {
+    static let maximumEntries = 64
+    static let pixelSize = 32
+    static let maximumPixelBytes = maximumEntries * pixelSize * pixelSize * 4
+
+    private struct Entry {
+        let image: NSImage
+        var recency: UInt64
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var recency: UInt64 = 0
+
+    var count: Int { entries.count }
+    var pixelBytes: Int { entries.count * Self.pixelSize * Self.pixelSize * 4 }
+
+    func image(
+        for url: URL?,
+        loader: (String) -> NSImage
+    ) -> NSImage? {
         guard let url else { return nil }
-        if let cached = cache[url.path] { return cached }
-        let image = NSWorkspace.shared.icon(forFile: url.path)
-        cache[url.path] = image
+        let path = url.path
+        recency &+= 1
+        if var hit = entries[path] {
+            hit.recency = recency
+            entries[path] = hit
+            return hit.image
+        }
+
+        guard let image = Self.thumbnail(of: loader(path)) else { return nil }
+        if entries.count >= Self.maximumEntries,
+            let oldest = entries.min(by: { $0.value.recency < $1.value.recency })?.key
+        {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[path] = Entry(image: image, recency: recency)
         return image
+    }
+
+    private static func thumbnail(of source: NSImage) -> NSImage? {
+        let size = NSSize(width: pixelSize, height: pixelSize)
+        guard
+            let representation = NSBitmapImageRep(
+                bitmapDataPlanes: nil,
+                pixelsWide: pixelSize,
+                pixelsHigh: pixelSize,
+                bitsPerSample: 8,
+                samplesPerPixel: 4,
+                hasAlpha: true,
+                isPlanar: false,
+                colorSpaceName: .deviceRGB,
+                bytesPerRow: 0,
+                bitsPerPixel: 0),
+            let context = NSGraphicsContext(bitmapImageRep: representation)
+        else { return nil }
+
+        representation.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.imageInterpolation = .high
+        source.draw(
+            in: NSRect(origin: .zero, size: size),
+            from: NSRect(origin: .zero, size: source.size),
+            operation: .copy,
+            fraction: 1)
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+
+        let thumbnail = NSImage(size: size)
+        thumbnail.addRepresentation(representation)
+        return thumbnail
     }
 }
