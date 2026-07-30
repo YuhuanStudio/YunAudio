@@ -135,6 +135,7 @@ struct KTVStage: View {
     /// The column's last reported size and position, so a layout that has not
     /// moved does not report itself again on every pass.
     nonisolated(unsafe) static var lastColumnPlacement = ""
+    nonisolated(unsafe) static var lastWordsPlacement = ""
 
     var body: some View {
         GeometryReader { proxy in
@@ -334,11 +335,19 @@ struct KTVStage: View {
             .clipped()
             .background {
                 GeometryReader { words in
-                    Color.clear.onAppear {
-                        SongArtwork.record(
-                            "words \(Int(words.size.height)) at y="
-                                + "\(Int(words.frame(in: .named("ktv-stage")).minY))")
-                    }
+                    // Every layout, for the reason the column reports on every
+                    // layout: the row's height is the larger of its two
+                    // columns, and if this one grows once the words arrive it
+                    // is what pushes the other down.
+                    let _ = {
+                        let frame = words.frame(in: .named("ktv-stage"))
+                        let now = "\(Int(words.size.height))@\(Int(frame.minY))"
+                        if now != Self.lastWordsPlacement {
+                            Self.lastWordsPlacement = now
+                            SongArtwork.record("words \(now)")
+                        }
+                    }()
+                    Color.clear
                 }
             }
         }
