@@ -2294,6 +2294,52 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+
+    // MARK: Transport
+
+    /// Asks the player the stage is showing to do something.
+    ///
+    /// Off the main actor: an Apple event to Music or Spotify was measured at
+    /// 20.7 ms for the cheap read and 61.4 for the expensive one, all of it
+    /// spent inside the player's own main thread. A button that costs a frame
+    /// and a half is a button that feels broken.
+    ///
+    /// The local state moves first. The poll will confirm it within a tick, but
+    /// waiting for that means the glyph changes a twentieth of a second after
+    /// the click, which reads as the click not having landed.
+    func sendTransport(_ transport: NowPlaying.Transport) {
+        guard let track = nowPlaying else { return }
+        if transport == .playPause {
+            nowPlaying?.isPlaying.toggle()
+            trackClock.adopt(
+                Double(songSecond), isPlaying: nowPlaying?.isPlaying ?? false,
+                trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        }
+        let application = track.application
+        Task.detached(priority: .userInitiated) {
+            NowPlaying.send(transport, to: application)
+        }
+    }
+
+    /// Moves the playhead to a fraction of the track.
+    ///
+    /// The lyric clock is moved here rather than left to the poll for the same
+    /// reason: dragging the bar and watching the words arrive a beat later is
+    /// the difference between a control and a request.
+    func seekNowPlaying(toFraction fraction: Double) {
+        guard let track = nowPlaying, track.duration > 0 else { return }
+        let seconds = max(0, min(track.duration, track.duration * fraction))
+        nowPlaying?.position = seconds
+        trackClock.adopt(
+            seconds, isPlaying: track.isPlaying,
+            trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        followTheWords()
+        let application = track.application
+        Task.detached(priority: .userInitiated) {
+            NowPlaying.seek(to: seconds, in: application)
+        }
+    }
+
     /// Takes a new song, with the words and the tune that go with it.
     private func adopt(_ track: NowPlaying.Track?) {
         cancelLyricsLookup()
@@ -4187,54 +4233,44 @@ final class RouterModel: ScriptTarget {
             verdictLabel: "speech", pitchHertz: 147)
         outputPeak = 0.39
         outputVerdict = Self.classifyOutput(peak: outputPeak, clippedSamples: 0)
+        // A long title with a bracketed subtitle, which is what a drama theme
+        // is actually called. The short one never made the strip's text column
+        // wider than the window, so the title that pushed the duration off the
+        // right-hand edge could not appear in any render.
         nowPlaying = NowPlaying.Track(
-            application: "Spotify", title: "年少心動雨季", artist: "黃霄雲",
-            album: "天賜的聲音", position: 82, duration: 265, isPlaying: true)
-        // Eight lines, not three, and two of them long enough to wrap. The
-        // stage draws six — two behind the current line and three ahead — so a
-        // fixture of three with the current line second could only ever fill
-        // three of those slots. Every screenshot of the KTV stage was therefore
-        // of a stage a third full, and the case that overflows it went out: a
-        // wrapped line is two rows, six of them passed the window's height, and
-        // the track column was carried down until its progress bar and the
-        // score strip were outside the frame. Reported from a 984×670 stage.
-        lyrics = Lyrics(
-            title: "年少心動雨季", artist: "黃霄雲", album: "天賜的聲音",
-            lines: [
-                Lyrics.Line(
-                    time: 64,
-                    text: loc("The stage keeps two lines behind the one being sung.")),
-                Lyrics.Line(
-                    time: 70,
-                    text: loc(
-                        "A long Chinese lyric wraps naturally instead of disappearing at the edge."
-                    )),
-                Lyrics.Line(
-                    time: 76,
-                    text: loc(
-                        "Production credits arrive as one very long line, and that is the case which used to push the track column off the bottom of the window."
-                    )),
-                Lyrics.Line(
-                    time: 82,
-                    text: loc("The current line lights smoothly as the music moves.")),
-                Lyrics.Line(
-                    time: 88,
-                    text: loc("The next line stays legible so the singer can prepare.")),
-                Lyrics.Line(
-                    time: 94,
-                    text: loc("Lines further ahead are dimmed, and the furthest is blurred.")),
-                Lyrics.Line(
-                    time: 100,
-                    text: loc("Beyond the third line ahead, nothing is drawn at all.")),
-                Lyrics.Line(
-                    time: 106,
-                    text: loc("The song ends here.")),
-            ])
+            application: "Spotify",
+            title: "年少心動雨季 (《那年盛夏》電視劇片頭曲)", artist: "黃霄雲",
+            album: "天賜的聲音", position: 80.7, duration: 265, isPlaying: true)
+        // A real file, parsed rather than assembled: the credit block that
+        // opens it, the timestamps as the index sends them, and a rest in the
+        // middle. Every earlier fixture was three short sentences written to
+        // look right, so the stage was only ever rendered in a state it never
+        // reaches — no credits to strip, no line long enough to wrap, and three
+        // of the six slots empty. 年少心動雨季, from NetEase, as it arrives.
+        lyrics = Lyrics.parse(
+            """
+            [00:00.00] 作词 Lyricist : 翟云鹏/冉亦/黄霄雲
+            [00:01.00] 作曲Composer : 黄霄雲
+            [00:03.00] 编曲Arrangement : 马克/黄霄雲
+            [00:15.00] 母带 Mastering : 时俊峰@福达录音棚
+            [00:19.00] 出品 : 环球音乐
+            [00:57.54]告别总来不及练习
+            [01:02.16]我只追到你的背影
+            [01:09.39]原来年少心动是逆行在一场雨季
+            [01:14.79]注定了无法走进同一个晴天里
+            [01:20.70]可偏偏时光的橡皮
+            [01:23.91]擦去很多却放过你姓名
+            [01:28.00]
+            [01:33.15]原来有些相遇明明知道会分离
+            [01:38.16]再重来我依然有选择你的勇气
+            [01:44.10]只可惜青春的诗句
+            [01:47.31]总有挥散不去的叹息
+            """)
         lyricsSourceName = loc("NetEase Cloud Music")
         lyricsLookupStatus = .online
         trackClock.duration = 265
         trackClock.adopt(
-            82, isPlaying: true,
+            80.7, isPlaying: true,
             trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
         followTheWords()
         scoringReference = stride(from: 78.0, through: 90.0, by: 0.05).map {

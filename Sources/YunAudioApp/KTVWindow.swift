@@ -230,6 +230,10 @@ struct KTVStage: View {
                 track, width: columnWidth,
                 artwork: Self.artworkSide(
                     columnWidth: columnWidth, stageHeight: stageHeight))
+                // Centred against the stage rather than against whatever the
+                // words happen to occupy, which left it in the bottom-left of a
+                // large window with the top half of the stage empty.
+                .frame(height: stageHeight, alignment: .center)
             // A fixed height, not a maximum. A stack whose own minimum exceeds
             // the proposal is laid out at that minimum and overflows, and
             // `maxHeight` does not stop it: six lyric lines, of which the
@@ -238,10 +242,16 @@ struct KTVStage: View {
             // score strip were outside the frame. Clipping belongs inside the
             // column, where the current line stays centred, rather than at the
             // bottom edge of the window.
-            lyricsColumn
-                .frame(maxWidth: .infinity)
-                .frame(height: stageHeight)
-                .clipped()
+            let available = max(
+                120,
+                size.width - columnWidth - max(36, size.width * 0.055)
+                    - 2 * max(32, size.width * 0.055))
+            lyricsColumn(
+                KTVLyricMetrics.resolve(width: available, height: stageHeight)
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: stageHeight)
+            .clipped()
         }
         .padding(.horizontal, max(32, size.width * 0.055))
         .padding(.vertical, max(34, size.height * 0.07))
@@ -258,10 +268,15 @@ struct KTVStage: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.xl) {
             nowPlayingStrip(track, tile: 128, showsProgress: true)
-            lyricsColumn
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: max(0, stageHeight - 128 - Yun.Space.xl))
-                .clipped()
+            let band = max(0, stageHeight - 128 - Yun.Space.xl)
+            lyricsColumn(
+                KTVLyricMetrics.resolve(
+                    width: max(120, size.width - 2 * max(32, size.width * 0.055)),
+                    height: band)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: band)
+            .clipped()
         }
         .padding(.horizontal, max(32, size.width * 0.055))
         .padding(.vertical, max(34, size.height * 0.07))
@@ -278,10 +293,19 @@ struct KTVStage: View {
         _ track: NowPlaying.Track, in size: CGSize, stageHeight: CGFloat
     ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
-            lyricsColumn
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .frame(height: max(0, stageHeight - 62))
-                .clipped()
+            // Floored, not merely clamped at zero: a stage of 60 points gave
+            // the words nothing and drew a window with nothing in it at all.
+            // Below this the column overflows its band and is clipped, which
+            // shows some of the words rather than none of them.
+            let band = max(72, stageHeight - 62)
+            lyricsColumn(
+                KTVLyricMetrics.resolve(
+                    width: max(120, size.width - 2 * max(32, size.width * 0.055)),
+                    height: band)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: band)
+            .clipped()
             nowPlayingStrip(track, tile: 44, showsProgress: false)
         }
         .padding(.horizontal, max(32, size.width * 0.055))
@@ -304,19 +328,70 @@ struct KTVStage: View {
                 .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
 
             VStack(alignment: .leading, spacing: showsProgress ? 6 : 2) {
+                // Truncating, and told so. `lineLimit(1)` alone still reports
+                // the full width as ideal, so a long title — 「線 (《因為遇見你》
+                // 電視劇片頭曲)」 — made the column wider than the window and
+                // pushed the track's own duration off the right-hand edge.
                 Text(track.title)
                     .font(.system(size: tile > 80 ? 20 : 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 Text(track.artist)
                     .font(.system(size: tile > 80 ? 15 : 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.62))
                     .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 if showsProgress { progress(track) }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(height: tile)
+    }
+
+    /// Previous, play or pause, next — driving the player the stage is showing.
+    ///
+    /// The glyph here was a picture of the state and nothing else: a stage that
+    /// shows what is playing, names the player, sweeps the words and scores the
+    /// singing, and then cannot pause. Both scripting dictionaries carry these
+    /// three verbs, so the stage can offer them for either player without
+    /// knowing which one it has.
+    @ViewBuilder
+    private func transportControls(_ track: NowPlaying.Track) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            transportButton(
+                "backward.fill", label: loc("Previous track"), size: 26,
+                identifier: "KTVPreviousTrack"
+            ) { model.sendTransport(.previous) }
+            transportButton(
+                track.isPlaying ? "pause.fill" : "play.fill",
+                label: track.isPlaying ? loc("Pause") : loc("Play"), size: 32,
+                identifier: "KTVPlayPause"
+            ) { model.sendTransport(.playPause) }
+            transportButton(
+                "forward.fill", label: loc("Next track"), size: 26,
+                identifier: "KTVNextTrack"
+            ) { model.sendTransport(.next) }
+        }
+    }
+
+    private func transportButton(
+        _ symbol: String, label: String, size: CGFloat, identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: size * 0.44, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: size, height: size)
+                .background(.white.opacity(size > 30 ? 0.16 : 0.10), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 
     /// Side of the artwork tile, bounded by the stage's height as well as by its
@@ -363,12 +438,7 @@ struct KTVStage: View {
             progress(track)
 
             HStack(spacing: Yun.Space.sm) {
-                Image(systemName: track.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
-                    .background(.white.opacity(0.12), in: Circle())
-                    .accessibilityHidden(true)
+                transportControls(track)
                 Text(track.application)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.66))
@@ -401,8 +471,23 @@ struct KTVStage: View {
                         .fill(.white.opacity(0.78))
                         .frame(width: geometry.size.width * fraction)
                 }
+                // The whole bar, not the five points it is drawn as: a target
+                // that thin is one nobody hits. Continuous rather than on
+                // release, because a lyric stage is scrubbed to find a line and
+                // the words have to arrive while the finger is still moving.
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard geometry.size.width > 0 else { return }
+                            model.seekNowPlaying(
+                                toFraction: value.location.x / geometry.size.width)
+                        }
+                )
+                .accessibilityIdentifier("KTVSeek")
             }
             .frame(height: 5)
+            .contentShape(Rectangle().inset(by: -10))
             HStack {
                 Text(Self.clock(Double(model.songSecond)))
                 Spacer()
@@ -415,16 +500,10 @@ struct KTVStage: View {
     }
 
     @ViewBuilder
-    private var lyricsColumn: some View {
+    private func lyricsColumn(_ metrics: KTVLyricMetrics) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            if let source = model.lyricsSourceName {
-                Text(String(format: loc("Words from %@"), source))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.58))
-                    .padding(.bottom, 20)
-            }
             if let lyrics = model.lyrics {
-                timedLyrics(lyrics)
+                timedLyrics(lyrics, metrics: metrics)
             } else if let plain = model.plainLyrics {
                 Text(plain)
                     .font(.system(size: 28, weight: .semibold))
@@ -443,13 +522,62 @@ struct KTVStage: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
         }
+        // A measure, then centred in what is left. A line of text is read by
+        // sweeping back to the start of the next one, and past about
+        // twenty-two Chinese characters that sweep is long enough to lose the
+        // place — so beyond it the block stops widening. Left-aligned in a
+        // column that kept widening, the words sat against the left edge of a
+        // wide stage with the right half of it empty.
+        .frame(maxWidth: metrics.measure, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .center)
         .clipped()
     }
 
-    private func timedLyrics(_ lyrics: Lyrics) -> some View {
+    /// Six lines with the one being sung anchored at the centre of the column.
+    ///
+    /// The whole block used to be centred instead, so where the current line
+    /// landed depended on how many of the six existed and how many of them
+    /// wrapped — it drifted down the stage as the song went on and sat in the
+    /// lower third of a large window with the top half empty. Anchoring it
+    /// means the eye has one place to be: the lines above grow upwards from the
+    /// centre and the lines below grow down from it, which is what every player
+    /// that does this well does.
+    private func timedLyrics(_ lyrics: Lyrics, metrics: KTVLyricMetrics) -> some View {
         let current = model.lyricLine ?? 0
-        return VStack(alignment: .leading, spacing: 25) {
-            ForEach(-2...3, id: \.self) { offset in
+        let behind = Array(metrics.offsets.filter { $0 < 0 })
+        let ahead = Array(metrics.offsets.filter { $0 > 0 })
+        return VStack(alignment: .leading, spacing: 0) {
+            // The attribution rides at the bottom of the band above the words
+            // rather than at the top of the column. The bands expand to hold
+            // the current line on the centre line, so a label placed above them
+            // ends up at the top of the whole stage — two thousand points from
+            // the thing it is attributing.
+            VStack(alignment: .leading, spacing: 20) {
+                if let source = model.lyricsSourceName {
+                    Text(String(format: loc("Words from %@"), source))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.40))
+                }
+                lyricGroup(
+                    lyrics, current: current, offsets: behind, metrics: metrics,
+                    alignment: .leading)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            lyricGroup(lyrics, current: current, offsets: [0], metrics: metrics, alignment: .leading)
+            lyricGroup(lyrics, current: current, offsets: ahead, metrics: metrics, alignment: .topLeading)
+        }
+    }
+
+    /// One band of the column: the lines behind, the line being sung, or the
+    /// lines ahead. The first and last expand to fill what is left, so the
+    /// middle one stays on the centre line whatever they contain.
+    @ViewBuilder
+    private func lyricGroup(
+        _ lyrics: Lyrics, current: Int, offsets: [Int],
+        metrics: KTVLyricMetrics, alignment: Alignment
+    ) -> some View {
+        let band = VStack(alignment: .leading, spacing: metrics.spacing) {
+            ForEach(offsets, id: \.self) { offset in
                 let index = current + offset
                 if lyrics.lines.indices.contains(index) {
                     let line = lyrics.lines[index]
@@ -478,23 +606,35 @@ struct KTVStage: View {
                         // exists to avoid.
                         lyricLine(
                             line.isInterlude ? Self.interludeMark : line.text,
-                            offset: offset)
+                            offset: offset, metrics: metrics)
                     }
                 }
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.32), value: model.lyricLine)
+        return
+            band
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // The band being sung takes only the height it needs; the two
+            // around it take everything left, half each, which is what holds
+            // the middle one on the centre line.
+            .frame(
+                maxHeight: alignment == .leading ? nil : .infinity,
+                alignment: alignment
+            )
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.32), value: model.lyricLine)
     }
 
     @ViewBuilder
-    private func lyricLine(_ text: String, offset: Int) -> some View {
+    private func lyricLine(
+        _ text: String, offset: Int, metrics: KTVLyricMetrics
+    ) -> some View {
         if offset == 0 {
-            CompositedLyricSurface(model: model, text: text, style: .stage)
+            CompositedLyricSurface(model: model, text: text, style: .stage(metrics.currentSize))
                 .contentTransition(.opacity)
         } else {
             Text(text)
-                .font(.system(size: offset < 0 ? 23 : 26, weight: .semibold))
+                .font(.system(size: metrics.neighbourSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(Self.lyricOpacity(for: offset)))
                 .contentTransition(.opacity)
                 .fixedSize(horizontal: false, vertical: true)

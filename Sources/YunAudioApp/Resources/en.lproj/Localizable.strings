@@ -655,6 +655,9 @@
 "Current %@" = "Current %@";
 "A long Chinese lyric wraps naturally instead of disappearing at the edge." = "A long Chinese lyric wraps naturally instead of disappearing at the edge.";
 "The current line lights smoothly as the music moves." = "The current line lights smoothly as the music moves.";
+"Previous track" = "Previous track";
+"Next track" = "Next track";
+"Play" = "Play";
 "Instrumental" = "Instrumental";
 "The stage keeps two lines behind the one being sung." = "The stage keeps two lines behind the one being sung.";
 "Production credits arrive as one very long line, and that is the case which used to push the track column off the bottom of the window." = "Production credits arrive as one very long line, and that is the case which used to push the track column off the bottom of the window.";

@@ -201,6 +201,7 @@ public struct Lyrics: Sendable, Hashable {
         "混音", "母带", "母帶", "录音", "錄音", "后期", "後期", "和声", "和聲",
         "吉他", "贝斯", "貝斯", "鼓", "键盘", "鍵盤", "弦乐", "弦樂", "配唱",
         "封面", "特别鸣谢", "特別鳴謝", "鸣谢", "鳴謝", "歌词", "歌詞",
+        "音频编辑", "音頻編輯", "音乐制作", "音樂製作", "人声", "人聲",
         "op", "sp", "producer", "composer", "lyricist", "arranger",
         "mixing", "mixed by", "mastering", "mastered by", "produced by",
         "written by", "composed by", "arranged by", "lyrics by", "recorded by",
@@ -212,10 +213,15 @@ public struct Lyrics: Sendable, Hashable {
         }
         let head = String(text[text.startIndex..<colon])
             .trimmingCharacters(in: .whitespaces)
-        // Long heads are sentences. The longest role above is four characters
-        // in Chinese and "mastered by" in English.
-        guard head.count <= 12, !head.isEmpty else { return false }
-        return creditRoles.contains(head.lowercased())
+            .lowercased()
+        // A prefix, not the whole head. What the indexes actually send is the
+        // role in two languages at once — 「作词 Lyricist : 翟雲鵬」, 「鼓Drum :
+        // 郝稷倫」, 「後期母帶處理製作人MASTERING PRODUCER : …」 — so an exact
+        // match caught none of the twenty credit lines at the head of a real
+        // file. Long heads are still sentences rather than roles, but the cap
+        // has to clear that last one.
+        guard !head.isEmpty, head.count <= 40 else { return false }
+        return creditRoles.contains { head.hasPrefix($0) }
     }
 
     /// Fixed duet markers, in both scripts. A performer's name is recognised

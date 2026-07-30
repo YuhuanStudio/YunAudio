@@ -12,23 +12,35 @@ import YunDesign
 struct CompositedLyricSurface: View {
     enum Style {
         case inspector
-        case stage
+        /// The stage, at the size the stage worked out for the space it has.
+        /// Fixed at 34 points, it stayed 34 on a wall-sized display and on a
+        /// window barely taller than a line — and the lines around it scaled
+        /// while it did not, so the one being sung came out smaller than its
+        /// neighbours. See `KTVLyricMetrics`.
+        case stage(CGFloat)
+
+        var pointSize: CGFloat {
+            switch self {
+            case .inspector: 27
+            case let .stage(size): size
+            }
+        }
 
         @MainActor var appKitFont: NSFont {
             switch self {
             case .inspector:
-                NSFont.systemFont(ofSize: 27, weight: .semibold)
+                NSFont.systemFont(ofSize: pointSize, weight: .semibold)
             case .stage:
-                NSFont.systemFont(ofSize: 34, weight: .bold)
+                NSFont.systemFont(ofSize: pointSize, weight: .bold)
             }
         }
 
         @MainActor var swiftUIFont: Font {
             switch self {
             case .inspector:
-                .system(size: 27, weight: .semibold)
+                .system(size: pointSize, weight: .semibold)
             case .stage:
-                .system(size: 34, weight: .bold)
+                .system(size: pointSize, weight: .bold)
             }
         }
 

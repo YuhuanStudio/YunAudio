@@ -131,3 +131,55 @@ struct LyricAttributionTests {
         #expect(Lyrics.parse(text) == nil)
     }
 }
+
+/// The credit block of a real file, as an index actually sends it.
+///
+/// Taken from 年少心動雨季 — twenty lines before the first word, and every one
+/// of them naming its role in Chinese and English at once. An exact match on
+/// the role caught none of them.
+@Suite("Real credit blocks")
+struct RealCreditBlockTests {
+
+    @Test("a bilingual role is still a role")
+    func bilingualRolesAreCredits() {
+        for credit in [
+            "作词 Lyricist : 翟云鹏/冉亦/黄霄雲",
+            "作曲Composer : 黄霄雲",
+            "制作人Music Producer : 黄霄雲/马克",
+            "编曲Arrangement : 马克/黄霄雲",
+            "键盘Keyboard : 马克",
+            "配唱制作人Vocal Producer : 黄霄雲",
+            "和声编写Backing Vocal : 黄霄雲",
+            "吉他Guitar : 朱家明",
+            "鼓Drum : 郝稷伦",
+            "贝斯Bass : 彭轩/孟凡荻",
+            "监制 : 许雯静/彭轩/卢冠囝",
+            "录音 Recording Engineer : 孔令祎@TONGX",
+            "音频编辑 : 商红阳",
+            "混音 Mixing Engineer : 刘俊杰",
+            "母带 Mastering : 时俊峰@福达录音棚",
+            "后期母带处理制作人MASTERING PRODUCER : 黄霄雲",
+            "OP : 回音如果",
+            "SP : 回音如果",
+            "出品 : 环球音乐",
+        ] {
+            #expect(Lyrics.isCredit(credit), "\(credit) was taken for a lyric")
+        }
+    }
+
+    @Test("the first sung line survives the block above it")
+    func theSongStartsAtItsFirstWord() throws {
+        let text = """
+            [00:00.00] 作词 Lyricist : 翟云鹏/冉亦/黄霄雲
+            [00:09.00] 鼓Drum : 郝稷伦
+            [00:19.00] 出品 : 环球音乐
+            [00:23.67]落叶像逾期约定
+            [00:29.22]在风中四散飘零
+            """
+        let lyrics = try #require(Lyrics.parse(text))
+        #expect(lyrics.lines.count == 2)
+        #expect(lyrics.lines.first?.text == "落叶像逾期约定")
+        // And it starts where it is sung, not at zero.
+        #expect(lyrics.lines.first?.time == 23.67)
+    }
+}

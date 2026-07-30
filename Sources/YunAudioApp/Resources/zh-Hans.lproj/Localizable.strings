@@ -654,6 +654,9 @@
 "Current %@" = "当前 %@";
 "A long Chinese lyric wraps naturally instead of disappearing at the edge." = "很长的中文歌词会在这里自然换行，而不是消失在边缘。";
 "The current line lights smoothly as the music moves." = "当前这一句会随着音乐平滑亮起。";
+"Previous track" = "上一首";
+"Next track" = "下一首";
+"Play" = "播放";
 "Instrumental" = "间奏";
 "The stage keeps two lines behind the one being sung." = "舞台会保留正在唱的那句之前的两句。";
 "Production credits arrive as one very long line, and that is the case which used to push the track column off the bottom of the window." = "制作名单会以一整段很长的文字出现，而这正是先前把歌曲栏推出窗口底部的情况。";

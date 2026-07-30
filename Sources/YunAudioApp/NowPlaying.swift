@@ -317,6 +317,72 @@ enum NowPlaying {
     /// Without the AppleScript timeout, that strands the serial query queue and
     /// `isAskingThePlayer` never clears: one slow answer disables KTV for the
     /// rest of the launch.
+
+    // MARK: Transport
+
+    /// What a stage can ask the player to do.
+    ///
+    /// Through the player's own scripting dictionary rather than the system
+    /// media keys. A media key goes to whichever application the system decides
+    /// is playing, which on a machine routing several sources is a guess; this
+    /// names the player the stage is showing. Both dictionaries carry the same
+    /// four verbs, which is why the stage can offer them at all.
+    enum Transport: String, Sendable, CaseIterable {
+        case playPause
+        case next
+        case previous
+
+        var command: String {
+            switch self {
+            case .playPause: "playpause"
+            case .next: "next track"
+            case .previous: "previous track"
+            }
+        }
+    }
+
+    /// True when the command was accepted.
+    ///
+    /// A player that is not running is not an error worth reporting: the stage
+    /// only offers these while it is showing that player's track.
+    @discardableResult
+    nonisolated static func send(
+        _ transport: Transport, to application: String
+    ) -> Bool {
+        let source = """
+            tell application "\(application)"
+                if it is running then
+                    \(transport.command)
+                    return "ok"
+                end if
+            end tell
+            return ""
+            """
+        return run(source, application: application).text == "ok"
+    }
+
+    /// Moves the playhead, in seconds from the start of the track.
+    ///
+    /// Both players spell this the same way and both take seconds, including
+    /// Spotify — whose *duration* is milliseconds, which is the trap this does
+    /// not fall into because it is setting a position rather than reading one.
+    @discardableResult
+    nonisolated static func seek(
+        to seconds: Double, in application: String
+    ) -> Bool {
+        guard seconds.isFinite, seconds >= 0 else { return false }
+        let source = """
+            tell application "\(application)"
+                if it is running then
+                    set player position to \(String(format: "%.3f", seconds))
+                    return "ok"
+                end if
+            end tell
+            return ""
+            """
+        return run(source, application: application).text == "ok"
+    }
+
     nonisolated private static func run(
         _ source: String, application: String
     ) -> ScriptReply {
