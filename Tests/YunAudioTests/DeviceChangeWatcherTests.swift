@@ -56,8 +56,10 @@ struct DeviceChangeWatcherTests {
     @Test("sixty seconds of self-notifications perform thirteen inventory reads")
     func identicalNotificationStormBacksOff() {
         let inventory = Inventory([12, 34])
-        let probe = DeviceInventoryProbe(initial: [12, 34], read: inventory.read)
-        var schedule = DeviceChangeSchedule()
+        let diagnostics = DeviceChangeDiagnostics { _, _, _ in }
+        let probe = DeviceInventoryProbe(
+            initial: [12, 34], read: inventory.read, diagnostics: diagnostics)
+        var schedule = DeviceChangeSchedule(diagnostics: diagnostics)
         var deliveries = 0
 
         guard var scheduled = schedule.signal(at: 0) else {
@@ -80,6 +82,59 @@ struct DeviceChangeWatcherTests {
         #expect(inventory.reads == 13)
         #expect(scheduled.deadline == 63_750 * millisecond)
         #expect(deliveries == 0)
+        #expect(
+            diagnostics.snapshot
+                == DeviceChangeDiagnostics.Snapshot(
+                    notifications: 14, probes: 14, superseded: 0, halReads: 13))
+    }
+
+    @Test("diagnostics are disabled unless the trace environment opts in")
+    func diagnosticsAreOffByDefault() {
+        #expect(DeviceChangeDiagnostics.fromEnvironment([:]) == nil)
+        #expect(
+            DeviceChangeDiagnostics.fromEnvironment(
+                ["YUNAUDIO_DEVICE_WATCH_TRACE": "0"]) == nil)
+    }
+
+    @Test("notification, probe, supersede, and HAL-read counts are event exact")
+    func diagnosticCountsAreEventExact() {
+        let diagnostics = DeviceChangeDiagnostics(clock: { 123 }) { _, _, _ in }
+        let inventory = Inventory([1])
+        let probe = DeviceInventoryProbe(
+            initial: [1], read: inventory.read, diagnostics: diagnostics)
+        var schedule = DeviceChangeSchedule(diagnostics: diagnostics)
+
+        diagnostics.record(.notification)
+        guard let first = schedule.signal(at: 0, recordsNotification: false) else {
+            Issue.record("the first notification did not schedule a probe")
+            return
+        }
+        #expect(schedule.signal(at: 10 * millisecond) == nil)
+        let firstBegan = schedule.beginProbe(first)
+        #expect(firstBegan)
+        #expect(!probe.readChanged())
+        schedule.complete(inventoryChanged: false, at: first.deadline)
+
+        guard let stale = schedule.signal(at: first.deadline) else {
+            Issue.record("the self-notification did not schedule a probe")
+            return
+        }
+        let quietSignal = first.deadline + 550 * millisecond
+        guard let replacement = schedule.signal(at: quietSignal) else {
+            Issue.record("the quiet notification did not replace the pending probe")
+            return
+        }
+        let replacementBegan = schedule.beginProbe(replacement)
+        #expect(replacementBegan)
+        #expect(!probe.readChanged())
+        let staleBegan = schedule.beginProbe(stale)
+        #expect(!staleBegan)
+
+        #expect(inventory.reads == 2)
+        #expect(
+            diagnostics.snapshot
+                == DeviceChangeDiagnostics.Snapshot(
+                    notifications: 4, probes: 3, superseded: 1, halReads: 2))
     }
 
     @Test("unchanged self-notifications follow the bounded backoff ladder")

@@ -11,6 +11,7 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
     private let queue: DispatchQueue
     private let coalescer: DeviceChangeCoalescer
     private let inventory: DeviceInventoryProbe
+    private let diagnostics: DeviceChangeDiagnostics?
     /// Accessed only on `queue`.
     private var hasBaseline = false
     /// Accessed only on `queue`.
@@ -24,6 +25,8 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
     public init(onChange: @escaping @Sendable () -> Void) {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
         self.queue = queue
+        let diagnostics = DeviceChangeDiagnostics.fromEnvironment()
+        self.diagnostics = diagnostics
         let inventory = DeviceInventoryProbe(
             // Construction happens before the application's first frame. A
             // baseline read here blocked MainActor on coreaudiod even though
@@ -32,9 +35,10 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
             // this probe from the launch snapshot before a notification is
             // allowed to ask HAL whether anything changed.
             initial: nil,
-            read: Self.inventorySignature)
+            read: Self.inventorySignature,
+            diagnostics: diagnostics)
         self.inventory = inventory
-        coalescer = DeviceChangeCoalescer(queue: queue) {
+        coalescer = DeviceChangeCoalescer(queue: queue, diagnostics: diagnostics) {
             // Some audio plug-ins announce the device-list property after a
             // harmless property read. Re-enumerating complete devices in
             // response asks the same plug-in again and can create a permanent
@@ -55,6 +59,7 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
             if self.hasBaseline {
                 self.coalescer.signal()
             } else {
+                self.diagnostics?.record(.notification)
                 self.notificationBeforeBaseline = true
             }
         }
@@ -78,7 +83,7 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
             self.hasBaseline = true
             if self.notificationBeforeBaseline {
                 self.notificationBeforeBaseline = false
-                self.coalescer.signal()
+                self.coalescer.signal(recordsNotification: false)
             }
         }
     }
@@ -113,22 +118,28 @@ final class DeviceChangeCoalescer: @unchecked Sendable {
     init(
         queue: DispatchQueue,
         schedule: DeviceChangeSchedule = DeviceChangeSchedule(),
+        diagnostics: DeviceChangeDiagnostics? = nil,
         clock: @escaping @Sendable () -> UInt64 = {
             DispatchTime.now().uptimeNanoseconds
         },
         handler: @escaping @Sendable () -> Bool
     ) {
         self.queue = queue
+        var schedule = schedule
+        schedule.diagnostics = diagnostics
         self.schedule = schedule
         self.clock = clock
         self.handler = handler
     }
 
-    func signal() {
+    func signal(recordsNotification: Bool = true) {
         queue.async { [weak self] in
             guard let self else { return }
             let now = clock()
-            guard let probe = schedule.signal(at: now) else { return }
+            guard
+                let probe = schedule.signal(
+                    at: now, recordsNotification: recordsNotification)
+            else { return }
             queue.asyncAfter(
                 deadline: DispatchTime(uptimeNanoseconds: probe.deadline)
             ) { [weak self] in
@@ -173,13 +184,15 @@ struct DeviceChangeSchedule: Sendable {
     private var lastSignal: UInt64?
     private var generation: UInt64 = 0
     private var pendingGeneration: UInt64?
+    var diagnostics: DeviceChangeDiagnostics?
 
     init(
         initialDelay: UInt64 = 50_000_000,
         burstMaximumDelay: UInt64 = 400_000_000,
         stormInitialDelay: UInt64 = 1_000_000_000,
         maximumDelay: UInt64 = 8_000_000_000,
-        quietReset: UInt64 = 500_000_000
+        quietReset: UInt64 = 500_000_000,
+        diagnostics: DeviceChangeDiagnostics? = nil
     ) {
         precondition(initialDelay > 0)
         precondition(burstMaximumDelay >= initialDelay)
@@ -191,10 +204,14 @@ struct DeviceChangeSchedule: Sendable {
         self.stormInitialDelay = stormInitialDelay
         self.maximumDelay = maximumDelay
         self.quietReset = quietReset
+        self.diagnostics = diagnostics
         delay = initialDelay
     }
 
-    mutating func signal(at now: UInt64) -> DeviceChangeProbe? {
+    mutating func signal(
+        at now: UInt64, recordsNotification: Bool = true
+    ) -> DeviceChangeProbe? {
+        if recordsNotification { diagnostics?.record(.notification) }
         let followsQuiet =
             lastSignal.map { now &- $0 >= quietReset }
             ?? false
@@ -227,7 +244,10 @@ struct DeviceChangeSchedule: Sendable {
     /// False means a quiet-period notification superseded this generation.
     /// The caller must return without invoking its handler or `complete`.
     mutating func beginProbe(_ probe: DeviceChangeProbe) -> Bool {
-        guard pendingGeneration == probe.generation else { return false }
+        guard pendingGeneration == probe.generation else {
+            diagnostics?.record(.probeSuperseded)
+            return false
+        }
         pendingGeneration = nil
         return true
     }
@@ -250,6 +270,7 @@ struct DeviceChangeSchedule: Sendable {
     private mutating func makeProbe(at now: UInt64) -> DeviceChangeProbe {
         generation &+= 1
         pendingGeneration = generation
+        diagnostics?.record(.probe)
         return DeviceChangeProbe(
             deadline: now.addingReportingOverflow(delay).partialValue,
             generation: generation)
@@ -286,20 +307,96 @@ final class DeviceInventoryGate: @unchecked Sendable {
 final class DeviceInventoryProbe: @unchecked Sendable {
     private let gate: DeviceInventoryGate
     private let read: @Sendable () -> Set<AudioObjectID>?
+    private let diagnostics: DeviceChangeDiagnostics?
 
     init(
         initial: Set<AudioObjectID>?,
-        read: @escaping @Sendable () -> Set<AudioObjectID>?
+        read: @escaping @Sendable () -> Set<AudioObjectID>?,
+        diagnostics: DeviceChangeDiagnostics? = nil
     ) {
         gate = DeviceInventoryGate(initial: initial)
         self.read = read
+        self.diagnostics = diagnostics
     }
 
     func readChanged() -> Bool {
-        gate.shouldDeliver(read())
+        diagnostics?.record(.halRead)
+        return gate.shouldDeliver(read())
     }
 
     func establishBaseline(_ baseline: Set<AudioObjectID>) {
         gate.establishBaseline(baseline)
+    }
+}
+
+/// Event counts for diagnosing a noisy HAL device-list publisher.
+///
+/// Nil in ordinary runs, so an idle watcher pays for neither locking nor
+/// output. `YUNAUDIO_DEVICE_WATCH_TRACE=1` enables one stderr line per event;
+/// there is no sampling timer, and silence in CoreAudio produces no work.
+final class DeviceChangeDiagnostics: @unchecked Sendable {
+    enum Event: String, Sendable {
+        case notification
+        case probe
+        case probeSuperseded = "probe-superseded"
+        case halRead = "hal-read"
+    }
+
+    struct Snapshot: Sendable, Equatable {
+        var notifications = 0
+        var probes = 0
+        var superseded = 0
+        var halReads = 0
+    }
+
+    private let lock = NSLock()
+    private var counters = Snapshot()
+    private let clock: @Sendable () -> UInt64
+    private let sink: @Sendable (Event, UInt64, Snapshot) -> Void
+
+    init(
+        clock: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        sink: @escaping @Sendable (Event, UInt64, Snapshot) -> Void
+    ) {
+        self.clock = clock
+        self.sink = sink
+    }
+
+    static func fromEnvironment(
+        _ environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> DeviceChangeDiagnostics? {
+        guard environment["YUNAUDIO_DEVICE_WATCH_TRACE"] == "1" else { return nil }
+        return DeviceChangeDiagnostics { event, now, snapshot in
+            let line =
+                "device-watch event=\(event.rawValue) uptime-ns=\(now)"
+                + " notifications=\(snapshot.notifications)"
+                + " probes=\(snapshot.probes)"
+                + " superseded=\(snapshot.superseded)"
+                + " hal-reads=\(snapshot.halReads)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+        }
+    }
+
+    func record(_ event: Event) {
+        let snapshot = lock.withLock {
+            switch event {
+            case .notification:
+                counters.notifications += 1
+            case .probe:
+                counters.probes += 1
+            case .probeSuperseded:
+                counters.superseded += 1
+            case .halRead:
+                counters.halReads += 1
+            }
+            return counters
+        }
+        sink(event, clock(), snapshot)
+    }
+
+    var snapshot: Snapshot {
+        lock.withLock { counters }
     }
 }
