@@ -221,6 +221,38 @@ struct BackgroundResourceTests {
         #expect(effects.ranges(of: "currentBufferFrameSize").count == 0)
     }
 
+    /// A second toggle used to enter `restartIfRunning` while the first live
+    /// chain swap owned `isBusy`; because it was not a start, that function
+    /// recorded nothing and the new state never reached audio. This is a
+    /// placement bug, so assert the ordering around the asynchronous boundary.
+    @Test("effect changes arriving during a chain build are coalesced and replayed")
+    func effectSwapIsLatestWins() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "private func swapChainIfPossible()"))
+        let end = try #require(
+            source.range(
+                of: "private var activeEffectStageCache",
+                range: start.upperBound..<source.endIndex))
+        let swap = source[start.lowerBound..<end.lowerBound]
+
+        let busy = try #require(swap.range(of: "guard !isBusy else { return false }"))
+        let pending = try #require(swap.range(of: "if effectSwapIsInFlight"))
+        #expect(pending.lowerBound < busy.lowerBound)
+        #expect(swap.ranges(of: "effectSwapIsPending = true").count == 1)
+        #expect(swap.ranges(of: "effectSwapIsPending = false").count == 3)
+        #expect(swap.ranges(of: "swapChainIfPossible()").count == 2)
+
+        let replay = try #require(swap.range(of: "if self.effectSwapIsPending"))
+        let staleResult = try #require(
+            swap.range(
+                of: "guard swapped else",
+                range: replay.upperBound..<swap.endIndex))
+        #expect(replay.lowerBound < staleResult.lowerBound)
+    }
+
     @Test("a deferred snapshot keeps the state from the user event")
     func preferenceSnapshotHasValueSemantics() {
         var preferences = Preferences.default

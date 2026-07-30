@@ -473,6 +473,17 @@ Realtime graph 的 sample rate 與 buffer size 也改為保存 graph 建立時�
 Release 資源套件 24 個測試全綠；同輪既有基準仍是來源 meter 10,000 次 **1 allocation**、
 來源 grouping cache 10,000 次 **0 allocation／5,750 ns**。這階段沒有啟動音訊硬體。
 
+快速切換效果另有一個不是「慢」而是會把最後狀態弄丟的競態。第一個 Audio Unit chain
+在 `engineQueue` 建立時 `isBusy` 為 true；第二個 toggle 的 live swap 因此被拒，
+`restartIfRunning()` 又只替正在 start 的工作記 pending，對正在 swap 的工作直接返回。
+結果是 UI 與偏好已經顯示第二個狀態，聲音永久停在第一個，直到另一次不相關重建。
+
+現在 chain swap 有自己的 in-flight／latest-pending 狀態。忙碌期間任意多個效果與外掛
+變更只要求一次最新重播；舊 snapshot 完成後，在發布舊 plugin failure 或套用舊 chain
+預設值之前先切到最新狀態。Stop 仍優先並清除 pending，不會為追效果把已停止的 route
+帶回來。結構測試固定「pending 判斷在 busy 拒絕之前」與「最新重播在 stale result 發布
+之前」兩個關鍵順序。
+
 ### 1. KTV 的下半 [提案]
 
 已完成：Music 與 Spotify 的 now playing（走 scripting dictionary，不是私有的

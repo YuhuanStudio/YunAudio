@@ -4139,8 +4139,19 @@ final class RouterModel: ScriptTarget {
     private func swapChainIfPossible() -> Bool {
         // A batch is about to restart anyway, and a swap in the middle of one
         // would be work thrown away.
-        guard !isApplyingPreset, isRunning, !isBusy else { return false }
+        guard !isApplyingPreset, isRunning else { return false }
+        // Audio Units can take long enough to build for several more toggles
+        // to arrive. The graph being built is immutable, so mutating it is not
+        // an option; remember that the latest model state needs one more swap.
+        // Returning true keeps each intermediate toggle from ordering a full
+        // stop/start while the current live swap is already doing useful work.
+        if effectSwapIsInFlight {
+            effectSwapIsPending = true
+            return true
+        }
+        guard !isBusy else { return false }
         isBusy = true
+        effectSwapIsInFlight = true
         let engine = engine
         let kinds = Array(enabledEffects)
         let pluginList = enabledPlugins
@@ -4152,10 +4163,23 @@ final class RouterModel: ScriptTarget {
                 kinds, plugins: pluginList, voiceIsolation: isolation)
             Task { @MainActor in
                 self.isBusy = false
+                self.effectSwapIsInFlight = false
                 // A chain swap holds the queue for as long as it takes to build
                 // the Audio Units, which is long enough for somebody to press
                 // Stop into it and be refused.
-                if self.honourPendingStop() { return }
+                if self.honourPendingStop() {
+                    self.effectSwapIsPending = false
+                    return
+                }
+                // The result belongs to the snapshot captured above. If the
+                // model moved while it was building, neither its plugin errors
+                // nor its default parameters are the current answer. Coalesce
+                // every intervening toggle into one swap of the newest state.
+                if self.effectSwapIsPending {
+                    self.effectSwapIsPending = false
+                    if !self.swapChainIfPossible() { self.restartIfRunning() }
+                    return
+                }
                 guard swapped else {
                     self.restartIfRunning()
                     return
@@ -4170,6 +4194,11 @@ final class RouterModel: ScriptTarget {
         }
         return true
     }
+
+    /// A chain build already on `engineQueue`, and whether its captured state
+    /// has since been superseded.
+    @ObservationIgnored private var effectSwapIsInFlight = false
+    @ObservationIgnored private var effectSwapIsPending = false
 
     /// The stages actually rendering. Not the same as `enabledEffects`: one
     /// that will not instantiate is dropped, and until recently a single
