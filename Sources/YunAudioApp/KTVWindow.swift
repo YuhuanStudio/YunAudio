@@ -48,6 +48,11 @@ enum KTVWindow {
         self.delegate = delegate
         window.delegate = delegate
         window.title = loc("KTV")
+        WindowChrome.integrate(window)
+        // Opaque, and the stage's own colour. A clear background made every
+        // region SwiftUI had not yet painted show the desktop instead — which
+        // is what the transparent band along the top edge actually was.
+        window.backgroundColor = .black
         window.isReleasedWhenClosed = false
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.contentView = makeHost(model: model)
@@ -58,10 +63,40 @@ enum KTVWindow {
     }
 
     /// One construction path keeps a reopened stage identical to its first one.
-    private static func makeHost(model: RouterModel) -> NSHostingView<KTVStage> {
+    ///
+    /// The stage is held one level below the content view, autoresized rather
+    /// than constrained, so that `safeAreaRegions` can be cleared without the
+    /// window coming apart.
+    ///
+    /// Clearing it is what makes the artwork reach the frame's own top edge. The
+    /// thirty-two points measured along that edge are the hosting view's own
+    /// safe-area region, and nothing inside SwiftUI reaches them: with the
+    /// region left in place `safeAreaInsets` reads zero, so the stage cannot see
+    /// what it is being inset by, and `ignoresSafeArea` — on the background, on
+    /// its container, anywhere — leaves the strip exactly as it was.
+    ///
+    /// Clearing it on a hosting view that *is* the content view is what tore the
+    /// window: it and `fullSizeContentView` invalidated each other's constraints
+    /// every pass, so the window climbed to 1136 points for a 720-point request
+    /// and AppKit threw `NSGenericException: more Update Constraints in Window
+    /// passes than there are views in the window`. What reached the screen was
+    /// whichever partial pass happened to be current — the transparent band and
+    /// the cut-off button were that, not a styling choice. One level down and
+    /// autoresized, the stage publishes no constraints at all, so there is
+    /// nothing left to diverge. The container is black so that anything the
+    /// stage has not painted reads as stage rather than as desktop.
+    private static func makeHost(model: RouterModel) -> NSView {
         let host = NSHostingView(rootView: KTVStage(model: model))
+        host.safeAreaRegions = []
         host.setAccessibilityIdentifier("YunAudioKTVWindow")
-        return host
+
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 1080, height: 720))
+        container.wantsLayer = true
+        container.layer?.backgroundColor = NSColor.black.cgColor
+        host.frame = container.bounds
+        host.autoresizingMask = [.width, .height]
+        container.addSubview(host)
+        return container
     }
 
     private final class Delegate: NSObject, NSWindowDelegate {
@@ -88,7 +123,11 @@ struct KTVStage: View {
     var body: some View {
         GeometryReader { proxy in
             ZStack {
-                stageBackground(size: proxy.size)
+                // Sized by the ZStack rather than by `proxy.size`, which would
+                // pin it to whatever the reader was proposed at the time.
+                // `makeHost` is what makes that the whole window frame,
+                // title-bar row included.
+                stageBackground()
 
                 if let track = model.nowPlaying {
                     HStack(alignment: .center, spacing: max(36, proxy.size.width * 0.055)) {
@@ -123,10 +162,14 @@ struct KTVStage: View {
                     Spacer()
                     scoreStrip
                 }
-                .padding(Yun.Space.lg)
+                // The artwork owns the title-bar row, so the controls inset
+                // themselves from it explicitly: there is no safe area left to
+                // do it for them, and at `lg` the full-screen button sat level
+                // with the traffic lights and read as clipped by the frame.
+                .padding(.top, WindowChrome.controlClearance)
+                .padding([.horizontal, .bottom], Yun.Space.lg)
             }
         }
-        .frame(minWidth: 720, minHeight: 520)
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))
         .focusEffectDisabled()
@@ -134,11 +177,11 @@ struct KTVStage: View {
     }
 
     @ViewBuilder
-    private func stageBackground(size: CGSize) -> some View {
+    private func stageBackground() -> some View {
         if let track = model.nowPlaying {
             let phase = (model.lyricLine ?? 0) % 4
             SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fill)
-                .frame(width: size.width, height: size.height)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .scaleEffect(phase.isMultiple(of: 2) ? 1.16 : 1.19)
                 .offset(

@@ -100,13 +100,26 @@ enum SettingsWindow {
             defer: false)
         let host = NSHostingController(
             rootView: PreferencesWindow(model: model, navigation: navigation))
+        // Deliberately not `host.safeAreaRegions = []`. Overriding the region a
+        // hosting view derives from `fullSizeContentView` makes the two fight:
+        // Settings opened at 1410 points — the full height of the screen — for a
+        // 560-point request, and `setContentSize` was undone again within a few
+        // run-loop turns. The same line took the KTV window to 1136 and an
+        // uncaught `NSGenericException`. Nothing is gained here in any case: the
+        // panes are a flat colour, so they need no bleed into the title-bar row.
         let delegate = Delegate()
         self.host = host
         self.delegate = delegate
         window.delegate = delegate
         window.title = loc("Settings")
+        WindowChrome.integrate(window)
         window.isReleasedWhenClosed = false
         window.contentViewController = host
+        // The floor the panes used to declare through `frame(minWidth:minHeight:)`.
+        // A window is the right place for it — it is what a user drags against —
+        // and left to the constraints the hosting view publishes the floor came
+        // out at 321 points, well below the height the panes were designed for.
+        window.minSize = NSSize(width: 620, height: 440)
         window.setFrameAutosaveName("YunAudioSettingsWindow")
         window.center()
         return NSWindowController(window: window)
@@ -178,7 +191,7 @@ struct PreferencesWindow: View {
                 .scrollIndicators(.never)
             }
         }
-        .frame(minWidth: 620, minHeight: 440)
+        .ignoresSafeArea(.container, edges: .top)
         .background(Yun.Palette.background)
         .focusEffectDisabled()
         .accessibilityIdentifier(Self.accessibilityIdentifier)
@@ -248,6 +261,10 @@ struct PreferencesWindow: View {
             Spacer()
         }
         .padding(Yun.Space.md)
+        // Only the left edge meets the traffic lights. Keep its first control
+        // clear without restoring the empty title-bar strip across the whole
+        // settings window.
+        .padding(.top, isRendering ? 0 : WindowChrome.controlClearance)
         .frame(width: 168)
     }
 

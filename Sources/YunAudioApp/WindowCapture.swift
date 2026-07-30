@@ -94,6 +94,11 @@ enum WindowCapture {
         // window must not reserve a microphone or wake a Continuity device.
         // `--full` omits this flag and owns the hardware checks that follow.
         if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil {
+            if let model {
+                wroteEverything =
+                    photographAuxiliaryWindows(model: model, into: directory)
+                    && wroteEverything
+            }
             return wroteEverything
         }
 
@@ -129,13 +134,131 @@ enum WindowCapture {
         return wroteEverything
     }
 
+    /// The two AppKit-owned windows that the main SwiftUI scene cannot show.
+    ///
+    /// Their title bars were absent from offscreen renders by construction, so
+    /// the 32-point empty strip survived while every design image was green.
+    private static func photographAuxiliaryWindows(
+        model: RouterModel, into directory: String
+    ) -> Bool {
+        var wroteEverything = true
+
+        guard SettingsWindow.open(model: model),
+            let settings = PreferencesWindow.openWindow()
+        else {
+            FileHandle.standardError.write(Data("could not open Settings for capture\n".utf8))
+            return false
+        }
+        settle(turns: 12)
+        wroteEverything =
+            photograph(
+                settings,
+                sizes: [("settings", CGSize(width: 760, height: 560))],
+                into: directory, appearances: [.darkAqua]) && wroteEverything
+
+        // Reproduce the user's exact state: Settings is the front auxiliary
+        // window when the Dock asks the application to reopen. The callback
+        // must consume that request and bring the router forward; merely
+        // asserting which closure is installed would miss AppKit choosing
+        // Settings afterwards.
+        if let delegate = TerminationObserver.current {
+            let appKitShouldChoose =
+                delegate.applicationShouldHandleReopen(
+                    NSApp, hasVisibleWindows: true)
+            settle(turns: 12)
+            let routerIsKey = mainWindow()?.isKeyWindow == true
+            if appKitShouldChoose || !routerIsKey {
+                FileHandle.standardError.write(
+                    Data(
+                        "Dock reopen left Settings in front"
+                            .appending(
+                                " — AppKit fallback \(appKitShouldChoose),"
+                                    + " router key \(routerIsKey)\n"
+                            ).utf8))
+                wroteEverything = false
+            }
+        } else {
+            FileHandle.standardError.write(
+                Data("Dock reopen could not reach the application delegate\n".utf8))
+            wroteEverything = false
+        }
+        settings.close()
+
+        // The preceding tab pass drives the compact singing view's disappear
+        // hook. Restore the no-audio fixture before photographing its other
+        // presentation.
+        model.prepareForRendering(refreshesApplications: false)
+        guard KTVWindow.open(model: model),
+            let ktv = NSApp.windows.first(where: {
+                $0.frameAutosaveName == "YunAudioKTVWindow" && $0.isVisible
+            })
+        else {
+            FileHandle.standardError.write(Data("could not open KTV for capture\n".utf8))
+            return false
+        }
+        settle(turns: 12)
+        wroteEverything =
+            photograph(
+                ktv,
+                sizes: [("ktv-window", CGSize(width: 1080, height: 720))],
+                into: directory, appearances: [.darkAqua]) && wroteEverything
+        ktv.close()
+        return wroteEverything
+    }
+
     private static func photograph(
         _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String,
         suffix: String = "", appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
     ) -> Bool {
         var wroteEverything = true
         for (label, size) in sizes {
+            let opened = window.frame.size
             window.setContentSize(size)
+            window.contentView?.layoutSubtreeIfNeeded()
+            let resized = window.frame.size
+            // Roughly the size it was asked for, and *still* that size several
+            // run-loop turns later. Two windows were overriding the safe-area
+            // region their hosting view derives from `fullSizeContentView`, and
+            // both then grew without converging: KTV reached 1136 points and
+            // threw an uncaught `NSGenericException`, Settings reached 1410 —
+            // the whole height of the screen — after `setContentSize` had
+            // already put it at 560. Neither was noticed here, because the
+            // image was simply written at whatever size the window had reached
+            // and a settings pane that fills the screen still looks like a
+            // settings pane. Hence the three sizes in the failure: what the
+            // window opened at, what it accepted, and what it drifted back to.
+            //
+            // The tolerance is the title-bar row itself, taken from AppKit
+            // rather than assumed: `fullSizeContentView` moves those points
+            // inside the content, so a window may legitimately need that many
+            // more than a naive content request. The main window does, at its
+            // 632-point floor. Settings at 1410 for a requested 560 does not.
+            settle(turns: 8)
+            let settled = window.frame.size
+            let titleBar = max(0, window.frame.height - window.contentLayoutRect.height)
+            if abs(settled.width - size.width) > titleBar + 1
+                || abs(settled.height - size.height) > titleBar + 1
+            {
+                var message = "\(label) was asked for \(Int(size.width))×\(Int(size.height))"
+                message += " and settled at \(Int(settled.width))×\(Int(settled.height))"
+                message += " — not accepted"
+                message += " [opened \(Int(opened.height))"
+                message += ", resized \(Int(resized.height))"
+                message += ", min \(Int(window.contentMinSize.height))]\n"
+                FileHandle.standardError.write(Data(message.utf8))
+                wroteEverything = false
+                continue
+            }
+            if !WindowChrome.isIntegrated(window) {
+                let reserved =
+                    window.frame.height - (window.contentView?.frame.height ?? 0)
+                FileHandle.standardError.write(
+                    Data(
+                        "\(label) still reserves \(reserved) points above its content"
+                            .appending(" — not accepted\n").utf8))
+                wroteEverything = false
+                continue
+            }
             for scheme in appearances {
                 let isLight = scheme == .aqua
                 let name = "live-\(label)\(suffix)-\(isLight ? "light" : "dark").png"
