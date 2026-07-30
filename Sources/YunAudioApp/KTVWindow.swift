@@ -22,7 +22,7 @@ enum KTVWindow {
         let controller = controller ?? makeController(model: model)
         self.controller = controller
         if controller.window?.contentView == nil {
-            controller.window?.contentView = NSHostingView(rootView: KTVStage(model: model))
+            controller.window?.contentView = makeHost(model: model)
         }
         model.isSingingVisible = true
         NSApp.activate(ignoringOtherApps: true)
@@ -50,12 +50,18 @@ enum KTVWindow {
         window.title = loc("KTV")
         window.isReleasedWhenClosed = false
         window.collectionBehavior.insert(.fullScreenPrimary)
-        window.contentView = NSHostingView(rootView: KTVStage(model: model))
-        window.contentView?.setAccessibilityIdentifier("YunAudioKTVWindow")
+        window.contentView = makeHost(model: model)
         window.minSize = NSSize(width: 720, height: 520)
         window.setFrameAutosaveName("YunAudioKTVWindow")
         window.center()
         return NSWindowController(window: window)
+    }
+
+    /// One construction path keeps a reopened stage identical to its first one.
+    private static func makeHost(model: RouterModel) -> NSHostingView<KTVStage> {
+        let host = NSHostingView(rootView: KTVStage(model: model))
+        host.setAccessibilityIdentifier("YunAudioKTVWindow")
+        return host
     }
 
     private final class Delegate: NSObject, NSWindowDelegate {

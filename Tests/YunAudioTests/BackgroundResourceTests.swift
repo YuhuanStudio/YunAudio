@@ -725,6 +725,27 @@ struct BackgroundResourceTests {
         #expect(ktv.contains(".foregroundStyle(.white.opacity(0.62))"))
     }
 
+    @Test("the reopened KTV stage keeps its accessibility identity")
+    func reopenedKTVStageKeepsAccessibilityIdentity() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let ktv = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/KTVWindow.swift",
+            encoding: .utf8)
+
+        #expect(
+            ktv.contains(
+                "controller.window?.contentView = makeHost(model: model)"
+            ))
+        #expect(ktv.contains("window.contentView = makeHost(model: model)"))
+        #expect(
+            ktv.ranges(of: "NSHostingView(rootView: KTVStage(model: model))").count == 1
+        )
+        #expect(
+            ktv.contains(
+                "host.setAccessibilityIdentifier(\"YunAudioKTVWindow\")"
+            ))
+    }
+
     @Test("the main window keeps all three columns on every inspector tab")
     func mainWindowAlwaysKeepsItsThreeColumnLayout() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
