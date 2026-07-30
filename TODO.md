@@ -84,9 +84,19 @@ AudioHardwareCreateProcessTap returned noErr and no tap for
 會把調查帶歪的名稱：那個數字是 CoreAudio object ID，從來不是 Unix PID，而且被濾掉的
 `pid:` 合成身分現在明講是「未交給 HAL」，不再謊稱它是 bundle ID 參數。
 
-**下一步**：重現一次，看上面四個讀數把它分到「process object 在呼叫中消失」、
-「HAL 留下一個沒回傳的 tap」或「兩張表都沒動」哪一類，再針對那一類處理。沒有這筆新
-證據以前不要猜 rate limit 或 teardown 時序。
+現在 API 邊界會處理兩個已經能從那些讀數判定的分支：
+
+- out parameter 是空的、但 tap list 多出**同一份 description UUID** 的物件，就接回
+  那個物件。只比 process 或 bundle 不夠，因為另一個應用程式可以在同一段時間 tap
+  同一個播放器；UUID 才是這次呼叫的身分。
+- process object 呼叫後仍存在、前後 tap list 都讀得到且沒有新物件，等 20 ms 後只重試
+  一次。process 已消失、tap list 讀不到或出現不屬於這次 UUID 的物件都不猜。錯誤回傳
+  若同時留下自己的 tap 也會銷毀，不再讓一次失敗變成持續複製音訊的洩漏。
+
+純分支與真實 HAL 的 restore 建立測試都已通過；這一輪要跑真實 `afplay` capture 時，
+整台 CoreAudio 已經是 `AudioDeviceStart returned success but no IO cycle ran within
+750 ms`，`yunaudio-cli audio-start` 也同樣失敗。因此「無 bundle 行程真的恢復出聲」
+仍保留為未驗，而不是拿沒執行到 live half 的 flow 綠字冒充證據。
 
 ### 停止錄音會在即時執行緒裡 segfault —— **已修**，而且是先前就存在的 [本機實測]
 
@@ -188,6 +198,29 @@ release `bench` 的同機 A/B：
 Package 現在只替 `YunAudioEngine` 的 Clang importer 開
 `ACCELERATE_NEW_LAPACK`，仍用適合 bounded frame count 的 32-bit 介面。11 個案例的
 checksum 全與基線相同，每一個 realtime allocation 都是 **0**，棄用警告消失。
+
+### 連續拖控制項仍替每一格完整展開偏好設定 —— **已修且量過** [release benchmark]
+
+150 ms 的 writer 原本只合併 JSON encode 與 `UserDefaults.set`；`RouterModel.persist()`
+在每一個 slider event 仍先把 captured／excluded `Set`、效果集合、角色與 MIDI binding
+展開成新的字串陣列和字典，再把前 99 份丟掉。畫面不是卡在磁碟，而是卡在為不會寫出的
+值準備磁碟格式。
+
+現在 event 當下只保留 scalar 與 COW collection snapshot，等 coalescer 確定最後一筆才
+materialise。不能單純延後讀 model：那會讓 150 ms 內被刻意排除持久化的 auto-level、
+preset restore 或 verification 暫態污染使用者剛才的值；value-semantics 測試先改動原
+集合再展開，仍讀回 event 當下內容。
+
+Release，以 64 captured + 64 excluded + 11 effects + 64 roles + 64 MIDI bindings、
+100 個連續事件量兩次：
+
+- **15,000 allocations／1.23–1.28 ms**
+- → **150 allocations／12.4–12.6 µs**
+
+量測本身也修了一個程序缺陷：allocation tripwire 是 process-wide，Swift Testing 會把
+不同 suite 平行跑。Preferences 的 1,699 次配置曾同時被 Formant 與 KTV 各自算進去，
+讓兩個零配置門檻一起假紅。所有 tripwire benchmark 現在共用一把 test-only lock；重跑
+得到 Formant **0**、KTV 調性 **5**、精確旋律 **10**，不再互相污染。
 
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
@@ -368,6 +401,24 @@ MediaRemote）、本機與線上 `.lrc` 逐字歌詞（掃過去的高亮）、�
 HAL 查詢從 main actor 移到 engine queue，頻率仍是 2 Hz；同一個四秒 flow A/B：
 面板關閉 **492 → 177 µs/poll**，分析面板 **2.57 → 1.67 ms/poll**，唱歌面板
 **3.18 → 2.07 ms/poll**。
+
+多來源本身再查到四個缺口：
+
+- 網易雲常見的 `klyric` 是自己的逐字格式，不是 LRC。以前只要它存在就不再看同一回覆
+  裡的標準 `lrc`，所以「有 61 行時間線」仍可能顯示沒歌詞；現在逐字格式 parse 不過會
+  接著採用標準時間線。
+- 帶時間戳的「純音樂／暫無歌詞」占位曾因為看起來是 timed answer 而贏過所有來源。
+  現在內容本身也要不是伴奏占位；只看搜尋標題不夠。
+- 切歌取消原本只取消 main actor 外層的 `Task`，`Task.detached` 裡四個 provider 繼續
+  跑到 timeout。現在是 structured child，離線測試量到 **4/4 loader 都收到
+  `CancellationError`**。
+- 解析與正規化沒有共用結果：LRCLIB 15 個候選最多 parse 30 次，QQ／網易雲成功內容
+  parse 3 次，中文 query 的兩個 transliteration 對最多 45 個候選重算 90 次。現在分別
+  是 **15、1、2**；Shazam 48 kHz × 6 秒 signature 也移除一份 288,000 Float、即
+  **1,152,000 bytes** 的中間陣列。
+
+另外修掉 Shazam cooldown 落在 capture block 中間的邊界：舊寫法把整塊丟掉，連
+cooldown 結束後的有效後綴一起丟；現在只消耗前綴。
 
 完整 flow 曾把「Yu huan 的 iPhone 麥克風」當成一般備用輸入，光是打開 Continuity
 Capture 就會喚醒手機並發出提示。現在不是靠名稱排除，而是讀 CoreAudio 的三個 transport
