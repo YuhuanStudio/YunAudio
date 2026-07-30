@@ -592,6 +592,14 @@ struct SongArtwork: View {
 
     nonisolated static func record(_ outcome: String) {
         taskOutcomes[outcome, default: 0] += 1
+        // Written where it cannot be lost. Read back from a process variable
+        // and printed later, a probe can be overwritten, or missed entirely
+        // because the reader ran first; and looking for its literal in a
+        // release binary does not find it even when the code is there. Both
+        // produced confident conclusions this session that were simply wrong.
+        // stderr is seen the moment it happens, by the harness that already
+        // captures it.
+        FileHandle.standardError.write(Data("PROBE \(outcome)\n".utf8))
     }
 
     nonisolated static var outcomeSummary: String {
