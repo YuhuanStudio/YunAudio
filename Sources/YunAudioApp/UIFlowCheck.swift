@@ -7023,7 +7023,7 @@ enum UIFlowCheck {
     /// The link to OBS, as far as it can be driven with OBS not installed.
     ///
     /// What is checked here is everything that does not need the far end: the
-    /// number this application would tell OBS, that it is the chain's latency
+    /// number this application would tell OBS, that it is the complete processing latency
     /// with the sign the protocol wants, and that a connection to nothing comes
     /// back promptly with a sentence naming the switch that is off — which is
     /// the first thing almost everybody meets, because obs-websocket ships
@@ -7044,13 +7044,16 @@ enum UIFlowCheck {
 
         // The offset is a fact about this application's own audio, so it has to
         // read correctly with nothing connected at all.
-        let frames = model.chainAlignment.chain
+        let frames = model.totalProcessingLatencyFrames
         let rate = model.pathQuality?.sampleRate ?? 48000
         let offset = model.obsSyncOffsetMilliseconds
-        note(String(format: "chain %d frames at %.0f Hz, offset %.0f ms", frames, rate, offset))
+        note(
+            String(
+                format: "processing %d frames at %.0f Hz, offset %.0f ms",
+                frames, rate, offset))
         check("the offset is never positive", offset <= 0)
         check(
-            "and it is the chain's latency in milliseconds",
+            "and it is the processing latency in milliseconds",
             abs(offset + (Double(frames) / rate * 1000).rounded()) < 0.001
                 || offset == -950)
         check("nothing has been sent yet", link.pushedOffsetMilliseconds == nil)
