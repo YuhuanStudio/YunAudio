@@ -181,16 +181,26 @@ struct BackgroundResourceTests {
         #expect(writer.pendingValue == 99)
         #expect(written.isEmpty)
 
-        try await Task.sleep(for: .milliseconds(100))
+        // Under the complete parallel suite, CPU-bound release benchmarks can
+        // keep MainActor from running for far longer than this writer's 50 ms
+        // policy. Wait for the event, not an assumed scheduler deadline; the
+        // bounded loop still fails a writer that never fires.
+        for _ in 0..<100 where written.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(written == [99])
         #expect(writer.pendingValue == nil)
+        #expect(!writer.hasScheduledWrite)
 
         // Quit does not wait for the window, so its flush has to write exactly
-        // once and cancel the scheduled duplicate.
+        // once and cancel the scheduled duplicate. Inspecting the cancelled
+        // task is deterministic; sleeping and hoping a duplicate has had time
+        // to happen is not.
         writer.submit(100)
+        #expect(writer.hasScheduledWrite)
         writer.flush()
-        try await Task.sleep(for: .milliseconds(100))
         #expect(written == [99, 100])
+        #expect(!writer.hasScheduledWrite)
     }
 
     @MainActor

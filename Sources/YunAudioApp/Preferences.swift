@@ -374,6 +374,7 @@ final class CoalescedPreferenceWriter<Value> {
     private let write: (Value) -> Void
     private var task: Task<Void, Never>?
     private(set) var pendingValue: Value?
+    var hasScheduledWrite: Bool { task != nil }
 
     init(delay: Duration, write: @escaping (Value) -> Void) {
         self.delay = delay
