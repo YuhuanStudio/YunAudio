@@ -9,6 +9,9 @@ if [[ ! -x "$APP" ]]; then
     exit 1
 fi
 
+# YUNAUDIO_UI_BENCHMARK_STAGE=1 opens the KTV stage as well, so the numbers
+# cover the window the singing features live in. Off by default, so every
+# figure recorded before it still means what it meant.
 SECONDS_TO_MEASURE=${1:-4}
 STYLE_TO_MEASURE=${2:-current}
 VARIANT_TO_MEASURE=${3:-full}

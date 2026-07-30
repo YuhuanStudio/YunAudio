@@ -13,6 +13,8 @@ enum KTVKeyCommand: Equatable, Sendable {
     case playPause
     /// Move through the song, in seconds; negative goes back.
     case skip(Double)
+    /// Look up or down the words without moving the music.
+    case browse(Int)
     /// Shift the words against the music, in seconds.
     case nudgeLyrics(Double)
     /// Fill the screen, and leave it.
@@ -39,6 +41,8 @@ enum KTVKeyCommand: Equatable, Sendable {
         case KeyEquivalent.space.character: return .playPause
         case KeyEquivalent.leftArrow.character: return .skip(-skipStep)
         case KeyEquivalent.rightArrow.character: return .skip(skipStep)
+        case KeyEquivalent.upArrow.character: return .browse(-1)
+        case KeyEquivalent.downArrow.character: return .browse(1)
         case "[": return .nudgeLyrics(-nudgeStep)
         case "]": return .nudgeLyrics(nudgeStep)
         case "f", "F": return .toggleFullScreen

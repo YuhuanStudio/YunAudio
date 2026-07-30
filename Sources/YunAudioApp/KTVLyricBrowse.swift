@@ -52,6 +52,18 @@ struct KTVLyricBrowse: Equatable, Sendable {
         line = max(0, min(lineCount - 1, from - steps))
     }
 
+    /// Moves the column a whole line, which is what a key press means.
+    ///
+    /// Not the wheel's path with a contrived distance: a key press is exact,
+    /// and routing it through the accumulator would make the first press of a
+    /// pair do nothing.
+    mutating func step(by lines: Int, playing: Int?, lineCount: Int) {
+        guard lineCount > 0, lines != 0 else { return }
+        carried = 0
+        let from = line ?? playing ?? 0
+        line = max(0, min(lineCount - 1, from + lines))
+    }
+
     /// Puts the column back on the song.
     mutating func stop() {
         line = nil

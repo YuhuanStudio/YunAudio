@@ -49,10 +49,17 @@ struct KTVKeyCommandTests {
         #expect(KTVKeyCommand.resolve(KeyEquivalent("["), modifiers: .control) == nil)
     }
 
+    @Test("up and down look through the words without moving the music")
+    func verticalArrowsBrowse() {
+        // Deliberately the other axis from the seek: one moves the song, the
+        // other moves only what is on screen.
+        #expect(KTVKeyCommand.resolve(.upArrow) == .browse(-1))
+        #expect(KTVKeyCommand.resolve(.downArrow) == .browse(1))
+    }
+
     @Test("keys the stage has no use for are left alone")
     func unknownKeysAreIgnored() {
         #expect(KTVKeyCommand.resolve(KeyEquivalent("q")) == nil)
-        #expect(KTVKeyCommand.resolve(.upArrow) == nil)
         #expect(KTVKeyCommand.resolve(.return) == nil)
         #expect(KTVKeyCommand.resolve(.escape) == nil)
     }

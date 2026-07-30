@@ -128,6 +128,19 @@ enum UIResourceBenchmark {
         model.runWords()
         model.inspectorTab = .singing
         window.makeKeyAndOrderFront(nil)
+        // Optional, and off by default so that every number recorded before
+        // this still means what it meant. With it on, the stage is open and
+        // drawing beside the inspector, which is what the singing features
+        // actually cost.
+        let measuresTheStage =
+            ProcessInfo.processInfo.environment["YUNAUDIO_UI_BENCHMARK_STAGE"] == "1"
+        if measuresTheStage {
+            // Left in front deliberately. A window the window server has
+            // covered gets no updates, so re-fronting the inspector would
+            // measure a stage that is not drawing and report it as cheap.
+            KTVWindow.open(model: model)
+        }
+        report("UI benchmark ktv stage \(measuresTheStage ? "open" : "closed")")
         await settle(for: 1)
         guard fixtureIsIsolated(model) else { return false }
 

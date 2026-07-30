@@ -159,6 +159,10 @@ struct KTVStage: View {
 
     var body: some View {
         GeometryReader { proxy in
+            // Counted here rather than at the head of `body`: the reader's
+            // closure re-evaluates on its own, and a tick outside it reported
+            // zero while everything inside was updating once a second.
+            let _ = BodyCount.tick("KTVStage")
             let _ = {
                 Self.lastMeasuredStageSize = proxy.size
                 guard SongArtwork.isProbing else { return }
@@ -279,6 +283,10 @@ struct KTVStage: View {
         case .skip(let seconds): model.skipNowPlaying(by: seconds)
         case .nudgeLyrics(let seconds): model.nudgeLyricOffset(by: seconds)
         case .toggleFullScreen: KTVWindow.toggleFullScreen()
+        case .browse(let lines):
+            guard let lyrics = model.lyrics, lyrics.lines.count > 1 else { return }
+            browse.step(by: lines, playing: model.lyricLine, lineCount: lyrics.lines.count)
+            startTheWayBack()
         }
     }
 
@@ -289,12 +297,16 @@ struct KTVStage: View {
             SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fill)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
+                // Blurred first and rasterised, then moved. Blurring after the
+                // move meant a fifty-two-point Gaussian over the whole window
+                // on every frame of the 1.8-second drift; this way the drift
+                // transforms a picture that was blurred once.
+                .blur(radius: 52)
                 .scaleEffect(phase.isMultiple(of: 2) ? 1.16 : 1.19)
                 .offset(
                     x: phase < 2 ? -8 : 8,
                     y: phase == 0 || phase == 3 ? -5 : 5
                 )
-                .blur(radius: 52)
                 // Moving only when the lyric advances gives the stage life
                 // without a permanent display-link or background timer.
                 .animation(
@@ -757,46 +769,8 @@ struct KTVStage: View {
     }
 
     private func progress(_ track: NowPlaying.Track) -> some View {
-        let fraction =
-            track.duration > 0
-            ? max(0, min(1, Double(model.songSecond) / track.duration))
-            : 0
-        return VStack(spacing: 6) {
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.18))
-                    Capsule()
-                        .fill(.white.opacity(0.78))
-                        .frame(width: geometry.size.width * fraction)
-                }
-                // The whole bar, not the five points it is drawn as: a target
-                // that thin is one nobody hits. Continuous rather than on
-                // release, because a lyric stage is scrubbed to find a line and
-                // the words have to arrive while the finger is still moving.
-                .contentShape(Rectangle())
-                .gesture(
-                    DragGesture(minimumDistance: 0)
-                        .onChanged { value in
-                            guard geometry.size.width > 0 else { return }
-                            model.seekNowPlaying(
-                                toFraction: value.location.x / geometry.size.width)
-                        }
-                )
-                .accessibilityIdentifier("KTVSeek")
-            }
-            .frame(height: 5)
-            .contentShape(Rectangle().inset(by: -10))
-            HStack {
-                Text(Self.clock(Double(model.songSecond)))
-                Spacer()
-                Text(track.duration > 0 ? Self.clock(track.duration) : "--:--")
-            }
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.48))
-            .monospacedDigit()
-        }
+        KTVSongProgress(model: model, duration: track.duration)
     }
-
     @ViewBuilder
     private func lyricsColumn(_ metrics: KTVLyricMetrics) -> some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -847,17 +821,16 @@ struct KTVStage: View {
         // being sung keeps its fill wherever it happens to sit.
         let playing = model.lyricLine
         let current = browse.centre(whilePlaying: playing) ?? 0
-        // Read from the second the song is on, which the model already
-        // publishes once a second for the timecode — so the count costs the
-        // stage no clock of its own. Suppressed while the column is being
+        // Whether a count *can* happen — the music is waiting rather than
+        // being sung — is a fact about the line, and changes when the line
+        // does. How many dots are left is a fact about the second, and is read
+        // inside `KTVCountInDots` so that reading it does not rebuild the
+        // whole stage once a second. Suppressed while the column is being
         // looked through: a cue is for the line the music is on.
         let countIn =
-            browse.isBrowsing
-            ? nil
-            : KTVCountIn.remaining(
-                seconds: KTVCountIn.secondsUntilWords(
-                    in: lyrics, playing: playing, position: Double(model.songSecond),
-                    nudge: model.lyricNudge))
+            !browse.isBrowsing
+            && (playing.map { lyrics.lines.indices.contains($0) && lyrics.lines[$0].isInterlude }
+                ?? true)
         let behind = Array(metrics.offsets.filter { $0 < 0 })
         let ahead = Array(metrics.offsets.filter { $0 > 0 })
         return VStack(alignment: .leading, spacing: 0) {
@@ -968,7 +941,7 @@ struct KTVStage: View {
     /// middle one stays on the centre line whatever they contain.
     @ViewBuilder
     private func lyricGroup(
-        _ lyrics: Lyrics, current: Int, playing: Int?, countIn: Int?, offsets: [Int],
+        _ lyrics: Lyrics, current: Int, playing: Int?, countIn: Bool, offsets: [Int],
         metrics: KTVLyricMetrics, alignment: Alignment
     ) -> some View {
         // Identified by the line, not by the slot it occupies. With the offset
@@ -1009,10 +982,10 @@ struct KTVStage: View {
                         // the rest's three notes during a break, and above the
                         // first line during an intro. Both are the centre row,
                         // so neither moves anything else on the stage.
-                        if offset == 0, let countIn {
-                            countInDots(countIn, size: metrics.currentSize)
+                        if offset == 0, countIn {
+                            KTVCountInDots(model: model, size: metrics.currentSize)
                         }
-                        if !(offset == 0 && countIn != nil && line.isInterlude) {
+                        if !(offset == 0 && countIn && line.isInterlude) {
                             lyricLine(
                                 line.isInterlude ? Self.interludeMark : line.text,
                                 offset: offset, isPlaying: index == playing,
@@ -1110,27 +1083,6 @@ struct KTVStage: View {
         }
     }
 
-    /// Four dots that go out one a second until the singing starts.
-    private func countInDots(_ remaining: Int, size: CGFloat) -> some View {
-        // Sized from the line it counts into, so it keeps its proportion on a
-        // full screen and on a 420-point stage alike.
-        let dot = max(7, size * 0.24)
-        return HStack(spacing: dot * 0.7) {
-            ForEach(0..<KTVCountIn.dots, id: \.self) { index in
-                Circle()
-                    .fill(
-                        index < remaining
-                            ? Yun.Palette.accent.opacity(0.92)
-                            : .white.opacity(0.16)
-                    )
-                    .frame(width: dot, height: dot)
-            }
-        }
-        .frame(height: size * 0.9, alignment: .center)
-        .accessibilityLabel(loc("The singing starts in a moment"))
-        .accessibilityIdentifier("KTVCountIn")
-    }
-
     @ViewBuilder
     private var scoreStrip: some View {
         let singers = model.singers
@@ -1190,7 +1142,7 @@ struct KTVStage: View {
         }
     }
 
-    private static func clock(_ seconds: Double) -> String {
+    static func clock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "--:--" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
     }
@@ -1231,5 +1183,95 @@ extension View {
     /// Marks a lyric line as somewhere the song can be played from.
     fileprivate func seekableLine(seek: @escaping () -> Void) -> some View {
         SeekableLine(seek: seek) { self }
+    }
+}
+
+/// The bar and the two timecodes, which change once a second.
+///
+/// Its own view for the same reason the compact inspector has one: reading
+/// `songSecond` where the stage's own body reads it rebuilt the lyric column,
+/// the artwork and the whole track block once a second to move a bar five
+/// points tall. The read belongs where the second is drawn.
+private struct KTVSongProgress: View {
+    @Bindable var model: RouterModel
+    let duration: Double
+
+    var body: some View {
+        let _ = BodyCount.tick("KTVSongProgress")
+        let fraction = duration > 0 ? max(0, min(1, Double(model.songSecond) / duration)) : 0
+        return VStack(spacing: 6) {
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(.white.opacity(0.18))
+                    Capsule()
+                        .fill(.white.opacity(0.78))
+                        .frame(width: geometry.size.width * fraction)
+                }
+                // The whole bar, not the five points it is drawn as: a target
+                // that thin is one nobody hits. Continuous rather than on
+                // release, because a lyric stage is scrubbed to find a line and
+                // the words have to arrive while the finger is still moving.
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            guard geometry.size.width > 0 else { return }
+                            model.seekNowPlaying(
+                                toFraction: value.location.x / geometry.size.width)
+                        }
+                )
+                .accessibilityIdentifier("KTVSeek")
+            }
+            .frame(height: 5)
+            .contentShape(Rectangle().inset(by: -10))
+            HStack {
+                Text(KTVStage.clock(Double(model.songSecond)))
+                Spacer()
+                Text(duration > 0 ? KTVStage.clock(duration) : "--:--")
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.48))
+            .monospacedDigit()
+        }
+    }
+}
+
+/// Four dots that go out one a second until the singing starts.
+///
+/// Reads the second itself. Computing the count where the column is built
+/// would put a one-hertz dependency on the whole stage for four seconds of
+/// dots — which is how a stage that draws nothing becomes a stage that
+/// rebuilds everything, once per second, for the whole of a song.
+private struct KTVCountInDots: View {
+    @Bindable var model: RouterModel
+    let size: CGFloat
+
+    var body: some View {
+        let _ = BodyCount.tick("KTVCountInDots")
+        // Sized from the line it counts into, so it keeps its proportion on a
+        // full screen and on a 420-point stage alike.
+        let dot = max(7, size * 0.24)
+        let remaining =
+            model.lyrics.flatMap {
+                KTVCountIn.remaining(
+                    seconds: KTVCountIn.secondsUntilWords(
+                        in: $0, playing: model.lyricLine,
+                        position: Double(model.songSecond), nudge: model.lyricNudge))
+            } ?? 0
+        return HStack(spacing: dot * 0.7) {
+            ForEach(0..<KTVCountIn.dots, id: \.self) { index in
+                Circle()
+                    .fill(
+                        index < remaining
+                            ? Yun.Palette.accent.opacity(0.92)
+                            : .white.opacity(0.16)
+                    )
+                    .frame(width: dot, height: dot)
+            }
+        }
+        .frame(height: size * 0.9, alignment: .center)
+        .opacity(remaining > 0 ? 1 : 0)
+        .accessibilityLabel(loc("The singing starts in a moment"))
+        .accessibilityIdentifier("KTVCountIn")
     }
 }

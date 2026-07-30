@@ -81,6 +81,32 @@ struct KTVLyricBrowseTests {
         #expect(!browse.isBrowsing)
     }
 
+    @Test("a key press moves exactly one line, every press")
+    func steppingIsExact() {
+        var browse = KTVLyricBrowse()
+        // Part-spent wheel travel must not make the first press do nothing or
+        // two lines at once.
+        browse.scroll(by: 20, playing: 10, lineCount: 60)
+        #expect(!browse.isBrowsing)
+        browse.step(by: -1, playing: 10, lineCount: 60)
+        #expect(browse.line == 9)
+        browse.step(by: 1, playing: 10, lineCount: 60)
+        #expect(browse.line == 10)
+        browse.step(by: -1, playing: 40, lineCount: 60)
+        #expect(browse.line == 9)
+    }
+
+    @Test("stepping stops at both ends")
+    func steppingIsClamped() {
+        var browse = KTVLyricBrowse()
+        browse.step(by: -5, playing: 2, lineCount: 60)
+        #expect(browse.line == 0)
+        browse.step(by: 500, playing: 2, lineCount: 60)
+        #expect(browse.line == 59)
+        browse.step(by: 0, playing: 2, lineCount: 60)
+        #expect(browse.line == 59)
+    }
+
     @Test("a song with no words cannot be browsed")
     func noLinesMeansNoBrowsing() {
         var browse = KTVLyricBrowse()
