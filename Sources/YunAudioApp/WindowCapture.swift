@@ -276,6 +276,20 @@ enum WindowCapture {
         // it never got. The photographs were of a stage whose artwork had never
         // been requested and whose lifecycle had never run, and nothing said
         // so: they simply looked like a stage with no cover.
+        // And the cover has to have arrived, not merely been asked for. Three
+        // consecutive runs report `loaded ×4` with the single `cancelled` being
+        // the inspector's copy torn down as this window takes over — so the
+        // count is stable enough to assert, and a run that photographs
+        // placeholders where covers exist now says so.
+        if SongArtwork.taskOutcomes["loaded", default: 0] == 0,
+            model.nowPlaying?.artworkURL != nil
+        {
+            FileHandle.standardError.write(
+                Data(
+                    "the KTV stage was photographed with no cover loaded"
+                        .appending(" — not accepted\n").utf8))
+            wroteEverything = false
+        }
         if !SongArtwork.taskOutcomes.keys.contains("stage task ran") {
             FileHandle.standardError.write(
                 Data(
