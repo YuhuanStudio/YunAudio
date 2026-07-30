@@ -131,11 +131,17 @@ struct CompositedLyricFillTests {
             font: .systemFont(ofSize: 27, weight: .semibold),
             baseColour: .secondaryLabelColor,
             fillColour: .controlAccentColor,
+            // A minute-long line. The two-second fixture this replaces read
+            // 1.0 → 1.0 every time the whole suite ran and passed whenever the
+            // test ran alone: with 1067 tests in flight, more than the 1.6
+            // seconds it had left could pass between configuring the view and
+            // the first sample, so the sweep had already finished. The subject
+            // here is whether the layer advances, not how quickly.
             anchor: LyricPlaybackAnchor(
                 lineIndex: 0,
                 lineStart: 0,
-                lineEnd: 2,
-                position: 0.2,
+                lineEnd: Self.lineSeconds,
+                position: 0,
                 trueAt: now,
                 isPlaying: true,
                 revision: 1),
@@ -146,13 +152,29 @@ struct CompositedLyricFillTests {
 
         try await Task.sleep(for: .milliseconds(70))
         let before = try #require(view.presentationProgress())
+        let beforeAt = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
         try await Task.sleep(for: .milliseconds(180))
         let after = try #require(view.presentationProgress())
-        print("lyric presentation progress \(before) → \(after)")
+        let afterAt = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
 
-        #expect(after > before + 0.04)
+        // Against the time that actually passed, not the time the sleep asked
+        // for — under load it is the elapsed interval that moves, and an
+        // assertion written against the requested interval measures the
+        // scheduler rather than the compositor.
+        let expected = (afterAt - beforeAt) / Self.lineSeconds
+        print(
+            "lyric presentation progress \(before) → \(after)"
+                + " over \(afterAt - beforeAt) s, expected +\(expected)")
+
+        #expect(
+            after > before + expected * 0.5,
+            "the compositor advanced \(after - before) where the anchor describes \(expected)")
         #expect(after < 1)
     }
+
+    /// Long enough that a contended run cannot exhaust the sweep before it is
+    /// sampled, short enough that 180 milliseconds of it is still measurable.
+    private static let lineSeconds: Double = 60
 
     @Test("production call sites never observe the ten-hertz legacy progress")
     func productionObservationBoundary() throws {

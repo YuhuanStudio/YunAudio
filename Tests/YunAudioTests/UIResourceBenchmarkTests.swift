@@ -151,6 +151,14 @@ struct UIResourceBenchmarkTests {
         #expect(compositor.ranges(of: ".lyricFillStatic").count == 2)
         #expect(compositor.ranges(of: ".lyricFillLegacy").count == 1)
         #expect(compositor.contains("variant == .lyricFillStatic ? 0.5 : nil"))
-        #expect(compositor.contains("let progress = model.lyricProgress"))
+        // The ten-hertz model value belongs to the legacy branch and to nothing
+        // else — production animates on the compositor and never observes it.
+        // Counted rather than merely found: the previous form named a `let` that
+        // a refactor had already folded into the call, so the assertion had
+        // stopped standing for anything.
+        #expect(compositor.ranges(of: "model.lyricProgress").count == 1)
+        #expect(
+            compositor.contains(
+                "swiftUISurface(progress: model.lyricProgress, animates: true)"))
     }
 }
