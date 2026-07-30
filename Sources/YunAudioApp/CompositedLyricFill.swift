@@ -114,7 +114,10 @@ struct CompositedLyricSurface: View {
                     baseColour: style.baseColour,
                     fillColour: style.fillColour,
                     reduceMotion: reduceMotion,
-                    frozenProgress: variant == .lyricFillStatic ? 0.5 : nil
+                    frozenProgress: variant == .lyricFillStatic ? 0.5 : nil,
+                    // The line being sung, so its own word times reach the
+                    // layer. Absent, the fill keeps the linear animation.
+                    syllables: model.currentLyricSyllables
                 )
             }
         }
@@ -157,6 +160,9 @@ struct CompositedLyricFill: NSViewRepresentable {
         CompositedLyricView()
     }
 
+    /// Word times for this line, when the file carried them.
+    var syllables: [Lyrics.Line.Syllable] = []
+
     func updateNSView(_ view: CompositedLyricView, context: Context) {
         view.configure(
             text: text,
@@ -165,7 +171,8 @@ struct CompositedLyricFill: NSViewRepresentable {
             fillColour: fillColour,
             anchor: anchor,
             reduceMotion: reduceMotion,
-            frozenProgress: frozenProgress)
+            frozenProgress: frozenProgress,
+            syllables: syllables)
     }
 
     func sizeThatFits(
@@ -355,8 +362,10 @@ final class CompositedLyricView: NSView {
         fillColour: NSColor,
         anchor: LyricPlaybackAnchor?,
         reduceMotion: Bool,
-        frozenProgress: Double?
+        frozenProgress: Double?,
+        syllables: [Lyrics.Line.Syllable] = []
     ) {
+        self.syllables = syllables
         let needsTextLayout =
             self.text != text
             || self.font != font
@@ -446,6 +455,9 @@ final class CompositedLyricView: NSView {
         }
     }
 
+    /// Word times for the line being drawn, when the file carried them.
+    private var syllables: [Lyrics.Line.Syllable] = []
+
     private func applyTimeline() {
         guard let layout = lyricLayout else { return }
         let uptime = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
@@ -481,6 +493,31 @@ final class CompositedLyricView: NSView {
                 continue
             }
             rowLayer.setValue(1.0, forKeyPath: "transform.scale.x")
+            // The shape the words describe, where the file gave one. The whole
+            // line's curve is handed over at once and the animation is started
+            // in the past by however much of the line has already been sung, so
+            // Core Animation walks the same path it would have walked from the
+            // beginning — rather than a straight line fitted to what remains.
+            if shouldAnimate, !syllables.isEmpty, let anchor,
+                let curve = CompositedLyricKeyFrames.fill(
+                    row: (layout.rows[index].startProgress,
+                        layout.rows[index].endProgress),
+                    syllables: syllables,
+                    line: (anchor.lineStart, anchor.lineEnd),
+                    text: text)
+            {
+                let animation = CAKeyframeAnimation(keyPath: "transform.scale.x")
+                animation.values = curve.values
+                animation.keyTimes = curve.keyTimes.map { NSNumber(value: $0) }
+                animation.duration = max(0.001, anchor.lineEnd - anchor.lineStart)
+                animation.beginTime =
+                    now - max(0, anchor.position(at: uptime) - anchor.lineStart)
+                animation.calculationMode = .linear
+                animation.fillMode = .backwards
+                animation.isRemovedOnCompletion = true
+                rowLayer.add(animation, forKey: "lyric-fill")
+                continue
+            }
             let animation = CABasicAnimation(keyPath: "transform.scale.x")
             animation.fromValue = timing.initialScale
             animation.toValue = 1.0

@@ -2340,6 +2340,18 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Word times for the line being sung, when the file carried them.
+    ///
+    /// Read by the compositor to fill along the shape the words describe
+    /// rather than evenly across the line. Empty is the ordinary case and the
+    /// linear sweep remains the honest approximation for it.
+    var currentLyricSyllables: [Lyrics.Line.Syllable] {
+        guard let lyrics, let index = lyricLine,
+            lyrics.lines.indices.contains(index)
+        else { return [] }
+        return lyrics.lines[index].syllables
+    }
+
     /// Takes a new song, with the words and the tune that go with it.
     private func adopt(_ track: NowPlaying.Track?) {
         cancelLyricsLookup()
