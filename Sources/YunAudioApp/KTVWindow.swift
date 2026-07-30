@@ -261,10 +261,13 @@ struct KTVStage: View {
                 track, width: columnWidth,
                 artwork: Self.artworkSide(
                     columnWidth: columnWidth, stageHeight: stageHeight))
-                // Centred against the stage rather than against whatever the
-                // words happen to occupy, which left it in the bottom-left of a
-                // large window with the top half of the stage empty.
-                .frame(height: stageHeight, alignment: .center)
+                // `maxHeight`, not a fixed height with an alignment. Given an
+                // exact height the column was placed 302 points down a
+                // 619-point stage where centring predicts 92 — the fixed frame
+                // was being satisfied by the row rather than positioning the
+                // column inside it. Filling the row and centring within it is
+                // the arrangement that actually holds.
+                .frame(maxHeight: .infinity, alignment: .center)
             // A fixed height, not a maximum. A stack whose own minimum exceeds
             // the proposal is laid out at that minimum and overflows, and
             // `maxHeight` does not stop it: six lyric lines, of which the
