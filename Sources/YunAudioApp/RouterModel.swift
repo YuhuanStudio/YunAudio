@@ -4630,84 +4630,91 @@ final class RouterModel: ScriptTarget {
     private func persist() {
         guard !isRestoring, !isApplyingPreset, !isAutoAdjusting else { return }
         PreferencesStore.save(
-            Preferences(
-                sourceDeviceUID: verificationAdditionalSourceUIDs == nil
-                    ? selectedSourceUID : verificationSourceUID,
-                destinationDeviceUID: selectedDestinationUID,
-                channelMode: channelMode.rawValue,
-                monoChannel: monoChannel,
-                bufferFrames: bufferFrames,
-                autoStart: autoStart,
-                voiceIsolationEnabled: voiceIsolationEnabled,
-                voiceIsolationMix: voiceIsolationMix,
-                preferredSampleRate: preferredSampleRate,
-                capturedAppBundleIDs: Array(capturedAppBundleIDs),
-                excludedAppBundleIDs: Array(excludedAppBundleIDs),
-                enabledEffects: enabledEffects.map(\.rawValue),
-                effectValues: effectValues,
-                cancelsEcho: cancelsEcho,
-                echoSpeakerUID: echoSpeakerUID,
-                style: style.rawValue,
-                iconStyle: iconStyle,
-                lightingMode: lighting.mode.rawValue,
-                lightingHue: lightingHue,
-                lightingBrightness: lightingBrightness,
-                inputDecibels: inputDecibels,
-                isInputMuted: isInputMuted,
-                outputDecibels: outputDecibels,
-                isOutputMuted: isOutputMuted,
-                loudnessTarget: loudnessTarget.rawValue,
-                monitorDeviceUID: monitorDeviceUID,
-                monitorDecibels: monitorDecibels,
-                isAutoLevelling: isAutoLevelling,
-                isDucking: isDucking,
-                duckDecibels: duckDecibels,
-                sourceRoles: sourceRoles.mapValues(\.rawValue),
-                isPushToTalkEnabled: isPushToTalkEnabled,
-                plugins: enabledPlugins,
-                pluginValues: pluginValues,
-                voicePreset: voicePreset.rawValue,
-                recordsStems: recordsStems,
-                recordingFormat: recordingFormat.rawValue,
-                monitorSends: monitorSends,
-                outputDelays: outputDelays,
-                // The two flat fields are still written so that a file this
-                // version saves can be opened by one that predates buses having
-                // their own: the primary bus is what that version would have
-                // run, which is the closest thing to the truth it can hold.
-                headphoneProfileName: headphoneProfileName,
-                graphicEQ: graphicEQ,
-                busGraphicEQ: busGraphicEQ,
-                busHeadphoneProfiles: busHeadphoneProfiles,
-                recentSourceUIDs: recentSourceUIDs,
-                recentDestinationUIDs: recentDestinationUIDs,
-                // Written on every save, not only when a binding changes: this
-                // rebuilds the whole file, so leaving it out would quietly
-                // erase somebody's controller the next time they moved a fader.
-                midiBindings: midiControl.storedBindings,
-                // Its `didSet` has called `persist()` since the day it was
-                // written, and `Preferences` had no field for it — so the one
-                // setting that decides whether a captured application is still
-                // audible was forgotten at every launch, silently, back to the
-                // default.
-                tapMuteBehavior: tapMuteBehavior.storageKey,
-                // The same omission as `tapMuteBehavior` above, on the field
-                // added directly after it: a `didSet` that persists, a
-                // `Preferences` field to persist into, and no line here joining
-                // them. The memberwise initialiser fills an optional it was not
-                // given with nil and `save` replaces the whole blob, so every
-                // save — including the one the script editor's own `didSet`
-                // triggers — wrote the script away as nothing.
-                residentScript: residentScript,
-                sourceChannelChoices: sourceChannelChoices,
-                additionalSourceUIDs: verificationAdditionalSourceUIDs ?? additionalSourceUIDs,
-                additionalDestinationUIDs: additionalDestinationUIDs,
-                outputTrims: outputTrims,
-                sourceLevels: sourceLevels,
-                obsHost: obsLink.host,
-                obsPort: obsLink.port,
-                obsInputName: obsLink.inputName,
-                obsMirrorsMute: obsLink.mirrorsMute))
+            PendingPreferencesSnapshot(
+                Preferences(
+                    sourceDeviceUID: verificationAdditionalSourceUIDs == nil
+                        ? selectedSourceUID : verificationSourceUID,
+                    destinationDeviceUID: selectedDestinationUID,
+                    channelMode: channelMode.rawValue,
+                    monoChannel: monoChannel,
+                    bufferFrames: bufferFrames,
+                    autoStart: autoStart,
+                    voiceIsolationEnabled: voiceIsolationEnabled,
+                    voiceIsolationMix: voiceIsolationMix,
+                    preferredSampleRate: preferredSampleRate,
+                    capturedAppBundleIDs: [],
+                    excludedAppBundleIDs: [],
+                    enabledEffects: [],
+                    effectValues: effectValues,
+                    cancelsEcho: cancelsEcho,
+                    echoSpeakerUID: echoSpeakerUID,
+                    style: style.rawValue,
+                    iconStyle: iconStyle,
+                    lightingMode: lighting.mode.rawValue,
+                    lightingHue: lightingHue,
+                    lightingBrightness: lightingBrightness,
+                    inputDecibels: inputDecibels,
+                    isInputMuted: isInputMuted,
+                    outputDecibels: outputDecibels,
+                    isOutputMuted: isOutputMuted,
+                    loudnessTarget: loudnessTarget.rawValue,
+                    monitorDeviceUID: monitorDeviceUID,
+                    monitorDecibels: monitorDecibels,
+                    isAutoLevelling: isAutoLevelling,
+                    isDucking: isDucking,
+                    duckDecibels: duckDecibels,
+                    sourceRoles: [:],
+                    isPushToTalkEnabled: isPushToTalkEnabled,
+                    plugins: enabledPlugins,
+                    pluginValues: pluginValues,
+                    voicePreset: voicePreset.rawValue,
+                    recordsStems: recordsStems,
+                    recordingFormat: recordingFormat.rawValue,
+                    monitorSends: monitorSends,
+                    outputDelays: outputDelays,
+                    // The two flat fields are still written so that a file this
+                    // version saves can be opened by one that predates buses having
+                    // their own: the primary bus is what that version would have
+                    // run, which is the closest thing to the truth it can hold.
+                    headphoneProfileName: headphoneProfileName,
+                    graphicEQ: graphicEQ,
+                    busGraphicEQ: busGraphicEQ,
+                    busHeadphoneProfiles: busHeadphoneProfiles,
+                    recentSourceUIDs: recentSourceUIDs,
+                    recentDestinationUIDs: recentDestinationUIDs,
+                    // Written on every save, not only when a binding changes: this
+                    // rebuilds the whole file, so leaving it out would quietly
+                    // erase somebody's controller the next time they moved a fader.
+                    midiBindings: [:],
+                    // Its `didSet` has called `persist()` since the day it was
+                    // written, and `Preferences` had no field for it — so the one
+                    // setting that decides whether a captured application is still
+                    // audible was forgotten at every launch, silently, back to the
+                    // default.
+                    tapMuteBehavior: tapMuteBehavior.storageKey,
+                    // The same omission as `tapMuteBehavior` above, on the field
+                    // added directly after it: a `didSet` that persists, a
+                    // `Preferences` field to persist into, and no line here joining
+                    // them. The memberwise initialiser fills an optional it was not
+                    // given with nil and `save` replaces the whole blob, so every
+                    // save — including the one the script editor's own `didSet`
+                    // triggers — wrote the script away as nothing.
+                    residentScript: residentScript,
+                    sourceChannelChoices: sourceChannelChoices,
+                    additionalSourceUIDs: verificationAdditionalSourceUIDs
+                        ?? additionalSourceUIDs,
+                    additionalDestinationUIDs: additionalDestinationUIDs,
+                    outputTrims: outputTrims,
+                    sourceLevels: sourceLevels,
+                    obsHost: obsLink.host,
+                    obsPort: obsLink.port,
+                    obsInputName: obsLink.inputName,
+                    obsMirrorsMute: obsLink.mirrorsMute),
+                capturedAppBundleIDs: capturedAppBundleIDs,
+                excludedAppBundleIDs: excludedAppBundleIDs,
+                enabledEffects: enabledEffects,
+                sourceRoles: sourceRoles,
+                midiBindings: midiControl.bindings))
     }
 
     // MARK: Devices

@@ -467,6 +467,12 @@ final class MIDIController {
 
     /// The flat form kept in the preferences file.
     var storedBindings: [String: String] {
+        Self.storedBindings(for: bindings)
+    }
+
+    nonisolated static func storedBindings(
+        for bindings: [MIDITarget: MIDIAddress]
+    ) -> [String: String] {
         bindings.reduce(into: [:]) { $0[$1.key.storageKey] = $1.value.storageKey }
     }
 

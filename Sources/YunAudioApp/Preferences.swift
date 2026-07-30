@@ -228,6 +228,61 @@ struct Preferences: Codable, Equatable, Sendable {
         obsMirrorsMute: false)
 }
 
+/// A value-semantic preference snapshot whose derived collections are built
+/// only if this is the last value in the coalescing window.
+///
+/// The source sets and dictionaries are copied here while `persist()` is
+/// called. Their copy-on-write storage preserves the exact event-time state,
+/// including when a later automatic adjustment deliberately suppresses
+/// persistence. Turning them into the Codable shape is the allocating part and
+/// can wait until the writer knows this snapshot will actually reach disk.
+struct PendingPreferencesSnapshot {
+    private struct DeferredCollections {
+        var capturedAppBundleIDs: Set<String>
+        var excludedAppBundleIDs: Set<String>
+        var enabledEffects: Set<EffectKind>
+        var sourceRoles: [String: LevelCalibration.Role]
+        var midiBindings: [MIDITarget: MIDIAddress]
+    }
+
+    private var preferences: Preferences
+    private var deferredCollections: DeferredCollections?
+
+    init(_ preferences: Preferences) {
+        self.preferences = preferences
+        deferredCollections = nil
+    }
+
+    init(
+        _ preferences: Preferences,
+        capturedAppBundleIDs: Set<String>,
+        excludedAppBundleIDs: Set<String>,
+        enabledEffects: Set<EffectKind>,
+        sourceRoles: [String: LevelCalibration.Role],
+        midiBindings: [MIDITarget: MIDIAddress]
+    ) {
+        self.preferences = preferences
+        deferredCollections = DeferredCollections(
+            capturedAppBundleIDs: capturedAppBundleIDs,
+            excludedAppBundleIDs: excludedAppBundleIDs,
+            enabledEffects: enabledEffects,
+            sourceRoles: sourceRoles,
+            midiBindings: midiBindings)
+    }
+
+    func materialised() -> Preferences {
+        guard let deferredCollections else { return preferences }
+        var materialised = preferences
+        materialised.capturedAppBundleIDs = Array(deferredCollections.capturedAppBundleIDs)
+        materialised.excludedAppBundleIDs = Array(deferredCollections.excludedAppBundleIDs)
+        materialised.enabledEffects = deferredCollections.enabledEffects.map(\.rawValue)
+        materialised.sourceRoles = deferredCollections.sourceRoles.mapValues(\.rawValue)
+        materialised.midiBindings = MIDIController.storedBindings(
+            for: deferredCollections.midiBindings)
+        return materialised
+    }
+}
+
 extension TapMuteBehavior {
     /// A name that is safe to write down.
     ///
@@ -252,9 +307,10 @@ extension TapMuteBehavior {
 @MainActor
 enum PreferencesStore {
     private static let key = "com.yuhuanstudio.yunaudio.preferences"
-    private static let writer = CoalescedPreferenceWriter<Preferences>(
+    private static let writer = CoalescedPreferenceWriter<PendingPreferencesSnapshot>(
         delay: .milliseconds(150)
-    ) { preferences in
+    ) { snapshot in
+        let preferences = snapshot.materialised()
         guard let data = try? JSONEncoder().encode(preferences) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
@@ -284,7 +340,12 @@ enum PreferencesStore {
 
     static func save(_ preferences: Preferences) {
         installTerminationObserver()
-        writer.submit(preferences)
+        writer.submit(PendingPreferencesSnapshot(preferences))
+    }
+
+    static func save(_ snapshot: PendingPreferencesSnapshot) {
+        installTerminationObserver()
+        writer.submit(snapshot)
     }
 
     private static func installTerminationObserver() {
