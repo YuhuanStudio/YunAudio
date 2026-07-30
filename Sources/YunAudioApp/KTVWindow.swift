@@ -929,13 +929,8 @@ struct KTVStage: View {
                     }
                     .id(index)
                     // The words are an index of the song; this is what makes
-                    // it one you can use. `contentShape` because the row is
-                    // mostly the space between the glyphs, and a hit test
-                    // against the glyphs alone means most of a line is not a
-                    // target.
-                    .contentShape(Rectangle())
-                    .onTapGesture { model.seekToLyricLine(index) }
-                    .help(loc("Play from this line"))
+                    // it one you can use, and what says so before it is tried.
+                    .seekableLine { model.seekToLyricLine(index) }
                 }
             }
         }
@@ -1032,5 +1027,43 @@ struct KTVStage: View {
     private static func clock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "--:--" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+}
+
+/// A lyric line that can be played from, and that shows it under the pointer.
+///
+/// Its own view with its own state, deliberately. Hovering is a per-row fact,
+/// and holding it on the stage would invalidate the stage — the blurred cover,
+/// every other line, the score strip — on every crossing of the pointer, for a
+/// change that affects one row's background. This keeps the redraw inside the
+/// row it belongs to.
+private struct SeekableLine<Content: View>: View {
+    let seek: () -> Void
+    @ViewBuilder let content: Content
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPointedAt = false
+
+    var body: some View {
+        content
+            // The row is mostly the space between the glyphs; a hit test
+            // against the glyphs alone leaves most of a line dead.
+            .contentShape(Rectangle())
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.white.opacity(isPointedAt ? 0.08 : 0))
+                    .padding(.horizontal, -12)
+                    .padding(.vertical, -6)
+            }
+            .onHover { isPointedAt = $0 }
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isPointedAt)
+            .onTapGesture(perform: seek)
+            .help(loc("Play from this line"))
+    }
+}
+
+extension View {
+    /// Marks a lyric line as somewhere the song can be played from.
+    fileprivate func seekableLine(seek: @escaping () -> Void) -> some View {
+        SeekableLine(seek: seek) { self }
     }
 }
