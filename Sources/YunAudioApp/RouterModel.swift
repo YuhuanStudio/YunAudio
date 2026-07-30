@@ -4240,7 +4240,14 @@ final class RouterModel: ScriptTarget {
         nowPlaying = NowPlaying.Track(
             application: "Spotify",
             title: "年少心動雨季 (《那年盛夏》電視劇片頭曲)", artist: "黃霄雲",
-            album: "天賜的聲音", position: 80.7, duration: 265, isPlaying: true)
+            album: "天賜的聲音", position: 80.7, duration: 265, isPlaying: true,
+            // A real cover, because the two branches of `SongArtwork` are not
+            // the same view: without a URL it draws a gradient and a letter,
+            // which takes whatever size it is given, and with one it draws a
+            // resizable image that arrives asynchronously and lays the stage
+            // out twice. Every render and every photograph of this stage took
+            // the first branch, so the one a user actually sees was untested.
+            artworkURL: URL(string: "https://p2.music.126.net/VZBj5FRD5zQpvkquGkBYEw==/109951173224181614.jpg"))
         // A real file, parsed rather than assembled: the credit block that
         // opens it, the timestamps as the index sends them, and a rest in the
         // middle. Every earlier fixture was three short sentences written to
