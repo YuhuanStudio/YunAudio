@@ -9517,9 +9517,31 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// The image currently installed into AppKit.
+    ///
+    /// Restore and status-item installation both ask for the icon. On systems
+    /// where `NSApp` already exists during model construction, the first call
+    /// is not the no-op the launch code once assumed: AppKit rasterises and
+    /// retains another full backing image. The style name is enough to make
+    /// this operation idempotent without retaining a second `NSImage` here.
+    @ObservationIgnored private var appliedIconStyle: String?
+
+    nonisolated static func shouldApplyIconStyle(
+        _ requested: String, previouslyApplied: String?,
+        applicationIsAvailable: Bool
+    ) -> Bool {
+        applicationIsAvailable && requested != previouslyApplied
+    }
+
     func applyIconStyle() {
-        NSApp?.applicationIconImage = YunIconBadge.image(
+        guard let application = NSApp,
+            Self.shouldApplyIconStyle(
+                iconStyle, previouslyApplied: appliedIconStyle,
+                applicationIsAvailable: true)
+        else { return }
+        application.applicationIconImage = YunIconBadge.image(
             size: 512, style: YunIconBadge.style(named: iconStyle))
+        appliedIconStyle = iconStyle
     }
 
     /// IO cycles completed. Only used by the flow check, which needs to know

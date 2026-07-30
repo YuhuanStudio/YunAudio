@@ -6,6 +6,28 @@ import Testing
 @MainActor
 @Suite("Application icon cache")
 struct AppIconCacheTests {
+    @Test("restoring and installing the same application icon rasterises it once")
+    func repeatedApplicationStyleIsSuppressed() {
+        var applied: String?
+        var rasterisations = 0
+
+        for requested in ["graphite", "graphite", "paper", "paper", "graphite"] {
+            if RouterModel.shouldApplyIconStyle(
+                requested, previouslyApplied: applied,
+                applicationIsAvailable: true)
+            {
+                rasterisations += 1
+                applied = requested
+            }
+        }
+
+        #expect(rasterisations == 3)
+        #expect(
+            !RouterModel.shouldApplyIconStyle(
+                "graphite", previouslyApplied: nil,
+                applicationIsAvailable: false))
+    }
+
     @Test("full workspace icons become bounded row-sized pixels")
     func fullIconsAreNotRetained() throws {
         let source = try Self.image(pixels: 1_024)
