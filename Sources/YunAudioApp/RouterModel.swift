@@ -8731,10 +8731,18 @@ final class RouterModel: ScriptTarget {
         guard slots > 0 else { return }
         for slot in 0..<slots {
             transcriptScratch.withUnsafeMutableBufferPointer { buffer in
+                // An idle route releases this storage, and the accessor then
+                // hands out an empty buffer whose base address is nil — which
+                // this force-unwrapped. The poll timer only has to fall in the
+                // window where the scratch is already gone and the transcribers
+                // are not yet cleared, and the main thread dies: "Unexpectedly
+                // found nil while unwrapping an Optional value", in the middle
+                // of a line of flow-check output.
+                guard let base = buffer.baseAddress, buffer.count > 0 else { return }
                 let taken = engine.drainTranscript(
-                    slot, into: buffer.baseAddress!, capacity: buffer.count)
+                    slot, into: base, capacity: buffer.count)
                 guard taken > 0 else { return }
-                let borrowed = UnsafeBufferPointer(start: buffer.baseAddress, count: taken)
+                let borrowed = UnsafeBufferPointer(start: base, count: taken)
                 if slot < singerTracks.count {
                     // Keep the tuner live while paused without moving the score
                     // clock or recording the voice as part of the performance.

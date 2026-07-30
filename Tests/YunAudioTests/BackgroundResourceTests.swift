@@ -995,6 +995,39 @@ struct BackgroundResourceTests {
         #expect(scratch.retainedSampleBytes == 0)
         #expect(scratch.allocationIdentity == nil)
         #expect(allocation == nil)
+
+        // Released, the accessor hands out an empty buffer whose base address
+        // is nil. Every caller therefore has to check, and `pumpSourceTaps`
+        // did not: it force-unwrapped, and the 20 Hz poll timer only had to
+        // land in the window where the scratch was already gone and the
+        // transcribers were not yet cleared for the main thread to trap.
+        var base: UnsafeMutablePointer<Float>?
+        var count = -1
+        scratch.withUnsafeMutableBufferPointer { buffer in
+            base = buffer.baseAddress
+            count = buffer.count
+        }
+        #expect(base == nil)
+        #expect(count == 0)
+    }
+
+    @Test("the source-tap drain never dereferences a released scratch")
+    func sourceTapDrainChecksTheScratch() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "private func pumpSourceTaps()"))
+        let end = try #require(
+            source.range(
+                of: "private func recognitionApplication",
+                range: start.upperBound..<source.endIndex))
+        let body = source[start.lowerBound..<end.lowerBound]
+
+        #expect(body.contains("guard let base = buffer.baseAddress"))
+        #expect(
+            !body.contains("buffer.baseAddress!"),
+            "the drain force-unwraps a base address that is nil on an idle route")
     }
 
     @Test("new transcript lines stay chronological and are never duplicated")
