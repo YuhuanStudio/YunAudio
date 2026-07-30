@@ -130,15 +130,36 @@ struct KTVStage: View {
                 stageBackground()
 
                 if let track = model.nowPlaying {
+                    let inset = max(34, proxy.size.height * 0.07)
+                    let stageHeight = max(0, proxy.size.height - inset * 2)
                     HStack(alignment: .center, spacing: max(36, proxy.size.width * 0.055)) {
                         trackColumn(
                             track,
-                            width: min(360, max(220, proxy.size.width * 0.31)))
+                            width: min(360, max(220, proxy.size.width * 0.31)),
+                            artwork: Self.artworkSide(
+                                columnWidth: min(360, max(220, proxy.size.width * 0.31)),
+                                stageHeight: stageHeight))
+                        // A fixed height, not a maximum. A stack whose own
+                        // minimum exceeds the proposal is laid out at that
+                        // minimum and overflows, and `maxHeight` does not stop
+                        // it: six lyric lines, of which the wrapped ones are two
+                        // rows each — Chinese production credits routinely wrap
+                        // — grew the row past the window, and the track column
+                        // went down with it until its progress bar and the score
+                        // strip were outside the frame. Reported from a 984×670
+                        // stage. Clipping belongs inside this column, where the
+                        // current line stays centred, rather than at the bottom
+                        // edge of the window.
                         lyricsColumn
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: stageHeight)
+                            // After the height, not before it: the `clipped()`
+                            // inside the column cuts to the column's own bounds,
+                            // which are the oversized ones.
+                            .clipped()
                     }
                     .padding(.horizontal, max(32, proxy.size.width * 0.055))
-                    .padding(.vertical, max(34, proxy.size.height * 0.07))
+                    .padding(.vertical, inset)
                 } else {
                     emptyStage
                 }
@@ -214,10 +235,28 @@ struct KTVStage: View {
             endPoint: .bottomTrailing)
     }
 
-    private func trackColumn(_ track: NowPlaying.Track, width: CGFloat) -> some View {
+    /// Side of the artwork tile, bounded by the stage's height as well as by its
+    /// width.
+    ///
+    /// The tile used to be sized from the window's width alone. On a wide, short
+    /// stage the 360-point ceiling plus the block beneath it passes the height,
+    /// and the column overflows the window exactly as the lyrics did.
+    ///
+    /// Measured on the 1080×720 stage: from the bottom of the tile to the bottom
+    /// of the player row is 138 points with a one-line title. 170 covers a title
+    /// that takes two, with the gap above it.
+    nonisolated static func artworkSide(
+        columnWidth: CGFloat, stageHeight: CGFloat
+    ) -> CGFloat {
+        max(120, min(columnWidth, stageHeight - 170))
+    }
+
+    private func trackColumn(
+        _ track: NowPlaying.Track, width: CGFloat, artwork: CGFloat
+    ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fit)
-                .frame(width: width, height: width)
+                .frame(width: artwork, height: artwork)
                 .background(.black.opacity(0.32))
                 .clipShape(.rect(cornerRadius: 14))
                 .overlay(
@@ -329,7 +368,34 @@ struct KTVStage: View {
             ForEach(-2...3, id: \.self) { offset in
                 let index = current + offset
                 if lyrics.lines.indices.contains(index) {
-                    lyricLine(lyrics.lines[index].text, offset: offset)
+                    let line = lyrics.lines[index]
+                    VStack(alignment: .leading, spacing: 6) {
+                        // Only where it changes hands. A duet names the singer
+                        // on every line it owns, and repeating that above each
+                        // one turns the stage into a cast list.
+                        let previousSinger =
+                            lyrics.lines.indices.contains(index - 1)
+                            ? lyrics.lines[index - 1].singer : nil
+                        if let singer = line.singer, singer != previousSinger {
+                            Text(singer)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(
+                                    Yun.Palette.accent.opacity(
+                                        offset == 0 ? 0.95 : 0.5)
+                                )
+                                .textCase(nil)
+                        }
+                        // A rest goes through the same compositor as a line,
+                        // so it sweeps as the music crosses it and costs the
+                        // stage no ten-hertz read. `CompositedLyricFillTests`
+                        // and `BackgroundResourceTests` both assert this file
+                        // never reads `lyricProgress`, which is what a hand-rolled
+                        // set of filling dots needed and what the compositor
+                        // exists to avoid.
+                        lyricLine(
+                            line.isInterlude ? Self.interludeMark : line.text,
+                            offset: offset)
+                    }
                 }
             }
         }
@@ -393,6 +459,15 @@ struct KTVStage: View {
         .foregroundStyle(.white.opacity(0.72))
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    /// What a rest is drawn as.
+    ///
+    /// Files mark an intro, an interlude or an outro with a timed line and no
+    /// words. Drawn literally that is a gap in the column, which reads as a
+    /// layout fault rather than as music — and it is the one moment a singer
+    /// most wants a countdown for. Three notes, swept by the same compositor as
+    /// the words, say both that it is a rest and how far through it is.
+    static let interludeMark = "♪ ♪ ♪"
 
     private static func lyricOpacity(for offset: Int) -> Double {
         switch offset {
