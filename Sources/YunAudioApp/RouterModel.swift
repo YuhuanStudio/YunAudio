@@ -1605,13 +1605,11 @@ final class RouterModel: ScriptTarget {
         if plainLyrics == nil { lyricsLookupStatus = .loading }
         lyricsLookupTask = Task { [weak self] in
             do {
-                // Decoding four potentially large JSON answers belongs off the
-                // main actor. The previous form resumed this task on the main
-                // actor after each network await, making a successful lyric
-                // lookup visible as a hitch in the whole window.
-                let match = try await Task.detached(priority: .utility) {
-                    try await OnlineLyrics.live.fetch(query)
-                }.value
+                // OnlineLyrics is nonisolated, so its network and decoding work
+                // runs on the generic executor. Keeping it as this task's child
+                // also means changing songs cancels all four provider requests;
+                // Task.detached left them running after their answer was stale.
+                let match = try await OnlineLyrics.live.fetch(query)
                 try Task.checkCancellation()
                 guard let self,
                     let current = self.nowPlaying,

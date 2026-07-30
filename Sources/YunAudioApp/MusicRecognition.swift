@@ -58,14 +58,19 @@ final class MusicRecognition: @unchecked Sendable {
             guard !isDisabled else { return }
             if self.sampleRate != sampleRate {
                 self.pending.removeAll(keepingCapacity: true)
+                self.pending.reserveCapacity(Int(Self.querySeconds * sampleRate))
                 self.sampleRate = sampleRate
                 self.cooldownSamples = 0
             }
             if cooldownSamples > 0 {
-                cooldownSamples = max(0, cooldownSamples - samples.count)
-                return
+                let split = Self.consumeCooldown(
+                    sampleCount: samples.count, cooldownSamples: cooldownSamples)
+                cooldownSamples = split.remaining
+                guard split.discarded < samples.count else { return }
+                pending.append(contentsOf: samples[split.discarded...])
+            } else {
+                self.pending.append(contentsOf: samples)
             }
-            self.pending.append(contentsOf: samples)
             self.startMatchWhenReady()
         }
     }
@@ -86,12 +91,17 @@ final class MusicRecognition: @unchecked Sendable {
         let queryCount = Int(Self.querySeconds * sampleRate)
         guard pending.count >= queryCount else { return }
 
-        let samples = Array(pending.prefix(queryCount))
+        let rate = sampleRate
+        let buffer = pending.withUnsafeBufferPointer { samples in
+            Self.buffer(
+                samples: UnsafeBufferPointer(start: samples.baseAddress, count: queryCount),
+                sampleRate: rate)
+        }
         pending.removeAll(keepingCapacity: true)
         isMatching = true
         let requestedGeneration = generation
 
-        guard let buffer = Self.buffer(samples: samples, sampleRate: sampleRate) else {
+        guard let buffer else {
             isMatching = false
             return
         }
@@ -153,9 +163,32 @@ final class MusicRecognition: @unchecked Sendable {
         return .failed(cocoa.localizedDescription)
     }
 
+    /// Divides one captured block at the end of a retry cooldown.
+    ///
+    /// Dropping the whole block delayed a new signature by whatever audio
+    /// followed the boundary — up to the full drain size — even though only
+    /// the prefix belonged to the cooldown.
+    static func consumeCooldown(
+        sampleCount: Int, cooldownSamples: Int
+    ) -> (discarded: Int, remaining: Int) {
+        let discarded = min(max(0, sampleCount), max(0, cooldownSamples))
+        return (discarded, max(0, cooldownSamples - discarded))
+    }
+
     /// A separate pure construction point so the frame count and sample
     /// values can be asserted without making a network match.
     static func buffer(samples: [Float], sampleRate: Double) -> AVAudioPCMBuffer? {
+        samples.withUnsafeBufferPointer {
+            buffer(samples: $0, sampleRate: sampleRate)
+        }
+    }
+
+    /// The signature accumulator already owns six seconds in one contiguous
+    /// array. Borrow it so constructing an AVAudio buffer does not first copy
+    /// another 1.15 MB at 48 kHz.
+    static func buffer(
+        samples: UnsafeBufferPointer<Float>, sampleRate: Double
+    ) -> AVAudioPCMBuffer? {
         guard
             let format = AVAudioFormat(
                 standardFormatWithSampleRate: sampleRate, channels: 1),
@@ -164,9 +197,8 @@ final class MusicRecognition: @unchecked Sendable {
             let channel = buffer.floatChannelData?[0]
         else { return nil }
         buffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { source in
-            channel.update(from: source.baseAddress!, count: source.count)
-        }
+        guard let source = samples.baseAddress else { return buffer }
+        channel.update(from: source, count: samples.count)
         return buffer
     }
 

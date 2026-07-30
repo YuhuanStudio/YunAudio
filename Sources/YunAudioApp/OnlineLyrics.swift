@@ -35,28 +35,38 @@ struct OnlineLyrics: Sendable {
         let plain: String?
         let parsed: Lyrics?
 
-        init(
+        init?(
             source: Source, trackName: String, artistName: String,
             albumName: String, duration: Double?, synchronised: String?,
-            plain: String?
+            plain: String?, parsed validatedParsed: Lyrics? = nil
         ) {
+            let synchronised = synchronised?.nonEmpty
+            let parsed = validatedParsed ?? synchronised.flatMap(Lyrics.parse)
+            let acceptedSynchronised =
+                parsed != nil && synchronised.map(OnlineLyrics.isInstrumentalLyrics) != true
+                ? synchronised : nil
+            let plain = plain?.nonEmpty
+            let acceptedPlain =
+                plain.map(OnlineLyrics.isInstrumentalLyrics) == true ? nil : plain
+            guard acceptedSynchronised != nil || acceptedPlain != nil else { return nil }
+
             self.source = source
             self.trackName = trackName
             self.artistName = artistName
             self.albumName = albumName
             self.duration = duration
-            self.synchronised = synchronised
-            self.plain = plain
+            self.synchronised = acceptedSynchronised
+            self.plain = acceptedPlain
             // Parsing is linear in every character. A successful answer used
             // to be parsed while ranking, again on the main actor when adopted,
             // and a third time to choose its cache extension.
-            self.parsed = synchronised.flatMap(Lyrics.parse)
+            self.parsed = acceptedSynchronised == nil ? nil : parsed
         }
 
         /// The text worth keeping between launches.
         var cacheText: String? {
-            if let synchronised, Lyrics.parse(synchronised) != nil { return synchronised }
-            return plain?.trimmingCharacters(in: .whitespacesAndNewlines).nonEmpty
+            if parsed != nil, let synchronised { return synchronised }
+            return plain
         }
 
         var cacheExtension: String { parsed == nil ? "txt" : "lrc" }
@@ -146,6 +156,36 @@ struct OnlineLyrics: Sendable {
         let klyric: Part?
     }
 
+    /// Query-side normalisation is invariant across every candidate.
+    ///
+    /// A search currently returns fifteen candidates per provider. Computing
+    /// both Chinese transliterations inside `matches` repeated the same two
+    /// CoreFoundation transforms up to forty-five times for one lookup.
+    private struct WantedMatch: Sendable {
+        let title: String
+        let latinTitle: String
+        let isBacking: Bool
+        let artist: String
+        let latinArtist: String
+        let duration: Double
+
+        init(_ query: Query) {
+            title = OnlineLyrics.canonicalTitle(query.title)
+            latinTitle = OnlineLyrics.transliterated(title)
+            isBacking = OnlineLyrics.isBackingTitle(query.title)
+            artist = OnlineLyrics.normalised(query.artist)
+            latinArtist = OnlineLyrics.transliterated(query.artist)
+            duration = query.duration
+        }
+    }
+
+    private struct LRCLIBSelection {
+        let candidate: LRCLIBCandidate
+        let synchronised: String?
+        let plain: String?
+        let parsed: Lyrics?
+    }
+
     private enum Attempt: Sendable {
         case answer(Match?)
         case failed(Failure)
@@ -169,10 +209,13 @@ struct OnlineLyrics: Sendable {
     /// identify the exact recording by duration; lyrics.ovh is a title/artist
     /// fallback. One dead service does not hide a valid answer from the others.
     func fetch(_ query: Query) async throws -> Match? {
-        try await withThrowingTaskGroup(of: Attempt.self) { group in
-            group.addTask { await attempt { try await fetchLRCLIB(query) } }
-            group.addTask { await attempt { try await fetchQQMusic(query) } }
-            group.addTask { await attempt { try await fetchNetEase(query) } }
+        let wanted = WantedMatch(query)
+        return try await withThrowingTaskGroup(
+            of: Attempt.self, returning: Match?.self
+        ) { group in
+            group.addTask { await attempt { try await fetchLRCLIB(query, wanted: wanted) } }
+            group.addTask { await attempt { try await fetchQQMusic(query, wanted: wanted) } }
+            group.addTask { await attempt { try await fetchNetEase(query, wanted: wanted) } }
             group.addTask { await attempt { try await fetchLyricsOvh(query) } }
 
             var answers: [Match] = []
@@ -225,7 +268,7 @@ struct OnlineLyrics: Sendable {
         }
     }
 
-    private func fetchLRCLIB(_ query: Query) async throws -> Match? {
+    private func fetchLRCLIB(_ query: Query, wanted: WantedMatch) async throws -> Match? {
         var components = URLComponents(string: "https://lrclib.net/api/search")
         components?.queryItems = [
             URLQueryItem(name: "track_name", value: query.title),
@@ -235,11 +278,12 @@ struct OnlineLyrics: Sendable {
         guard let url = components?.url else { throw Failure.badResponse }
         let candidates: [LRCLIBCandidate] = try await decode(
             [LRCLIBCandidate].self, from: request(url))
-        guard let best = bestLRCLIBMatch(candidates, query: query) else { return nil }
+        guard let best = bestLRCLIBMatch(candidates, wanted: wanted) else { return nil }
         return Match(
-            source: .lrclib, trackName: best.trackName, artistName: best.artistName,
-            albumName: best.albumName, duration: best.duration,
-            synchronised: best.syncedLyrics?.nonEmpty, plain: best.plainLyrics?.nonEmpty)
+            source: .lrclib, trackName: best.candidate.trackName,
+            artistName: best.candidate.artistName,
+            albumName: best.candidate.albumName, duration: best.candidate.duration,
+            synchronised: best.synchronised, plain: best.plain, parsed: best.parsed)
     }
 
     private func fetchLyricsOvh(_ query: Query) async throws -> Match? {
@@ -262,7 +306,7 @@ struct OnlineLyrics: Sendable {
         }
     }
 
-    private func fetchQQMusic(_ query: Query) async throws -> Match? {
+    private func fetchQQMusic(_ query: Query, wanted: WantedMatch) async throws -> Match? {
         var search = URLComponents(
             string: "https://c.y.qq.com/soso/fcgi-bin/client_search_cp")
         search?.queryItems = [
@@ -280,7 +324,7 @@ struct OnlineLyrics: Sendable {
                     matches(
                         title: $0.songname,
                         artist: $0.singer.map(\.name).joined(separator: " "),
-                        duration: $0.interval, query: query)
+                        duration: $0.interval, wanted: wanted)
                 })
                 .min(by: {
                     abs($0.interval - query.duration) < abs($1.interval - query.duration)
@@ -302,10 +346,10 @@ struct OnlineLyrics: Sendable {
             source: .qqMusic, trackName: song.songname,
             artistName: song.singer.map(\.name).joined(separator: " / "),
             albumName: song.albumname, duration: song.interval,
-            synchronised: Lyrics.parse(words) == nil ? nil : words, plain: words)
+            synchronised: words, plain: words)
     }
 
-    private func fetchNetEase(_ query: Query) async throws -> Match? {
+    private func fetchNetEase(_ query: Query, wanted: WantedMatch) async throws -> Match? {
         var search = URLComponents(string: "https://music.163.com/api/search/get/web")
         search?.queryItems = [
             URLQueryItem(name: "s", value: "\(query.title) \(query.artist)"),
@@ -322,7 +366,7 @@ struct OnlineLyrics: Sendable {
                 .filter({
                     matches(
                         title: $0.name, artist: $0.artists.map(\.name).joined(separator: " "),
-                        duration: $0.duration / 1_000, query: query)
+                        duration: $0.duration / 1_000, wanted: wanted)
                 })
                 .min(by: {
                     abs($0.duration / 1_000 - query.duration)
@@ -340,14 +384,25 @@ struct OnlineLyrics: Sendable {
         guard let lyricURL = lyric?.url else { throw Failure.badResponse }
         let reply: NetEaseLyricsReply = try await decode(
             NetEaseLyricsReply.self, from: request(lyricURL))
-        guard let words = reply.klyric?.lyric.nonEmpty ?? reply.lrc?.lyric.nonEmpty else {
-            return nil
+        var plain: String?
+        for words in [reply.klyric?.lyric.nonEmpty, reply.lrc?.lyric.nonEmpty].compactMap({
+            $0
+        }) {
+            guard !Self.isInstrumentalLyrics(words) else { continue }
+            if plain == nil { plain = words }
+            if let parsed = Lyrics.parse(words) {
+                return Match(
+                    source: .netEase, trackName: song.name,
+                    artistName: song.artists.map(\.name).joined(separator: " / "),
+                    albumName: song.album.name, duration: song.duration / 1_000,
+                    synchronised: words, plain: words, parsed: parsed)
+            }
         }
         return Match(
             source: .netEase, trackName: song.name,
             artistName: song.artists.map(\.name).joined(separator: " / "),
             albumName: song.album.name, duration: song.duration / 1_000,
-            synchronised: Lyrics.parse(words) == nil ? nil : words, plain: words)
+            synchronised: nil, plain: plain)
     }
 
     private func request(_ url: URL, referer: String? = nil) -> URLRequest {
@@ -374,53 +429,71 @@ struct OnlineLyrics: Sendable {
     }
 
     private func bestLRCLIBMatch(
-        _ candidates: [LRCLIBCandidate], query: Query
-    ) -> LRCLIBCandidate? {
-        return
-            candidates
-            .filter {
-                let hasWords =
-                    $0.syncedLyrics?.nonEmpty != nil || $0.plainLyrics?.nonEmpty != nil
-                return hasWords
-                    && matches(
-                        title: $0.trackName, artist: $0.artistName,
-                        duration: $0.duration, query: query)
+        _ candidates: [LRCLIBCandidate], wanted: WantedMatch
+    ) -> LRCLIBSelection? {
+        var best: LRCLIBSelection?
+        for candidate in candidates {
+            guard
+                matches(
+                    title: candidate.trackName, artist: candidate.artistName,
+                    duration: candidate.duration, wanted: wanted)
+            else { continue }
+            let synchronised = candidate.syncedLyrics?.nonEmpty
+            let parsed = synchronised.flatMap(Lyrics.parse)
+            let acceptedSynchronised =
+                parsed != nil
+                    && synchronised.map(Self.isInstrumentalLyrics) != true
+                ? synchronised : nil
+            let acceptedPlain =
+                candidate.plainLyrics?.nonEmpty.flatMap {
+                    Self.isInstrumentalLyrics($0) ? nil : $0
+                }
+            guard acceptedSynchronised != nil || acceptedPlain != nil else { continue }
+            let selection = LRCLIBSelection(
+                candidate: candidate, synchronised: acceptedSynchronised,
+                plain: acceptedPlain,
+                parsed: acceptedSynchronised == nil ? nil : parsed)
+            guard let current = best else {
+                best = selection
+                continue
             }
-            .min {
-                let leftTimed = Lyrics.parse($0.syncedLyrics ?? "") != nil
-                let rightTimed = Lyrics.parse($1.syncedLyrics ?? "") != nil
-                if leftTimed != rightTimed { return leftTimed && !rightTimed }
-                return abs($0.duration - query.duration) < abs($1.duration - query.duration)
+            let selectionTimed = selection.parsed != nil
+            let currentTimed = current.parsed != nil
+            if selectionTimed != currentTimed {
+                if selectionTimed { best = selection }
+            } else if abs(candidate.duration - wanted.duration)
+                < abs(current.candidate.duration - wanted.duration)
+            {
+                best = selection
             }
+        }
+        return best
     }
 
     /// Loose enough for live/TV edition suffixes, strict enough not to attach
     /// another recording merely because a search engine ranked it highly.
     private func matches(
-        title: String, artist: String, duration: Double, query: Query
+        title: String, artist: String, duration: Double, wanted: WantedMatch
     ) -> Bool {
-        let wantedTitle = Self.canonicalTitle(query.title)
         let candidateTitle = Self.canonicalTitle(title)
-        let queryIsBacking = Self.isBackingTitle(query.title)
         let candidateIsBacking = Self.isBackingTitle(title)
         let titleFits =
-            candidateTitle == wantedTitle
-            || Self.transliterated(candidateTitle) == Self.transliterated(wantedTitle)
-            || (min(candidateTitle.count, wantedTitle.count) >= 4
-                && (candidateTitle.contains(wantedTitle)
-                    || wantedTitle.contains(candidateTitle)))
-        let wantedArtist = Self.normalised(query.artist)
+            candidateTitle == wanted.title
+            || Self.transliterated(candidateTitle) == wanted.latinTitle
+            || (min(candidateTitle.count, wanted.title.count) >= 4
+                && (candidateTitle.contains(wanted.title)
+                    || wanted.title.contains(candidateTitle)))
         let candidateArtist = Self.normalised(artist)
-        let wantedArtistLatin = Self.transliterated(query.artist)
         let candidateArtistLatin = Self.transliterated(artist)
         let artistFits =
-            wantedArtist.isEmpty || candidateArtist.isEmpty
-            || candidateArtist.contains(wantedArtist) || wantedArtist.contains(candidateArtist)
-            || candidateArtistLatin.contains(wantedArtistLatin)
-            || wantedArtistLatin.contains(candidateArtistLatin)
-        let durationFits = query.duration <= 0 || abs(duration - query.duration) <= 12
+            wanted.artist.isEmpty || candidateArtist.isEmpty
+            || candidateArtist.contains(wanted.artist)
+            || wanted.artist.contains(candidateArtist)
+            || candidateArtistLatin.contains(wanted.latinArtist)
+            || wanted.latinArtist.contains(candidateArtistLatin)
+        let durationFits = wanted.duration <= 0 || abs(duration - wanted.duration) <= 12
         return titleFits && artistFits && durationFits
-            && (queryIsBacking || !candidateIsBacking)
+            && (wanted.isBacking || !candidateIsBacking)
     }
 
     static func canonicalTitle(_ value: String) -> String {
@@ -448,6 +521,38 @@ struct OnlineLyrics: Sendable {
         let title = normalised(value)
         return ["伴奏", "纯音乐", "純音樂", "instrumental", "karaoke", "offvocal"]
             .contains { title.contains(normalised($0)) }
+    }
+
+    /// True for the placeholder LRC some catalogues return for an instrumental.
+    ///
+    /// Its timestamps make it look like the strongest possible answer to the
+    /// provider race, so title matching alone is insufficient: releases often
+    /// omit "伴奏" from the searchable title even when the lyric body says
+    /// there are no words.
+    static func isInstrumentalLyrics(_ value: String) -> Bool {
+        let compact = normalised(value)
+        if [
+            "此歌曲为没有填词的纯音乐请您欣赏",
+            "此歌曲為沒有填詞的純音樂請您欣賞",
+            "该歌曲为纯音乐请欣赏",
+            "該歌曲為純音樂請欣賞",
+            "纯音乐请欣赏",
+            "純音樂請欣賞",
+            "暂无歌词",
+            "暫無歌詞",
+        ].contains(where: compact.contains) {
+            return true
+        }
+
+        let bodies = value.split(whereSeparator: \.isNewline).compactMap { raw -> String? in
+            var line = raw[...]
+            while line.first == "[", let close = line.firstIndex(of: "]") {
+                line = line[line.index(after: close)...]
+            }
+            return normalised(String(line)).nonEmpty
+        }
+        let placeholders = Set(["instrumental", "musiconly", "纯音乐", "純音樂"])
+        return !bodies.isEmpty && bodies.allSatisfy(placeholders.contains)
     }
 
     static func normalised(_ value: String) -> String {

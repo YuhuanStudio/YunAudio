@@ -153,6 +153,171 @@ struct OnlineLyricsTests {
         #expect(match.parsed?.lines.count == 2)
     }
 
+    @Test("NetEase falls back from word timing to its standard LRC timeline")
+    func netEaseStandardTimelineFallback() async throws {
+        let client = OnlineLyrics { request in
+            let url = try #require(request.url)
+            let body: String
+            let status: Int
+            switch (url.host, url.path) {
+            case ("music.163.com", let path) where path.contains("search"):
+                body =
+                    """
+                    {"result":{"songs":[{
+                      "id":42,"name":"年少心动雨季","duration":265000,
+                      "album":{"name":"年少心动雨季"},
+                      "artists":[{"name":"黄霄雲"}]
+                    }]}}
+                    """
+                status = 200
+            case ("music.163.com", let path) where path.contains("lyric"):
+                body =
+                    """
+                    {
+                      "klyric":{"lyric":"[18960,640](0,320)word(320,320)timing"},
+                      "lrc":{"lyric":"[00:18.96]first line\\n[00:25.65]second line"}
+                    }
+                    """
+                status = 200
+            case ("lrclib.net", _):
+                body = "[]"
+                status = 200
+            case ("c.y.qq.com", _):
+                body = #"{"data":{"song":{"list":[]}}}"#
+                status = 200
+            case ("api.lyrics.ovh", _):
+                body = "{}"
+                status = 404
+            default:
+                Issue.record("unexpected request \(url)")
+                body = "{}"
+                status = 500
+            }
+            return (Data(body.utf8), response(for: request, status: status))
+        }
+
+        let match = try #require(
+            try await client.fetch(
+                .init(
+                    title: "年少心动雨季", artist: "黄霄雲",
+                    album: "年少心动雨季", duration: 265)))
+        #expect(match.source == .netEase)
+        #expect(match.parsed?.lines.count == 2)
+        #expect(abs((match.parsed?.lines.first?.time ?? 0) - 18.96) < 0.001)
+    }
+
+    @Test("a timed instrumental placeholder is not accepted as lyrics")
+    func instrumentalPlaceholderIsRejected() async throws {
+        let client = OnlineLyrics { request in
+            let url = try #require(request.url)
+            let body: String
+            let status: Int
+            switch (url.host, url.path) {
+            case ("c.y.qq.com", let path) where path.contains("client_search"):
+                body =
+                    """
+                    {"data":{"song":{"list":[{
+                      "songmid":"instrumental","songname":"年少心动雨季",
+                      "albumname":"年少心动雨季","interval":265,
+                      "singer":[{"name":"黄霄雲"}]
+                    }]}}}
+                    """
+                status = 200
+            case ("c.y.qq.com", _):
+                body = #"{"lyric":"[00:00.00]此歌曲为没有填词的纯音乐，请您欣赏"}"#
+                status = 200
+            case ("lrclib.net", _):
+                body = "[]"
+                status = 200
+            case ("music.163.com", _):
+                body = #"{"result":{"songs":[]}}"#
+                status = 200
+            case ("api.lyrics.ovh", _):
+                body = "{}"
+                status = 404
+            default:
+                body = "{}"
+                status = 500
+            }
+            return (Data(body.utf8), response(for: request, status: status))
+        }
+
+        let match = try await client.fetch(
+            .init(
+                title: "年少心动雨季", artist: "黄霄雲",
+                album: "年少心动雨季", duration: 265))
+        #expect(match == nil)
+    }
+
+    @Test("cancelling a lookup cancels all four provider requests")
+    func cancellationReachesProviders() async throws {
+        actor Probe {
+            var arrivals = 0
+            var cancellations = 0
+            var waiters: [CheckedContinuation<Void, Never>] = []
+
+            func arrive() {
+                arrivals += 1
+                guard arrivals == 4 else { return }
+                let waiting = waiters
+                waiters.removeAll()
+                for waiter in waiting { waiter.resume() }
+            }
+
+            func waitForAll() async {
+                guard arrivals < 4 else { return }
+                await withCheckedContinuation { waiters.append($0) }
+            }
+
+            func cancelled() {
+                cancellations += 1
+            }
+        }
+
+        let probe = Probe()
+        let client = OnlineLyrics { request in
+            await probe.arrive()
+            do {
+                try await Task.sleep(for: .seconds(30))
+            } catch is CancellationError {
+                await probe.cancelled()
+                throw CancellationError()
+            }
+            return (Data(), response(for: request))
+        }
+        let lookup = Task {
+            try await client.fetch(
+                .init(
+                    title: "年少心动雨季", artist: "黄霄雲",
+                    album: "年少心动雨季", duration: 265))
+        }
+        await probe.waitForAll()
+        lookup.cancel()
+
+        do {
+            _ = try await lookup.value
+            Issue.record("a cancelled lookup returned normally")
+        } catch is CancellationError {
+            // The cancellation is the expected answer.
+        }
+        #expect(await probe.cancellations == 4)
+    }
+
+    @Test("the model does not detach provider requests from song cancellation")
+    func modelLookupIsStructured() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        let start = try #require(source.range(of: "private func startLyricsLookup"))
+        let end = try #require(
+            source.range(
+                of: "private static func lyricsIdentity",
+                range: start.upperBound..<source.endIndex))
+        let implementation = source[start.lowerBound..<end.lowerBound]
+        #expect(implementation.contains("OnlineLyrics.live.fetch(query)"))
+        #expect(!implementation.contains("let match = try await Task.detached"))
+    }
+
     @Test("cache names identify the database and timing format")
     func cacheNames() {
         let directory = URL(fileURLWithPath: "/tmp/lyrics")
@@ -218,5 +383,33 @@ struct MusicRecognitionTests {
             MusicRecognition.describe(
                 NSError(domain: "com.apple.ShazamCore", code: 102))
                 == .catalogueAccessNotEnabled)
+    }
+
+    @Test("signature construction borrows the six-second accumulator")
+    func borrowedAudioBuffer() throws {
+        let samples: [Float] = [0.125, -0.25, 0.5, -1]
+        let buffer = try #require(
+            samples.withUnsafeBufferPointer {
+                MusicRecognition.buffer(samples: $0, sampleRate: 48_000)
+            })
+        let channel = try #require(buffer.floatChannelData?[0])
+        #expect((0..<4).map { channel[$0] } == samples)
+
+        let queryFrames = Int(MusicRecognition.querySeconds * 48_000)
+        #expect(queryFrames == 288_000)
+        #expect(queryFrames * MemoryLayout<Float>.stride == 1_152_000)
+    }
+
+    @Test("audio after a cooldown boundary starts the next signature")
+    func cooldownBoundary() {
+        let crossing = MusicRecognition.consumeCooldown(
+            sampleCount: 700, cooldownSamples: 500)
+        #expect(crossing.discarded == 500)
+        #expect(crossing.remaining == 0)
+
+        let stillCooling = MusicRecognition.consumeCooldown(
+            sampleCount: 300, cooldownSamples: 500)
+        #expect(stillCooling.discarded == 300)
+        #expect(stillCooling.remaining == 200)
     }
 }
