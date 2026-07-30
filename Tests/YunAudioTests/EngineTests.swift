@@ -123,8 +123,8 @@ struct NegotiatedGraphTimingTests {
         // quarters of the cleared output untouched: a precise 6.02 dB loss and
         // a 187.5 Hz gate at 48 kHz.
         let truncatedRMS = sqrt((64 * 0.25 * 0.25) / 256)
-        let loss = 20 * log10(Double(0.5 / truncatedRMS))
-        #expect(abs(truncatedRMS - 0.25) < 0.000_001)
+        let loss = 20 * log10(Double(0.25 / truncatedRMS))
+        #expect(abs(truncatedRMS - 0.125) < 0.000_001)
         #expect(abs(loss - 6.020_599_913_279_624) < 0.000_001)
         #expect(timing.sampleRate / Double(timing.cycleFrames) == 187.5)
     }
