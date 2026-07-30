@@ -3343,10 +3343,38 @@ struct FailureMessageTests {
 
     @Test("every echo cancellation failure the engine can record has a sentence")
     func echoFailuresAreExplained() {
-        for reason in [
-            RoutingEngine.EchoFailure.notBuilt, RoutingEngine.EchoFailure.wouldNotStart,
-        ] {
+        // Iterated rather than listed. The list here used to be written out by
+        // hand beside a list in the engine, which is two lists that drift: a
+        // reason added to one and not the other reaches the user as the
+        // engine's own English in the middle of a Chinese interface.
+        for reason in RoutingEngine.EchoFailure.all {
             #expect(RouterModel.echoMessage(reason) != reason, "\(reason)")
+        }
+    }
+
+    /// Every refusal `EchoCancellationBridge` can throw has to land on one of
+    /// those reasons, or the interface falls through to `default` and prints
+    /// the engine's own words.
+    @Test("every refusal the canceller can throw carries a known reason")
+    func echoSetupErrorsCarryKnownReasons() {
+        let errors: [EchoCancellationSetupError] = [
+            .microphoneNotFound(uid: "mic"),
+            .speakerNotFound(uid: "speaker"),
+            .microphoneCannotPresentRouterRate(
+                microphoneRates: [16_000], routerRate: 48_000),
+            .noSharedSampleRate(microphoneRates: [48_000], speakerRates: [16_000]),
+            .sampleRateNotApplied(rate: 48_000),
+            .aggregateNotCreated,
+            .componentMissing,
+            .unitNotInstantiated(status: -50),
+            .unitSetupFailed(.init(step: .initialise, status: -10_868)),
+            .captureClockDiffersFromRouter(captureRate: 44_100, routerRate: 48_000),
+            .cancelledRingNotAllocated(frames: 12_000),
+        ]
+        for error in errors {
+            #expect(RoutingEngine.EchoFailure.all.contains(error.reason), "\(error)")
+            #expect(RouterModel.echoMessage(error.reason) != error.reason, "\(error)")
+            #expect(!error.detail.isEmpty, "\(error)")
         }
     }
 

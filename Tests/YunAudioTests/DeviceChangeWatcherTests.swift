@@ -53,6 +53,49 @@ struct DeviceChangeWatcherTests {
         #expect(inventory.reads == 2)
     }
 
+    /// A watcher whose baseline never arrives has to start working anyway.
+    ///
+    /// It did not. `establishBaseline` is reached from one code path in
+    /// RouterModel, the verification process reads its inventory synchronously
+    /// and takes the other one, and the watcher then swallowed every
+    /// notification for the lifetime of the process — a decoy device created
+    /// beside a running route was never seen, and neither was a destination
+    /// being destroyed underneath one. The first read is the baseline now:
+    /// silent, because it has nothing to be a change from, and after it every
+    /// notification is a real comparison.
+    @Test("a probe with no baseline supplied baselines itself on its first read")
+    func probeBaselinesItselfWithoutBeingTold() {
+        let inventory = Inventory([12, 34])
+        let probe = DeviceInventoryProbe(initial: nil, read: inventory.read)
+
+        // Adopted, not announced: announcing it would mean a second
+        // whole-machine enumeration beside the launch inventory, every launch.
+        #expect(!probe.readChanged())
+        #expect(inventory.reads == 1)
+
+        inventory.set([12, 34, 56])
+        #expect(probe.readChanged())
+        inventory.set([12, 34, 56])
+        #expect(!probe.readChanged())
+        #expect(inventory.reads == 3)
+    }
+
+    /// A read that failed is not a machine with no devices, and it must not
+    /// become the baseline either — that would make the next successful read
+    /// look like every device on the machine appearing at once.
+    @Test("a failed first read leaves the probe still waiting for a baseline")
+    func failedFirstReadDoesNotBaseline() {
+        let inventory = Inventory(nil)
+        let probe = DeviceInventoryProbe(initial: nil, read: inventory.read)
+
+        #expect(!probe.readChanged())
+        inventory.set([12, 34])
+        #expect(!probe.readChanged())
+        inventory.set([12, 34, 56])
+        #expect(probe.readChanged())
+        #expect(inventory.reads == 3)
+    }
+
     @Test("sixty seconds of self-notifications perform thirteen inventory reads")
     func identicalNotificationStormBacksOff() {
         let inventory = Inventory([12, 34])

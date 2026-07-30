@@ -11,11 +11,6 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
     private let queue: DispatchQueue
     private let coalescer: DeviceChangeCoalescer
     private let inventory: DeviceInventoryProbe
-    private let diagnostics: DeviceChangeDiagnostics?
-    /// Accessed only on `queue`.
-    private var hasBaseline = false
-    /// Accessed only on `queue`.
-    private var notificationBeforeBaseline = false
 
     private static let deviceListAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDevices,
@@ -26,14 +21,13 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
         self.queue = queue
         let diagnostics = DeviceChangeDiagnostics.fromEnvironment()
-        self.diagnostics = diagnostics
         let inventory = DeviceInventoryProbe(
             // Construction happens before the application's first frame. A
             // baseline read here blocked MainActor on coreaudiod even though
             // there had not been a device-change notification to answer.
-            // Starting unknown keeps construction read-free. RouterModel seeds
-            // this probe from the launch snapshot before a notification is
-            // allowed to ask HAL whether anything changed.
+            // Starting unknown keeps construction read-free: the probe reads
+            // only when a notification has already said something changed, and
+            // it does that on this watcher's own queue.
             initial: nil,
             read: Self.inventorySignature,
             diagnostics: diagnostics)
@@ -52,16 +46,17 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
 
         let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
-            // The listener itself is delivered on `queue`. Until RouterModel
-            // publishes its launch snapshot there is no baseline against which
-            // a notification can mean "changed", so remember the event without
-            // starting a second inventory beside the first.
-            if self.hasBaseline {
-                self.coalescer.signal()
-            } else {
-                self.diagnostics?.record(.notification)
-                self.notificationBeforeBaseline = true
-            }
+            // Every notification is scheduled, with no precondition of any
+            // kind. It used to be gated on RouterModel having published its
+            // launch snapshot, and that gate was silent when it never opened:
+            // `establishBaseline` is reached from one code path, and the
+            // verification process reads its inventory synchronously and takes
+            // the other one — so the watcher swallowed every notification for
+            // the lifetime of the process and no device appearing or
+            // disappearing was ever noticed. A missing baseline is now a fact
+            // about the *first read*, handled in `DeviceInventoryProbe`, where
+            // it costs one silent adoption rather than everything.
+            self.coalescer.signal()
         }
         block = listener
 
@@ -73,18 +68,14 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
 
     /// Supplies the ID set already read by RouterModel's launch inventory.
     ///
-    /// A notification received during that read is replayed once. If the set
-    /// is unchanged, the probe suppresses it; if hardware really changed in
-    /// the read's window, the ordinary refresh is delivered.
+    /// An optimisation rather than a requirement: it saves the probe the one
+    /// HAL read it would otherwise perform to baseline itself, and it makes
+    /// that baseline the same snapshot the interface is showing. Calling it is
+    /// still worth doing on every path that constructs a watcher — a probe
+    /// that baselines itself absorbs whichever change was being announced.
     public func establishBaseline(_ ids: Set<AudioObjectID>) {
         queue.async { [weak self] in
-            guard let self else { return }
-            self.inventory.establishBaseline(ids)
-            self.hasBaseline = true
-            if self.notificationBeforeBaseline {
-                self.notificationBeforeBaseline = false
-                self.coalescer.signal(recordsNotification: false)
-            }
+            self?.inventory.establishBaseline(ids)
         }
     }
 
@@ -308,6 +299,8 @@ final class DeviceInventoryProbe: @unchecked Sendable {
     private let gate: DeviceInventoryGate
     private let read: @Sendable () -> Set<AudioObjectID>?
     private let diagnostics: DeviceChangeDiagnostics?
+    /// Accessed only on the watcher's serial queue.
+    private var hasBaseline: Bool
 
     init(
         initial: Set<AudioObjectID>?,
@@ -315,17 +308,36 @@ final class DeviceInventoryProbe: @unchecked Sendable {
         diagnostics: DeviceChangeDiagnostics? = nil
     ) {
         gate = DeviceInventoryGate(initial: initial)
+        hasBaseline = initial != nil
         self.read = read
         self.diagnostics = diagnostics
     }
 
     func readChanged() -> Bool {
         diagnostics?.record(.halRead)
-        return gate.shouldDeliver(read())
+        let candidate = read()
+        let changed = gate.shouldDeliver(candidate)
+        guard hasBaseline else {
+            // The first answer has nothing to be a change *from*, so it is
+            // adopted rather than announced: reporting it would mean a second
+            // whole-machine enumeration beside the launch inventory, every
+            // launch. Only a read that actually returned something counts —
+            // a transient failure must not leave this permanently baselined
+            // on nothing.
+            //
+            // This is why the watcher no longer needs a baseline to be given
+            // to it before it will listen. It used to, and a caller that never
+            // supplied one got a watcher that noticed nothing for the lifetime
+            // of the process and said nothing about it.
+            hasBaseline = candidate != nil
+            return false
+        }
+        return changed
     }
 
     func establishBaseline(_ baseline: Set<AudioObjectID>) {
         gate.establishBaseline(baseline)
+        hasBaseline = true
     }
 }
 

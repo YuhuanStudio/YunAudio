@@ -77,18 +77,70 @@ struct EchoCancellationRateContractTests {
                 requiredRate: rate) == rate)
     }
 
-    @Test("a required rate unsupported by either endpoint is rejected")
+    @Test("a required rate the microphone cannot produce is rejected")
     func rejectsUnsupportedRequiredRate() {
-        #expect(
-            EchoCancellingCapture.sampleRate(
-                microphoneRates: [48_000, 96_000],
-                speakerRates: [44_100, 48_000],
-                requiredRate: 96_000) == nil)
         #expect(
             EchoCancellingCapture.sampleRate(
                 microphoneRates: [44_100],
                 speakerRates: [48_000],
                 requiredRate: 48_000) == nil)
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [],
+                speakerRates: [48_000],
+                requiredRate: 48_000) == nil)
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [48_000],
+                speakerRates: [48_000],
+                requiredRate: 0) == nil)
+    }
+
+    /// The pair that killed this feature on the machine it is developed on.
+    ///
+    /// A Seiren V3 Pro offers 48 k and 96 k; a Razer Barracuda over Bluetooth
+    /// negotiates HFP and offers 16 k. Their intersection is empty, and the
+    /// canceller used to refuse the pair and vanish without a word — for a
+    /// router running at 48 kHz, which is a rate the microphone presents
+    /// natively. The speaker is a drift-compensated follower and the HAL
+    /// converts for it, exactly as the route already does for a Bluetooth
+    /// destination.
+    @Test("a 16 kHz Bluetooth speaker does not veto a 48 kHz microphone")
+    func bluetoothSpeakerDoesNotVetoTheMicrophone() {
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [48_000, 96_000],
+                speakerRates: [16_000],
+                requiredRate: 48_000) == 48_000)
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [48_000, 96_000],
+                speakerRates: [44_100],
+                requiredRate: 96_000) == 96_000)
+        // A speaker whose capabilities were never read is the same case: an
+        // empty list is "not asked", not "supports nothing", and it must not
+        // decide anything about the microphone.
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [48_000, 96_000],
+                speakerRates: [],
+                requiredRate: 48_000) == 48_000)
+    }
+
+    /// Without a consumer fixing the clock there is no reason to make either
+    /// device convert, so the shared-rate rule still stands there.
+    @Test("standalone capture still refuses a pair with no rate in common")
+    func standaloneCaptureStillNeedsASharedRate() {
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [48_000, 96_000],
+                speakerRates: [16_000],
+                requiredRate: nil) == nil)
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [44_100, 96_000],
+                speakerRates: [44_100, 96_000],
+                requiredRate: nil) == 96_000)
     }
 
     @Test("standalone voice capture still prefers 48 kHz")

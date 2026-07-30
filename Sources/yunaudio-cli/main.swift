@@ -1036,7 +1036,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-route" {
     }
 
     guard engine.cancelsEcho else {
-        print("\nthe canceller is not in the path: \(engine.lastEchoCancellationError ?? "—")")
+        print(
+            "\nthe canceller is not in the path: "
+                + "\(engine.lastEchoCancellationError ?? "—")"
+                + (engine.lastEchoCancellationDetail.map { " (\($0))" } ?? ""))
         engine.stop()
         exit(1)
     }
@@ -1693,10 +1696,14 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
         let speaker = all.first(where: { $0.name.contains("MacBook") && $0.hasOutput })
     else { print("need the built-in microphone and speakers"); exit(1) }
 
-    guard
-        let capture = EchoCancellingCapture(
+    let capture: EchoCancellingCapture
+    do {
+        capture = try EchoCancellingCapture(
             microphoneUID: mic.uid, speakerUID: speaker.uid)
-    else { print("could not set up the unit"); exit(1) }
+    } catch {
+        print("could not set up the unit: \(error.reason) (\(error.detail))")
+        exit(1)
+    }
 
     // Accumulators are touched by the audio thread and the main thread, so they
     // go behind a lock. Without one, Swift's exclusivity checking traps the
@@ -1800,11 +1807,14 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-run" {
     print("microphone  \(mic.name)  (\(mic.inputChannels) in / \(mic.outputChannels) out)")
     print("speaker     \(speaker.name)")
 
-    guard
-        let capture = EchoCancellingCapture(
+    let capture: EchoCancellingCapture
+    do {
+        capture = try EchoCancellingCapture(
             microphoneUID: mic.uid, speakerUID: speaker.uid)
-    else {
-        print("AUVoiceProcessingIO could not be set up for that pair")
+    } catch {
+        print(
+            "AUVoiceProcessingIO could not be set up for that pair: "
+                + "\(error.reason) (\(error.detail))")
         exit(1)
     }
     print(

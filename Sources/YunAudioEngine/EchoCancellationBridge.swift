@@ -155,12 +155,14 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     ///   - routerSampleRate: Rate at which the router will drain cancelled
     ///     frames. The bridge refuses any capture clock that differs.
     ///   - maximumFrames: Largest block the unit will be asked for.
-    public init?(
+    /// - Throws: `EchoCancellationSetupError`, which the route records so the
+    ///   interface can name the refusal instead of the feature disappearing.
+    public init(
         microphoneUID: String,
         settings: EchoCancellationSettings,
         routerSampleRate: Double,
         maximumFrames: Int = 512
-    ) {
+    ) throws(EchoCancellationSetupError) {
         // Build the far end first so its actual rate is known before accepting
         // it as a reference. The router's rate decides the canceller clock; a
         // tap on another clock is left out rather than consumed at the wrong
@@ -172,18 +174,19 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                 processIDs: settings.farEndProcessIDs,
                 muteBehavior: settings.tapMuteBehavior)
 
-        guard
-            let capture = EchoCancellingCapture(
-                microphoneUID: microphoneUID, speakerUID: settings.speakerUID,
-                requiredSampleRate: routerSampleRate,
-                maximumFrames: maximumFrames)
-        else { return nil }
+        let capture = try EchoCancellingCapture(
+            microphoneUID: microphoneUID, speakerUID: settings.speakerUID,
+            requiredSampleRate: routerSampleRate,
+            maximumFrames: maximumFrames)
 
         let contract = EchoCancellationRateContract(
             farEndRate: candidateReference?.sampleRate,
             captureRate: capture.sampleRate,
             routerRate: routerSampleRate)
-        guard contract.canCarryCancelledAudio else { return nil }
+        guard contract.canCarryCancelledAudio else {
+            throw .captureClockDiffersFromRouter(
+                captureRate: capture.sampleRate, routerRate: routerSampleRate)
+        }
 
         // A mismatched process tap is not a reference at this clock. Running
         // the canceller blind is less capable, but remains time-correct; feeding
@@ -197,8 +200,9 @@ public final class EchoCancellationBridge: @unchecked Sendable {
         // are realtime threads on the same nominal clock, so the standing fill
         // is a buffer or two; the rest is there so a stall costs latency rather
         // than a gap.
-        guard let ring = yun_rt_ring_create(UInt32(capture.sampleRate * 0.25)) else {
-            return nil
+        let ringFrames = Int(capture.sampleRate * 0.25)
+        guard let ring = yun_rt_ring_create(UInt32(ringFrames)) else {
+            throw .cancelledRingNotAllocated(frames: ringFrames)
         }
         cancelledRing = ring
 

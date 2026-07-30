@@ -594,9 +594,40 @@ public final class RoutingEngine: @unchecked Sendable {
     public enum EchoFailure {
         public static let notBuilt = "the echo canceller could not be built"
         public static let wouldNotStart = "the echo canceller would not start"
+        public static let microphoneMissing = "the microphone is no longer there"
+        public static let speakerMissing = "the speaker to cancel against is no longer there"
+        public static let microphoneCannotPresentRouterRate =
+            "the microphone cannot run at the router's sample rate"
+        public static let noSharedSampleRate =
+            "the microphone and the speaker share no sample rate"
+        public static let sampleRateNotApplied =
+            "the devices would not take the sample rate the canceller needs"
+        public static let aggregateNotCreated =
+            "the canceller's aggregate device could not be created"
+        public static let unitNotInstantiated =
+            "AUVoiceProcessingIO could not be instantiated"
+        public static let unitRefusedSetup =
+            "AUVoiceProcessingIO refused the configuration it was given"
+        public static let clockDiffersFromRouter =
+            "the canceller's clock does not match the router's"
+        public static let ringNotAllocated =
+            "the ring carrying cancelled audio could not be allocated"
+
+        /// Every reason the engine can record, so the application's mapping
+        /// from reason to sentence can be checked exhaustively rather than
+        /// against a list somebody has to remember to extend.
+        public static let all: [String] = [
+            notBuilt, wouldNotStart, microphoneMissing, speakerMissing,
+            microphoneCannotPresentRouterRate, noSharedSampleRate,
+            sampleRateNotApplied, aggregateNotCreated, unitNotInstantiated,
+            unitRefusedSetup, clockDiffersFromRouter, ringNotAllocated,
+        ]
     }
 
     public private(set) var lastEchoCancellationError: String?
+    /// The same refusal with its numbers, for the command-line harness. The
+    /// interface gets a sentence; a report gets the rates that decided it.
+    public private(set) var lastEchoCancellationDetail: String?
 
     /// The canceller, while it is in the path. Retained here so it outlives the
     /// ring pointer the IO thread holds.
@@ -956,12 +987,20 @@ public final class RoutingEngine: @unchecked Sendable {
         // microphone by definition.
         var bridge: EchoCancellationBridge?
         if let settings = echoCancellation {
-            bridge = EchoCancellationBridge(
-                microphoneUID: sourceDeviceUID, settings: settings,
-                routerSampleRate: targetRate,
-                maximumFrames: Int(bufferFrames) * 4)
-            if bridge == nil {
-                lastEchoCancellationError = EchoFailure.notBuilt
+            // Cleared first. This is set on every refusal and was never put
+            // back, so a route that succeeded after one failure kept showing
+            // the reason for the failure — which is the same defect as saying
+            // nothing, one step further on.
+            lastEchoCancellationError = nil
+            lastEchoCancellationDetail = nil
+            do {
+                bridge = try EchoCancellationBridge(
+                    microphoneUID: sourceDeviceUID, settings: settings,
+                    routerSampleRate: targetRate,
+                    maximumFrames: Int(bufferFrames) * 4)
+            } catch {
+                lastEchoCancellationError = error.reason
+                lastEchoCancellationDetail = error.detail
             }
         }
         let cancelsEcho = bridge != nil
@@ -1043,7 +1082,13 @@ public final class RoutingEngine: @unchecked Sendable {
         if let bridge,
             !EchoCancellationRateContract.ratesMatch(bridge.sampleRate, rate)
         {
-            lastEchoCancellationError = EchoFailure.notBuilt
+            // Not the same fact as "it could not be built": it was built, and
+            // then the aggregate settled on a rate other than the one asked
+            // for. Saying so is the difference between "try another speaker"
+            // and "something upstream changed the clock".
+            lastEchoCancellationError = EchoFailure.clockDiffersFromRouter
+            lastEchoCancellationDetail =
+                "canceller \(Int(bridge.sampleRate)) Hz, aggregate \(Int(rate)) Hz"
             throw RoutingError.echoCancellerFailed
         }
 

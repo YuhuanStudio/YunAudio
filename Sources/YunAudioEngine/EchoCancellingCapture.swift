@@ -3,7 +3,7 @@ import AVFoundation
 import Foundation
 import YunAudioHAL
 
-enum EchoCancellationUnitSetupStep: String, CaseIterable, Sendable {
+public enum EchoCancellationUnitSetupStep: String, CaseIterable, Sendable {
     case enableInput
     case enableOutput
     case setCurrentDevice
@@ -17,13 +17,13 @@ enum EchoCancellationUnitSetupStep: String, CaseIterable, Sendable {
     case initialise
 }
 
-struct EchoCancellationUnitSetupFailure: Sendable, Equatable {
-    let step: EchoCancellationUnitSetupStep
-    let status: OSStatus
-    let expectedDeviceID: AudioObjectID?
-    let actualDeviceID: AudioObjectID?
+public struct EchoCancellationUnitSetupFailure: Sendable, Equatable {
+    public let step: EchoCancellationUnitSetupStep
+    public let status: OSStatus
+    public let expectedDeviceID: AudioObjectID?
+    public let actualDeviceID: AudioObjectID?
 
-    init(
+    public init(
         step: EchoCancellationUnitSetupStep,
         status: OSStatus,
         expectedDeviceID: AudioObjectID? = nil,
@@ -33,6 +33,91 @@ struct EchoCancellationUnitSetupFailure: Sendable, Equatable {
         self.status = status
         self.expectedDeviceID = expectedDeviceID
         self.actualDeviceID = actualDeviceID
+    }
+}
+
+/// Why the echo canceller could not be put into the path.
+///
+/// One case per distinct refusal, because until this existed every one of them
+/// was the same `return nil`, became the same sentence — "the echo canceller
+/// could not be built" — and told nobody what to do about it. A missing device,
+/// a rate the microphone cannot produce and an audio unit that would not
+/// instantiate are three different problems with three different answers, and
+/// the one that actually happens on this machine is a Bluetooth headset chosen
+/// as the speaker, which is a *choice the user can change* if anybody tells
+/// them so.
+///
+/// The payloads are not shown to the user; they are what the command-line
+/// harness prints, so a report of this failure carries the numbers that decided
+/// it rather than a description of the code.
+public enum EchoCancellationSetupError: Error, Sendable, Equatable {
+    case microphoneNotFound(uid: String)
+    case speakerNotFound(uid: String)
+    /// The router fixed the clock and the microphone cannot produce it. Frames
+    /// cross a ring with no metadata, so nothing downstream could resample
+    /// them: this one is a genuine refusal rather than a preference.
+    case microphoneCannotPresentRouterRate(
+        microphoneRates: [Double], routerRate: Double)
+    /// Nothing fixed the clock and the pair has no rate in common at all.
+    case noSharedSampleRate(microphoneRates: [Double], speakerRates: [Double])
+    case sampleRateNotApplied(rate: Double)
+    case aggregateNotCreated
+    case componentMissing
+    case unitNotInstantiated(status: OSStatus)
+    case unitSetupFailed(EchoCancellationUnitSetupFailure)
+    case captureClockDiffersFromRouter(captureRate: Double, routerRate: Double)
+    case cancelledRingNotAllocated(frames: Int)
+
+    /// The stable identifier the application matches on to choose a sentence.
+    ///
+    /// A constant rather than an interpolated phrase, for the reason
+    /// `IsolationFailure` is: matching on wording somebody later rewords puts
+    /// the raw English silently back in front of the user.
+    public var reason: String {
+        switch self {
+        case .microphoneNotFound: RoutingEngine.EchoFailure.microphoneMissing
+        case .speakerNotFound: RoutingEngine.EchoFailure.speakerMissing
+        case .microphoneCannotPresentRouterRate:
+            RoutingEngine.EchoFailure.microphoneCannotPresentRouterRate
+        case .noSharedSampleRate: RoutingEngine.EchoFailure.noSharedSampleRate
+        case .sampleRateNotApplied: RoutingEngine.EchoFailure.sampleRateNotApplied
+        case .aggregateNotCreated: RoutingEngine.EchoFailure.aggregateNotCreated
+        case .componentMissing, .unitNotInstantiated:
+            RoutingEngine.EchoFailure.unitNotInstantiated
+        case .unitSetupFailed: RoutingEngine.EchoFailure.unitRefusedSetup
+        case .captureClockDiffersFromRouter:
+            RoutingEngine.EchoFailure.clockDiffersFromRouter
+        case .cancelledRingNotAllocated: RoutingEngine.EchoFailure.ringNotAllocated
+        }
+    }
+
+    /// The numbers behind the refusal, for a report rather than for a person.
+    public var detail: String {
+        switch self {
+        case .microphoneNotFound(let uid): "microphone \(uid)"
+        case .speakerNotFound(let uid): "speaker \(uid)"
+        case .microphoneCannotPresentRouterRate(let rates, let routerRate):
+            "router \(Int(routerRate)) Hz, microphone offers \(Self.list(rates))"
+        case .noSharedSampleRate(let microphone, let speaker):
+            "microphone offers \(Self.list(microphone)),"
+                + " speaker offers \(Self.list(speaker))"
+        case .sampleRateNotApplied(let rate): "\(Int(rate)) Hz"
+        case .aggregateNotCreated: "AggregateDevice refused the pair"
+        case .componentMissing: "AUVoiceProcessingIO is not installed"
+        case .unitNotInstantiated(let status):
+            "AudioComponentInstanceNew \(fourCharDescription(status))"
+        case .unitSetupFailed(let failure):
+            "\(failure.step.rawValue) \(fourCharDescription(failure.status))"
+        case .captureClockDiffersFromRouter(let capture, let router):
+            "canceller \(Int(capture)) Hz, router \(Int(router)) Hz"
+        case .cancelledRingNotAllocated(let frames): "\(frames) frame(s)"
+        }
+    }
+
+    private static func list(_ rates: [Double]) -> String {
+        rates.isEmpty
+            ? "nothing"
+            : rates.sorted().map { "\(Int($0))" }.joined(separator: "/") + " Hz"
     }
 }
 
@@ -144,12 +229,16 @@ public final class EchoCancellingCapture {
     ///     `AudioUnitRender` then wrote 3528 bytes past the end of the capture
     ///     buffer on every cycle. The clamp in the callback below means an
     ///     underestimate can now only cost audio, never memory.
-    public init?(
+    /// - Throws: `EchoCancellationSetupError`, one case per distinct refusal.
+    ///   Every one of them used to be the same `return nil`, which is why the
+    ///   feature could switch itself off without anybody being able to say what
+    ///   had stopped it.
+    public init(
         microphoneUID: String,
         speakerUID: String?,
         requiredSampleRate: Double? = nil,
         maximumFrames: Int = 512
-    ) {
+    ) throws(EchoCancellationSetupError) {
 
         // Bind the two devices into one duplex object when both are named.
         var builtAggregate: AggregateDevice?
@@ -164,20 +253,45 @@ public final class EchoCancellingCapture {
         }
 
         if let speakerUID {
+            guard let microphone = try? AudioDevices.device(uid: microphoneUID) else {
+                throw .microphoneNotFound(uid: microphoneUID)
+            }
+            guard let speaker = try? AudioDevices.device(uid: speakerUID) else {
+                throw .speakerNotFound(uid: speakerUID)
+            }
             guard
-                let microphone = try? AudioDevices.device(uid: microphoneUID),
-                let speaker = try? AudioDevices.device(uid: speakerUID),
                 let selectedRate = Self.sampleRate(
                     microphoneRates: microphone.availableSampleRates,
                     speakerRates: speaker.availableSampleRates,
                     requiredRate: requiredSampleRate)
-            else { return nil }
-            let members = [microphone, speaker]
+            else {
+                // With a required rate the only way to arrive here is that the
+                // microphone itself cannot produce it; the speaker is allowed
+                // to disagree, see `sampleRate` below.
+                if let requiredSampleRate {
+                    throw .microphoneCannotPresentRouterRate(
+                        microphoneRates: microphone.availableSampleRates,
+                        routerRate: requiredSampleRate)
+                }
+                throw .noSharedSampleRate(
+                    microphoneRates: microphone.availableSampleRates,
+                    speakerRates: speaker.availableSampleRates)
+            }
             rate = selectedRate
+            // Only the members that can actually present it, exactly as the
+            // route's own alignment does. Asking a 16 kHz Bluetooth headset for
+            // 48 throws, and that throw used to be the whole feature rather
+            // than the one member that could not oblige — the canceller simply
+            // never appeared, and the interface said "could not be built".
+            let alignable = [microphone, speaker].filter { device in
+                device.availableSampleRates.contains {
+                    EchoCancellationRateContract.ratesMatch($0, rate)
+                }
+            }
             guard
                 let alignedRates = try? AggregateDevice.alignSampleRate(
-                    rate, across: members)
-            else { return nil }
+                    rate, across: alignable)
+            else { throw .sampleRateNotApplied(rate: rate) }
             ratesToRestoreOnFailure = alignedRates
             restorableRates = alignedRates
 
@@ -189,7 +303,7 @@ public final class EchoCancellingCapture {
                         .init(uid: speakerUID, driftCompensation: true),
                     ],
                     clockMasterUID: microphoneUID)
-            else { return nil }
+            else { throw .aggregateNotCreated }
             builtAggregate = dedicated
             boundDeviceID = dedicated.id
         } else if let microphone = try? AudioDevices.device(uid: microphoneUID) {
@@ -198,7 +312,8 @@ public final class EchoCancellingCapture {
                 !EchoCancellationRateContract.ratesMatch(
                     currentRate, requiredSampleRate)
             {
-                return nil
+                throw .microphoneCannotPresentRouterRate(
+                    microphoneRates: [currentRate], routerRate: requiredSampleRate)
             }
             rate = currentRate
         }
@@ -210,11 +325,15 @@ public final class EchoCancellingCapture {
             componentSubType: EchoCancellation.componentSubType,
             componentManufacturer: kAudioUnitManufacturer_Apple,
             componentFlags: 0, componentFlagsMask: 0)
-        guard let component = AudioComponentFindNext(nil, &description) else { return nil }
+        guard let component = AudioComponentFindNext(nil, &description) else {
+            throw .componentMissing
+        }
 
         var instance: AudioComponentInstance?
-        guard AudioComponentInstanceNew(component, &instance) == noErr, let created = instance
-        else { return nil }
+        let instantiation = AudioComponentInstanceNew(component, &instance)
+        guard instantiation == noErr, let created = instance else {
+            throw .unitNotInstantiated(status: instantiation)
+        }
         unit = created
 
         // Sized from the device that will actually drive this unit, not from
@@ -334,7 +453,7 @@ public final class EchoCancellingCapture {
             inputCallback: &inputCallback,
             renderCallback: &renderCallback,
             operations: operations)
-        guard setupFailure == nil else {
+        if let setupFailure {
             AudioComponentInstanceDispose(unit)
             captureBuffer.deallocate()
             truncatedBlocks.deinitialize(count: 1)
@@ -343,17 +462,33 @@ public final class EchoCancellingCapture {
             callbackDiagnostics.deallocate()
             free(bufferList.unsafeMutablePointer)
             builtAggregate?.destroy()
-            return nil
+            throw .unitSetupFailed(setupFailure)
         }
         keepsAlignedRates = true
     }
 
-    /// Chooses one exact clock for the microphone and speaker.
+    /// Chooses one clock for the canceller's aggregate.
     ///
     /// The standalone capture keeps its established voice-oriented preference
-    /// for 48 kHz. A bridge supplies `requiredRate`, because frames crossing a
-    /// ring have no metadata with which a downstream consumer could discover
-    /// that they need resampling.
+    /// for 48 kHz across whatever the pair both offer. A bridge supplies
+    /// `requiredRate`, because frames crossing a ring have no metadata with
+    /// which a downstream consumer could discover that they need resampling.
+    ///
+    /// **Only the microphone has to agree with `requiredRate`.** It is the
+    /// aggregate's clock master and the one device whose samples travel that
+    /// metadata-free ring, so a rate it cannot produce is a real refusal. The
+    /// speaker is a drift-compensated follower and the HAL converts for it —
+    /// which is exactly the rule the route itself already follows for a
+    /// destination that cannot present the target rate.
+    ///
+    /// Requiring a *shared* rate here is what killed the feature on this
+    /// machine. A Seiren V3 Pro offers 48 k and 96 k and nothing else; a
+    /// Razer Barracuda over Bluetooth negotiates HFP and offers 16 k. Their
+    /// intersection is empty, so a router at 48 kHz — a rate the microphone
+    /// presents perfectly — got nil, and echo cancellation silently did not
+    /// happen. Nothing about that pair prevents the canceller from running at
+    /// 48 kHz; it only prevents the speaker from being fed without conversion,
+    /// and a Bluetooth speaker was never going to be fed without conversion.
     static func sampleRate(
         microphoneRates: [Double],
         speakerRates: [Double],
@@ -361,15 +496,18 @@ public final class EchoCancellingCapture {
     ) -> Double? {
         let microphone = Set(microphoneRates.filter { $0.isFinite && $0 > 0 })
         let speaker = Set(speakerRates.filter { $0.isFinite && $0 > 0 })
-        let shared = microphone.intersection(speaker)
-        guard !shared.isEmpty else { return nil }
 
         if let requiredRate {
             guard requiredRate.isFinite, requiredRate > 0 else { return nil }
-            return shared.first {
+            return microphone.first {
                 EchoCancellationRateContract.ratesMatch($0, requiredRate)
-            }
+            }.map { _ in requiredRate }
         }
+
+        // No consumer fixed the clock, so there is no reason to make either
+        // device convert: prefer what they both present.
+        let shared = microphone.intersection(speaker)
+        guard !shared.isEmpty else { return nil }
         return shared.contains(48_000) ? 48_000 : shared.max()
     }
 
