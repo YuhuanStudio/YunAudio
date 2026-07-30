@@ -654,6 +654,7 @@
 "Current %@" = "当前 %@";
 "A long Chinese lyric wraps naturally instead of disappearing at the edge." = "很长的中文歌词会在这里自然换行，而不是消失在边缘。";
 "The current line lights smoothly as the music moves." = "当前这一句会随着音乐平滑亮起。";
+"Show pronunciation" = "显示发音";
 "Hold the words back" = "歌词晚一点";
 "Send the words forward" = "歌词早一点";
 "Put the words back where the file had them" = "回到文件原本的时间";

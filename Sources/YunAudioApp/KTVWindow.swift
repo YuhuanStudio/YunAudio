@@ -536,6 +536,24 @@ struct KTVStage: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(loc("Send the words forward"))
                 .accessibilityIdentifier("KTVLyricsLater")
+
+                Button {
+                    model.showsRomanisation.toggle()
+                } label: {
+                    Text(verbatim: "拼")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(
+                            model.showsRomanisation
+                                ? Yun.Palette.accent : .white.opacity(0.72)
+                        )
+                        .frame(width: 24, height: 24)
+                        .background(
+                            .white.opacity(model.showsRomanisation ? 0.18 : 0.10),
+                            in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(loc("Show pronunciation"))
+                .accessibilityIdentifier("KTVRomanisation")
             }
         }
     }
@@ -803,6 +821,26 @@ struct KTVStage: View {
                         lyricLine(
                             line.isInterlude ? Self.interludeMark : line.text,
                             offset: offset, metrics: metrics)
+                        // Pronunciation, above the translation and below the
+                        // words: the order a singer reads them in. Only for the
+                        // line being sung and the one after it — further away
+                        // it is a wall of Latin nobody is looking at, and the
+                        // transform is not free.
+                        if model.showsRomanisation, abs(offset) <= 1,
+                            !line.isInterlude,
+                            let latin = LyricRomanisation.of(line.text)
+                        {
+                            Text(latin)
+                                .font(
+                                    .system(
+                                        size: metrics.neighbourSize * 0.68,
+                                        weight: .medium)
+                                )
+                                .foregroundStyle(
+                                    Yun.Palette.accent.opacity(offset == 0 ? 0.78 : 0.42)
+                                )
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                         // Under the line it belongs to, smaller and quieter, so
                         // it reads as the same sentence again rather than as
                         // the next one. Only where the index actually carried

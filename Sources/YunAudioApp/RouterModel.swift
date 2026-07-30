@@ -2343,6 +2343,18 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Whether the stage prints how the words are pronounced.
+    ///
+    /// Off by default and remembered: most people reading their own language
+    /// want the characters and nothing else, and a second row under every line
+    /// costs the stage real height. The people who need it need it every time.
+    var showsRomanisation: Bool {
+        get { UserDefaults.standard.bool(forKey: "YunAudioShowsRomanisation") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "YunAudioShowsRomanisation")
+        }
+    }
+
     /// Seconds this song's words have been nudged. Negative holds them back.
     var lyricOffsetSeconds: Double {
         guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else { return 0 }
@@ -4343,6 +4355,10 @@ final class RouterModel: ScriptTarget {
                 [01:20.70]Yet the eraser of time
                 [01:23.91]Took so much and spared your name
                 """)
+        // On for the design harness, so the row has a picture. A user's own
+        // choice is untouched: this fixture only ever runs under the renderer
+        // and the capture gate.
+        showsRomanisation = true
         lyricsSourceName = loc("NetEase Cloud Music")
         lyricsLookupStatus = .online
         trackClock.duration = 265
