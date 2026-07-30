@@ -624,7 +624,14 @@ struct SongArtwork: View {
         }
         .task(id: url) {
             image = nil
-            guard let url else { return }
+            guard let url else {
+                // Counted, because a task that starts with no URL and a task
+                // that never starts look identical from outside and mean
+                // opposite things: one is the artwork missing from the model,
+                // the other is the view never asking.
+                SongArtwork.record("no url")
+                return
+            }
             guard
                 let decoded = await SongArtworkResources.shared.value(for: url),
                 !Task.isCancelled
