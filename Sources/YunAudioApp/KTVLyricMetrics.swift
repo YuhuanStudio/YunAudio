@@ -82,7 +82,10 @@ struct KTVLyricMetrics: Equatable, Sendable {
         // halves are budgeted separately.
         let extra = max(0, extraRowsPerLine)
         let perNeighbour = neighbour * (1.35 + extra) + spacing
-        let half = max(0, (height - current * (1.4 + extra)) / 2)
+        // Less the two gaps the stage puts either side of the sung line: they
+        // are drawn, so they are spent, and a budget that ignores them is a
+        // budget that overflows by exactly that much.
+        let half = max(0, (height - current * (1.4 + extra) - spacing * 2) / 2)
         let fit = Int((half / perNeighbour).rounded(.down))
 
         // At least one either side while there is room for it — and the room
@@ -102,8 +105,12 @@ struct KTVLyricMetrics: Equatable, Sendable {
         // found room for — five neighbours drawn into a budget of four. Where
         // there is genuine room `fit` exceeds both caps and the asymmetry
         // survives; where there is not, it is the first thing to go.
-        let ahead = max(min(fit, 4), height >= lineBlock + perNeighbour ? 1 : 0)
-        let behind = max(min(fit, 3), height >= lineBlock + perNeighbour * 2 ? 1 : 0)
+        // Both gaps either way: the stack keeps its three slots whether or not
+        // a band has anything in it, so the two gaps are drawn even when only
+        // one band is.
+        let gaps = spacing * 2
+        let ahead = max(min(fit, 4), height >= lineBlock + gaps + perNeighbour ? 1 : 0)
+        let behind = max(min(fit, 3), height >= lineBlock + gaps + perNeighbour * 2 ? 1 : 0)
 
         return KTVLyricMetrics(
             currentSize: current,

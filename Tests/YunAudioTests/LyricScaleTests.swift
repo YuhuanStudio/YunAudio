@@ -87,8 +87,11 @@ struct LyricScaleTests {
                             extraRowsPerLine: extra)
                         let perNeighbour =
                             metrics.neighbourSize * (1.35 + extra) + metrics.spacing
+                        // The two gaps the stage puts either side of the sung
+                        // line count against the height like anything else
+                        // drawn.
                         let drawn =
-                            metrics.currentSize * (1.4 + extra)
+                            metrics.currentSize * (1.4 + extra) + metrics.spacing * 2
                             + CGFloat(metrics.linesBehind + metrics.linesAhead) * perNeighbour
                         // A stage too short for even the line being sung is
                         // clipped on purpose — some of the words beats none —

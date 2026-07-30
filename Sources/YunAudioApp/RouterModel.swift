@@ -4543,6 +4543,35 @@ final class RouterModel: ScriptTarget {
         followTheWords()
     }
 
+    /// Puts a duet on the fixture stage, for the capture that judges it.
+    ///
+    /// The song the renderer normally uses is sung by one person, so the
+    /// colours that tell one voice from the other had no image to be judged
+    /// in. This is 「往事只能回味」 as a duet file writes it: a name on a line
+    /// of its own, which the attribution pass lifts off and hands to the line
+    /// below. Renderer only.
+    func renderDuet() {
+        lyrics = Lyrics.parse(
+            """
+            [00:00.00]王赫野
+            [00:04.00]时光一逝永不回
+            [00:09.00]往事只能回味
+            [00:14.00]黃霄雲
+            [00:18.00]忆童年时竹马青梅
+            [00:23.00]两小无猜日夜相随
+            [00:28.00]合
+            [00:32.00]春风又吹红了花蕊
+            [00:37.00]你已经也添了新岁
+            [00:42.00]王赫野
+            [00:46.00]你就要变心
+            [00:51.00]像时光难倒回
+            """, performers: ["王赫野", "黃霄雲"])
+        nowPlaying?.title = "往事只能回味"
+        nowPlaying?.artist = "王赫野 / 黃霄雲"
+        trackClock.duration = 240
+        renderAt(second: 29)
+    }
+
     /// A score with nothing behind it, for the design captures only.
     private static func previewScore(percentage: Double, error: Double) -> KaraokeScore {
         KaraokeScore(

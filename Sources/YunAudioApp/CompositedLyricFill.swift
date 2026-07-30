@@ -85,6 +85,12 @@ struct CompositedLyricSurface: View {
     let model: RouterModel
     let text: String
     let style: Style
+    /// The voice this line belongs to, where the song has more than one.
+    ///
+    /// Only the filled part takes it: the words not yet sung stay the stage's
+    /// own quiet white, so the sweep still reads as a sweep rather than as two
+    /// colours meeting.
+    var voice: Color? = nil
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private static let isOffscreenRender =
         ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] != nil
@@ -112,7 +118,7 @@ struct CompositedLyricSurface: View {
                     anchor: variant == .lyricFillStatic ? nil : model.lyricPlaybackAnchor,
                     font: style.appKitFont,
                     baseColour: style.baseColour,
-                    fillColour: style.fillColour,
+                    fillColour: voice.map { NSColor($0) } ?? style.fillColour,
                     reduceMotion: reduceMotion,
                     frozenProgress: variant == .lyricFillStatic ? 0.5 : nil,
                     // The line being sung, so its own word times reach the
@@ -132,7 +138,7 @@ struct CompositedLyricSurface: View {
             Text(text)
                 .foregroundStyle(style.baseStyle)
             Text(text)
-                .foregroundStyle(style.fillStyle)
+                .foregroundStyle(voice ?? style.fillStyle)
                 .textRenderer(SequentialTextFillRenderer(progress: progress))
         }
         .animation(

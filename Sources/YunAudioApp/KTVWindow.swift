@@ -862,6 +862,9 @@ struct KTVStage: View {
         // being sung keeps its fill wherever it happens to sit.
         let playing = model.lyricLine
         let current = browse.centre(whilePlaying: playing) ?? 0
+        // Built from the song, not per line: the same singer keeps one colour
+        // for the whole of it, and a song with one voice takes none at all.
+        let voices = KTVSingerVoices(lyrics)
         // Whether a count *can* happen — the music is waiting rather than
         // being sung — is a fact about the line, and changes when the line
         // does. How many dots are left is a fact about the second, and is read
@@ -874,7 +877,12 @@ struct KTVStage: View {
                 ?? true)
         let behind = Array(metrics.offsets.filter { $0 < 0 })
         let ahead = Array(metrics.offsets.filter { $0 > 0 })
-        return VStack(alignment: .leading, spacing: 0) {
+        // Spaced, because the bands do not space themselves. The one above is
+        // bottom-aligned and the one below top-aligned — that is what holds
+        // the sung line on the centre line — so both are pushed hard against
+        // it and every gap in the column existed except the two that matter.
+        // With a singer's name above a line it read as part of the line before.
+        return VStack(alignment: .leading, spacing: metrics.spacing) {
             // The attribution rides at the bottom of the band above the words
             // rather than at the top of the column. The bands expand to hold
             // the current line on the centre line, so a label placed above them
@@ -887,15 +895,15 @@ struct KTVStage: View {
                         .foregroundStyle(.white.opacity(0.40))
                 }
                 lyricGroup(
-                    lyrics, current: current, playing: playing, countIn: countIn,
+                    lyrics, current: current, playing: playing, countIn: countIn, voices: voices,
                     offsets: behind, metrics: metrics, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
             lyricGroup(
-                lyrics, current: current, playing: playing, countIn: countIn,
+                lyrics, current: current, playing: playing, countIn: countIn, voices: voices,
                 offsets: [0], metrics: metrics, alignment: .leading)
             lyricGroup(
-                lyrics, current: current, playing: playing, countIn: countIn,
+                lyrics, current: current, playing: playing, countIn: countIn, voices: voices,
                 offsets: ahead, metrics: metrics, alignment: .topLeading)
         }
         .overlay(alignment: .bottomTrailing) { returnToTheSongButton }
@@ -982,7 +990,8 @@ struct KTVStage: View {
     /// middle one stays on the centre line whatever they contain.
     @ViewBuilder
     private func lyricGroup(
-        _ lyrics: Lyrics, current: Int, playing: Int?, countIn: Bool, offsets: [Int],
+        _ lyrics: Lyrics, current: Int, playing: Int?, countIn: Bool,
+        voices: KTVSingerVoices, offsets: [Int],
         metrics: KTVLyricMetrics, alignment: Alignment
     ) -> some View {
         // Identified by the line, not by the slot it occupies. With the offset
@@ -996,6 +1005,7 @@ struct KTVStage: View {
                 let index = current + offset
                 if lyrics.lines.indices.contains(index) {
                     let line = lyrics.lines[index]
+                    let voice = voices.colour(for: line.singer)
                     VStack(alignment: .leading, spacing: 6) {
                         // Only where it changes hands. A duet names the singer
                         // on every line it owns, and repeating that above each
@@ -1007,7 +1017,7 @@ struct KTVStage: View {
                             Text(singer)
                                 .font(.system(size: 13, weight: .bold))
                                 .foregroundStyle(
-                                    Yun.Palette.accent.opacity(
+                                    (voice ?? Yun.Palette.accent).opacity(
                                         offset == 0 ? 0.95 : 0.5)
                                 )
                                 .textCase(nil)
@@ -1030,7 +1040,7 @@ struct KTVStage: View {
                             lyricLine(
                                 line.isInterlude ? Self.interludeMark : line.text,
                                 offset: offset, isPlaying: index == playing,
-                                metrics: metrics)
+                                voice: voice, metrics: metrics)
                         }
                         // Pronunciation, above the translation and below the
                         // words: the order a singer reads them in. Only for the
@@ -1097,27 +1107,30 @@ struct KTVStage: View {
 
     @ViewBuilder
     private func lyricLine(
-        _ text: String, offset: Int, isPlaying: Bool, metrics: KTVLyricMetrics
+        _ text: String, offset: Int, isPlaying: Bool, voice: Color?,
+        metrics: KTVLyricMetrics
     ) -> some View {
         // The fill belongs to the line the music is on, wherever the column
         // has been scrolled to. Drawing it on the middle row regardless would
         // make browsing look like the song had jumped.
         if isPlaying {
             let size = offset == 0 ? metrics.currentSize : metrics.neighbourSize
-            CompositedLyricSurface(model: model, text: text, style: .stage(size))
+            CompositedLyricSurface(model: model, text: text, style: .stage(size), voice: voice)
                 .contentTransition(.opacity)
         } else if offset == 0 {
             // Centred but not being sung: prominent, and plainly not the one
             // the music is on.
             Text(text)
                 .font(.system(size: metrics.currentSize, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle((voice ?? .white).opacity(0.62))
                 .contentTransition(.opacity)
                 .fixedSize(horizontal: false, vertical: true)
         } else {
             Text(text)
                 .font(.system(size: metrics.neighbourSize, weight: .semibold))
-                .foregroundStyle(.white.opacity(Self.lyricOpacity(for: offset)))
+                // The lines ahead carry the colour too: the whole point is
+                // seeing which of the next four are yours before they arrive.
+                .foregroundStyle((voice ?? .white).opacity(Self.lyricOpacity(for: offset)))
                 .contentTransition(.opacity)
                 .fixedSize(horizontal: false, vertical: true)
                 .blur(radius: abs(offset) == 2 ? 1.2 : 0)
