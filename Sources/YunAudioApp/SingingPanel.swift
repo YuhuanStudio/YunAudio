@@ -12,7 +12,6 @@ import YunDesign
 /// invalidating the header, device pickers, patchbay and the other columns.
 struct SingingPanel: View {
     @Bindable var model: RouterModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isTitleLookupExpanded = false
     @State private var handTitle = ""
     @State private var handArtist = ""
@@ -67,7 +66,7 @@ struct SingingPanel: View {
 
             if let lyrics = model.lyrics {
                 lyricsSource(synchronised: true)
-                lyricView(lyrics)
+                SingingLyrics(model: model, lyrics: lyrics)
                 lyricNudge
             } else if let plain = model.plainLyrics {
                 lyricsSource(synchronised: false)
@@ -509,16 +508,7 @@ struct SingingPanel: View {
         // the same thing in the running application — the list is filled when
         // scoring starts and emptied when it stops — and is what lets the
         // offscreen capture show the rows without opening a tap.
-        let singers = model.singers
-        let currentLyricLine = model.lyricLine
-        let targetMidi = model.scoringTargetMidi
-        ForEach(singers.indices, id: \.self) { index in
-            singerRow(
-                singers[index],
-                currentLyricLine: currentLyricLine,
-                targetMidi: targetMidi,
-                colour: Self.singerColour(index))
-        }
+        SingerScores(model: model)
     }
 
     private var scoringReferenceDescription: String {
@@ -533,6 +523,192 @@ struct SingingPanel: View {
             )
         case .key:
             loc("Key and timing score — accompaniment alone does not contain the vocal melody.")
+        }
+    }
+
+    /// Score lines are stored in lyric order. Looking up the current one must
+    /// not walk a whole song for every singer on every lyric tick.
+    nonisolated static func scoreLine(
+        at wanted: Int,
+        in lines: [KaraokeScore.Line]
+    ) -> KaraokeScore.Line? {
+        var lower = 0
+        var upper = lines.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if lines[middle].index < wanted {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        guard lower < lines.count, lines[lower].index == wanted else { return nil }
+        return lines[lower]
+    }
+
+    static func clock(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
+        return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+    }
+
+}
+
+/// The same fill for progress tracks, retaining both rounded ends.
+private struct HorizontalCapsuleFill: Shape {
+    var fraction: Double
+
+    var animatableData: Double {
+        get { fraction }
+        set { fraction = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let width = rect.width * max(0, min(1, fraction))
+        return Capsule().path(
+            in: CGRect(x: rect.minX, y: rect.minY, width: width, height: rect.height))
+    }
+}
+
+/// Loads one cover per song and keeps the decoded image out of the moving lyric
+/// body. `AsyncImage` does not load file URLs, which made local artwork look
+/// complete in the model and remain a placeholder on screen.
+struct SongArtwork: View {
+    let url: URL?
+    let title: String
+    var contentMode: ContentMode = .fit
+
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    // Player artwork remains complete and uncropped.
+                    .aspectRatio(contentMode: contentMode)
+            } else {
+                ZStack {
+                    LinearGradient(
+                        colors: [
+                            Yun.Palette.accent.opacity(0.42),
+                            Yun.Palette.info.opacity(0.16),
+                        ],
+                        startPoint: .topLeading, endPoint: .bottomTrailing)
+                    Text(title.first.map(String.init) ?? "♪")
+                        .font(.system(size: 36, weight: .bold, design: .rounded))
+                        .foregroundStyle(Yun.Palette.textPrimary.opacity(0.82))
+                }
+            }
+        }
+        .task(id: url) {
+            image = nil
+            guard let url else { return }
+            guard
+                let decoded = await SongArtworkResources.shared.value(for: url),
+                !Task.isCancelled
+            else { return }
+            let loaded = NSImage(
+                cgImage: decoded.image,
+                size: NSSize(width: decoded.image.width, height: decoded.image.height))
+            guard !Task.isCancelled else { return }
+            image = loaded
+        }
+    }
+}
+
+// MARK: - The parts that move
+
+/// The observation leaves of the singing panel.
+///
+/// `SingingPanel` is eight hundred lines, and every one of its sub-views is a
+/// computed property of the same struct — so a value read anywhere inside it is
+/// a dependency of the whole body. Measured before this split: 54 body
+/// evaluations in four idle seconds, 13.5 a second, re-deriving the track
+/// header, the permission prose, the lyric source row and every button for a
+/// note readout that had changed by a semitone.
+///
+/// The same shape as `LiveSpectrum`, and for the same reason: put the
+/// invalidation where the moving picture is.
+private struct SingingLyrics: View {
+    let model: RouterModel
+    let lyrics: Lyrics
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        let _ = BodyCount.tick("SingingLyrics")
+        let current = model.lyricLine ?? 0
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            ForEach(-1...1, id: \.self) { offset in
+                let index = current + offset
+                let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
+                if offset == 0 {
+                    ZStack(alignment: .leading) {
+                        Text(text.isEmpty ? " " : text)
+                            .font(.system(size: 27, weight: .semibold))
+                            .foregroundStyle(Yun.Palette.textMuted)
+                            .contentTransition(.opacity)
+                        // The sweep is the point: a line that lights up all at
+                        // once tells you which line, and a line that fills
+                        // tells you where in it.
+                        Text(text.isEmpty ? " " : text)
+                            .font(.system(size: 27, weight: .semibold))
+                            .foregroundStyle(Yun.Palette.accent)
+                            .textRenderer(
+                                SequentialTextFillRenderer(progress: model.lyricProgress)
+                            )
+                            .contentTransition(.opacity)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, Yun.Space.lg)
+                    .padding(.vertical, Yun.Space.lg)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Yun.Palette.accent.opacity(0.14),
+                                Yun.Palette.accent.opacity(0.045),
+                            ],
+                            startPoint: .leading, endPoint: .trailing),
+                        in: .rect(cornerRadius: Yun.Radius.card)
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text(text)
+                        .font(.system(size: offset < 0 ? 15 : 18, weight: .medium))
+                        .foregroundStyle(
+                            offset < 0
+                                ? Yun.Palette.textMuted : Yun.Palette.textTertiary
+                        )
+                        .contentTransition(.opacity)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .opacity(offset < 0 ? 0.65 : 1)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .animation(reduceMotion ? nil : .linear(duration: 0.1), value: model.lyricProgress)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
+    }
+}
+
+/// Per-microphone readings, which move at the scoring cadence.
+///
+/// Keeping the switch and its explanation in the parent means enabling scoring
+/// still updates the whole inspector once. Keeping the readings here means the
+/// next eighty score frames do not.
+private struct SingerScores: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("SingerScores")
+        let singers = model.singers
+        let currentLyricLine = model.lyricLine
+        let targetMidi = model.scoringTargetMidi
+        ForEach(singers.indices, id: \.self) { index in
+            singerRow(
+                singers[index],
+                currentLyricLine: currentLyricLine,
+                targetMidi: targetMidi,
+                colour: Self.singerColour(index))
         }
     }
 
@@ -653,27 +829,7 @@ struct SingingPanel: View {
         at index: Int?
     ) -> KaraokeScore.Line? {
         guard let index else { return nil }
-        return Self.scoreLine(at: index, in: score.lines)
-    }
-
-    /// Score lines are stored in lyric order. Looking up the current one must
-    /// not walk a whole song for every singer on every lyric tick.
-    nonisolated static func scoreLine(
-        at wanted: Int,
-        in lines: [KaraokeScore.Line]
-    ) -> KaraokeScore.Line? {
-        var lower = 0
-        var upper = lines.count
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if lines[middle].index < wanted {
-                lower = middle + 1
-            } else {
-                upper = middle
-            }
-        }
-        guard lower < lines.count, lines[lower].index == wanted else { return nil }
-        return lines[lower]
+        return SingingPanel.scoreLine(at: index, in: score.lines)
     }
 
     /// A compact pitch lane modelled on the useful part of karaoke games: the
@@ -714,149 +870,8 @@ struct SingingPanel: View {
             .frame(height: 10)
         }
     }
-
-    /// Three lines: what was just sung, what is being sung, what comes next.
-    ///
-    /// Three rather than a scrolling sheet, because the one being sung has to
-    /// be findable without reading — that is the difference between lyrics you
-    /// can sing to and lyrics you have to search.
-    private func lyricView(_ lyrics: Lyrics) -> some View {
-        let current = model.lyricLine ?? 0
-        return VStack(alignment: .leading, spacing: Yun.Space.md) {
-            ForEach(-1...1, id: \.self) { offset in
-                let index = current + offset
-                let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
-                if offset == 0 {
-                    ZStack(alignment: .leading) {
-                        Text(text.isEmpty ? " " : text)
-                            .font(.system(size: 27, weight: .semibold))
-                            .foregroundStyle(Yun.Palette.textMuted)
-                            .contentTransition(.opacity)
-                        // The sweep is the point: a line that lights up all at
-                        // once tells you which line, and a line that fills
-                        // tells you where in it.
-                        Text(text.isEmpty ? " " : text)
-                            .font(.system(size: 27, weight: .semibold))
-                            .foregroundStyle(Yun.Palette.accent)
-                            .textRenderer(
-                                SequentialTextFillRenderer(progress: model.lyricProgress)
-                            )
-                            .contentTransition(.opacity)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Yun.Space.lg)
-                    .padding(.vertical, Yun.Space.lg)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Yun.Palette.accent.opacity(0.14),
-                                Yun.Palette.accent.opacity(0.045),
-                            ],
-                            startPoint: .leading, endPoint: .trailing),
-                        in: .rect(cornerRadius: Yun.Radius.card)
-                    )
-                    .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text(text)
-                        .font(.system(size: offset < 0 ? 15 : 18, weight: .medium))
-                        .foregroundStyle(
-                            offset < 0
-                                ? Yun.Palette.textMuted : Yun.Palette.textTertiary
-                        )
-                        .contentTransition(.opacity)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .opacity(offset < 0 ? 0.65 : 1)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(reduceMotion ? nil : .linear(duration: 0.1), value: model.lyricProgress)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
-    }
-
-    static func clock(_ seconds: Double) -> String {
-        guard seconds.isFinite, seconds >= 0 else { return "--:--" }
-        return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
-    }
-
 }
 
-/// The same fill for progress tracks, retaining both rounded ends.
-private struct HorizontalCapsuleFill: Shape {
-    var fraction: Double
-
-    var animatableData: Double {
-        get { fraction }
-        set { fraction = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let width = rect.width * max(0, min(1, fraction))
-        return Capsule().path(
-            in: CGRect(x: rect.minX, y: rect.minY, width: width, height: rect.height))
-    }
-}
-
-/// Loads one cover per song and keeps the decoded image out of the moving lyric
-/// body. `AsyncImage` does not load file URLs, which made local artwork look
-/// complete in the model and remain a placeholder on screen.
-struct SongArtwork: View {
-    let url: URL?
-    let title: String
-    var contentMode: ContentMode = .fit
-
-    @State private var image: NSImage?
-
-    var body: some View {
-        Group {
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    // Player artwork remains complete and uncropped.
-                    .aspectRatio(contentMode: contentMode)
-            } else {
-                ZStack {
-                    LinearGradient(
-                        colors: [
-                            Yun.Palette.accent.opacity(0.42),
-                            Yun.Palette.info.opacity(0.16),
-                        ],
-                        startPoint: .topLeading, endPoint: .bottomTrailing)
-                    Text(title.first.map(String.init) ?? "♪")
-                        .font(.system(size: 36, weight: .bold, design: .rounded))
-                        .foregroundStyle(Yun.Palette.textPrimary.opacity(0.82))
-                }
-            }
-        }
-        .task(id: url) {
-            image = nil
-            guard let url else { return }
-            guard
-                let decoded = await SongArtworkResources.shared.value(for: url),
-                !Task.isCancelled
-            else { return }
-            let loaded = NSImage(
-                cgImage: decoded.image,
-                size: NSSize(width: decoded.image.width, height: decoded.image.height))
-            guard !Task.isCancelled else { return }
-            image = loaded
-        }
-    }
-}
-
-// MARK: - The parts that move
-
-/// The observation leaves of the singing panel.
-///
-/// `SingingPanel` is eight hundred lines, and every one of its sub-views is a
-/// computed property of the same struct — so a value read anywhere inside it is
-/// a dependency of the whole body. Measured before this split: 54 body
-/// evaluations in four idle seconds, 13.5 a second, re-deriving the track
-/// header, the permission prose, the lyric source row and every button for a
-/// note readout that had changed by a semitone.
-///
-/// The same shape as `LiveSpectrum`, and for the same reason: put the
-/// invalidation where the moving picture is.
 private struct SingingNote: View {
     let model: RouterModel
 

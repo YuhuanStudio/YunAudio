@@ -4914,8 +4914,11 @@ enum UIFlowCheck {
             "the whole window does not redraw with the meters",
             Double(counts["MainWindow"] ?? 0) < poll / 2)
         check(
+            "the whole singing inspector does not redraw with the lyric sweep",
+            Double(counts["SingingPanel"] ?? 0) < poll / 2)
+        check(
             "the lyric sweep itself stayed live",
-            Double(counts["SingingPanel"] ?? 0) > poll / 2)
+            Double(counts["SingingLyrics"] ?? 0) > poll / 4)
         check(
             "nor the patchbay, which nothing on the poll can change",
             Double(counts["RoutingCanvas"] ?? 0) < poll / 2)

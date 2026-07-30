@@ -128,9 +128,25 @@ struct SingingUIPerformanceTests {
         #expect(source.contains("SingingNote(model: model)"))
         #expect(source.contains("SongClock(model: model, track: track)"))
         #expect(source.contains("SongProgress(model: model, duration: track.duration)"))
+        #expect(source.contains("SingingLyrics(model: model, lyrics: lyrics)"))
+        #expect(source.contains("SingerScores(model: model)"))
         #expect(source.ranges(of: "BodyCount.tick(\"SingingNote\")").count == 1)
         #expect(source.ranges(of: "BodyCount.tick(\"SongClock\")").count == 1)
         #expect(source.ranges(of: "BodyCount.tick(\"SongProgress\")").count == 1)
+        #expect(source.ranges(of: "BodyCount.tick(\"SingingLyrics\")").count == 1)
+        #expect(source.ranges(of: "BodyCount.tick(\"SingerScores\")").count == 1)
+
+        let leaves = try #require(source.range(of: "// MARK: - The parts that move"))
+        let parent = source[..<leaves.lowerBound]
+        // These are the values the twenty-hertz poll can move. Reading any one
+        // in the 800-line parent recreates its artwork, lookup controls,
+        // scoring explanation and manual-run tools at that value's cadence.
+        #expect(parent.ranges(of: "model.heardNote").count == 0)
+        #expect(parent.ranges(of: "model.songSecond").count == 0)
+        #expect(parent.ranges(of: "model.lyricLine").count == 0)
+        #expect(parent.ranges(of: "model.lyricProgress").count == 0)
+        #expect(parent.ranges(of: "model.singers").count == 0)
+        #expect(parent.ranges(of: "model.scoringTargetMidi").count == 0)
     }
 
     private static func lines(count: Int) -> [KaraokeScore.Line] {
