@@ -2343,6 +2343,14 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Whether the floating desktop lyric is showing.
+    var showsDesktopLyrics: Bool {
+        get { UserDefaults.standard.bool(forKey: "YunAudioShowsDesktopLyrics") }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "YunAudioShowsDesktopLyrics")
+        }
+    }
+
     /// Whether the stage prints how the words are pronounced.
     ///
     /// Off by default and remembered: most people reading their own language

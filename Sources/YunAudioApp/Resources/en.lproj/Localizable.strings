@@ -655,6 +655,8 @@
 "Current %@" = "Current %@";
 "A long Chinese lyric wraps naturally instead of disappearing at the edge." = "A long Chinese lyric wraps naturally instead of disappearing at the edge.";
 "The current line lights smoothly as the music moves." = "The current line lights smoothly as the music moves.";
+"Desktop lyrics" = "Desktop lyrics";
+"Nothing is playing" = "Nothing is playing";
 "Show pronunciation" = "Show pronunciation";
 "Hold the words back" = "Hold the words back";
 "Send the words forward" = "Send the words forward";

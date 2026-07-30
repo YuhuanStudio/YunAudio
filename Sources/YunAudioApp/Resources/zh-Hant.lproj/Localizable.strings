@@ -655,6 +655,8 @@
 "Current %@" = "目前 %@";
 "A long Chinese lyric wraps naturally instead of disappearing at the edge." = "很長的中文歌詞會在這裡自然換行，而不是消失在邊緣。";
 "The current line lights smoothly as the music moves." = "目前這一句會隨著音樂平滑亮起。";
+"Desktop lyrics" = "桌面歌詞";
+"Nothing is playing" = "目前沒有播放";
 "Show pronunciation" = "顯示發音";
 "Hold the words back" = "歌詞晚一點";
 "Send the words forward" = "歌詞早一點";

@@ -125,6 +125,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             withTitle: loc("Setups"), action: nil, keyEquivalent: "")
         configItem?.submenu = NSMenu()
         menu.addItem(.separator())
+        // The words, without an application around them. This belongs in the
+        // menu bar rather than inside the stage, because the whole point of it
+        // is not having to bring a window forward to see the line.
+        desktopLyricsItem = menu.addItem(
+            withTitle: loc("Desktop lyrics"), action: #selector(toggleDesktopLyrics),
+            keyEquivalent: "")
+        desktopLyricsItem?.target = self
+        menu.addItem(.separator())
         menu.addItem(
             withTitle: loc("Open YunAudio"), action: #selector(openWindow), keyEquivalent: ""
         ).target = self
@@ -646,6 +654,14 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         } else {
             popover.performClose(nil)
         }
+    }
+
+    private var desktopLyricsItem: NSMenuItem?
+
+    @objc private func toggleDesktopLyrics() {
+        DesktopLyricsWindow.toggle(model: model)
+        if !DesktopLyricsWindow.isVisible { model.showsDesktopLyrics = false }
+        desktopLyricsItem?.state = DesktopLyricsWindow.isVisible ? .on : .off
     }
 
     @objc private func openWindow() {
