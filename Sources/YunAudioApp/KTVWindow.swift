@@ -136,6 +136,7 @@ struct KTVStage: View {
     /// moved does not report itself again on every pass.
     nonisolated(unsafe) static var lastColumnPlacement = ""
     nonisolated(unsafe) static var lastWordsPlacement = ""
+    nonisolated(unsafe) static var lastControlsPlacement = ""
 
     var body: some View {
         GeometryReader { proxy in
@@ -183,12 +184,32 @@ struct KTVStage: View {
                     Spacer()
                     scoreStrip
                 }
+                .background {
+                    GeometryReader { controls in
+                        // A background fills the frame it is given, so this
+                        // reports the ZStack's height rather than what the
+                        // controls demand: 1036 in a 720-point window, and
+                        // 1136 in another. That the stack is far taller than
+                        // the window is the finding; which child made it so is
+                        // still open, and it is not this one.
+                        let _ = {
+                            let frame = controls.frame(in: .named("ktv-stage"))
+                            let now = "\(Int(controls.size.height))@\(Int(frame.minY))"
+                            if now != Self.lastControlsPlacement {
+                                Self.lastControlsPlacement = now
+                                SongArtwork.record("controls \(now)")
+                            }
+                        }()
+                        Color.clear
+                    }
+                }
                 // The artwork owns the title-bar row, so the controls inset
                 // themselves from it explicitly: there is no safe area left to
                 // do it for them, and at `lg` the full-screen button sat level
                 // with the traffic lights and read as clipped by the frame.
                 .padding(.top, WindowChrome.controlClearance)
                 .padding([.horizontal, .bottom], Yun.Space.lg)
+
             }
         }
         // Does anything on this stage get a task at all? `SongArtwork` never
