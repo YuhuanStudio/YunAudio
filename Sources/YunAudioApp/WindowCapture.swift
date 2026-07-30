@@ -96,7 +96,7 @@ enum WindowCapture {
         if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil {
             if let model {
                 wroteEverything =
-                    photographAuxiliaryWindows(model: model, into: directory)
+                    await photographAuxiliaryWindows(model: model, into: directory)
                     && wroteEverything
             }
             return wroteEverything
@@ -140,7 +140,7 @@ enum WindowCapture {
     /// the 32-point empty strip survived while every design image was green.
     private static func photographAuxiliaryWindows(
         model: RouterModel, into directory: String
-    ) -> Bool {
+    ) async -> Bool {
         var wroteEverything = true
 
         guard SettingsWindow.open(model: model),
@@ -188,6 +188,17 @@ enum WindowCapture {
         // hook. Restore the no-audio fixture before photographing its other
         // presentation.
         model.prepareForRendering(refreshesApplications: false)
+        // Downloaded before the window opens, and waited for. `SongArtwork` is
+        // two different views: without a URL it draws a gradient and a letter,
+        // and with one it draws a resizable image that arrives asynchronously.
+        // Photographed without waiting, every capture of this stage took the
+        // first branch — so the branch a user sees had never been in a picture,
+        // and the arrangement was being judged from the one that cannot show
+        // what the other gets wrong.
+        if let artwork = model.nowPlaying?.artworkURL {
+            _ = await SongArtworkResources.shared.value(for: artwork)
+            settle(turns: 12)
+        }
         guard KTVWindow.open(model: model),
             let ktv = NSApp.windows.first(where: {
                 $0.frameAutosaveName == "YunAudioKTVWindow" && $0.isVisible
