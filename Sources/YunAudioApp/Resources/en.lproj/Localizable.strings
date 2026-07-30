@@ -77,7 +77,6 @@
 "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down." = "Applied when both devices support it. A voice chat gains nothing above 48 kHz.";
 "Registered with the window server, so they work without Input Monitoring permission." = "Registered with the window server, so they work without Input Monitoring permission.";
 "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app." = "Anything above zero breaks the realtime contract. Voice isolation raises it; those allocations come from Apple's model.";
-"The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0." = "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0.";
 "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact." = "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact.";
 "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image." = "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image.";
 "Gain" = "Gain";
@@ -488,6 +487,8 @@
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "Local file" = "Local file";
 "Words from %@" = "Words from %@";
+"Catalogue region %@" = "Catalogue region %@";
+"Open in Apple Music" = "Open in Apple Music";
 "timed" = "timed";
 "plain words" = "plain words";
 "Searching LRCLIB, QQ Music, NetEase and lyrics.ovh…" = "Searching LRCLIB, QQ Music, NetEase and lyrics.ovh…";

@@ -77,7 +77,6 @@
 "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down." = "兩端裝置都支援時才套用。語音通話高於 48 kHz 沒有意義。";
 "Registered with the window server, so they work without Input Monitoring permission." = "向視窗伺服器註冊，因此不需要「輸入監控」權限。";
 "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app." = "任何非零值都代表即時契約被破壞。人聲隔離會讓它上升，那些配置來自 Apple 的模型。";
-"The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0." = "虛擬裝置是對著 CoreAudio 的 AudioServerPlugIn 介面從零寫的，與 GPL-3.0 的 BlackHole 沒有共用任何程式碼。";
 "The clock lock dropped, so drift correction was switched back on. Audio is safe but no longer bit-exact." = "時鐘鎖定中斷，已改回啟用漂移補償。音訊安全，但不再位元精確。";
 "Run ./Driver/build-driver.sh --install from the source tree, or use the copy on the disk image." = "請從原始碼執行 ./Driver/build-driver.sh --install，或使用磁碟映像檔中的副本。";
 "Gain" = "增益";
@@ -488,6 +487,8 @@
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "這首沒有歌詞。把 .lrc 放進下面那個資料夾，會依名稱自動找到。";
 "Local file" = "本機檔案";
 "Words from %@" = "歌詞來源：%@";
+"Catalogue region %@" = "曲庫地區 %@";
+"Open in Apple Music" = "在 Apple Music 中開啟";
 "timed" = "同步";
 "plain words" = "純文字";
 "Searching LRCLIB, QQ Music, NetEase and lyrics.ovh…" = "正在同時搜尋 LRCLIB、QQ 音樂、網易雲音樂與 lyrics.ovh…";

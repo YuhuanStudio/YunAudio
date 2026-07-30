@@ -1101,15 +1101,6 @@ struct PreferencesWindow: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
             }
-
-            Text(
-                loc(
-                    "The virtual device is written from scratch against CoreAudio's AudioServerPlugIn interface. It shares no code with BlackHole, which is GPL-3.0."
-                )
-            )
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
