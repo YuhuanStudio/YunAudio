@@ -92,15 +92,26 @@ public actor Transcriber {
     /// comparable across them.
     private var startedAt: Double = 0
     private var isRunning = false
+    /// Delivers only the line that was just finalised.
+    ///
+    /// The interface used to poll every transcriber twenty times a second,
+    /// copy every line said so far and sort the whole conversation even when
+    /// nobody had spoken. A transcript is an event stream, not a meter. The
+    /// callback lets its owner do work once per finished sentence instead.
+    private let onLine: (@Sendable (Line) -> Void)?
 
     /// Lines finished so far. Volatile partial results are deliberately not
     /// kept: a transcript that rewrites itself as somebody speaks is unreadable
     /// scrolling past, and the finalised text is what anybody wants afterwards.
     public private(set) var lines: [Line] = []
 
-    public init(speaker: String, locale: Locale = Locale.current) {
+    public init(
+        speaker: String, locale: Locale = Locale.current,
+        onLine: (@Sendable (Line) -> Void)? = nil
+    ) {
         self.speaker = speaker
         self.locale = locale
+        self.onLine = onLine
     }
 
     /// True when this system can transcribe at all.
@@ -199,12 +210,17 @@ public actor Transcriber {
     private func append(_ result: SpeechTranscriber.Result) {
         let text = String(result.text.characters)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        lines.append(
+        record(
             Line(
                 speaker: speaker,
                 text: text,
                 start: sessionOffset + result.range.start.seconds,
                 duration: result.range.duration.seconds))
+    }
+
+    private func record(_ line: Line) {
+        lines.append(line)
+        onLine?(line)
     }
 
     /// Seconds between the session beginning and this source's first audio.
@@ -328,7 +344,7 @@ public actor Transcriber {
     /// Adds a line directly. Only for tests, which cannot make Apple's model
     /// say something specific on demand — what is being checked is the shape of
     /// the transcript, not the model.
-    public func appendForTesting(_ line: Line) { lines.append(line) }
+    public func appendForTesting(_ line: Line) { record(line) }
 
     /// Everything said so far, as a transcript somebody can read.
     ///

@@ -4470,6 +4470,29 @@ struct TranscriberTests {
         #expect(text.contains("[01:15] Guest: and again"))
     }
 
+    /// A sentence is an event rather than a twenty-hertz state sample. The
+    /// callback must contain exactly the new line, so the owner never has to
+    /// fetch or sort the history to discover what changed.
+    @Test("a finished line is delivered once as an event")
+    func lineEvent() async {
+        let (stream, continuation) = AsyncStream<Transcriber.Line>.makeStream()
+        let expected = Transcriber.Line(
+            speaker: "Guest", text: "only this line", start: 12, duration: 1)
+        let receiver = Task<Transcriber.Line?, Never> {
+            for await line in stream { return line }
+            return nil
+        }
+        let transcriber = Transcriber(speaker: "Guest") { line in
+            continuation.yield(line)
+        }
+
+        await transcriber.appendForTesting(expected)
+        continuation.finish()
+
+        #expect(await receiver.value == expected)
+        #expect(await transcriber.lines == [expected])
+    }
+
     /// Feeding it before it has started must not crash or queue anything up for
     /// later — a transcript that begins with audio from before somebody pressed
     /// the button is not what they asked for.

@@ -5858,6 +5858,10 @@ final class RouterModel: ScriptTarget {
         }
         stopPolling()
         stopAnalysis()
+        // `engine.stop()` freed every source ring before returning. Keeping
+        // this cache marked open made the same source IDs reuse zero taps after
+        // a route restart, leaving lyrics, pitch and scoring permanently deaf.
+        invalidateSourceTaps()
         // Transcription goes down with the route it was listening to, but the
         // transcript stays: it is what somebody was there for, and losing it
         // because a device changed underneath would be the worst moment to.
@@ -6632,6 +6636,12 @@ final class RouterModel: ScriptTarget {
     }
 
     @ObservationIgnored private var transcribers: [Transcriber] = []
+    /// Identifies the explicit transcription session a callback belongs to.
+    ///
+    /// Stopping finalises the last sentence asynchronously. It still belongs
+    /// to that session, but if somebody has already started another one its
+    /// late callback must not appear among the new conversation.
+    @ObservationIgnored private var transcriptSessionGeneration = 0
     /// Reused across polls. Two seconds at 48 kHz, which is more than the ring
     /// behind it holds, so a drain is never cut short by this buffer.
     @ObservationIgnored private var transcriptScratch = [Float](repeating: 0, count: 96_000)
@@ -6666,8 +6676,17 @@ final class RouterModel: ScriptTarget {
             return
         }
 
+        transcriptSessionGeneration &+= 1
+        let generation = transcriptSessionGeneration
+        transcript = []
         transcribers = groups.prefix(opened).map { group in
-            Transcriber(speaker: representative(of: group).map(routeTitle) ?? loc("Source"))
+            Transcriber(
+                speaker: representative(of: group).map(routeTitle) ?? loc("Source")
+            ) { [weak self] line in
+                Task { @MainActor [weak self] in
+                    self?.receiveTranscript(line, generation: generation)
+                }
+            }
         }
         isTranscribing = true
         transcriptionError = nil
@@ -6695,13 +6714,14 @@ final class RouterModel: ScriptTarget {
         isTranscribing = false
         closeSourceTapsIfIdle()
         let finishing = transcribers
+        let generation = transcriptSessionGeneration
         transcribers = []
         // Finalised rather than dropped: the model is holding the end of the
         // last sentence, and a transcript that stops mid-word because somebody
         // pressed a button is not what they asked for.
         Task { @MainActor in
             for transcriber in finishing { await transcriber.stop() }
-            await self.collectTranscript(from: finishing)
+            await self.collectTranscript(from: finishing, generation: generation)
         }
     }
 
@@ -6711,6 +6731,22 @@ final class RouterModel: ScriptTarget {
     /// built on, so this is what says whether the open ones are still the right
     /// ones.
     @ObservationIgnored private var sourceTapsFor: [String] = []
+    /// The engine count recorded when these rings were opened.
+    ///
+    /// Reading `engine.transcriptTapCount` takes the engine's state lock. The
+    /// singing poll used to take it twenty times a second merely to rediscover
+    /// an invariant that only changes when a tap opens or the graph stops.
+    @ObservationIgnored private var openedSourceTapCount = 0
+
+    /// Whether the open rings can serve this request without touching the
+    /// engine. A zero count is never reusable: it is the exact stale state a
+    /// full route stop used to leave behind.
+    nonisolated static func reusableSourceTapCount(
+        isOpen: Bool, openedCount: Int, openedFor: [String], wanted: [String]
+    ) -> Int? {
+        guard isOpen, openedCount > 0, openedFor == wanted else { return nil }
+        return openedCount
+    }
 
     /// Opens one ring per source, or leaves the open ones alone.
     ///
@@ -6739,8 +6775,14 @@ final class RouterModel: ScriptTarget {
         let first = groups.compactMap(\.routes.first)
         guard !first.isEmpty else { return 0 }
         let uids = groups.map(\.uid)
-        if sourceTapsOpen, sourceTapsFor == uids { return engine.transcriptTapCount }
+        if let count = Self.reusableSourceTapCount(
+            isOpen: sourceTapsOpen, openedCount: openedSourceTapCount,
+            openedFor: sourceTapsFor, wanted: uids)
+        {
+            return count
+        }
         if sourceTapsOpen { engine.stopTranscriptTaps() }
+        invalidateSourceTaps()
         musicRecognition.reset()
         recognisedApplication = nil
         recognitionSourceUID = nil
@@ -6748,8 +6790,19 @@ final class RouterModel: ScriptTarget {
         let opened = engine.startTranscriptTaps(routes: first)
         sourceTapsOpen = opened > 0
         sourceTapsFor = opened > 0 ? uids : []
+        openedSourceTapCount = opened
         transcriptRate = engine.pathQuality?.sampleRate ?? 48000
         return opened
+    }
+
+    /// Forgets rings the engine has already destroyed with its graph.
+    ///
+    /// This deliberately does not call the engine: `finishStop` runs after
+    /// `engine.stop()`, when there is no graph left to modify.
+    private func invalidateSourceTaps() {
+        sourceTapsOpen = false
+        sourceTapsFor = []
+        openedSourceTapCount = 0
     }
 
     /// Closes them once nothing is listening. Not before: stopping the
@@ -6762,8 +6815,7 @@ final class RouterModel: ScriptTarget {
             return
         }
         engine.stopTranscriptTaps()
-        sourceTapsOpen = false
-        sourceTapsFor = []
+        invalidateSourceTaps()
     }
 
     /// Moves audio from the rings to whoever asked for it, and lines back.
@@ -6797,9 +6849,6 @@ final class RouterModel: ScriptTarget {
                 }
             }
         }
-        guard !transcribers.isEmpty else { return }
-        let running = transcribers
-        Task { @MainActor in await self.collectTranscript(from: running) }
     }
 
     /// The unsupported player behind one source-tap slot.
@@ -6840,15 +6889,46 @@ final class RouterModel: ScriptTarget {
         return application
     }
 
-    private func collectTranscript(from transcribers: [Transcriber]) async {
-        var merged: [Transcriber.Line] = []
-        for transcriber in transcribers { merged += await transcriber.lines }
-        // Sorted across sources, which is the point of doing it here rather
-        // than per transcriber: two people talking is one conversation, and a
-        // transcript that lists one person's half and then the other's is not
-        // a record of it.
-        merged.sort { $0.start < $1.start }
-        if merged != transcript { transcript = merged }
+    /// Inserts one finished line into the attributed conversation.
+    ///
+    /// Duplicate IDs are ignored because stopping performs one final catch-up
+    /// after callbacks have already delivered most lines. The timestamp search
+    /// is logarithmic; moving later elements is unavoidable because SwiftUI
+    /// observes an ordered array, but it now happens once per sentence rather
+    /// than once per 50 ms poll.
+    @discardableResult
+    nonisolated static func insertTranscriptLine(
+        _ line: Transcriber.Line, into transcript: inout [Transcriber.Line]
+    ) -> Bool {
+        guard !transcript.contains(where: { $0.id == line.id }) else { return false }
+        var lower = 0
+        var upper = transcript.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if transcript[middle].start <= line.start {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        transcript.insert(line, at: lower)
+        return true
+    }
+
+    private func receiveTranscript(_ line: Transcriber.Line, generation: Int) {
+        guard generation == transcriptSessionGeneration else { return }
+        Self.insertTranscriptLine(line, into: &transcript)
+    }
+
+    private func collectTranscript(
+        from transcribers: [Transcriber], generation: Int
+    ) async {
+        guard generation == transcriptSessionGeneration else { return }
+        for transcriber in transcribers {
+            for line in await transcriber.lines {
+                receiveTranscript(line, generation: generation)
+            }
+        }
     }
 
     /// The transcript as somebody would read it, attributed and timestamped.

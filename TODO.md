@@ -539,6 +539,21 @@ Spotify 接受 Apple Event 卻不回答時會永久占住串列佇列，`isAskin
 起來卻只像 KTV 壞掉。每次 start 現在必須在 **750 ms** 內完成至少兩個 IO cycle；
 否則先以完全相同的配置重試一次，仍失敗才具名報錯並完整拆除。
 
+又找到一個會讓「第一次有歌詞，重啟後永遠沒有」完全成立的生命週期錯誤。完整
+`engine.stop()` 會釋放逐來源 transcript rings，但 app 端的 `sourceTapsOpen` 與來源
+UID 快取沒有失效；相同來源再次啟動時，它因此把底層已不存在的 **0 個 tap** 當成仍可
+重用。現在完整停止明確清掉 open flag、UID 與 opened count；只有「仍開啟、count 大於
+零、來源完全相同」三項同時成立才重用。這個判斷有四組數值斷言，另有結構測試要求
+`finishStop()` 一定失效 tap，而且 20 Hz steady poll 不得再讀 engine state lock。
+
+同一條路徑原本每次 50 ms poll 都建立一個 MainActor `Task`，跨過每個 transcriber actor
+拿回從開場至今的所有句子，再重新合併與排序整份逐字稿。沒有任何人說話時，一分鐘仍是
+**1,200 個 Task、1,200 次完整歷史走訪與排序**。現在 transcriber 只在一句完成時送出
+那一句；app 以 UUID 去重、二分搜尋時間位置，停止時才做一次 final catch-up。空閒一分鐘
+三者都是 **0**，新增一句只發布一次。callback 的 exactly-once、跨來源時間排序、停止
+後補收與 session generation 都由單元或結構測試固定。676 個單元測試、125 個套件與
+swift-format lint 全綠；這一階段沒有啟動任何音訊裝置。
+
 ### 2. MIDI 的另一半 [本機實測]
 
 CoreMIDI 直接寫、沒有第三方相依、推桿有 soft takeover，這些都做完並測過了。

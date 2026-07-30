@@ -435,6 +435,80 @@ struct BackgroundResourceTests {
                 RouterModel.SourceGroup(uid: "player", routes: [2]),
             ])
     }
+
+    @Test("source taps are reused only while their engine rings still exist")
+    func sourceTapReuse() {
+        let sources = ["microphone", "player"]
+        #expect(
+            RouterModel.reusableSourceTapCount(
+                isOpen: true, openedCount: 2, openedFor: sources, wanted: sources) == 2)
+        #expect(
+            RouterModel.reusableSourceTapCount(
+                isOpen: true, openedCount: 0, openedFor: sources, wanted: sources) == nil)
+        #expect(
+            RouterModel.reusableSourceTapCount(
+                isOpen: false, openedCount: 2, openedFor: sources, wanted: sources) == nil)
+        #expect(
+            RouterModel.reusableSourceTapCount(
+                isOpen: true, openedCount: 2, openedFor: sources, wanted: ["player"]) == nil)
+    }
+
+    @Test("new transcript lines stay chronological and are never duplicated")
+    func incrementalTranscriptMerge() {
+        let late = Transcriber.Line(
+            speaker: "Player", text: "later", start: 10, duration: 1)
+        let early = Transcriber.Line(
+            speaker: "Singer", text: "early", start: 2, duration: 1)
+        let sameTime = Transcriber.Line(
+            speaker: "Singer", text: "same time", start: 10, duration: 1)
+        var transcript: [Transcriber.Line] = []
+
+        #expect(RouterModel.insertTranscriptLine(late, into: &transcript))
+        #expect(RouterModel.insertTranscriptLine(early, into: &transcript))
+        #expect(RouterModel.insertTranscriptLine(sameTime, into: &transcript))
+        #expect(!RouterModel.insertTranscriptLine(late, into: &transcript))
+        #expect(transcript.map(\.text) == ["early", "later", "same time"])
+    }
+
+    /// The old poll created twenty Tasks per second, crossed every transcriber
+    /// actor and sorted the complete transcript even when no line had changed.
+    /// Keep both the event boundary and the full-stop invalidation structural:
+    /// a fake performance test would otherwise miss their placement.
+    @Test("the source poll neither scans transcript history nor trusts stopped taps")
+    func sourceTapPollingIsEventDriven() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let pumpStart = try #require(source.range(of: "private func pumpSourceTaps()"))
+        let pumpEnd = try #require(
+            source.range(
+                of: "private func recognitionApplication",
+                range: pumpStart.upperBound..<source.endIndex))
+        let pump = source[pumpStart.lowerBound..<pumpEnd.lowerBound]
+        #expect(pump.ranges(of: "collectTranscript").count == 0)
+        #expect(pump.ranges(of: "Task {").count == 0)
+
+        let openStart = try #require(source.range(of: "private func openSourceTaps()"))
+        let openEnd = try #require(
+            source.range(
+                of: "private func invalidateSourceTaps",
+                range: openStart.upperBound..<source.endIndex))
+        let open = source[openStart.lowerBound..<openEnd.lowerBound]
+        #expect(open.ranges(of: "engine.transcriptTapCount").count == 0)
+
+        let stopStart = try #require(source.range(of: "private func finishStop()"))
+        let stopEnd = try #require(
+            source.range(
+                of: "func toggle()",
+                range: stopStart.upperBound..<source.endIndex))
+        let stop = source[stopStart.lowerBound..<stopEnd.lowerBound]
+        #expect(stop.ranges(of: "invalidateSourceTaps()").count == 1)
+        #expect(
+            source.ranges(
+                of: "guard generation == transcriptSessionGeneration else { return }"
+            ).count == 2)
+    }
 }
 
 /// The write coalescer is only useful if it also avoids the allocations needed
