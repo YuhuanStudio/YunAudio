@@ -2,6 +2,20 @@ import SwiftUI
 import YunAudioControl
 import YunDesign
 
+/// Routes a Dock reopen without involving AppKit in the test.
+///
+/// Constructing `NSApplication.shared` from the SwiftPM test process asks
+/// LaunchServices to start the registered app bundle. That produced an orphaned
+/// normal YunAudio process at 30–40% CPU while a supposedly pure unit test was
+/// running. Keep the decision and callback in a value that needs no application
+/// object; the delegate is only its adapter.
+enum MainWindowReopenPolicy {
+    /// True when AppKit still needs to choose a window.
+    nonisolated static func appKitShouldChooseWindow(hasPresenter: Bool) -> Bool {
+        !hasPresenter
+    }
+}
+
 /// Watches for the application quitting.
 ///
 /// Routing changes the sample rate of real hardware, and that change outlives
@@ -10,7 +24,17 @@ import YunDesign
 /// exactly how someone's microphone ends up left at 96 kHz.
 @MainActor
 final class TerminationObserver: NSObject, NSApplicationDelegate {
+    /// The adaptor instance, without assuming it is `NSApp.delegate`.
+    ///
+    /// SwiftUI installs its own forwarding delegate around
+    /// `@NSApplicationDelegateAdaptor`; verification must therefore reach the
+    /// actual observer through this weak reference.
+    private(set) static weak var current: TerminationObserver?
+
     var onTerminate: (@MainActor () -> Void)?
+    /// The Dock represents the application, so reopening it means the main
+    /// router — never whichever auxiliary window happened to close last.
+    var onReopenMainWindow: (@MainActor () -> Void)?
     /// Owned here because the status item has to outlive the scene body that
     /// created it, and a SwiftUI scene is not a place to keep a reference.
     var statusItem: StatusItemController?
@@ -19,8 +43,25 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     /// has to reason about.
     var controlListener: ControlListener?
 
+    override init() {
+        super.init()
+        Self.current = self
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         onTerminate?()
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication, hasVisibleWindows flag: Bool
+    ) -> Bool {
+        let hasPresenter = onReopenMainWindow != nil
+        onReopenMainWindow?()
+        // The retained action has handled presentation. Returning true would
+        // let AppKit additionally choose its last window, which is how clicking
+        // YunAudio in the Dock brought Settings forward instead of the router.
+        return MainWindowReopenPolicy.appKitShouldChooseWindow(
+            hasPresenter: hasPresenter)
     }
 
     /// Runs the flow check once the run loop is alive.
@@ -295,7 +336,7 @@ struct YunAudioApp: App {
     @MainActor
     private func injectMainWindowOpener(_ openWindow: OpenWindowAction) {
         installStatusItem()
-        termination.statusItem?.setOpenMainWindow {
+        let showMainWindow: @MainActor () -> Void = {
             openWindow(id: "main")
             // Scene presentation completes after the action returns. Looking in
             // the same stack frame can miss a window that opens correctly and
@@ -312,6 +353,8 @@ struct YunAudioApp: App {
                 window.makeKeyAndOrderFront(nil)
             }
         }
+        termination.statusItem?.setOpenMainWindow(showMainWindow)
+        termination.onReopenMainWindow = showMainWindow
     }
 
     var body: some Scene {
