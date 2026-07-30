@@ -610,6 +610,12 @@ struct KTVStage: View {
         _ lyrics: Lyrics, current: Int, offsets: [Int],
         metrics: KTVLyricMetrics, alignment: Alignment
     ) -> some View {
+        // Identified by the line, not by the slot it occupies. With the offset
+        // as the identity, advancing a line makes each slot "the same view with
+        // different words", and `contentTransition(.opacity)` cross-fades them
+        // in place — the outgoing song's line and the incoming one drawn on top
+        // of each other, which is what 「是不是太过清醒背影」 was. Identified by
+        // the line, a slot's contents never change: lines arrive and leave.
         let band = VStack(alignment: .leading, spacing: metrics.spacing) {
             ForEach(offsets, id: \.self) { offset in
                 let index = current + offset
@@ -642,6 +648,7 @@ struct KTVStage: View {
                             line.isInterlude ? Self.interludeMark : line.text,
                             offset: offset, metrics: metrics)
                     }
+                    .id(index)
                 }
             }
         }
