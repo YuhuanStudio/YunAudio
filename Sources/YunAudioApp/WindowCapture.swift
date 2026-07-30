@@ -259,6 +259,20 @@ enum WindowCapture {
                 wroteEverything = false
             }
         }
+        // The stage has to have actually appeared, not merely been drawn.
+        // `settle` turns the run loop while holding the main actor, and the
+        // body of a `.task` is MainActor-isolated — so for as long as this gate
+        // spun instead of suspending, every task on the stage waited for a turn
+        // it never got. The photographs were of a stage whose artwork had never
+        // been requested and whose lifecycle had never run, and nothing said
+        // so: they simply looked like a stage with no cover.
+        if !SongArtwork.taskOutcomes.keys.contains("stage task ran") {
+            FileHandle.standardError.write(
+                Data(
+                    "the KTV stage was photographed without ever appearing"
+                        .appending(" — not accepted\n").utf8))
+            wroteEverything = false
+        }
         ktv.close()
         return wroteEverything
     }
