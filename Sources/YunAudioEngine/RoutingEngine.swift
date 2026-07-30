@@ -124,6 +124,13 @@ public final class RoutingEngine: @unchecked Sendable {
     /// makes a route change a swap rather than a restart.
     private var graphCell: OpaquePointer?
     private var activeRoutes: [Route] = []
+    /// Stable identities and their live slots, rebuilt only with the topology.
+    ///
+    /// Commands arrive on the engine queue after the interface has emitted
+    /// them. Resolving an array index there would let a graph publication move
+    /// that index onto another cable before the command arrives.
+    private var activeRouteKeys: [RouteOccurrenceKey] = []
+    private var activeRouteIndex: [RouteOccurrenceKey: Int] = [:]
 
     /// The routes currently carrying audio, including any built from taps.
     public var currentRoutes: [Route] {
@@ -1118,7 +1125,7 @@ public final class RoutingEngine: @unchecked Sendable {
             outputGain: outputGain, outputMuted: isOutputMuted,
             on: graph)
         self.graph = graph
-        activeRoutes = routes
+        installActiveRoutes(routes)
         graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0
         graph.pointee.outputLimiter = Unmanaged.passUnretained(outputLimiter).toOpaque()
         graph.pointee.outputLimiterEnabled = effects.contains(.limiter) ? 1 : 0
@@ -1383,7 +1390,7 @@ public final class RoutingEngine: @unchecked Sendable {
         inputMap.removeAll()
         outputMap.removeAll()
         outputChannelCounts.removeAll()
-        activeRoutes.removeAll()
+        installActiveRoutes([])
 
         // Restore last: the aggregate has to be gone first, or the HAL will
         // simply set the rate back to whatever the aggregate wanted.
@@ -1402,8 +1409,13 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         guard requiresClockLock, !clockLockAbandoned,
-            let configuration = lastConfiguration
+            var configuration = lastConfiguration
         else { return }
+        // Per-route controls are deliberately not copied into the recovery
+        // snapshot on every pointer event. Doing so made each slider tick copy
+        // the whole route array. The current engine truth is already protected
+        // by this lock, so attach it once at the recovery boundary instead.
+        configuration.routes = activeRoutes
         clockLockAbandoned = true
 
         // The whole configuration, not the devices alone. This used to name four
@@ -1800,6 +1812,32 @@ public final class RoutingEngine: @unchecked Sendable {
         }
     }
 
+    /// Carries live fader and mute truth onto a proposed topology.
+    ///
+    /// A topology request is built on MainActor before earlier fader commands
+    /// necessarily reach this queue. The engine's copy is therefore the newer
+    /// truth. Reusing the route carry contract also keeps duplicate cables
+    /// independent instead of collapsing identical endpoints into one entry.
+    static func preservingRouteControls(from old: [Route], to new: [Route]) -> [Route] {
+        var result = new
+        for (newIndex, oldIndex) in carriedPositions(from: old, to: new).enumerated() {
+            guard let oldIndex else { continue }
+            result[newIndex].gain = old[oldIndex].gain
+            result[newIndex].isMuted = old[oldIndex].isMuted
+        }
+        return result
+    }
+
+    /// Publishes control-side topology truth and its O(1) command lookup.
+    private func installActiveRoutes(_ routes: [Route]) {
+        activeRoutes = routes
+        activeRouteKeys = Route.occurrenceKeys(in: routes)
+        activeRouteIndex = Dictionary(
+            uniqueKeysWithValues: activeRouteKeys.indices.map {
+                (activeRouteKeys[$0], $0)
+            })
+    }
+
     public func stopStemRecording() {
         stateLock.lock()
         defer { stateLock.unlock() }
@@ -2065,11 +2103,13 @@ public final class RoutingEngine: @unchecked Sendable {
     /// realtime thread has been seen to complete two cycles past the swap: one
     /// cycle may already have been in flight holding the old pointer.
     @discardableResult
-    public func updateRoutes(_ routes: [Route]) -> Bool {
+    public func updateRoutes(_ requestedRoutes: [Route]) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
 
         guard isRunning, let cell = graphCell, let previous = graph else { return false }
+        let routes = Self.preservingRouteControls(
+            from: activeRoutes, to: requestedRoutes)
 
         let rtRoutes = routes.compactMap { route -> RTRoute? in
             guard let source = inputMap[route.source],
@@ -2171,7 +2211,7 @@ public final class RoutingEngine: @unchecked Sendable {
 
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         graph = next
-        activeRoutes = routes
+        installActiveRoutes(routes)
         lastConfiguration?.rememberLiveRoutes(routes)
 
         // A false return means the device is not producing cycles, so nothing
@@ -2541,6 +2581,8 @@ public final class RoutingEngine: @unchecked Sendable {
         guard gain.isFinite else { return false }
         stateLock.lock()
         defer { stateLock.unlock() }
+        guard activeRoutes.indices.contains(index) else { return false }
+        activeRoutes[index].gain = gain
         return push(kind: kYunRTCommandSetGain, index: index, value: gain)
     }
 
@@ -2548,6 +2590,32 @@ public final class RoutingEngine: @unchecked Sendable {
     public func setMuted(_ muted: Bool, forRouteAt index: Int) -> Bool {
         stateLock.lock()
         defer { stateLock.unlock() }
+        guard activeRoutes.indices.contains(index) else { return false }
+        activeRoutes[index].isMuted = muted
+        return push(kind: kYunRTCommandSetMute, index: index, value: muted ? 1 : 0)
+    }
+
+    /// Sets a route by topology-stable identity rather than a captured slot.
+    ///
+    /// A false queue push still leaves the desired value in `activeRoutes`, as
+    /// global controls do. A later graph publication or clock recovery will
+    /// therefore not resurrect the old value.
+    @discardableResult
+    public func setGain(_ gain: Float, for key: RouteOccurrenceKey) -> Bool {
+        guard gain.isFinite else { return false }
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let index = activeRouteIndex[key] else { return false }
+        activeRoutes[index].gain = gain
+        return push(kind: kYunRTCommandSetGain, index: index, value: gain)
+    }
+
+    @discardableResult
+    public func setMuted(_ muted: Bool, for key: RouteOccurrenceKey) -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let index = activeRouteIndex[key] else { return false }
+        activeRoutes[index].isMuted = muted
         return push(kind: kYunRTCommandSetMute, index: index, value: muted ? 1 : 0)
     }
 

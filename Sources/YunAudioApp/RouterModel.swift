@@ -3693,8 +3693,10 @@ final class RouterModel: ScriptTarget {
             return
         }
         let gain = Self.gain(fromDecibels: decibels)
+        let keys = indices.compactMap(routeKey(at:))
+        for key in keys { rememberGain(gain, for: key) }
         applyLiveControl { engine in
-            for index in indices { engine.setGain(gain, forRouteAt: index) }
+            for key in keys { engine.setGain(gain, for: key) }
         }
     }
 
@@ -3738,8 +3740,10 @@ final class RouterModel: ScriptTarget {
             let indices = monitorRouteIndices[uid]
         else { return }
         let gain = Self.gain(fromDecibels: monitorDecibels)
+        let keys = indices.compactMap(routeKey(at:))
+        for key in keys { rememberGain(gain, for: key) }
         applyLiveControl { engine in
-            for index in indices { engine.setGain(gain, forRouteAt: index) }
+            for key in keys { engine.setGain(gain, for: key) }
         }
     }
 
@@ -4585,10 +4589,11 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var routeUpdatesAreAccepted = false
 
     private var desiredTopologyRoutes: [Route] {
-        pendingTopologyRoutes ?? activeRoutes
+        applyingLatestRouteControls(to: pendingTopologyRoutes ?? activeRoutes)
     }
 
     private func applyPatch(_ routes: [Route]) {
+        let routes = applyingLatestRouteControls(to: routes)
         guard isRunning else {
             // Nothing to swap into; the patch takes effect when routing starts.
             pendingTopologyRoutes = nil
@@ -4613,9 +4618,10 @@ final class RouterModel: ScriptTarget {
             restartIfRunning()
             return
         }
-        activeRoutes = installed
-        routeGains = installed.map(\.gain)
-        routeMutes = installed.map(\.isMuted)
+        let controlled = applyingLatestRouteControls(to: installed)
+        activeRoutes = controlled
+        routeGains = controlled.map(\.gain)
+        routeMutes = controlled.map(\.isMuted)
         rebuiltRoutes()
     }
 
@@ -4671,6 +4677,47 @@ final class RouterModel: ScriptTarget {
 
     private(set) var routeGains: [Float] = []
     private(set) var routeMutes: [Bool] = []
+    @ObservationIgnored private var activeRouteKeys: [RouteOccurrenceKey] = []
+
+    /// Pointer-event truth that may be newer than an in-flight topology result.
+    ///
+    /// Each field is optional so moving a fader cannot restore an old mute, or
+    /// pressing mute restore an old gain. Capacity is reserved when topology
+    /// changes; the slider path updates one existing scalar entry.
+    private struct LatestRouteControl {
+        var gain: Float?
+        var muted: Bool?
+    }
+
+    @ObservationIgnored private var latestRouteControls:
+        [RouteOccurrenceKey: LatestRouteControl] = [:]
+
+    private func routeKey(at index: Int) -> RouteOccurrenceKey? {
+        guard activeRouteKeys.indices.contains(index) else { return nil }
+        return activeRouteKeys[index]
+    }
+
+    private func rememberGain(_ gain: Float, for key: RouteOccurrenceKey) {
+        var control = latestRouteControls[key] ?? LatestRouteControl()
+        control.gain = gain
+        latestRouteControls[key] = control
+    }
+
+    private func rememberMute(_ muted: Bool, for key: RouteOccurrenceKey) {
+        var control = latestRouteControls[key] ?? LatestRouteControl()
+        control.muted = muted
+        latestRouteControls[key] = control
+    }
+
+    private func applyingLatestRouteControls(to routes: [Route]) -> [Route] {
+        var routes = routes
+        for (index, key) in Route.occurrenceKeys(in: routes).enumerated() {
+            guard let control = latestRouteControls[key] else { continue }
+            if let gain = control.gain { routes[index].gain = gain }
+            if let muted = control.muted { routes[index].isMuted = muted }
+        }
+        return routes
+    }
 
     /// The route being soloed, if any.
     ///
@@ -4704,18 +4751,26 @@ final class RouterModel: ScriptTarget {
     }
 
     private func applyMutes() {
-        let mutes = routeMutes.indices.map { (index: $0, muted: isSilenced($0)) }
+        let mutes = routeMutes.indices.compactMap { index in
+            routeKey(at: index).map {
+                (key: $0, muted: isSilenced(index))
+            }
+        }
+        for entry in mutes { rememberMute(entry.muted, for: entry.key) }
         applyLiveControl { engine in
             for entry in mutes {
-                engine.setMuted(entry.muted, forRouteAt: entry.index)
+                engine.setMuted(entry.muted, for: entry.key)
             }
         }
     }
 
     func setGain(_ gain: Float, forRouteAt index: Int) {
-        guard index < routeGains.count else { return }
+        guard index < routeGains.count, let key = routeKey(at: index) else {
+            return
+        }
         routeGains[index] = gain
-        applyLiveControl { $0.setGain(gain, forRouteAt: index) }
+        rememberGain(gain, for: key)
+        applyLiveControl { $0.setGain(gain, for: key) }
         persist()
     }
 
@@ -5051,9 +5106,12 @@ final class RouterModel: ScriptTarget {
             persist()
             return
         }
-        guard index < routeMutes.count else { return }
+        guard index < routeMutes.count, let key = routeKey(at: index) else {
+            return
+        }
         routeMutes[index] = muted
-        applyLiveControl { $0.setMuted(muted, forRouteAt: index) }
+        rememberMute(muted, for: key)
+        applyLiveControl { $0.setMuted(muted, for: key) }
         persist()
     }
 
@@ -5356,7 +5414,15 @@ final class RouterModel: ScriptTarget {
     private(set) var clockLockFailed = false
     /// The routes actually running, including any built from application taps.
     private(set) var activeRoutes: [Route] = [] {
-        didSet { groupedActiveRoutes = Self.groupRoutes(activeRoutes) }
+        didSet {
+            groupedActiveRoutes = Self.groupRoutes(activeRoutes)
+            activeRouteKeys = Route.occurrenceKeys(in: activeRoutes)
+            let liveKeys = Set(activeRouteKeys)
+            latestRouteControls = latestRouteControls.filter {
+                liveKeys.contains($0.key)
+            }
+            latestRouteControls.reserveCapacity(activeRouteKeys.count)
+        }
     }
 
     /// Whether the running route has taken the driver's clock. Not
