@@ -220,6 +220,9 @@ struct OnlineLyrics: Sendable {
 
         let lrc: Part?
         let klyric: Part?
+        /// The same song in another language. Requested since this was
+        /// written — `tv=-1` in the query — and discarded ever since.
+        let tlyric: Part?
     }
 
     /// Query-side normalisation is invariant across every candidate.
@@ -687,11 +690,13 @@ struct OnlineLyrics: Sendable {
             guard !Self.isInstrumentalLyrics(words) else { continue }
             if plain == nil { plain = words }
             if let parsed = Lyrics.parse(words) {
+                let translated =
+                    reply.tlyric?.lyric.nonEmpty.map(parsed.withTranslation) ?? parsed
                 return Match(
                     source: .netEase, trackName: song.name,
                     artistName: song.artists.map(\.name).joined(separator: " / "),
                     albumName: song.album.name, duration: song.duration / 1_000,
-                    synchronised: words, plain: words, parsed: parsed)
+                    synchronised: words, plain: words, parsed: translated)
             }
         }
         return Match(

@@ -24,12 +24,20 @@ public struct Lyrics: Sendable, Hashable {
 
         public init(
             time: Double, text: String, singer: String? = nil,
-            syllables: [Syllable] = []
+            syllables: [Syllable] = [], translation: String? = nil
         ) {
             self.time = time
             self.text = text
             self.singer = singer
             self.syllables = syllables
+            self.translation = translation
+        }
+
+        /// The same line with a translation attached.
+        public func translated(_ translation: String?) -> Line {
+            Line(
+                time: time, text: text, singer: singer, syllables: syllables,
+                translation: translation)
         }
 
         /// How far through the line a moment is, using the word times when the
@@ -88,6 +96,16 @@ public struct Lyrics: Sendable, Hashable {
                 self.text = text
             }
         }
+
+        /// The same line in another language, when the index carried one.
+        ///
+        /// NetEase returns a second `.lrc` under `tlyric` and QQ an equivalent;
+        /// this application has been asking for it since the day it was written
+        /// and throwing it away. For a Chinese lyric in front of somebody who
+        /// does not read Chinese — or an English one in front of somebody who
+        /// does not read English — it is the difference between a stage that
+        /// scrolls and a stage that means something.
+        public let translation: String?
 
         /// A rest: the file marked time here and gave no words.
         ///
@@ -370,6 +388,33 @@ public struct Lyrics: Sendable, Hashable {
         let rest = parts[1]
         guard let seconds = Double(rest), seconds >= 0, seconds < 60 else { return nil }
         return minutes * 60 + seconds
+    }
+
+    /// Attaches a second `.lrc` of the same song in another language.
+    ///
+    /// Matched by timestamp rather than by position: the two files agree on
+    /// when a line is sung and disagree on how many lines there are, because
+    /// the translation routinely omits the credit block the original carries
+    /// and sometimes merges two short lines into one. Pairing them by index —
+    /// the obvious way — puts the wrong sentence under every line after the
+    /// first mismatch, which is worse than showing none.
+    ///
+    /// A quarter of a second of tolerance, because the two are typed by
+    /// different people from the same recording and agreeing to the frame is
+    /// not something either promises.
+    public func withTranslation(_ text: String) -> Lyrics {
+        guard let other = Lyrics.parse(text) else { return self }
+        var updated = self
+        updated.lines = lines.map { line in
+            let match = other.lines.min {
+                abs($0.time - line.time) < abs($1.time - line.time)
+            }
+            guard let match, abs(match.time - line.time) <= 0.25,
+                !match.text.isEmpty, match.text != line.text
+            else { return line }
+            return line.translated(match.text)
+        }
+        return updated
     }
 
     // MARK: Following along

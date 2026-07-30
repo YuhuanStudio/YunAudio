@@ -4333,7 +4333,16 @@ final class RouterModel: ScriptTarget {
             [01:38.16]再重来我依然有选择你的勇气
             [01:44.10]只可惜青春的诗句
             [01:47.31]总有挥散不去的叹息
-            """)
+            """)?
+            // A translation, because the stage now shows one and no render or
+            // photograph of it has ever contained a line that has one.
+            .withTranslation(
+                """
+                [01:09.39]So a young heart moving was walking backwards through a season of rain
+                [01:14.79]Never to arrive at the same clear day
+                [01:20.70]Yet the eraser of time
+                [01:23.91]Took so much and spared your name
+                """)
         lyricsSourceName = loc("NetEase Cloud Music")
         lyricsLookupStatus = .online
         trackClock.duration = 265

@@ -803,6 +803,24 @@ struct KTVStage: View {
                         lyricLine(
                             line.isInterlude ? Self.interludeMark : line.text,
                             offset: offset, metrics: metrics)
+                        // Under the line it belongs to, smaller and quieter, so
+                        // it reads as the same sentence again rather than as
+                        // the next one. Only where the index actually carried
+                        // one — most do not, and a blank row under every line
+                        // would halve the stage for nothing.
+                        if let translation = line.translation {
+                            Text(translation)
+                                .font(
+                                    .system(
+                                        size: metrics.neighbourSize * 0.78,
+                                        weight: .medium)
+                                )
+                                .foregroundStyle(
+                                    .white.opacity(
+                                        offset == 0 ? 0.68 : Self.lyricOpacity(for: offset) * 0.7)
+                                )
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     .id(index)
                 }
