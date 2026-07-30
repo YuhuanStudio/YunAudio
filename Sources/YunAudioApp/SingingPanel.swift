@@ -644,7 +644,13 @@ private struct SingingLyrics: View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             ForEach(-1...1, id: \.self) { offset in
                 let index = current + offset
-                let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
+                let line =
+                    lyrics.lines.indices.contains(index) ? lyrics.lines[index] : nil
+                // A rest is drawn here exactly as it is on the stage: a timed
+                // line with no words is an intro, an interlude or an outro, and
+                // an empty row says none of that. The same mark, so the two
+                // presentations of the same song do not disagree.
+                let text = line.map { $0.isInterlude ? KTVStage.interludeMark : $0.text } ?? ""
                 if offset == 0 {
                     // The sweep is the point: a line that lights up all at
                     // once tells you which line, and a line that fills tells
