@@ -2805,9 +2805,9 @@ final class RouterModel: ScriptTarget {
 
     /// Below this the fader reads as −∞ and the gain is exactly zero, so the
     /// bottom of the travel is silence rather than something very quiet.
-    static let minimumDecibels: Float = -40
+    nonisolated static let minimumDecibels: Float = -40
 
-    static func gain(fromDecibels decibels: Float) -> Float {
+    nonisolated static func gain(fromDecibels decibels: Float) -> Float {
         decibels <= minimumDecibels ? 0 : pow(10, decibels / 20)
     }
 
@@ -2923,23 +2923,6 @@ final class RouterModel: ScriptTarget {
                 device.transport.isVirtual ? nil : device
             }
             ?? echoSpeakerOptions.first
-    }
-
-    private func echoSettings(
-        fallbackProcessIDs: [AudioObjectID]
-    ) -> EchoCancellationSettings? {
-        guard cancelsEcho, let speaker = resolvedEchoSpeaker else { return nil }
-        let reference =
-            fallbackProcessIDs.isEmpty
-            ? availableApps.filter(\.isPlaying).flatMap(\.processIDs)
-            : fallbackProcessIDs
-        // Unmuted: the applications keep playing to the speaker themselves. The
-        // alternative routes their audio through the canceller instead, which
-        // cancels better but puts this app in the path of everything the user
-        // hears — too much to take without being asked.
-        return EchoCancellationSettings(
-            speakerUID: speaker.uid, farEndProcessIDs: reference,
-            tapMuteBehavior: .unmuted)
     }
 
     /// What the canceller is doing, or nil when it is not in the path.
@@ -3322,7 +3305,7 @@ final class RouterModel: ScriptTarget {
     ///   - published: What the tap says it carries, if it says anything.
     ///   - destination: Channels the destination has room for.
     /// - Returns: How many channels to build routes for.
-    static func channelsToRoute(published: UInt32?, destination: Int) -> Int {
+    nonisolated static func channelsToRoute(published: UInt32?, destination: Int) -> Int {
         let carried = Int(published ?? 0)
         return min(destination, carried > 0 ? carried : 2)
     }
@@ -5107,6 +5090,157 @@ final class RouterModel: ScriptTarget {
         "\(name) (\(String(describing: error)))"
     }
 
+    /// Process objects the echo canceller may use as its far-end reference.
+    nonisolated static func echoReferenceProcessIDs(
+        in applications: [AudioApplication],
+        excluding bundleIDs: Set<String>
+    ) -> [AudioObjectID] {
+        applications.filter {
+            $0.isPlaying && !bundleIDs.contains($0.bundleID)
+        }.flatMap(\.processIDs)
+    }
+
+    /// A destination reduced to the values application routing needs.
+    private struct CaptureDestination: Sendable {
+        let uid: String
+        let outputChannels: Int
+    }
+
+    /// The monitor values frozen at the instant Start was pressed.
+    private struct MonitorStartPlan: Sendable {
+        let uid: String
+        let outputChannels: Int
+        let sends: [String: Float]
+        let selectedSourceUID: String
+        let defaultDecibels: Float
+    }
+
+    /// Everything built before the engine can start.
+    ///
+    /// This value never leaves `engineQueue`. In particular, its taps must not
+    /// cross back to the main actor: their deinitializer synchronously destroys
+    /// a CoreAudio object, so the thread that abandons a cancelled start is as
+    /// important as the thread that creates it.
+    private struct CapturePreparation {
+        let applications: [AudioApplication]
+        let refreshedApplications: Bool
+        let routes: [Route]
+        let taps: [ProcessTap]
+        let owners: [String: String]
+        let unresolved: [String]
+        let refused: [String]
+        let monitorRouteIndices: [String: [Int]]
+    }
+
+    /// Resolves applications, creates their taps and lays out both mixes.
+    ///
+    /// Synchronous deliberately: taps use before/after snapshots of CoreAudio's
+    /// global tap list to recover a missing object identifier, so creating two
+    /// in parallel would make each snapshot contain the other's object.
+    nonisolated private static func prepareCapture(
+        selected: Set<String>,
+        currentApplications: [AudioApplication],
+        workspace: AudioApplications.WorkspaceSnapshot,
+        muteBehavior: TapMuteBehavior,
+        destinations: [CaptureDestination],
+        baseRoutes: [Route],
+        monitor: MonitorStartPlan?
+    ) -> CapturePreparation {
+        let refreshed = !selected.isEmpty
+        let applications =
+            refreshed
+            ? ((try? AudioApplications.grouped(keeping: selected, workspace: workspace)) ?? [])
+            : currentApplications
+        let captured = applications.filter {
+            selected.contains($0.bundleID) && !$0.processIDs.isEmpty
+        }
+        let unresolved = selected.subtracting(captured.map(\.bundleID)).sorted()
+        var routes = baseRoutes
+        var taps: [ProcessTap] = []
+        var owners: [String: String] = [:]
+        var refused: [String] = []
+
+        for application in captured {
+            let tap: ProcessTap
+            do {
+                tap = try ProcessTap(
+                    processIDs: application.processIDs,
+                    muteBehavior: muteBehavior,
+                    bundleIDs: [application.bundleID])
+            } catch {
+                refused.append(captureFailure(application.name, error))
+                continue
+            }
+            taps.append(tap)
+            owners[tap.uid] = application.bundleID
+            for destination in destinations {
+                let channels = channelsToRoute(
+                    published: tap.format?.mChannelsPerFrame,
+                    destination: min(2, destination.outputChannels))
+                for channel in 0..<channels {
+                    routes.append(
+                        Route(
+                            source: ChannelRef(deviceUID: tap.uid, channel: channel),
+                            destination: ChannelRef(
+                                deviceUID: destination.uid, channel: channel),
+                            isDuckable: true))
+                }
+            }
+        }
+
+        var monitorIndices: [String: [Int]] = [:]
+        if let monitor {
+            let monitorChannels = min(2, monitor.outputChannels)
+            var bySource: [String: [Route]] = [:]
+            var order: [String] = []
+            for route in routes {
+                let uid = route.source.deviceUID
+                if bySource[uid] == nil { order.append(uid) }
+                guard
+                    !(bySource[uid]?.contains { $0.source.channel == route.source.channel }
+                        ?? false)
+                else { continue }
+                bySource[uid, default: []].append(route)
+            }
+
+            for uid in order {
+                let decibels =
+                    monitor.sends[uid]
+                    ?? (uid == monitor.selectedSourceUID
+                        ? monitor.defaultDecibels : minimumDecibels)
+                guard decibels > minimumDecibels else { continue }
+                let monitorGain = gain(fromDecibels: decibels)
+                let members = (bySource[uid] ?? []).sorted {
+                    $0.source.channel < $1.source.channel
+                }
+                guard !members.isEmpty else { continue }
+                var indices: [Int] = []
+                for channel in 0..<monitorChannels {
+                    let taken = members[min(channel, members.count - 1)]
+                    indices.append(routes.count)
+                    routes.append(
+                        Route(
+                            source: taken.source,
+                            destination: ChannelRef(
+                                deviceUID: monitor.uid, channel: channel),
+                            gain: monitorGain,
+                            isDuckable: taken.isDuckable))
+                }
+                monitorIndices[uid] = indices
+            }
+        }
+
+        return CapturePreparation(
+            applications: applications,
+            refreshedApplications: refreshed,
+            routes: routes,
+            taps: taps,
+            owners: owners,
+            unresolved: unresolved,
+            refused: refused,
+            monitorRouteIndices: monitorIndices)
+    }
+
     /// Every input in the route wired to every output, before the taps and the
     /// monitor are added.
     ///
@@ -5214,183 +5348,39 @@ final class RouterModel: ScriptTarget {
             lastError = loc("The input and the output cannot be the same device.")
             return
         }
-        // Only when something is going to be tapped. Enumerating every audio
-        // process on the machine costs 27 ms warm and 118 cold, and it was
-        // being paid on every start — including the ones with nothing captured
-        // at all, which is most of them, and including every restart caused by
-        // a setting changing. It buys the process identifiers for the
-        // applications about to be tapped, and if there are none it buys
-        // nothing.
-        if !capturedAppBundleIDs.isEmpty { refreshApps() }
-        var routeList = routes
-        var taps: [ProcessTap] = []
+        beginStartOnEngineQueue(source: source, destination: destination, selftest: selftest)
+        return ()
+    }
 
-        // Application audio joins as extra source channels on the same
-        // aggregate, so a tapped app is addressable exactly like a microphone.
-        // One tap per application rather than one tap for all of them.
-        //
-        // A single stereo mixdown of every captured process is cheaper, and it
-        // was what shipped — but it makes Discord and Spotify the same source,
-        // which means they cannot be given different volumes, different roles
-        // or different treatment when somebody talks. Balancing a voice call
-        // against background music is the whole reason anybody captures two
-        // applications at once, and it was the one thing the single tap could
-        // not express.
-        let capturedApps = availableApps.filter {
-            capturedAppBundleIDs.contains($0.bundleID) && !$0.processIDs.isEmpty
-        }
-        unresolvedCaptures =
-            capturedAppBundleIDs
-            .subtracting(capturedApps.map(\.bundleID))
-            .sorted()
-        tapOwners = [:]
-        refusedCaptures = []
-        if !capturedApps.isEmpty {
-            // Every output the send goes to, so a captured application is heard
-            // wherever the microphone is. An extra output that carried the
-            // microphone and not the music would be a copy of the mix that is
-            // not a copy of the mix, which is the one thing it promises to be.
-            let sendDevices = activeDestinationUIDs.compactMap { uid in
-                outputDevices.first { $0.uid == uid }
-            }
-            var failed: [String] = []
-            for app in capturedApps {
-                let attempt: ProcessTap
-                do {
-                    attempt = try ProcessTap(
-                        processIDs: app.processIDs, muteBehavior: tapMuteBehavior,
-                        // The bundle identifier is what makes the capture
-                        // survive the application quitting and coming back.
-                        // See `ProcessTap.init` — this is the line that answers
-                        // OBS's #9144, and it is one argument.
-                        bundleIDs: [app.bundleID])
-                } catch {
-                    // With the status, which `try?` used to throw away. "OBS
-                    // could not be captured" is a sentence; the OSStatus is the
-                    // only part of it anybody can look up, and it is the
-                    // difference between a permission that was never granted
-                    // and a HAL that has run out of taps.
-                    failed.append(Self.captureFailure(app.name, error))
-                    continue
-                }
-                let tap = attempt
-                taps.append(tap)
-                tapOwners[tap.uid] = app.bundleID
-                for sendDevice in sendDevices {
-                    let tapChannels = Self.channelsToRoute(
-                        published: tap.format?.mChannelsPerFrame,
-                        destination: min(2, sendDevice.outputChannels))
-                    for channel in 0..<tapChannels {
-                        routeList.append(
-                            Route(
-                                source: ChannelRef(deviceUID: tap.uid, channel: channel),
-                                destination: ChannelRef(
-                                    deviceUID: sendDevice.uid, channel: channel),
-                                // Only application audio gets out of the way.
-                                // The microphone never does.
-                                isDuckable: true))
-                    }
-                }
-            }
-            refusedCaptures = failed
-            if !failed.isEmpty {
-                lastError = String(
-                    format: loc("%@ could not be captured."),
-                    failed.joined(separator: ", "))
+    /// Starts without putting CoreAudio enumeration or tap lifetime on the main
+    /// actor.
+    private func beginStartOnEngineQueue(
+        source: String,
+        destination: String,
+        selftest: Bool
+    ) {
+        // AppKit objects are reduced to values here. The HAL half of grouping
+        // is the measured 27 ms warm / 118 ms cold part and runs below.
+        let workspace = AudioApplications.workspaceSnapshot()
+        let selectedApplications = capturedAppBundleIDs
+        let knownApplications = availableApps
+        let muteBehavior = tapMuteBehavior
+        let destinations = activeDestinationUIDs.compactMap { uid in
+            outputDevices.first(where: { $0.uid == uid }).map {
+                CaptureDestination(uid: uid, outputChannels: $0.outputChannels)
             }
         }
-
-        // Monitoring last, so its routes sit at the end and their indices are
-        // stable regardless of how many applications are being captured.
-        // A second mix, not a monitor for the microphone alone.
-        //
-        // Every tool people praise for this — Wave Link, RØDE Connect,
-        // VoiceMeeter — is praised for the same thing: two independent mixes,
-        // one for what the far end hears and one for what you hear, with a
-        // separate level per source on each. Music loud in your ears and quiet
-        // on the stream is the case, and it cannot be expressed with one set of
-        // faders however many of them there are.
-        //
-        // The monitor used to carry the microphone and nothing else, which is a
-        // sidetone rather than a mix.
-        monitorRouteIndices = [:]
-        if let monitorUID = monitorDeviceUID,
-            let monitor = outputDevices.first(where: { $0.uid == monitorUID })
-        {
-            let monitorChannels = min(2, monitor.outputChannels)
-            // Every source already in the main mix, each at its own send.
-            // Grouped by source so a stereo source keeps its sides.
-            //
-            // Collected as distinct source *channels* rather than as routes:
-            // with a second output in the path each source channel appears in
-            // the list once per output, and taking the second route by position
-            // handed the right ear whatever happened to be there — the same
-            // channel again on a mono source going to two outputs, which is
-            // correct by accident, and would stop being correct the moment the
-            // build order changed.
-            var bySource: [String: [Route]] = [:]
-            var order: [String] = []
-            for route in routeList {
-                let uid = route.source.deviceUID
-                if bySource[uid] == nil { order.append(uid) }
-                guard
-                    !(bySource[uid]?.contains { $0.source.channel == route.source.channel }
-                        ?? false)
-                else { continue }
-                bySource[uid, default: []].append(route)
-            }
-
-            for uid in order {
-                let level = monitorSendDecibels(forSource: uid)
-                guard level > Self.minimumDecibels else { continue }
-                let gain = Self.gain(fromDecibels: level)
-                let members = (bySource[uid] ?? []).sorted {
-                    $0.source.channel < $1.source.channel
-                }
-                guard !members.isEmpty else { continue }
-                var indices: [Int] = []
-                for channel in 0..<monitorChannels {
-                    // A mono source feeds both ears; a stereo one keeps its
-                    // sides.
-                    let taken = members[min(channel, members.count - 1)]
-                    indices.append(routeList.count)
-                    routeList.append(
-                        Route(
-                            source: taken.source,
-                            destination: ChannelRef(
-                                deviceUID: monitorUID, channel: channel),
-                            gain: gain,
-                            // Application audio ducks on the monitor too, or
-                            // talking over music sounds different in your ears
-                            // from how it sounds to everybody else.
-                            isDuckable: taken.isDuckable))
-                }
-                monitorRouteIndices[uid] = indices
+        let baseRoutes = routes
+        let monitorPlan = monitorDeviceUID.flatMap { uid in
+            outputDevices.first(where: { $0.uid == uid }).map {
+                MonitorStartPlan(
+                    uid: uid,
+                    outputChannels: $0.outputChannels,
+                    sends: monitorSends,
+                    selectedSourceUID: source,
+                    defaultDecibels: monitorDecibels)
             }
         }
-
-        guard !routeList.isEmpty else {
-            // Two very different reasons for having nothing to route, reported
-            // until now as one. Either the two devices genuinely share no
-            // channels — a configuration to tell somebody about — or an end of
-            // the route is simply not in the device list any more, because it
-            // went away between this rebuild's teardown and its start. Telling
-            // somebody their microphone and their speakers have no channels in
-            // common, when what happened is that one of them was unplugged, is
-            // an invitation to go looking for a fault that is not there.
-            startFailed = true
-            lastError =
-                selectedSource == nil || selectedDestination == nil
-                ? loc("A device in the route was unplugged.")
-                : loc("Those two devices share no usable channels.")
-            return
-        }
-
-        clockLockFailed = false
-        isBusy = true
-        isStarting = true
-
-        let engine = engine
         let effects = Array(enabledEffects)
         let pluginList = enabledPlugins
         let isolation =
@@ -5398,42 +5388,104 @@ final class RouterModel: ScriptTarget {
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
         let buffer = bufferFrames
-        let handle = TapHandle(taps: taps)
-        // The far end is whatever the user chose to mix in. If they picked
-        // nothing, every application currently making noise is used instead:
-        // the point of the reference is to know what came out of the speaker,
-        // and asking someone to name that twice would be asking them to do the
-        // app's job.
-        // The exclusion reaches this too. A reference tap only listens — it
-        // does not redirect anything — but somebody who said "never touch
-        // Logic" did not mean "except when guessing what the speakers are
-        // playing", and the difference is not one they should have to know.
-        let echo = echoSettings(
-            fallbackProcessIDs:
-                availableApps
-                .filter { $0.isPlaying && !excludedAppBundleIDs.contains($0.bundleID) }
-                .flatMap(\.processIDs))
-        let monitor = monitorDeviceUID
+        let monitorUID = monitorDeviceUID
         let extraSources = additionalSourceUIDs
         let extraDestinations = additionalDestinationUIDs
         let trim = outputLatencyFrames
-        // Copied so the queue closure and the main actor are not reading and
-        // writing the same array. Route is a value type, so this is a real copy.
-        let routes = routeList
+        let echoIsEnabled = cancelsEcho
+        let wantedEchoSpeaker = echoSpeakerUID
+        let echoSpeakers = echoSpeakerOptions
+        let excludedApplications = excludedAppBundleIDs
+        let emptyRouteError =
+            selectedSource == nil || selectedDestination == nil
+            ? loc("A device in the route was unplugged.")
+            : loc("Those two devices share no usable channels.")
+
+        clockLockFailed = false
+        tapOwners = [:]
+        unresolvedCaptures = []
+        refusedCaptures = []
+        monitorRouteIndices = [:]
+        isBusy = true
+        isStarting = true
+        let intent = StartIntent()
+        currentStartIntent = intent
+        let engine = engine
 
         engineQueue.async {
+            let preparation = Self.prepareCapture(
+                selected: selectedApplications,
+                currentApplications: knownApplications,
+                workspace: workspace,
+                muteBehavior: muteBehavior,
+                destinations: destinations,
+                baseRoutes: baseRoutes,
+                monitor: monitorPlan)
+            guard !intent.isCancelled else {
+                // `preparation` — and therefore every ProcessTap — dies on this
+                // queue after the callback is enqueued, never on MainActor.
+                Task { @MainActor in self.finishCancelledStart(intent) }
+                return
+            }
+            guard !preparation.routes.isEmpty else {
+                let report = StartReport(
+                    applications: preparation.applications,
+                    refreshedApplications: preparation.refreshedApplications,
+                    owners: preparation.owners,
+                    unresolved: preparation.unresolved,
+                    refused: preparation.refused,
+                    monitorRouteIndices: preparation.monitorRouteIndices,
+                    failure: emptyRouteError,
+                    quality: nil,
+                    didStart: false)
+                Task { @MainActor in self.finishStart(intent, report, isolation: isolation) }
+                return
+            }
+
+            let echo: EchoCancellationSettings?
+            if echoIsEnabled {
+                let speaker =
+                    echoSpeakers.first { $0.uid == wantedEchoSpeaker }
+                    ?? (try? AudioDevices.defaultOutput()).flatMap {
+                        $0.transport.isVirtual ? nil : $0
+                    }
+                    ?? echoSpeakers.first
+                if let speaker {
+                    // The far end is every audible application the exclusion
+                    // permits. Empty stays empty: falling back to the excluded
+                    // set would turn "never touch this application" into a rule
+                    // that stops at the echo canceller.
+                    let reference = Self.echoReferenceProcessIDs(
+                        in: preparation.applications,
+                        excluding: excludedApplications)
+                    // Unmuted leaves those applications on their own speaker
+                    // path. Routing them through the canceller would subtract
+                    // better, but would also put YunAudio in the path of
+                    // everything somebody hears without being asked.
+                    echo = EchoCancellationSettings(
+                        speakerUID: speaker.uid,
+                        farEndProcessIDs: reference,
+                        tapMuteBehavior: .unmuted)
+                } else {
+                    echo = nil
+                }
+            } else {
+                echo = nil
+            }
+
             engine.allowClockLockRetry()
             var failure: String?
-            var startedQuality: PathQuality?
+            var quality: PathQuality?
+            var didStart = false
             do {
                 try engine.start(
                     sourceDeviceUID: source,
                     destinationDeviceUID: destination,
-                    routes: routes,
-                    taps: handle.taps,
+                    routes: preparation.routes,
+                    taps: preparation.taps,
                     additionalSourceUIDs: extraSources,
                     additionalDestinationUIDs: extraDestinations,
-                    monitorDeviceUID: monitor,
+                    monitorDeviceUID: monitorUID,
                     effects: effects,
                     plugins: pluginList,
                     preferredSampleRate: rate,
@@ -5442,121 +5494,138 @@ final class RouterModel: ScriptTarget {
                     echoCancellation: echo,
                     outputLatencyTrim: trim,
                     selftest: selftest)
-                // This asks CoreAudio several synchronous questions. The
-                // engine queue is already paying for device startup; carrying
-                // the answer across avoids adding a final main-actor stall just
-                // as the interface becomes interactive again.
-                startedQuality = engine.pathQuality
+                didStart = true
+                quality = engine.pathQuality
             } catch {
                 failure = String(describing: error)
             }
-            Task { @MainActor [failure, startedQuality] in
-                self.isBusy = false
-                self.isStarting = false
-                if let failure {
-                    self.isRunning = false
-                    self.lastError = failure
-                    self.startFailed = true
-                    // Nothing came up, so a stop that was refused while this was
-                    // in flight has already got what it wanted. Left set it
-                    // would take down the next start somebody asked for — and it
-                    // outranks the pending rebuild below, exactly as it does
-                    // everywhere else.
-                    let stayDown = self.stopIsPending
-                    self.stopIsPending = false
-                    if stayDown {
-                        self.restartIsPending = false
-                        return
-                    }
-                    // An edit that arrived while this doomed start was in flight
-                    // is not a retry of it. It is what somebody chose while
-                    // watching it not work, and it is quite likely the thing
-                    // that makes it work — a different output, a rate both ends
-                    // can present. Thrown away, it left the same dead end
-                    // `rerouteAfterDeviceChange` exists for: nothing running,
-                    // and the interface showing a device the engine was never
-                    // asked about.
-                    if self.restartIsPending {
-                        self.restartIsPending = false
-                        self.startFailed = false
-                        self.start()
-                    }
-                    return
-                }
-                self.isRunning = true
-                self.lastError = nil
-                self.fire(.routingStarted)
-                self.startFailed = false
-                // The detector needs the device's input to be running, which it
-                // now is. Started here rather than at selection for that reason
-                // — asked of an idle device it answers "no voice" forever.
-                self.startVoiceActivity()
-                // A graph built by `start` carries nothing from the one before
-                // it, so everything the user set has to be pushed in again.
-                self.appliedToGraph = []
-                self.applyInputGain()
-                self.applyInputMute()
-                self.applyOutputGain()
-                self.applyOutputMute()
-                // Ducking too. `start` takes no ducking arguments, so a fresh
-                // graph comes up with it off — and nothing put it back, so
-                // anything that restarted the route (a buffer size, a plugin,
-                // an isolation mix) silently switched off a feature the
-                // interface went on showing as on.
-                self.applyDucking()
-                self.applyEffectValues()
-                // What came up, which is not always what was asked for: a
-                // monitor that will not start is dropped so that the mix
-                // survives it, and a fader for a route the engine never
-                // installed looks exactly like one that works and moves
-                // nothing.
-                let installed = self.engine.currentRoutes
-                self.activeRoutes = installed
-                self.routeGains = installed.map(\.gain)
-                self.routeMutes = installed.map(\.isMuted)
-                if let dropped = self.engine.droppedMonitor {
-                    self.monitorWasDropped(dropped)
-                }
-                // After the monitor, so that a start which lost both reports
-                // the extras last and does not have its message overwritten.
-                self.extrasWereDropped(self.engine.droppedExtras)
-                self.applySourceLevels()
-                self.applyOutputTrims()
-                // Voice isolation asked for and not attached.
-                //
-                // The engine has written down why since the day it was
-                // written, and nothing anywhere read it. The route comes up,
-                // the effect goes on showing as enabled, the signal goes round
-                // it, and the only person who could tell is the one listening
-                // for something that is not there. This is the same rule as
-                // the path quality badge: say when the path is not what was
-                // asked for.
-                if isolation != nil, let reason = self.engine.lastIsolationError {
-                    self.lastError = Self.isolationMessage(reason)
-                }
-                // The analysers are built per run, because the K-weighting
-                // coefficients and the FFT bin mapping both depend on the rate
-                // the aggregate settled on.
-                // `?? 48000` covers a missing quality report and not a present
-                // one carrying zero, which is what a device that has not
-                // settled reports — and zero was the rate that took the whole
-                // application down from inside the FFT setup.
-                self.pathQuality = startedQuality
-                let reported = startedQuality?.sampleRate ?? 0
-                self.startAnalysis(
-                    sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
-                // After the graph exists, not before: a correction names an
-                // output buffer, and there are no buffers until the aggregate
-                // is built.
-                self.applyCorrections()
-                self.startPolling()
-                // Anything that arrived while this start was in flight. The stop
-                // first: it was asked for after everything else here, and it is
-                // the one request that makes the rest moot.
-                if self.honourPendingStop() { return }
-                self.drainPendingRestart()
+
+            // A stop or settings edit can arrive while CoreAudio is inside its
+            // synchronous start. It cannot interrupt that call, but it can keep
+            // the obsolete graph from ever being published to the interface.
+            if intent.isCancelled {
+                if didStart { engine.stop() }
+                Task { @MainActor in self.finishCancelledStart(intent) }
+                return
             }
+
+            let report = StartReport(
+                applications: preparation.applications,
+                refreshedApplications: preparation.refreshedApplications,
+                owners: preparation.owners,
+                unresolved: preparation.unresolved,
+                refused: preparation.refused,
+                monitorRouteIndices: preparation.monitorRouteIndices,
+                failure: failure,
+                quality: quality,
+                didStart: didStart)
+            Task { @MainActor in self.finishStart(intent, report, isolation: isolation) }
         }
+    }
+
+    /// Finishes a start made obsolete before its result reached the main actor.
+    private func finishCancelledStart(_ intent: StartIntent) {
+        guard currentStartIntent === intent else { return }
+        currentStartIntent = nil
+        isBusy = false
+        isStarting = false
+        isRunning = false
+        if honourPendingStop() { return }
+        if restartIsPending {
+            restartIsPending = false
+            startFailed = false
+            start()
+        }
+    }
+
+    /// Publishes only the report belonging to the current start generation.
+    private func finishStart(
+        _ intent: StartIntent,
+        _ report: StartReport,
+        isolation: VoiceIsolationSettings?
+    ) {
+        guard currentStartIntent === intent else { return }
+        // Cancellation can land after the queue's final check but before this
+        // callback. A graph that came up in that gap is taken down on the same
+        // queue before the cancelled generation is retired.
+        if intent.isCancelled {
+            if report.didStart {
+                let engine = engine
+                engineQueue.async {
+                    engine.stop()
+                    Task { @MainActor in self.finishCancelledStart(intent) }
+                }
+            } else {
+                finishCancelledStart(intent)
+            }
+            return
+        }
+
+        currentStartIntent = nil
+        if report.refreshedApplications {
+            availableApps = report.applications
+            appsRefreshedAt = Date()
+        }
+        tapOwners = report.didStart ? report.owners : [:]
+        unresolvedCaptures = report.unresolved
+        refusedCaptures = report.refused
+        monitorRouteIndices = report.didStart ? report.monitorRouteIndices : [:]
+        isBusy = false
+        isStarting = false
+
+        if let failure = report.failure {
+            isRunning = false
+            lastError = failure
+            startFailed = true
+            let stayDown = stopIsPending
+            stopIsPending = false
+            if stayDown {
+                restartIsPending = false
+                return
+            }
+            if restartIsPending {
+                restartIsPending = false
+                startFailed = false
+                start()
+            }
+            return
+        }
+
+        isRunning = true
+        lastError =
+            report.refused.isEmpty
+            ? nil
+            : String(
+                format: loc("%@ could not be captured."),
+                report.refused.joined(separator: ", "))
+        fire(.routingStarted)
+        startFailed = false
+        startVoiceActivity()
+        appliedToGraph = []
+        applyInputGain()
+        applyInputMute()
+        applyOutputGain()
+        applyOutputMute()
+        applyDucking()
+        applyEffectValues()
+        let installed = engine.currentRoutes
+        activeRoutes = installed
+        routeGains = installed.map(\.gain)
+        routeMutes = installed.map(\.isMuted)
+        if let dropped = engine.droppedMonitor { monitorWasDropped(dropped) }
+        extrasWereDropped(engine.droppedExtras)
+        applySourceLevels()
+        applyOutputTrims()
+        if isolation != nil, let reason = engine.lastIsolationError {
+            lastError = Self.isolationMessage(reason)
+        }
+        pathQuality = report.quality
+        let reported = report.quality?.sampleRate ?? 0
+        startAnalysis(sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
+        applyCorrections()
+        startPolling()
+        if honourPendingStop() { return }
+        drainPendingRestart()
     }
 
     func stop() {
@@ -5577,6 +5646,7 @@ final class RouterModel: ScriptTarget {
     func stop(then completion: (@MainActor () -> Void)? = nil) {
         guard !isBusy else {
             stopIsPending = true
+            if isStarting { currentStartIntent?.cancel() }
             return
         }
         isBusy = true
@@ -5912,10 +5982,36 @@ final class RouterModel: ScriptTarget {
         isRunning = false
     }
 
-    /// Carries the taps across the queue hop. `ProcessTap` is a class the audio
-    /// system owns, and the queue closure has to be `Sendable`.
-    private struct TapHandle: @unchecked Sendable {
-        let taps: [ProcessTap]
+    /// Cancellation shared by the main actor and one engine-queue start.
+    ///
+    /// This lock is never touched by the realtime path. It exists because Stop
+    /// and a settings edit must be able to prevent a 118 ms capture preflight
+    /// from going on to seize the audio devices after the request is obsolete.
+    private final class StartIntent: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        func cancel() {
+            lock.withLock { cancelled = true }
+        }
+
+        var isCancelled: Bool {
+            lock.withLock { cancelled }
+        }
+    }
+
+    /// Plain evidence returned after a start; live taps stay on the engine
+    /// queue and, on success, are retained by `RoutingEngine`.
+    private struct StartReport: Sendable {
+        let applications: [AudioApplication]
+        let refreshedApplications: Bool
+        let owners: [String: String]
+        let unresolved: [String]
+        let refused: [String]
+        let monitorRouteIndices: [String: [Int]]
+        let failure: String?
+        let quality: PathQuality?
+        let didStart: Bool
     }
 
     /// Applies a configuration change to a running route.
@@ -6070,7 +6166,10 @@ final class RouterModel: ScriptTarget {
             // which is why the old guard below never even saw it. A stop in
             // flight needs no note: the start chained after it reads the model
             // fresh.
-            if isStarting { restartIsPending = true }
+            if isStarting {
+                restartIsPending = true
+                currentStartIntent?.cancel()
+            }
             return
         }
         guard isRunning else { return }
@@ -6085,6 +6184,9 @@ final class RouterModel: ScriptTarget {
 
     /// True while a start is in flight, as opposed to a stop.
     @ObservationIgnored private var isStarting = false
+
+    /// The particular start whose capture preflight owns `engineQueue`.
+    @ObservationIgnored private var currentStartIntent: StartIntent?
 
     /// Carries out a restart that was asked for while a start was in flight.
     ///

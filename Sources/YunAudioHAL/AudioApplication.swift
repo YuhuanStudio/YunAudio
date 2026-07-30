@@ -91,6 +91,26 @@ extension AudioApplications {
         }
     }
 
+    /// One read of `NSWorkspace`, split into the two views grouping needs.
+    ///
+    /// `grouped()` used to enumerate the same running-application array twice:
+    /// once for foreground ownership and again for names. More importantly,
+    /// moving the expensive HAL half of grouping off the main actor must not
+    /// move AppKit object access with it. The application takes this value
+    /// snapshot on the main actor and hands only plain data to its engine queue.
+    public struct WorkspaceSnapshot: Sendable {
+        public let foreground: [String: ApplicationInfo]
+        public let named: [String: ApplicationInfo]
+
+        public init(
+            foreground: [String: ApplicationInfo],
+            named: [String: ApplicationInfo]
+        ) {
+            self.foreground = foreground
+            self.named = named
+        }
+    }
+
     /// The identity used for a process that publishes no bundle identifier.
     ///
     /// A tap is built from `AudioObjectID`s, so such a process can be captured
@@ -116,14 +136,23 @@ extension AudioApplications {
     /// - Returns: One entry per application, whatever is playing first.
     /// - Throws: Whatever reading the HAL's process list threw.
     public static func grouped(keeping: Set<String> = []) throws -> [AudioApplication] {
+        try grouped(keeping: keeping, workspace: workspaceSnapshot())
+    }
+
+    /// Groups the HAL process list against a value snapshot of AppKit state.
+    ///
+    /// The split lets callers take the AppKit snapshot on their actor, then pay
+    /// for the synchronous CoreAudio enumeration somewhere it cannot block the
+    /// interface.
+    public static func grouped(
+        keeping: Set<String> = [],
+        workspace: WorkspaceSnapshot
+    ) throws -> [AudioApplication] {
         let processes = try AudioProcesses.all(includingSilent: true).map(entry(for:))
         return group(
             processes: processes,
-            foreground: runningApplications(foregroundOnly: true),
-            // Accessory processes are not allowed to own a group, but they
-            // still have a name and an icon worth showing — Siri and Control
-            // Centre are recognisable, `com.apple.Siri` is not.
-            named: runningApplications(foregroundOnly: false),
+            foreground: workspace.foreground,
+            named: workspace.named,
             keeping: keeping)
     }
 
@@ -322,18 +351,23 @@ extension AudioApplications {
     /// window and no Dock icon, which is exactly the definition of something
     /// that should not head a list of applications to capture. It is not a
     /// reason to withhold its name.
-    private static func runningApplications(
-        foregroundOnly: Bool
-    ) -> [String: ApplicationInfo] {
-        var result: [String: ApplicationInfo] = [:]
-        for application in NSWorkspace.shared.runningApplications
-        where !foregroundOnly || application.activationPolicy == .regular {
+    public static func workspaceSnapshot() -> WorkspaceSnapshot {
+        var foreground: [String: ApplicationInfo] = [:]
+        var named: [String: ApplicationInfo] = [:]
+        for application in NSWorkspace.shared.runningApplications {
             guard let bundle = application.bundleIdentifier else { continue }
-            result[bundle] = ApplicationInfo(
+            let info = ApplicationInfo(
                 name: application.localizedName ?? bundle,
                 bundleURL: application.bundleURL)
+            named[bundle] = info
+            // Accessory processes are not allowed to own a group, but they
+            // still have a name and an icon worth showing — Siri and Control
+            // Centre are recognisable, `com.apple.Siri` is not.
+            if application.activationPolicy == .regular {
+                foreground[bundle] = info
+            }
         }
-        return result
+        return WorkspaceSnapshot(foreground: foreground, named: named)
     }
 
     /// Trims a helper identifier back to its parent when the parent itself is

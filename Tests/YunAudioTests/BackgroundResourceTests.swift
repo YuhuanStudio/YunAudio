@@ -149,6 +149,98 @@ struct BackgroundResourceTests {
         #expect(materialised.sourceRoles == ["event": LevelCalibration.Role.voice.rawValue])
         #expect(materialised.midiBindings == ["fader:master": "0.cc.7"])
     }
+
+    /// The regression was structural: `engine.start` was already queued, while
+    /// the 27–118 ms application enumeration and every ProcessTap constructor
+    /// still ran before the dispatch. Measuring a fake engine would pass while
+    /// that exact placement was wrong, so assert the boundary itself and count
+    /// the synchronous resources on each side of it.
+    @Test("capture preflight belongs wholly to the engine queue")
+    func capturePreflightIsNotOnTheMainActor() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "func start(selftest: Bool)"))
+        let worker = try #require(
+            source.range(
+                of: "private func beginStartOnEngineQueue",
+                range: start.upperBound..<source.endIndex))
+        let mainActorBody = source[start.upperBound..<worker.lowerBound]
+        #expect(mainActorBody.ranges(of: "AudioApplications.grouped").count == 0)
+        #expect(mainActorBody.ranges(of: "ProcessTap(").count == 0)
+        #expect(mainActorBody.ranges(of: "beginStartOnEngineQueue(").count == 1)
+
+        let finish = try #require(
+            source.range(
+                of: "private func finishCancelledStart",
+                range: worker.upperBound..<source.endIndex))
+        let workerBody = source[worker.lowerBound..<finish.lowerBound]
+        #expect(workerBody.ranges(of: "engineQueue.async").count == 1)
+        #expect(workerBody.ranges(of: "Self.prepareCapture(").count == 1)
+        #expect(workerBody.ranges(of: "try engine.start(").count == 1)
+    }
+
+    @Test("one workspace enumeration supplies both application maps")
+    func workspaceIsReadOncePerGrouping() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioHAL/AudioApplication.swift",
+            encoding: .utf8)
+        let snapshot = try #require(source.range(of: "public static func workspaceSnapshot()"))
+        let end = try #require(
+            source.range(
+                of: "private static func baseIdentifier",
+                range: snapshot.upperBound..<source.endIndex))
+        let body = source[snapshot.lowerBound..<end.lowerBound]
+        #expect(body.ranges(of: "NSWorkspace.shared.runningApplications").count == 1)
+        #expect(body.ranges(of: "foreground[bundle] = info").count == 1)
+        #expect(body.ranges(of: "named[bundle] = info").count == 1)
+    }
+
+    @MainActor
+    @Test("the AppKit half left on MainActor stays below one frame")
+    func workspaceSnapshotFitsAFrame() {
+        let iterations = 20
+        let started = DispatchTime.now().uptimeNanoseconds
+        var entries = 0
+        for _ in 0..<iterations {
+            entries &+= AudioApplications.workspaceSnapshot().named.count
+        }
+        let average = (DispatchTime.now().uptimeNanoseconds - started) / UInt64(iterations)
+        print("workspace snapshot: \(average) ns average, \(entries / iterations) apps")
+        #expect(entries >= iterations)
+        #expect(average < 16_000_000)
+    }
+
+    @Test("echo reference never falls back through an application exclusion")
+    func excludedEchoReferencesStayExcluded() {
+        let playing = AudioApplication(
+            bundleID: "com.example.playing",
+            name: "Playing",
+            bundleURL: nil,
+            isPlaying: true,
+            isRecording: false,
+            processIDs: [11, 12],
+            isBackground: false)
+        let quiet = AudioApplication(
+            bundleID: "com.example.quiet",
+            name: "Quiet",
+            bundleURL: nil,
+            isPlaying: false,
+            isRecording: false,
+            processIDs: [13],
+            isBackground: false)
+
+        #expect(
+            RouterModel.echoReferenceProcessIDs(
+                in: [playing, quiet],
+                excluding: ["com.example.playing"]
+            ).isEmpty)
+        #expect(
+            RouterModel.echoReferenceProcessIDs(in: [playing, quiet], excluding: [])
+                == [11, 12])
+    }
 }
 
 /// The write coalescer is only useful if it also avoids the allocations needed

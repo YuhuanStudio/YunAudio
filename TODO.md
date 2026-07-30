@@ -222,6 +222,29 @@ Release，以 64 captured + 64 excluded + 11 effects + 64 roles + 64 MIDI bindin
 讓兩個零配置門檻一起假紅。所有 tripwire benchmark 現在共用一把 test-only lock；重跑
 得到 Formant **0**、KTV 調性 **5**、精確旋律 **10**，不再互相污染。
 
+### 擷取應用程式的啟動前置工作卡住整個介面 —— **已修且量過** [release benchmark]
+
+`RoutingEngine.start` 早已在背景 queue，但它前面的工作沒有：`start()` 先在 main actor
+同步列舉所有 CoreAudio 行程、建立每一個 `ProcessTap`、查 tap format、組主混音與監聽
+路由，最後才把引擎啟動丟到 queue。列舉本身先前已量到 **27 ms warm／118 ms cold**；
+tap 若碰到 HAL 回 `noErr` 卻沒交回物件，還有一次 20 ms 的 bounded retry。按開始、
+切換擷取來源或改一個必須重建的設定，畫面都會在真正啟動音訊以前先停住。
+
+現在 main actor 只做一次 `NSWorkspace` 值快照，`engineQueue` 依序做 HAL enumeration →
+group → tap → route → echo plan → engine start。不能把 `[ProcessTap]` 建好再帶回 main
+判斷：取消時最後一個引用會同步跑 `AudioHardwareDestroyProcessTap`，等於把卡頓換一個
+名字搬回去。Stop 或設定改動改為取消該 start generation；舊 tap 在 engine queue
+釋放，舊 generation 不發布 app、owner 或 monitor index，也不會在已經過期後才把裝置
+啟動。
+
+Release 連續 20 次、這台機器 74 個 running apps：留在 main actor 的 AppKit 快照平均
+**1,226,856 ns（1.23 ms）**，低於一幀的 16 ms 門檻。結構測試另斷言 `start()` main
+段有 **0 次** `AudioApplications.grouped`、**0 次** `ProcessTap` 建立，worker 各只有
+一次 capture planner 與 `engine.start`；Workspace 清單也從同一輪掃兩次減成一次。
+662 個單元測試與不碰硬體的 acceptance gate 全綠。真實 flow check 仍等整台
+CoreAudio 從「start 成功但 750 ms 沒有 IO cycle」的系統狀態恢復，沒有拿未跑到的
+hardware half 冒充驗收。
+
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
 路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在
