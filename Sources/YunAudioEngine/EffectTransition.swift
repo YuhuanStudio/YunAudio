@@ -28,7 +28,10 @@ final class EffectTransition {
     private var fadePosition = 0
     private var previousOld: Float = 0
     private var previousNew: Float = 0
-    private var hasPrevious = false
+    private var hasPreviousOld = false
+    /// Tracked apart from the old path's history, because during warm-up the new
+    /// path has none worth having. See `processLatencyChange`.
+    private var hasPreviousNew = false
     private var fallbackStartFrame: Int?
     private var mismatchComplete = false
 
@@ -89,11 +92,9 @@ final class EffectTransition {
             let count = min(frames, warmupFrames - warmupPosition)
             for frame in 0..<count {
                 let oldSample = sanitisedAudioSample(old[frame])
-                let newSample = sanitisedAudioSample(new[frame])
                 output[frame] = oldSample
                 previousOld = oldSample
-                previousNew = newSample
-                hasPrevious = true
+                hasPreviousOld = true
             }
             warmupPosition += count
             offset = count
@@ -163,10 +164,17 @@ final class EffectTransition {
 
                 let oldSample = sanitisedAudioSample(old[cursor])
                 let newSample = sanitisedAudioSample(new[cursor])
-                if hasPrevious {
-                    let localStep = max(
-                        abs(oldSample - previousOld),
-                        abs(newSample - previousNew))
+                if hasPreviousOld {
+                    // The new path's own step counts only once it has produced
+                    // two real samples. Seeded from the warm-up region it was
+                    // the step out of the cold path's silence — up to full
+                    // scale — which made this test permissive enough to splice
+                    // anywhere: enabling a cold chain on a 997 Hz tone stepped
+                    // 0.295 where the tone itself steps 0.052.
+                    var localStep = abs(oldSample - previousOld)
+                    if hasPreviousNew {
+                        localStep = max(localStep, abs(newSample - previousNew))
+                    }
                     let seam = abs(newSample - previousOld)
                     if seam <= localStep * 1.1 + 1e-6 {
                         spliceFrame = absoluteFrame
@@ -183,7 +191,8 @@ final class EffectTransition {
                 output[cursor] = oldSample
                 previousOld = oldSample
                 previousNew = newSample
-                hasPrevious = true
+                hasPreviousOld = true
+                hasPreviousNew = true
                 cursor += 1
             }
         }
