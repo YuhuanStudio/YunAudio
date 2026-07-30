@@ -237,6 +237,8 @@
 "%@ would not start as a monitor; the mix is carrying on without it." = "%@ would not start as a monitor; the mix is carrying on without it.";
 "%1$@ could not be used for monitoring. %2$@" = "%1$@ could not be used for monitoring. %2$@";
 "Hold this level automatically" = "Hold this level automatically";
+"Identify sounds" = "Identify sounds";
+"Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it." = "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it.";
 "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "Moves the trim only while Apple's on-device model hears speech, so pauses and typing do not raise the gain.";
 "out of range" = "out of range";
 "waiting for speech" = "waiting for speech";

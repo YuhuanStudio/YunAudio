@@ -171,8 +171,40 @@ struct LoudnessReadout: View {
             }
 
             verdict
+            soundIdentification
             YunDivider()
             autoLevel
+        }
+    }
+
+    /// Keeps the expensive diagnostic model separate from the cheap meters.
+    ///
+    /// Levelling and ducking still ask for it automatically because they act
+    /// on its verdict. Merely opening the window no longer loads CoreML for a
+    /// label somebody may not want.
+    private var soundIdentification: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            HStack(spacing: Yun.Space.sm) {
+                YunSwitch(isOn: $model.isSoundIdentificationEnabled)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(loc("Identify sounds"))
+                        .font(Yun.Text.label)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                    Text(
+                        loc(
+                            "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if model.isSoundIdentificationEnabled || model.isAutoLevelling || model.isDucking {
+                heardBadge
+            }
         }
     }
 
@@ -202,7 +234,6 @@ struct LoudnessReadout: View {
         }
 
         HStack(spacing: Yun.Space.sm) {
-            heardBadge
             Spacer(minLength: 0)
             if model.isAutoLevelling {
                 Text(autoLevelState)

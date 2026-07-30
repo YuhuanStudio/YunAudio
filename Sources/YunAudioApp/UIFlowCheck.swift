@@ -1037,6 +1037,7 @@ enum UIFlowCheck {
 
         try section("what the on-device model hears")
         model.isAnalysisVisible = true
+        model.isSoundIdentificationEnabled = true
         await pause(upTo: 2.0, until: { !model.analysis.verdictLabel.isEmpty })
         // The classifier is what makes the levelling trustworthy, so the check
         // is that it is actually producing a verdict — not what the verdict is.
@@ -1048,6 +1049,7 @@ enum UIFlowCheck {
         check(
             "confidence is a probability",
             model.heardConfidence >= 0 && model.heardConfidence <= 1)
+        model.isSoundIdentificationEnabled = false
 
         try section("what is actually leaving")
         // The measurement that did not exist: every meter in the graph is taken
@@ -1261,6 +1263,7 @@ enum UIFlowCheck {
         // machinery should exist and the IO thread should not be folding a bus
         // for nobody.
         model.isAnalysisVisible = false
+        model.isSoundIdentificationEnabled = false
         model.isAutoLevelling = false
         model.isDucking = false
         await pause(0.4)

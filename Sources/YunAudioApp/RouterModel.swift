@@ -8663,6 +8663,20 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// True while the diagnostic sound label is wanted.
+    ///
+    /// Loudness, spectrum and pitch are useful whenever the analysis card is
+    /// visible. The classifier is different: constructing it loads Apple's
+    /// CoreML sound model and keeping it fed costs CPU. It therefore stays
+    /// opt-in unless automatic levelling or ducking needs the verdict to make
+    /// an audio decision.
+    var isSoundIdentificationEnabled = false {
+        didSet {
+            guard oldValue != isSoundIdentificationEnabled else { return }
+            refreshAnalysisNeeds()
+        }
+    }
+
     /// The platform the loudness readout is compared against.
     var loudnessTarget: LoudnessTarget = .discord {
         didSet {
@@ -9080,18 +9094,12 @@ final class RouterModel: ScriptTarget {
     /// on the IO thread — a router forwarding audio between two devices should
     /// not be holding a neural network open in case somebody looks.
     private func refreshAnalysisNeeds() {
-        var wanted: SignalAnalyser.Needs = []
-        if isAnalysisVisible {
-            wanted.formUnion([.loudness, .spectrum, .classification, .pitch])
-        }
-        // Singing needs the pitch and nothing else — no FFT, no sound model.
-        // The lazy needs are the reason a lyrics panel does not cost what the
-        // analysis panel costs.
-        // Singing needs the pitch, and the spectrum for the key of what is
-        // playing — no sound model, which is the expensive one.
-        if isSingingVisible { wanted.formUnion([.pitch, .spectrum]) }
-        if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
-        if isDucking { wanted.formUnion([.classification]) }
+        let wanted = Self.analysisNeeds(
+            isAnalysisVisible: isAnalysisVisible,
+            identifiesSounds: isSoundIdentificationEnabled,
+            isSingingVisible: isSingingVisible,
+            isAutoLevelling: isAutoLevelling,
+            isDucking: isDucking)
 
         guard wanted != analysisNeeds else { return }
         analysisNeeds = wanted
@@ -9099,6 +9107,24 @@ final class RouterModel: ScriptTarget {
         let analysisIsEnabled = !wanted.isEmpty
         applyLiveControl { $0.setAnalysisEnabled(analysisIsEnabled) }
         if wanted.isEmpty { analysis = .silent }
+    }
+
+    nonisolated static func analysisNeeds(
+        isAnalysisVisible: Bool,
+        identifiesSounds: Bool,
+        isSingingVisible: Bool,
+        isAutoLevelling: Bool,
+        isDucking: Bool
+    ) -> SignalAnalyser.Needs {
+        var wanted: SignalAnalyser.Needs = []
+        if isAnalysisVisible { wanted.formUnion([.loudness, .spectrum, .pitch]) }
+        if isAnalysisVisible, identifiesSounds { wanted.insert(.classification) }
+        // Singing needs the pitch and the spectrum for the key of what is
+        // playing — no sound model, which is the expensive one.
+        if isSingingVisible { wanted.formUnion([.pitch, .spectrum]) }
+        if isAutoLevelling { wanted.formUnion([.loudness, .classification]) }
+        if isDucking { wanted.formUnion([.classification]) }
+        return wanted
     }
 
     @ObservationIgnored private var analysisNeeds: SignalAnalyser.Needs = []

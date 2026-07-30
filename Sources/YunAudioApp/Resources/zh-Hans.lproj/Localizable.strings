@@ -237,6 +237,8 @@
 "%@ would not start as a monitor; the mix is carrying on without it." = "%@ 无法作为监听输出启动，混音在没有它的情况下继续。";
 "%1$@ could not be used for monitoring. %2$@" = "%1$@ 无法用于监听。%2$@";
 "Hold this level automatically" = "自动保持该响度";
+"Identify sounds" = "识别声音";
+"Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it." = "仅在此读数、自动响度或闪避功能需要时载入 Apple 的设备端声音模型。";
 "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up." = "仅在 Apple 端上模型识别为说话时调整增益，停顿与打字不会推高音量。";
 "out of range" = "已到调整上限";
 "waiting for speech" = "等待说话";

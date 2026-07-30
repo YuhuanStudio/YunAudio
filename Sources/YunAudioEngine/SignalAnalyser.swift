@@ -77,6 +77,7 @@ public final class SignalAnalyser {
     /// not be paying for either — a router that quietly loads a neural network
     /// to forward audio between two devices has misunderstood its own job.
     public private(set) var classifier: SoundClassifier?
+    private let makeClassifier: (Double) -> SoundClassifier?
     private var tracker: PitchTracker?
     /// Samples waiting for a whole tracker frame.
     private var pitchPending: [Float] = []
@@ -115,7 +116,7 @@ public final class SignalAnalyser {
         }
 
         if wanted.contains(.classification) {
-            if classifier == nil { classifier = SoundClassifier(sampleRate: sampleRate) }
+            if classifier == nil { classifier = makeClassifier(sampleRate) }
         } else {
             classifier = nil
         }
@@ -129,8 +130,16 @@ public final class SignalAnalyser {
         }
     }
 
-    public init(sampleRate: Double) {
+    public convenience init(sampleRate: Double) {
+        self.init(sampleRate: sampleRate, makeClassifier: SoundClassifier.init(sampleRate:))
+    }
+
+    init(
+        sampleRate: Double,
+        makeClassifier: @escaping (Double) -> SoundClassifier?
+    ) {
         self.sampleRate = sampleRate
+        self.makeClassifier = makeClassifier
         loudness = LoudnessMeter(sampleRate: sampleRate)
         // A quarter of a second at 96 kHz. The drain runs far more often than
         // that; the headroom is for the case where the main thread was busy and
