@@ -165,8 +165,8 @@ struct RTGraph {
     var effectTransition: UnsafeMutablePointer<RTEffectTransition>?
 
     /// Ring the recorder drains, or null when nothing is recording. Fed with
-    /// the destination bus after all processing, so what lands on disk is what
-    /// the far end hears.
+    /// the canonical destination mix after the master and before any output's
+    /// correction, so a headphone profile is never baked into the file.
     var recordRing: OpaquePointer?
     /// Channels the recorder expects per frame.
     var recordChannels: Int32
@@ -177,6 +177,17 @@ struct RTGraph {
     /// were not paused. A writer that dropped frames instead would leave the
     /// ring holding audio from before the pause and play it back after.
     var recordPaused: Int32
+    /// A limiter state owned by the recorder branch, or null.
+    ///
+    /// It cannot share the hardware output's detector: the recorder is taken
+    /// before per-bus correction, while the hardware path is taken after it.
+    /// Sharing one state would let a headphone-only boost turn down the file.
+    var recordLimiter: UnsafeMutableRawPointer?
+    /// Look-ahead output still to discard before the first real recorded frame.
+    ///
+    /// The same number is flushed at detach, so the file contains exactly the
+    /// canonical sequence with no leading silence and no missing tail.
+    var recordLimiterPrimingFrames: Int32
     /// Scratch for de-striding the destination bus before it goes into the ring.
     /// Allocated with the graph, because the IO thread cannot allocate and the
     /// destination is usually wider than the recording — BlackHole presents
@@ -244,6 +255,20 @@ struct RTGraph {
     /// Samples at or beyond full scale on the destination bus since the last
     /// read. Non-zero means audible damage has already happened.
     var outputClipped: UInt64
+    /// Final linked limiter shared by every output buffer, retained by the
+    /// engine and reached here without touching a reference count.
+    var outputLimiter: UnsafeMutableRawPointer?
+    /// Non-zero when the final limiter attenuates. Its delay stays installed
+    /// while bypassed so a live toggle cannot shift the complete mix by a
+    /// millisecond in one callback.
+    var outputLimiterEnabled: Int32
+    /// Linear drive into the final and recording limiters.
+    var outputLimiterPreGain: Float
+    /// Topology mismatches rejected by the final stage.
+    ///
+    /// Such a bus is silenced rather than sent unbounded or walked with a stale
+    /// channel stride. This counter makes the fail-closed branch observable.
+    var outputLimiterFailures: UInt64
 
     /// An output buffer the master fader does not apply to, or -1 for none.
     ///
@@ -624,6 +649,8 @@ struct RTGraph {
                 recordRing: nil,
                 recordChannels: 0,
                 recordPaused: 0,
+                recordLimiter: nil,
+                recordLimiterPrimingFrames: 0,
                 recordScratch: scratchStorage,
                 recordScratchCapacity: Int32(scratchCapacity),
                 mainOutputBuffer: 0,
@@ -639,6 +666,10 @@ struct RTGraph {
                 micPeak: 0,
                 outputPeak: 0,
                 outputClipped: 0,
+                outputLimiter: nil,
+                outputLimiterEnabled: 0,
+                outputLimiterPreGain: 1,
+                outputLimiterFailures: 0,
                 masterExemptBuffer: -1,
                 inputGain: 1,
                 inputMuted: 0,
@@ -865,6 +896,32 @@ struct RTGraph {
             next.pointee.eqState[index] = previous.pointee.eqState[index]
         }
     }
+
+    /// Carries the complete output and recording stages across a graph swap.
+    ///
+    /// The limiter pointer is intentionally the same pointer. A fresh bank has
+    /// an empty look-ahead line, so replacing it during a route or effect edit
+    /// would insert `latencyFrames` of silence even though the device never
+    /// stopped. Limiter pre-gain is deliberately not copied from this live
+    /// graph: the IOProc owns that copy, while the engine installs its
+    /// state-lock-protected control value into the unpublished replacement.
+    static func carryOutputStages(
+        from previous: UnsafeMutablePointer<RTGraph>,
+        to next: UnsafeMutablePointer<RTGraph>
+    ) {
+        next.pointee.outputLimiter = previous.pointee.outputLimiter
+        next.pointee.outputLimiterEnabled = previous.pointee.outputLimiterEnabled
+        next.pointee.outputLimiterFailures = previous.pointee.outputLimiterFailures
+        next.pointee.outputPeak = previous.pointee.outputPeak
+        next.pointee.outputClipped = previous.pointee.outputClipped
+
+        next.pointee.recordRing = previous.pointee.recordRing
+        next.pointee.recordChannels = previous.pointee.recordChannels
+        next.pointee.recordPaused = previous.pointee.recordPaused
+        next.pointee.recordLimiter = previous.pointee.recordLimiter
+        next.pointee.recordLimiterPrimingFrames =
+            previous.pointee.recordLimiterPrimingFrames
+    }
 }
 
 // MARK: - The realtime callback
@@ -927,6 +984,11 @@ func yunAudioIOProc(
                 continue
             case Int32(kYunRTCommandSetOutputMute.rawValue):
                 graph.pointee.outputMuted = command.value != 0 ? 1 : 0
+                continue
+            case Int32(kYunRTCommandSetLimiterPreGain.rawValue):
+                if command.value.isFinite, command.value >= 0 {
+                    graph.pointee.outputLimiterPreGain = command.value
+                }
                 continue
             default:
                 break
@@ -1559,8 +1621,11 @@ func yunAudioIOProc(
         }
     }
 
-    // Feed the recorder from the destination bus: what is written to disk
-    // should be what the far end receives, not what arrived at the input.
+    // Feed the recorder from the canonical destination mix: after the source
+    // processing, route gains and master, but before a correction that belongs
+    // to one particular output. The optional recording limiter has independent
+    // state because the hardware detector sees that corrected signal and must
+    // never let a headphone-only boost turn down the file.
     if let ring = graph.pointee.recordRing, graph.pointee.recordPaused == 0,
         mainIndex < output.count
     {
@@ -1568,9 +1633,41 @@ func yunAudioIOProc(
         if let data = output[mainIndex].mData, channels > 0 {
             let stride = Int(output[mainIndex].mNumberChannels)
             let frames =
-                Int(output[mainIndex].mDataByteSize) / (MemoryLayout<Float>.size * stride)
+                Int(output[mainIndex].mDataByteSize)
+                / (MemoryLayout<Float>.size * max(stride, 1))
             let source = data.assumingMemoryBound(to: Float.self)
-            if stride == channels {
+            if let rawLimiter = graph.pointee.recordLimiter {
+                let scratch = graph.pointee.recordScratch
+                let usable = min(
+                    frames, Int(graph.pointee.recordScratchCapacity) / channels)
+                for frame in 0..<usable {
+                    for channel in 0..<channels {
+                        scratch[frame * channels + channel] =
+                            channel < stride
+                            ? sanitisedAudioSample(source[frame * stride + channel]) : 0
+                    }
+                }
+
+                let limiter = Unmanaged<OutputLimiterBank>
+                    .fromOpaque(rawLimiter).takeUnretainedValue()
+                let limited = limiter.processInterleaved(
+                    bus: 0, samples: scratch, frames: usable, channels: channels,
+                    limiting: graph.pointee.outputLimiterEnabled != 0,
+                    preGain: graph.pointee.outputLimiterPreGain)
+                if limited {
+                    let skip = min(
+                        usable, max(0, Int(graph.pointee.recordLimiterPrimingFrames)))
+                    graph.pointee.recordLimiterPrimingFrames -= Int32(skip)
+                    let writtenFrames = usable - skip
+                    if writtenFrames > 0 {
+                        _ = yun_rt_ring_write(
+                            ring, scratch + skip * channels,
+                            UInt32(writtenFrames * channels))
+                    }
+                } else {
+                    graph.pointee.outputLimiterFailures &+= 1
+                }
+            } else if stride == channels {
                 _ = yun_rt_ring_write(ring, source, UInt32(frames * channels))
             } else {
                 // The destination is wider than the recording, so the wanted
@@ -1580,7 +1677,7 @@ func yunAudioIOProc(
                 for frame in 0..<usable {
                     for channel in 0..<channels {
                         scratch[frame * channels + channel] =
-                            source[frame * stride + channel]
+                            channel < stride ? source[frame * stride + channel] : 0
                     }
                 }
                 if usable > 0 {
@@ -1723,7 +1820,36 @@ func yunAudioIOProc(
         }
     }
 
-    // What actually leaves, after every gain and the main output's correction.
+    // Final safety stage, after every bus-specific correction and before any
+    // sample reaches hardware. The detector is linked within each bus, so a
+    // hot left channel turns the pair down together rather than pulling the
+    // stereo image sideways. Bypass still runs the delay line: changing one
+    // switch must not move the complete mix by the look-ahead in one callback.
+    if let rawLimiter = graph.pointee.outputLimiter {
+        let limiter = Unmanaged<OutputLimiterBank>
+            .fromOpaque(rawLimiter).takeUnretainedValue()
+        for slot in 0..<output.count {
+            let buffer = output[slot]
+            guard let data = buffer.mData else { continue }
+            let channels = Int(buffer.mNumberChannels)
+            guard channels > 0 else { continue }
+            let frames =
+                Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+            let samples = data.assumingMemoryBound(to: Float.self)
+            let succeeded = limiter.processInterleaved(
+                bus: slot, samples: samples, frames: frames, channels: channels,
+                limiting: graph.pointee.outputLimiterEnabled != 0,
+                preGain: graph.pointee.outputLimiterPreGain)
+            if !succeeded {
+                // A stale topology is not permission to send an unbounded bus
+                // or to stride it using yesterday's channel count.
+                memset(data, 0, Int(buffer.mDataByteSize))
+                graph.pointee.outputLimiterFailures &+= 1
+            }
+        }
+    }
+
+    // What actually leaves, after every gain, correction and final limiter.
     //
     // This deliberately stays after the correction rather than beside the
     // pre-correction analyser and recorder. A boost or a filter transient can
@@ -1732,10 +1858,8 @@ func yunAudioIOProc(
     // clipping. Full scale in float is 1.0; anything at or past it is counted
     // rather than merely peaked.
     //
-    // This is telemetry, not a hidden clipper. The untouched route is allowed
-    // to stay bit-exact, and the limiter remains an explicitly enabled Audio
-    // Unit. Counting damage here makes the downstream boundary visible; it
-    // does not pretend a sample at 1.2 was repaired.
+    // The limiter is optional. With it enabled this counter should stay zero;
+    // with it bypassed the same post-stage measurement still exposes damage.
     if mainIndex < output.count, let data = output[mainIndex].mData {
         let samples = Int(output[mainIndex].mDataByteSize) / MemoryLayout<Float>.size
         let pointer = data.assumingMemoryBound(to: Float.self)

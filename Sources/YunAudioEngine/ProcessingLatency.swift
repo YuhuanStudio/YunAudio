@@ -28,6 +28,16 @@ public struct ProcessingLatency: Sendable, Hashable {
         max(chainFrames ?? isolationFrames ?? 0, 0)
     }
 
+    /// Publishes the complete-mix stage's fixed delay, including bypass.
+    ///
+    /// Bypassing the limiter changes attenuation, not topology. Removing its
+    /// look-ahead delay on bypass would move every source by one millisecond
+    /// during a live toggle and make the OBS offset wrong whenever the control
+    /// was off.
+    static func outputStageFrames(limiterFrames: Int) -> Int {
+        max(limiterFrames, 0)
+    }
+
     /// What paths that skipped source processing must be held back by.
     public var alignmentFrames: Int { sourceFrames }
 

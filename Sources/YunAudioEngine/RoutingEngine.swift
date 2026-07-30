@@ -149,6 +149,17 @@ public final class RoutingEngine: @unchecked Sendable {
     /// shrink its buffers back to the ordinary cycle size and truncate the next
     /// larger slice.
     private var graphMaximumFrames = 4096
+    /// Channel layout of the aggregate's output buffer list.
+    ///
+    /// Captured from the same stream objects that build `outputMap`, so the
+    /// final limiter is prepared for exactly the buffers the IOProc receives.
+    private var outputChannelCounts: [Int] = []
+    /// Control-thread truth for the limiter drive.
+    ///
+    /// The realtime copy changes only by a queue command at a cycle boundary.
+    /// Reading or writing that ordinary Float directly from this thread would
+    /// race the callback.
+    private var outputLimiterPreGain: Float = 1
     private var clockPublisher: ClockAnchorPublisher?
     private var selftestBlock: UnsafeMutablePointer<RTSelftest>?
     /// Retained here so the unit outlives the unmanaged pointer the IO thread
@@ -199,6 +210,14 @@ public final class RoutingEngine: @unchecked Sendable {
         return Int(graph?.pointee.alignmentFrames ?? 0)
     }
     private var effectChain: EffectChain?
+    /// Retained owner of the unretained final-stage pointer in every live graph.
+    ///
+    /// One bank survives route and effect graph swaps. Recreating it would
+    /// reset the look-ahead line and insert 48 frames of silence into every
+    /// patchbay edit.
+    private var outputLimiterBank: OutputLimiterBank?
+    /// Independent detector for the canonical recording branch.
+    private var recordingLimiter: OutputLimiterBank?
     /// The currently installed handover and the old path it keeps alive.
     ///
     /// All references live here rather than in the graph, whose IO-facing
@@ -459,8 +478,9 @@ public final class RoutingEngine: @unchecked Sendable {
     public var activeEffectStages: [EffectKind] {
         stateLock.lock()
         defer { stateLock.unlock() }
-        if let effectChain { return effectChain.stages }
-        return isolationUnit != nil ? [.voiceIsolation] : []
+        var stages = effectChain?.stages ?? (isolationUnit != nil ? [.voiceIsolation] : [])
+        if graph?.pointee.outputLimiterEnabled != 0 { stages.append(.limiter) }
+        return stages.sorted { $0.chainOrder < $1.chainOrder }
     }
 
     /// The installed stages when they can be inspected without waiting for a
@@ -473,8 +493,9 @@ public final class RoutingEngine: @unchecked Sendable {
         // retain the last answer until the publication has finished.
         guard stateLock.try() else { return nil }
         defer { stateLock.unlock() }
-        if let effectChain { return effectChain.stages }
-        return isolationUnit != nil ? [.voiceIsolation] : []
+        var stages = effectChain?.stages ?? (isolationUnit != nil ? [.voiceIsolation] : [])
+        if graph?.pointee.outputLimiterEnabled != 0 { stages.append(.limiter) }
+        return stages.sorted { $0.chainOrder < $1.chainOrder }
     }
 
     /// How much a dynamics stage is pulling the signal down right now, in
@@ -998,13 +1019,21 @@ public final class RoutingEngine: @unchecked Sendable {
         // unit dropped onto an empty chain used to be the same defect one level
         // out: the plugin loaded, the interface listed it, and no chain was
         // built to run it in.
-        let isolationOnly = effects == [.voiceIsolation] && plugins.isEmpty
+        // The limiter is an output stage. Building it in this mono source chain
+        // limited only the first source before applications were summed, then
+        // allowed the master, another source and output correction to clip
+        // afterwards. Its UI state is preserved, but the stage itself is built
+        // once on the complete output below.
+        let sourceEffects = effects.filter { $0 != .limiter }
+        let isolationOnly = sourceEffects == [.voiceIsolation] && plugins.isEmpty
         var isolatedSource: ChannelRef?
-        if !effects.isEmpty || !plugins.isEmpty, !isolationOnly, let first = routes.first {
+        if !sourceEffects.isEmpty || !plugins.isEmpty, !isolationOnly,
+            let first = routes.first
+        {
             isolatedSource = first.source
             let built = timed("build the effect chain") {
                 EffectChain(
-                    kinds: effects, plugins: plugins, sampleRate: rate,
+                    kinds: sourceEffects, plugins: plugins, sampleRate: rate,
                     maximumFrames: maximumFrames)
             }
             if let chain = built {
@@ -1013,7 +1042,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 // lost a stage sounds different and says nothing about why.
                 failedPlugins = chain.pluginFailures
                 voiceIsolationLatencyFrames =
-                    effects.contains(.voiceIsolation) ? chain.latencyFrames : 0
+                    sourceEffects.contains(.voiceIsolation) ? chain.latencyFrames : 0
             } else {
                 isolatedSource = nil
                 lastIsolationError = IsolationFailure.chainNotBuilt
@@ -1036,6 +1065,15 @@ public final class RoutingEngine: @unchecked Sendable {
         sourceProcessingLatencyFrames = ProcessingLatency.sourceStageFrames(
             chainFrames: effectChain?.latencyFrames,
             isolationFrames: isolationUnit?.latencyFrames)
+        guard
+            let outputLimiter = OutputLimiterBank(
+                channelCounts: outputChannelCounts, sampleRate: rate)
+        else {
+            throw RoutingError.outputLimiterUnavailable
+        }
+        outputLimiterBank = outputLimiter
+        outputProcessingLatencyFrames = ProcessingLatency.outputStageFrames(
+            limiterFrames: outputLimiter.latencyFrames)
 
         let rtRoutes = try routes.map { route -> RTRoute in
             // With the canceller in front, the microphone's channels are not in
@@ -1078,6 +1116,9 @@ public final class RoutingEngine: @unchecked Sendable {
         self.graph = graph
         activeRoutes = routes
         graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0
+        graph.pointee.outputLimiter = Unmanaged.passUnretained(outputLimiter).toOpaque()
+        graph.pointee.outputLimiterEnabled = effects.contains(.limiter) ? 1 : 0
+        graph.pointee.outputLimiterPreGain = outputLimiterPreGain
 
         // When the canceller owns the microphone the reference has no entry in
         // the input map, so an absent point is expected rather than fatal.
@@ -1281,6 +1322,11 @@ public final class RoutingEngine: @unchecked Sendable {
         // only runs against a route that is up.
         lastConfiguration = nil
 
+        // The recording branch needs its graph scratch and priming count to
+        // flush the look-ahead tail. The IOProc is already destroyed, so it is
+        // safe to detach and finish that branch before the graph goes away.
+        stopRecordingLocked()
+
         // Safe now: the IOProc has been destroyed, so nothing can be reading
         // the graph any more.
         if let graph { RTGraph.deallocate(graph) }
@@ -1291,7 +1337,6 @@ public final class RoutingEngine: @unchecked Sendable {
         sharedClock = nil
         if let graphCell { yun_rt_cell_free(graphCell) }
         graphCell = nil
-        stopRecordingLocked()
         stopStemRecordingLocked()
         stopTranscriptTapsLocked()
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
@@ -1329,6 +1374,8 @@ public final class RoutingEngine: @unchecked Sendable {
         isolationFailureCounter = nil
         isolationUnit = nil
         effectChain = nil
+        outputLimiterBank = nil
+        recordingLimiter = nil
         voiceIsolationLatencyFrames = 0
         sourceProcessingLatencyFrames = 0
         outputProcessingLatencyFrames = 0
@@ -1338,6 +1385,7 @@ public final class RoutingEngine: @unchecked Sendable {
 
         inputMap.removeAll()
         outputMap.removeAll()
+        outputChannelCounts.removeAll()
         activeRoutes.removeAll()
 
         // Restore last: the aggregate has to be gone first, or the HAL will
@@ -1419,7 +1467,15 @@ public final class RoutingEngine: @unchecked Sendable {
     public func setEffectParameter(_ parameter: String, of kind: EffectKind, to value: Float) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        if let effectChain {
+        if kind == .limiter, parameter == "gain", value.isFinite {
+            let linear = powf(10, max(-20, min(20, value)) / 20)
+            if graph == nil
+                || pushGlobal(
+                    kind: kYunRTCommandSetLimiterPreGain, value: linear)
+            {
+                outputLimiterPreGain = linear
+            }
+        } else if let effectChain {
             effectChain.set(parameter, of: kind, to: value)
         } else if kind == .voiceIsolation, parameter == "mix" {
             isolationUnit?.setMix(value)
@@ -1437,6 +1493,11 @@ public final class RoutingEngine: @unchecked Sendable {
     public func effectParameter(_ parameter: String, of kind: EffectKind) -> Float? {
         stateLock.lock()
         defer { stateLock.unlock() }
+        if kind == .limiter, parameter == "gain" {
+            return 20
+                * log10f(
+                    max(outputLimiterPreGain, Float.leastNonzeroMagnitude))
+        }
         if let effectChain { return effectChain.value(parameter, of: kind) }
         if kind == .voiceIsolation, parameter == "mix" { return isolationUnit?.mix }
         return nil
@@ -1472,17 +1533,32 @@ public final class RoutingEngine: @unchecked Sendable {
     ) throws -> URL {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard isRunning, let graph, let device = aggregate?.device else {
+        guard isRunning, let graph, aggregate?.device != nil else {
             throw RecorderError.couldNotAllocate
         }
         stopRecordingLocked()
 
-        let channels = min(2, device.outputChannels)
+        let main = Int(graph.pointee.mainOutputBuffer)
+        guard main >= 0, main < outputChannelCounts.count else {
+            throw RecorderError.couldNotAllocate
+        }
+        let channels = min(2, outputChannelCounts[main])
+        guard channels > 0,
+            let limiter = OutputLimiterBank(
+                channelCounts: [channels], sampleRate: graphSampleRate)
+        else {
+            throw RecorderError.couldNotAllocate
+        }
         let recorder = try Recorder(
             directory: directory, format: format, channels: channels,
-            sampleRate: device.currentSampleRate ?? 48000, timestamp: now)
+            sampleRate: graphSampleRate, timestamp: now)
         self.recorder = recorder
+        recordingLimiter = limiter
         graph.pointee.recordChannels = Int32(channels)
+        graph.pointee.recordLimiter = Unmanaged.passUnretained(limiter).toOpaque()
+        graph.pointee.recordLimiterPrimingFrames = Int32(limiter.latencyFrames)
+        // Published last. Seeing the ring means every field the callback needs
+        // for this recording branch is already complete.
         graph.pointee.recordRing = recorder.ringHandle
         return recorder.url
     }
@@ -1620,7 +1696,24 @@ public final class RoutingEngine: @unchecked Sendable {
     public func setRecordingPaused(_ paused: Bool) {
         stateLock.lock()
         defer { stateLock.unlock() }
-        graph?.pointee.recordPaused = paused ? 1 : 0
+        guard let graph, graph.pointee.recordRing != nil else { return }
+        let wasPaused = graph.pointee.recordPaused != 0
+        guard wasPaused != paused else { return }
+        if paused {
+            // Stop the producer first, then finish the delayed tail. Resetting
+            // after the flush makes the resumed part a clean splice rather
+            // than replaying the last millisecond from before the pause.
+            graph.pointee.recordPaused = 1
+            letTheRealtimeThreadPast()
+            flushRecordingLimiterLocked(graph: graph)
+            if let limiter = recordingLimiter {
+                _ = limiter.reset(bus: 0)
+                graph.pointee.recordLimiterPrimingFrames =
+                    Int32(limiter.latencyFrames)
+            }
+        } else {
+            graph.pointee.recordPaused = 0
+        }
     }
 
     /// Under the lock like every other read of the graph, and non-blocking for
@@ -1908,11 +2001,61 @@ public final class RoutingEngine: @unchecked Sendable {
         guard let recorder else { return }
         // Detach from the graph first: the writer thread must not be draining a
         // ring the IO thread is still filling while it is being torn down.
-        graph?.pointee.recordRing = nil
-        graph?.pointee.recordChannels = 0
+        let current = graph
+        current?.pointee.recordRing = nil
+        current?.pointee.recordLimiter = nil
         letTheRealtimeThreadPast()
+        if let current { flushRecordingLimiterLocked(graph: current) }
+        current?.pointee.recordChannels = 0
+        current?.pointee.recordLimiterPrimingFrames = 0
         recorder.stop()
         self.recorder = nil
+        recordingLimiter = nil
+    }
+
+    /// Emits the delayed recording tail after its realtime producer detached.
+    ///
+    /// Start discards exactly the look-ahead's leading zeroes and detach emits
+    /// exactly the held tail. Therefore N canonical input frames become N file
+    /// frames: no 48-frame prefix, no 48-frame truncation.
+    private func flushRecordingLimiterLocked(graph: UnsafeMutablePointer<RTGraph>) {
+        guard let limiter = recordingLimiter, let ring = recorder?.ringHandle else { return }
+        _ = Self.flushRecordingLimiter(
+            limiter, into: ring, channels: Int(graph.pointee.recordChannels),
+            primingFrames: Int(graph.pointee.recordLimiterPrimingFrames),
+            limiting: graph.pointee.outputLimiterEnabled != 0,
+            preGain: outputLimiterPreGain)
+        graph.pointee.recordLimiterPrimingFrames = 0
+    }
+
+    /// Control-thread half of the recording look-ahead trim.
+    ///
+    /// Internal so a pure test can prove the exact frame count without opening
+    /// an audio device or relying on a file writer's scheduling.
+    @discardableResult
+    static func flushRecordingLimiter(
+        _ limiter: OutputLimiterBank, into ring: OpaquePointer,
+        channels: Int, primingFrames: Int, limiting: Bool, preGain: Float
+    ) -> Int {
+        guard channels > 0, limiter.channelCounts == [channels] else { return 0 }
+        let frames = limiter.latencyFrames
+        guard frames > 0 else { return 0 }
+        var tail = [Float](repeating: 0, count: frames * channels)
+        let processed = tail.withUnsafeMutableBufferPointer {
+            limiter.processInterleaved(
+                bus: 0, samples: $0.baseAddress!, frames: frames, channels: channels,
+                limiting: limiting, preGain: preGain)
+        }
+        guard processed else { return 0 }
+        let skip = min(frames, max(0, primingFrames))
+        let writtenFrames = frames - skip
+        guard writtenFrames > 0 else { return 0 }
+        return tail.withUnsafeBufferPointer {
+            Int(
+                yun_rt_ring_write(
+                    ring, $0.baseAddress! + skip * channels,
+                    UInt32(writtenFrames * channels)))
+        } / channels
     }
 
     // MARK: Live topology
@@ -1965,16 +2108,14 @@ public final class RoutingEngine: @unchecked Sendable {
         next.pointee.voiceIsolation = previous.pointee.voiceIsolation
         next.pointee.isolationIsChain = previous.pointee.isolationIsChain
         next.pointee.selftest = previous.pointee.selftest
-        next.pointee.recordRing = previous.pointee.recordRing
-        next.pointee.recordChannels = previous.pointee.recordChannels
-        next.pointee.recordPaused = previous.pointee.recordPaused
+        RTGraph.carryOutputStages(from: previous, to: next)
+        next.pointee.outputLimiterPreGain = outputLimiterPreGain
         next.pointee.cancelledRing = previous.pointee.cancelledRing
         next.pointee.inputGain = previous.pointee.inputGain
         next.pointee.inputMuted = previous.pointee.inputMuted
         next.pointee.outputGain = previous.pointee.outputGain
         next.pointee.outputMuted = previous.pointee.outputMuted
         next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
-        next.pointee.outputClipped = previous.pointee.outputClipped
         next.pointee.analysisEnabled = previous.pointee.analysisEnabled
         next.pointee.duckEnabled = previous.pointee.duckEnabled
         next.pointee.duckDepth = previous.pointee.duckDepth
@@ -2107,14 +2248,15 @@ public final class RoutingEngine: @unchecked Sendable {
         let previousTransitionOldBlock = transitionOldBlock
         let previousTransitionOldFailures = transitionOldFailures
 
-        // The same split `start` makes: a chain for everything except the one
-        // case the dedicated isolation unit exists for.
-        let isolationOnly = kinds == [.voiceIsolation] && plugins.isEmpty
+        // The same split `start` makes: the complete-mix limiter is not part of
+        // this mono source chain, and a dedicated unit handles isolation alone.
+        let sourceKinds = kinds.filter { $0 != .limiter }
+        let isolationOnly = sourceKinds == [.voiceIsolation] && plugins.isEmpty
         var chain: EffectChain?
         var unit: VoiceIsolationUnit?
-        if !kinds.isEmpty || !plugins.isEmpty, !isolationOnly {
+        if !sourceKinds.isEmpty || !plugins.isEmpty, !isolationOnly {
             chain = EffectChain(
-                kinds: kinds, plugins: plugins, sampleRate: rate,
+                kinds: sourceKinds, plugins: plugins, sampleRate: rate,
                 maximumFrames: maximumFrames)
             if chain == nil { lastIsolationError = IsolationFailure.chainNotBuilt }
         } else if isolationOnly, let settings = voiceIsolation {
@@ -2248,16 +2390,17 @@ public final class RoutingEngine: @unchecked Sendable {
         // whatever belongs to the route rather than to this particular graph is
         // silently switched off otherwise.
         next.pointee.selftest = previous.pointee.selftest
-        next.pointee.recordRing = previous.pointee.recordRing
-        next.pointee.recordChannels = previous.pointee.recordChannels
-        next.pointee.recordPaused = previous.pointee.recordPaused
+        RTGraph.carryOutputStages(from: previous, to: next)
+        next.pointee.outputLimiterPreGain = outputLimiterPreGain
+        // The bank and its delay history stay the same; only attenuation is
+        // switched. Bypass therefore has the same fixed delay as enabled mode.
+        next.pointee.outputLimiterEnabled = kinds.contains(.limiter) ? 1 : 0
         next.pointee.cancelledRing = previous.pointee.cancelledRing
         next.pointee.inputGain = previous.pointee.inputGain
         next.pointee.inputMuted = previous.pointee.inputMuted
         next.pointee.outputGain = previous.pointee.outputGain
         next.pointee.outputMuted = previous.pointee.outputMuted
         next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
-        next.pointee.outputClipped = previous.pointee.outputClipped
         next.pointee.analysisEnabled = previous.pointee.analysisEnabled
         next.pointee.duckEnabled = previous.pointee.duckEnabled
         next.pointee.duckDepth = previous.pointee.duckDepth
@@ -2326,7 +2469,7 @@ public final class RoutingEngine: @unchecked Sendable {
             isolationFrames: unit?.latencyFrames)
         if let chain {
             voiceIsolationLatencyFrames =
-                kinds.contains(.voiceIsolation) ? chain.latencyFrames : 0
+                sourceKinds.contains(.voiceIsolation) ? chain.latencyFrames : 0
         } else {
             voiceIsolationLatencyFrames = unit?.latencyFrames ?? 0
         }
@@ -2571,14 +2714,17 @@ public final class RoutingEngine: @unchecked Sendable {
             taps.map { ($0.uid, Int($0.format?.mChannelsPerFrame ?? 2)) },
             uniquingKeysWith: { first, _ in first })
 
+        let inputStreams = aggregateDevice.inputStreams
+        let outputStreams = aggregateDevice.outputStreams
         inputMap = Self.map(
-            streams: aggregateDevice.inputStreams,
+            streams: inputStreams,
             orderedUIDs: inputUIDs,
             channelCount: { byUID[$0]?.inputChannels ?? tapChannels[$0] ?? 0 })
         outputMap = Self.map(
-            streams: aggregateDevice.outputStreams,
+            streams: outputStreams,
             orderedUIDs: aggregate.subDevices.map(\.uid),
             channelCount: { byUID[$0]?.outputChannels ?? 0 })
+        outputChannelCounts = outputStreams.map { $0.currentPhysicalFormat?.channels ?? 0 }
     }
 
     private static func map(
@@ -2818,14 +2964,19 @@ public final class RoutingEngine: @unchecked Sendable {
         // the way out would be claiming something false.
         let attenuated =
             destinationDevice?.alters(scope: kAudioObjectPropertyScopeInput) ?? false
-        let processing = isolationUnit != nil || effectChain != nil || attenuated
+        let processing =
+            isolationUnit != nil || effectChain != nil
+            || graph?.pointee.outputLimiterEnabled != 0 || attenuated
         return PathQuality(
             // Nothing is being drift-corrected, nothing is processing the
             // signal, and where the first was only true because the driver
             // locks its own clock, the lock is confirmed to be holding. These
             // are facts we configured or read back — but "nothing is configured
             // to alter the signal" is still weaker than "the samples came back
-            // identical", which is what --selftest is for.
+            // identical", which is what --selftest is for. The final bank's
+            // fixed bypass delay does not count as processing here: it moves
+            // samples in time but returns their Float values bit for bit, and
+            // its 48 frames are always published separately as output latency.
             isBitExact: drifted.isEmpty && !processing
                 && (requiresClockLock ? isClockLocked : true),
             hasProcessing: processing,
@@ -2847,6 +2998,7 @@ public enum RoutingError: Error, CustomStringConvertible {
     case startFailed(OSStatus)
     case noIOCycles
     case echoCancellerFailed
+    case outputLimiterUnavailable
 
     public var description: String {
         switch self {
@@ -2866,6 +3018,8 @@ public enum RoutingError: Error, CustomStringConvertible {
             "AudioDeviceStart returned success but no IO cycle ran within 750 ms"
         case .echoCancellerFailed:
             "the echo canceller could not take the microphone and the speaker"
+        case .outputLimiterUnavailable:
+            "the final output limiter could not be prepared for this device layout"
         }
     }
 }

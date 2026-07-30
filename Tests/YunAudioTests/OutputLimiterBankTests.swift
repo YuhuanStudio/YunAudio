@@ -124,6 +124,35 @@ struct OutputLimiterBankTests {
         #expect(greatestError == 0)
     }
 
+    @Test("bypass keeps the same exact delay without imposing a ceiling")
+    func bypassIsExactAboveAndBelowCeiling() throws {
+        let limiter = try #require(
+            OutputLimiterBank(channelCounts: [2], sampleRate: 48_000))
+        let latency = limiter.latencyFrames
+        let frames = latency + 137
+        var input = [Float](repeating: 0, count: frames * 2)
+        for frame in 0..<frames {
+            input[frame * 2] = frame.isMultiple(of: 2) ? 1.5 : 0.25
+            input[frame * 2 + 1] = frame.isMultiple(of: 3) ? -1.25 : -0.125
+        }
+        var output = input
+
+        output.withUnsafeMutableBufferPointer {
+            #expect(
+                limiter.processInterleaved(
+                    bus: 0, samples: $0.baseAddress!, frames: frames, channels: 2,
+                    limiting: false))
+        }
+
+        #expect(output.prefix(latency * 2).allSatisfy { $0 == 0 })
+        for frame in latency..<frames {
+            #expect(output[frame * 2] == input[(frame - latency) * 2])
+            #expect(output[frame * 2 + 1] == input[(frame - latency) * 2 + 1])
+        }
+        #expect(output.contains(1.5))
+        #expect(output.contains(-1.25))
+    }
+
     @Test("each bus owns an independent linked detector")
     func separatesBuses() throws {
         let limiter = try #require(

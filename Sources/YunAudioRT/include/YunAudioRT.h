@@ -99,6 +99,9 @@ typedef enum {
     kYunRTCommandSetInputMute = 3,
     kYunRTCommandSetOutputGain = 4,
     kYunRTCommandSetOutputMute = 5,
+    /// Linear drive into the final output limiter. Like the master controls,
+    /// this belongs to the complete mix and does not carry a route index.
+    kYunRTCommandSetLimiterPreGain = 6,
 } YunRTCommandKind;
 
 /// Single-producer, single-consumer ring. The producer is whichever thread the

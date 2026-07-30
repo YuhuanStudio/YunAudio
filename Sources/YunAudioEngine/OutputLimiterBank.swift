@@ -78,12 +78,16 @@ public final class OutputLimiterBank: @unchecked Sendable {
         bus: Int,
         samples: UnsafeMutablePointer<Float>,
         frames: Int,
-        channels: Int
+        channels: Int,
+        limiting: Bool = true,
+        preGain: Float = 1
     ) -> Bool {
         guard bus >= 0, bus < channelCounts.count, frames >= 0,
-            channels == channelCounts[bus]
+            channels == channelCounts[bus], preGain.isFinite, preGain >= 0
         else { return false }
-        states.advanced(by: bus).pointee.process(samples: samples, frames: frames)
+        states.advanced(by: bus).pointee.process(
+            samples: samples, frames: frames, limiting: limiting,
+            preGain: limiting ? preGain : 1)
         return true
     }
 
@@ -167,14 +171,17 @@ private struct BusState {
     }
 
     @inline(__always)
-    mutating func process(samples: UnsafeMutablePointer<Float>, frames: Int) {
+    mutating func process(
+        samples: UnsafeMutablePointer<Float>, frames: Int,
+        limiting: Bool, preGain: Float
+    ) {
         var frameOffset = 0
         for _ in 0..<frames {
             let delayOffset = delayPosition * channels
             var linkedPeak: Float = 0
 
             for channel in 0..<channels {
-                let sample = sanitisedAudioSample(samples[frameOffset + channel])
+                let sample = sanitisedAudioSample(samples[frameOffset + channel] * preGain)
                 delay[delayOffset + channel] = sample
                 let magnitude = abs(sample)
                 if magnitude > linkedPeak { linkedPeak = magnitude }
@@ -202,7 +209,9 @@ private struct BusState {
             peakCount += 1
 
             let windowPeak = peakValues[peakFront]
-            let target = windowPeak > ceiling ? ceiling / windowPeak : 1
+            let target =
+                limiting && windowPeak > ceiling
+                ? ceiling / windowPeak : 1
             if target < gain {
                 // The delayed signal has not reached this peak yet, so the
                 // safest attack is immediate. Recovery is deliberately slow.
@@ -214,10 +223,12 @@ private struct BusState {
             var readPosition = delayPosition - lookAheadFrames
             if readPosition < 0 { readPosition += delayCapacity }
             let readOffset = readPosition * channels
+            let appliedGain = limiting ? gain : 1
             for channel in 0..<channels {
-                let limited = sanitisedAudioSample(delay[readOffset + channel] * gain)
+                let delayed = sanitisedAudioSample(
+                    delay[readOffset + channel] * appliedGain)
                 samples[frameOffset + channel] =
-                    min(ceiling, max(-ceiling, limited))
+                    limiting ? min(ceiling, max(-ceiling, delayed)) : delayed
             }
 
             delayPosition += 1

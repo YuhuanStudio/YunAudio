@@ -17,12 +17,18 @@ struct ProcessingLatencyTests {
                 frames: latency.totalFrames, sampleRate: 48000) == -58)
     }
 
-    @Test("the current path has no output processing yet")
-    func currentPathHasNoOutputStage() {
-        let latency = ProcessingLatency(sourceFrames: 2688, outputFrames: 0)
+    @Test("the final bank publishes its fixed delay even while bypassed")
+    func finalBankDelayIsAlwaysPublished() throws {
+        let bank = try #require(
+            OutputLimiterBank(channelCounts: [2], sampleRate: 48_000))
+        let outputFrames = ProcessingLatency.outputStageFrames(
+            limiterFrames: bank.latencyFrames)
+        let latency = ProcessingLatency(sourceFrames: 2688, outputFrames: outputFrames)
 
-        #expect(latency.alignmentFrames == latency.totalFrames)
-        #expect(latency.totalMilliseconds(sampleRate: 48000) == 56)
+        #expect(outputFrames == 48)
+        #expect(latency.alignmentFrames == 2688)
+        #expect(latency.totalFrames == 2736)
+        #expect(latency.totalMilliseconds(sampleRate: 48000) == 57)
     }
 
     @Test("isolation-only publishes source latency on first start")
