@@ -4817,7 +4817,9 @@ enum UIFlowCheck {
         ///   was open, or nil when it would not open and shut here at all — in
         ///   which case nothing below has been exercised and the caller must
         ///   say so.
-        func openAndShutPanel() async -> (counts: [String: Int], wasAttached: Bool)? {
+        func openAndShutPanel() async -> (
+            counts: [String: Int], wasAttached: Bool, generation: Int, wasReleased: Bool
+        )? {
             BodyCount.reset()
             BodyCount.isCounting = true
             // `popover.show` can synchronously perform the first SwiftUI layout.
@@ -4829,12 +4831,16 @@ enum UIFlowCheck {
             guard statusItem?.isPanelShownForCheck == true else { return nil }
             let counts = BodyCount.counts
             let wasAttached = statusItem?.isPanelContentAttachedForCheck == true
+            let generation = statusItem?.panelHostLifetimeForCheck.generation ?? 0
             statusItem?.setPanelOpenForCheck(false)
             // Long enough for the close animation to finish, or the panel is
             // still shown when this is read and the check disqualifies itself.
             await pause(1.0)
             return statusItem?.isPanelShownForCheck == false
-                ? (counts: counts, wasAttached: wasAttached) : nil
+                ? (
+                    counts: counts, wasAttached: wasAttached, generation: generation,
+                    wasReleased: statusItem?.panelHostLifetimeForCheck.retainedCount == 0
+                ) : nil
         }
 
         // Twice. The panel is detached from the popover when it shuts, so the
@@ -4842,7 +4848,10 @@ enum UIFlowCheck {
         // counted rather than assumed, because an empty panel and a panel that
         // costs nothing look exactly alike from outside.
         let firstOpen = await openAndShutPanel()
-        let secondOpen: (counts: [String: Int], wasAttached: Bool)?
+        let secondOpen:
+            (
+                counts: [String: Int], wasAttached: Bool, generation: Int, wasReleased: Bool
+            )?
         if let _ = firstOpen {
             secondOpen = await openAndShutPanel()
         } else {
@@ -4859,6 +4868,12 @@ enum UIFlowCheck {
             check(
                 "the menu bar panel still has content when it is opened again",
                 secondOpen.wasAttached)
+            check(
+                "the closed menu bar panel releases its hosting graph",
+                secondOpen.wasReleased)
+            check(
+                "the reopened menu bar panel builds a fresh hosting graph",
+                firstOpen.map { secondOpen.generation == $0.generation + 1 } == true)
             check(
                 "an open panel does not redraw with its meter",
                 (openCounts["PanelView"] ?? 0) < 10)

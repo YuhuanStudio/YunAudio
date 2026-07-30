@@ -3,6 +3,32 @@ import Observation
 import SwiftUI
 import YunDesign
 
+/// Owns a transient object for exactly one visible presentation.
+///
+/// Kept independent of AppKit so its lifetime contract can be asserted without
+/// constructing a status item or an audio model. `generation` is deliberately
+/// a number: a second open must create a second host, while every close must
+/// leave the retained count at zero.
+@MainActor
+struct TransientPresentationHost<Host: AnyObject> {
+    private(set) var host: Host?
+    private(set) var generation = 0
+
+    var retainedCount: Int { host == nil ? 0 : 1 }
+
+    mutating func acquire(_ make: () -> Host) -> Host {
+        if let host { return host }
+        let host = make()
+        self.host = host
+        generation += 1
+        return host
+    }
+
+    mutating func release() {
+        host = nil
+    }
+}
+
 /// The menu bar presence, built on AppKit rather than `MenuBarExtra`.
 ///
 /// SwiftUI's `MenuBarExtra` gives no way to handle a right-click, and a menu bar
@@ -21,7 +47,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private let model: RouterModel
     private var levelObserver: Timer?
 
-    /// The panel's SwiftUI graph, held here rather than by the popover.
+    /// The panel's SwiftUI graph and why its lifetime ends with the popover.
     ///
     /// **A closed popover keeps drawing.** Its window is ordered out, not
     /// released, and the hosting view is still in it — so SwiftUI goes on
@@ -41,11 +67,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// and the graph update below this popover, at 36.5% of a core, while the
     /// *visible* main window contributed nothing at all.
     ///
-    /// So the controller is attached when the panel opens and detached when it
-    /// closes. Held here across that, which is what keeps every `@State` in the
-    /// panel — which disclosure is open, which tab was picked — from resetting
-    /// each time somebody opens it.
-    private var panelHost: NSViewController?
+    /// So the controller is attached when the panel opens and released when it
+    /// closes. Retaining it after detaching leaves the complete SwiftUI graph
+    /// subscribed to the model and keeps its backing layers resident. The four
+    /// disclosure values that should survive are retained separately; they do
+    /// not justify retaining the view graph.
+    private var panelHost = TransientPresentationHost<NSViewController>()
+    private let panelPresentation = PanelPresentationState()
 
     /// The one status item, for the flow check to reach.
     ///
@@ -541,8 +569,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// Attaches the panel and shows it. See `panelHost` for why it is not
     /// attached the rest of the time.
     private func showPanel(from button: NSStatusBarButton) {
-        if panelHost == nil { panelHost = makePanelHost() }
-        popover.contentViewController = panelHost
+        popover.contentViewController = panelHost.acquire { makePanelHost() }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         // A status-bar popover is already interactive after `show`. Forcing its
         // private window key activates this LSUIElement process, then AppKit
@@ -560,7 +587,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         // say so, because a popover clips rather than scrolls.
         let host = NSHostingController(
             rootView: ScrollView {
-                PanelView(model: model) { [weak self] in
+                PanelView(
+                    model: model, presentation: panelPresentation
+                ) { [weak self] in
                     self?.openMainWindow?()
                 }
             }
@@ -580,6 +609,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// out from under a popover that is still on screen fading.
     func popoverDidClose(_ notification: Notification) {
         popover.contentViewController = nil
+        panelHost.release()
     }
 
     /// Opens or closes the panel, for the flow check.
@@ -600,7 +630,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// was reattached. This is the structural proof that a reopened popover has
     /// real content; the live-child body count separately proves it is moving.
     var isPanelContentAttachedForCheck: Bool {
-        panelHost != nil && popover.contentViewController === panelHost
+        panelHost.host != nil && popover.contentViewController === panelHost.host
+    }
+
+    /// A shut panel must retain no hosting graph. The generation makes a second
+    /// open distinguishable from reattaching a stale first graph.
+    var panelHostLifetimeForCheck: (generation: Int, retainedCount: Int) {
+        (panelHost.generation, panelHost.retainedCount)
     }
 
     func setPanelOpenForCheck(_ isOpen: Bool) {

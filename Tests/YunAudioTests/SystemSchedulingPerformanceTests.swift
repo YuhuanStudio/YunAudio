@@ -357,6 +357,46 @@ struct SystemSchedulingPerformanceTests {
         #expect(factory.ranges(of: "NSHostingController").count == 1)
     }
 
+    @Test("one thousand closed presentations retain zero hosts")
+    @MainActor
+    func closedPresentationsReleaseTheirHosts() {
+        final class Host {}
+
+        var lifetime = TransientPresentationHost<Host>()
+        weak var previous: Host?
+
+        for _ in 0..<1_000 {
+            autoreleasepool {
+                let host = lifetime.acquire { Host() }
+                previous = host
+                #expect(lifetime.retainedCount == 1)
+                lifetime.release()
+            }
+            #expect(previous == nil)
+        }
+
+        #expect(lifetime.generation == 1_000)
+        #expect(lifetime.retainedCount == 0)
+    }
+
+    @Test("closing the status panel releases the hosting graph")
+    func statusPanelCloseReleasesItsHost() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/StatusItem.swift",
+            encoding: .utf8)
+        let closeStart = try #require(
+            source.range(of: "func popoverDidClose("))
+        let closeEnd = try #require(
+            source.range(
+                of: "/// Opens or closes the panel",
+                range: closeStart.upperBound..<source.endIndex))
+        let close = source[closeStart.lowerBound..<closeEnd.lowerBound]
+
+        #expect(close.ranges(of: "popover.contentViewController = nil").count == 1)
+        #expect(close.ranges(of: "panelHost.release()").count == 1)
+    }
+
     @Test("opening the status panel does not take another application's key window")
     func statusPanelDoesNotForceActivation() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests

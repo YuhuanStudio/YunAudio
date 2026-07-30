@@ -1,7 +1,23 @@
+import Observation
 import SwiftUI
 import YunAudioEngine
 import YunAudioHAL
 import YunDesign
+
+/// The four pieces of presentation state worth carrying across panel opens.
+///
+/// Keeping these values does not require keeping the complete SwiftUI graph
+/// alive after its popover has closed. The graph is several orders of
+/// magnitude larger than four scalars, and — unlike these values — continues
+/// subscribing to the router while it is retained.
+@Observable
+@MainActor
+final class PanelPresentationState {
+    var showsDevices: Bool?
+    var showsApps = false
+    var showsProcessing = false
+    var showsEchoCancellation = false
+}
 
 /// The menu bar panel.
 ///
@@ -18,24 +34,31 @@ import YunDesign
 /// way into it.
 struct PanelView: View {
     @Bindable var model: RouterModel
+    @Bindable private var presentation: PanelPresentationState
     /// Forces the routed layout for the offscreen design captures. The panel
     /// otherwise shows the onboarding card whenever the driver is absent, which
     /// hides everything worth inspecting.
-    var forcesRoutedLayout = false
-    var openMainWindow: @MainActor () -> Void = {}
+    private var forcesRoutedLayout: Bool
+    private var openMainWindow: @MainActor () -> Void
 
     // Only the live card and the quick switches start open: they are what the
     // panel is opened for. Devices open on first run, when there is nothing
     // configured to collapse.
-    @State private var showsDevices: Bool?
-    @State private var showsApps = false
-    @State private var showsProcessing = false
-    @State private var showsEchoCancellation = false
+    init(
+        model: RouterModel, forcesRoutedLayout: Bool = false,
+        presentation: PanelPresentationState = PanelPresentationState(),
+        openMainWindow: @escaping @MainActor () -> Void = {}
+    ) {
+        self.model = model
+        self.presentation = presentation
+        self.forcesRoutedLayout = forcesRoutedLayout
+        self.openMainWindow = openMainWindow
+    }
 
     private var devicesExpanded: Binding<Bool> {
         Binding(
-            get: { showsDevices ?? (model.selectedDestination == nil) },
-            set: { showsDevices = $0 })
+            get: { presentation.showsDevices ?? (model.selectedDestination == nil) },
+            set: { presentation.showsDevices = $0 })
     }
 
     /// Width of the leading label column. Sized for the longest label in the
@@ -424,7 +447,7 @@ struct PanelView: View {
                 ? loc("none captured")
                 : String(
                     format: loc("%d captured"), model.capturedAppBundleIDs.count),
-            isExpanded: $showsApps
+            isExpanded: $presentation.showsApps
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
                 AppSourceList(model: model, limit: 6)
@@ -468,7 +491,7 @@ struct PanelView: View {
         YunDisclosure(
             loc("Echo cancellation"),
             subtitle: model.cancelsEcho ? loc("on") : loc("off"),
-            isExpanded: $showsEchoCancellation
+            isExpanded: $presentation.showsEchoCancellation
         ) {
             EchoCancellationControls(model: model, labelColumn: Self.labelColumn)
         }
@@ -488,7 +511,7 @@ struct PanelView: View {
             subtitle: model.enabledEffects.isEmpty
                 ? loc("bypass")
                 : String(format: loc("%d on"), model.enabledEffects.count),
-            isExpanded: $showsProcessing
+            isExpanded: $presentation.showsProcessing
         ) {
             VStack(alignment: .leading, spacing: Yun.Space.sm) {
                 YunSelect(
