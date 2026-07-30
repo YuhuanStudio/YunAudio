@@ -67,7 +67,9 @@ struct PanelView: View {
             // replacing them. Another loopback endpoint routes audio
             // perfectly well, so hiding everything behind "install the
             // driver" turned a working configuration into a dead end.
-            if !model.isDriverInstalled && !forcesRoutedLayout {
+            if model.deviceInventoryIsReady && !model.isDriverInstalled
+                && !forcesRoutedLayout
+            {
                 DriverOnboarding(model: model)
             }
             if model.selectedDestination != nil || forcesRoutedLayout {

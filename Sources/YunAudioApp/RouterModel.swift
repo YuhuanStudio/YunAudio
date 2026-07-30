@@ -33,6 +33,23 @@ final class RouterModel: ScriptTarget {
 
     private(set) var inputDevices: [AudioDevice] = []
     private(set) var outputDevices: [AudioDevice] = []
+    /// False means the driver and device lists are unknown, not absent.
+    ///
+    /// Production construction publishes its first frame before asking HAL.
+    /// Without a third state, those empty launch arrays briefly rendered the
+    /// missing-driver warning and then took it back when discovery completed.
+    private(set) var deviceInventoryIsReady = false
+
+    private struct RestoredDeviceIntent: Sendable {
+        let source: String?
+        let destination: String?
+        let monitor: String?
+        let additionalSources: [String]
+        let additionalDestinations: [String]
+    }
+
+    @ObservationIgnored private var restoredDeviceIntent: RestoredDeviceIntent?
+    @ObservationIgnored private var deviceDiscoveryHasBegun = false
 
     private enum DeviceSelectionTarget: Hashable, Sendable {
         case primarySource
@@ -78,11 +95,40 @@ final class RouterModel: ScriptTarget {
             && !transport.losesOutputQualityToItsMicrophone
     }
 
+    /// Whether a persisted input may wake itself at launch.
+    ///
+    /// Bluetooth LE can be a sensible picker default, but it is still personal
+    /// radio hardware. Restoring it must not open an input profile merely
+    /// because auto-start was saved in another session.
+    nonisolated static func canAutoStartPersistedInput(
+        transport: AudioTransport
+    ) -> Bool {
+        canSelectInputAutomatically(transport: transport)
+            && transport != .bluetooth
+            && transport != .bluetoothLE
+    }
+
+    nonisolated static func canProbeRestoredDeviceControls(
+        transport: AudioTransport
+    ) -> Bool {
+        transport != .bluetooth
+            && transport != .bluetoothLE
+            && transport != .continuityCapture
+    }
+
     /// Whether the remembered route contains an input that must not auto-start.
     private var routeRequiresExplicitInputSelection: Bool {
         activeSourceUIDs.contains { uid in
             inputDevices.first(where: { $0.uid == uid })?.transport
                 .requiresExplicitInputSelection == true
+        }
+    }
+
+    private var persistedRouteRequiresManualStart: Bool {
+        activeSourceUIDs.contains { uid in
+            guard let transport = inputDevices.first(where: { $0.uid == uid })?.transport
+            else { return false }
+            return !Self.canAutoStartPersistedInput(transport: transport)
         }
     }
 
@@ -153,7 +199,7 @@ final class RouterModel: ScriptTarget {
             pendingHardwareMonitor = nil
             publish(nil, to: \.hardwareGainReading)
             publish(nil, to: \.hardwareMonitorReading)
-            refreshDeviceControls()
+            if !isRestoring { refreshDeviceControls() }
             if !isRestoring, !isCommittingHydratedDeviceSelection {
                 hydrateConfiguredDevicesAsynchronously()
             }
@@ -179,8 +225,10 @@ final class RouterModel: ScriptTarget {
                 displacedDestinationName = nil
             }
             publish(true, to: \.destinationHasVolumeControl)
-            refreshDeviceControls()
-            refreshHeadsetQualityAsynchronously()
+            if !isRestoring {
+                refreshDeviceControls()
+                refreshHeadsetQualityAsynchronously()
+            }
             if !isRestoring, !isCommittingHydratedDeviceSelection {
                 hydrateConfiguredDevicesAsynchronously()
             }
@@ -3404,7 +3452,7 @@ final class RouterModel: ScriptTarget {
             }
             cancelHydratedSelection(for: .monitor)
             persist()
-            refreshHeadsetQualityAsynchronously()
+            if !isRestoring { refreshHeadsetQualityAsynchronously() }
             if !isRestoring, !isCommittingHydratedDeviceSelection {
                 hydrateConfiguredDevicesAsynchronously()
             }
@@ -3412,7 +3460,7 @@ final class RouterModel: ScriptTarget {
             // that is running. Restarting would take a working mix down to
             // arrive exactly where it already is — and the start it would run
             // is the one that has just been proved to work.
-            guard !isDroppingMonitor else { return }
+            guard !isRestoring, !isDroppingMonitor else { return }
             // A new choice is a new question, so the last refusal stops being
             // an answer to it.
             droppedMonitorName = nil
@@ -5445,7 +5493,11 @@ final class RouterModel: ScriptTarget {
     private var isRestoring = false
 
     init() {
-        refreshDevices()
+        // The verification harness expects a complete model immediately and
+        // explicitly owns the hardware. Production construction must instead
+        // reach its first live run-loop turn without a HAL read or even a
+        // queued HAL job; applicationDidFinishLaunching starts discovery.
+        if Self.isVerificationProcess { refreshDevices() }
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
         restore()
@@ -5470,20 +5522,36 @@ final class RouterModel: ScriptTarget {
             Task { @MainActor in self?.clockLockFailed = true }
         }
 
-        // Hardware comes and goes; the route has to follow it rather than
-        // silently pointing at a device that is no longer there.
-        deviceWatcher = DeviceChangeWatcher { [weak self] in
-            Task { @MainActor in self?.requestDeviceChangeRefresh() }
-        }
-        // The launch list is metadata-only so unrelated Bluetooth plug-ins stay
-        // asleep. Restore has now named the endpoints that do need full format
-        // details, and this one background refresh upgrades only those.
-        hydrateConfiguredDevicesAsynchronously()
-
         installHotkeys()
         installMIDI()
 
-        requestAutomaticStartIfConfigured()
+        if Self.isVerificationProcess { requestAutomaticStartIfConfigured() }
+    }
+
+    /// Starts HAL discovery only once the application has a live run loop.
+    ///
+    /// Kept out of `init` rather than merely dispatched from it: queueing an
+    /// inventory there still lets coreaudiod contention delay the first frame,
+    /// and `Task.yield()` does not promise that AppKit has presented one.
+    func beginInitialDeviceDiscovery() {
+        guard !deviceDiscoveryHasBegun else { return }
+        deviceDiscoveryHasBegun = true
+
+        // Register before reading the inventory so a plug event in the read's
+        // window becomes the gate's one latest rerun rather than being lost.
+        deviceWatcher = DeviceChangeWatcher { [weak self] in
+            Task { @MainActor in self?.requestDeviceChangeRefresh() }
+        }
+
+        if deviceInventoryIsReady {
+            // Verification constructs synchronously, but restored Bluetooth
+            // endpoints still need their exact topology before a route starts.
+            hydrateConfiguredDevicesAsynchronously()
+            requestAutomaticStartIfConfigured()
+            return
+        }
+        guard let token = deviceRefreshGate.request() else { return }
+        runInitialDeviceRefresh(token)
     }
 
     @ObservationIgnored private var automaticStartAwaitsDeviceHydration = false
@@ -5495,10 +5563,11 @@ final class RouterModel: ScriptTarget {
     private func requestAutomaticStartIfConfigured() {
         guard !Self.isVerificationProcess, autoStart,
             selectedSource != nil, selectedDestination != nil,
-            !routeRequiresExplicitInputSelection
+            !persistedRouteRequiresManualStart
         else { return }
         guard configuredDevicesHaveCompleteTopology else {
             automaticStartAwaitsDeviceHydration = true
+            hydrateConfiguredDevicesAsynchronously()
             return
         }
         automaticStartAwaitsDeviceHydration = false
@@ -5744,13 +5813,12 @@ final class RouterModel: ScriptTarget {
         monitorSends = saved.monitorSends ?? [:]
         tapMuteBehavior =
             saved.tapMuteBehavior.flatMap(TapMuteBehavior.init(storageKey:)) ?? .unmuted
-        // Only restored when the device is actually present: a monitor pointing
-        // at headphones that are not plugged in would fail the whole start.
-        if let uid = saved.monitorDeviceUID,
-            outputDevices.contains(where: { $0.uid == uid })
-        {
-            monitorDeviceUID = uid
-        }
+        restoredDeviceIntent = RestoredDeviceIntent(
+            source: saved.sourceDeviceUID,
+            destination: saved.destinationDeviceUID,
+            monitor: saved.monitorDeviceUID,
+            additionalSources: saved.additionalSourceUIDs ?? [],
+            additionalDestinations: saved.additionalDestinationUIDs ?? [])
         style = saved.style.flatMap(YunStyle.init(rawValue:)) ?? .flat
         YunTheme.shared.style = style
         // Through `style(named:)` so a preferences file naming an icon style
@@ -5765,32 +5833,22 @@ final class RouterModel: ScriptTarget {
         // during a restore would be looking at half an arrangement.
         residentScript = saved.residentScript ?? ""
         sourceChannelChoices = saved.sourceChannelChoices ?? [:]
-        // Before the primaries are set, so that `pruneAdditionalDevices` on the
-        // first device refresh sees the whole route and not a half of it.
         outputTrims = saved.outputTrims ?? [:]
         sourceLevels = saved.sourceLevels ?? [:]
-        additionalSourceUIDs = saved.additionalSourceUIDs ?? []
-        additionalDestinationUIDs = saved.additionalDestinationUIDs ?? []
         preferredSampleRate = saved.preferredSampleRate
         bufferFrames =
             Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
         monoChannel = saved.monoChannel
         channelMode = SourceChannelMode(rawValue: saved.channelMode) ?? .mono
 
-        if let uid = saved.sourceDeviceUID, inputDevices.contains(where: { $0.uid == uid }) {
-            selectedSourceUID = uid
-        }
-        if let uid = saved.destinationDeviceUID,
-            outputDevices.contains(where: { $0.uid == uid })
-        {
-            selectedDestinationUID = uid
-        }
         obsLink.host = saved.obsHost ?? "127.0.0.1"
         obsLink.port = saved.obsPort ?? OBSConnection.defaultPort
         obsLink.inputName = saved.obsInputName ?? ""
         obsLink.mirrorsMute = saved.obsMirrorsMute ?? false
 
-        selectDefaults()
+        if deviceInventoryIsReady {
+            resolveRestoredDeviceIntent(defaultInputUID: try? AudioDevices.defaultInputUID())
+        }
         reloadResidentScript()
     }
 
@@ -6055,9 +6113,11 @@ final class RouterModel: ScriptTarget {
 
     struct DeviceRefreshSnapshot: Sendable {
         let all: [AudioDevice]
+        let inventoryIDs: Set<AudioObjectID>
         let selectedSourceUID: String?
         let selectedDestinationUID: String?
         let detailUIDs: Set<String>
+        let defaultInputUID: String?
         let hardwareGain: AudioDevice.HardwareGain?
         let hardwareMonitor: AudioDevice.HardwareGain?
         let destinationHasVolumeControl: Bool
@@ -6070,7 +6130,7 @@ final class RouterModel: ScriptTarget {
     /// turn nor wake an unrelated Bluetooth capability provider.
     nonisolated static func readDeviceRefreshSnapshot(
         selectedSourceUID: String?, selectedDestinationUID: String?,
-        detailUIDs: Set<String>
+        detailUIDs: Set<String>, readsDefaultInput: Bool = false
     ) -> DeviceRefreshSnapshot {
         // Only Bluetooth endpoints the user placed in this route earn live
         // capability reads. RoutingEngine resolves its own full devices again
@@ -6081,9 +6141,11 @@ final class RouterModel: ScriptTarget {
         let destination = selectedDestinationUID.flatMap { uid in all.first { $0.uid == uid } }
         return DeviceRefreshSnapshot(
             all: all,
+            inventoryIDs: Set(all.map(\.id)),
             selectedSourceUID: selectedSourceUID,
             selectedDestinationUID: selectedDestinationUID,
             detailUIDs: detailUIDs,
+            defaultInputUID: readsDefaultInput ? (try? AudioDevices.defaultInputUID()) : nil,
             hardwareGain: source?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
             hardwareMonitor: source?.playThrough(),
             destinationHasVolumeControl:
@@ -6091,7 +6153,7 @@ final class RouterModel: ScriptTarget {
     }
 
     /// Applies an immutable device answer without asking HAL another question.
-    private func applyDeviceRefreshSnapshot(_ snapshot: DeviceRefreshSnapshot) {
+    private func applyDeviceInventory(_ snapshot: DeviceRefreshSnapshot) {
         // This snapshot already contains full details for every configured UID.
         // A direct hydration queued from an older picker state must not replace
         // any member of it after publication.
@@ -6102,6 +6164,9 @@ final class RouterModel: ScriptTarget {
         if outputDevices != outputs { outputDevices = outputs }
         for device in snapshot.all { deviceNames[device.uid] = device.name }
         pruneAdditionalDevices()
+    }
+
+    private func applyDeviceControlSnapshot(_ snapshot: DeviceRefreshSnapshot) {
         publish(snapshot.hardwareGain, to: \.hardwareGainReading)
         publish(snapshot.hardwareMonitor, to: \.hardwareMonitorReading)
         publish(
@@ -6109,16 +6174,26 @@ final class RouterModel: ScriptTarget {
             to: \.destinationHasVolumeControl)
     }
 
+    private func applyDeviceRefreshSnapshot(_ snapshot: DeviceRefreshSnapshot) {
+        applyDeviceInventory(snapshot)
+        applyDeviceControlSnapshot(snapshot)
+    }
+
     func refreshDevices() {
         // This deterministic form is for launch and explicit verification.
         // It supersedes an older event answer that may already be crossing back
         // from the serial queue.
         deviceRefreshGate.invalidate()
-        applyDeviceRefreshSnapshot(
-            Self.readDeviceRefreshSnapshot(
-                selectedSourceUID: selectedSourceUID,
-                selectedDestinationUID: selectedDestinationUID,
-                detailUIDs: deviceDetailUIDs))
+        let snapshot = Self.readDeviceRefreshSnapshot(
+            selectedSourceUID: selectedSourceUID,
+            selectedDestinationUID: selectedDestinationUID,
+            detailUIDs: deviceDetailUIDs,
+            readsDefaultInput: !deviceInventoryIsReady)
+        applyDeviceRefreshSnapshot(snapshot)
+        if !deviceInventoryIsReady {
+            deviceInventoryIsReady = true
+            resolveRestoredDeviceIntent(defaultInputUID: snapshot.defaultInputUID)
+        }
     }
 
     /// Endpoints whose live format is relevant to the configured route.
@@ -6199,7 +6274,38 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Resolves persisted UIDs only after one complete inventory exists.
+    ///
+    /// Holding the intent separately prevents an empty first-frame array from
+    /// erasing a saved route. Presence and picker role come from the snapshot;
+    /// no HAL question is asked while this runs on MainActor.
+    private func resolveRestoredDeviceIntent(defaultInputUID: String?) {
+        guard let intent = restoredDeviceIntent else { return }
+        restoredDeviceIntent = nil
+
+        let wasRestoring = isRestoring
+        isRestoring = true
+        defer { isRestoring = wasRestoring }
+
+        let inputs = Set(inputDevices.map(\.uid))
+        let outputs = Set(outputDevices.map(\.uid))
+        // Additional endpoints precede the primaries so pruning sees one
+        // complete restored arrangement rather than half of one.
+        additionalSourceUIDs = intent.additionalSources.filter(inputs.contains)
+        additionalDestinationUIDs = intent.additionalDestinations.filter(outputs.contains)
+        monitorDeviceUID = intent.monitor.flatMap { outputs.contains($0) ? $0 : nil }
+        selectedSourceUID = intent.source.flatMap { inputs.contains($0) ? $0 : nil }
+        selectedDestinationUID =
+            intent.destination.flatMap { outputs.contains($0) ? $0 : nil }
+        selectDefaults(defaultInputUID: defaultInputUID)
+        pruneAdditionalDevices()
+    }
+
     func selectDefaults() {
+        selectDefaults(defaultInputUID: try? AudioDevices.defaultInputUID())
+    }
+
+    private func selectDefaults(defaultInputUID: String?) {
         if selectedSourceUID == nil {
             // Prefer the system input, but never a loopback — and least of all
             // our own device.
@@ -6211,8 +6317,7 @@ final class RouterModel: ScriptTarget {
             // destination as its source and refused to start with "the input
             // and the output cannot be the same device" — on a first run, with
             // nothing to suggest what to change.
-            let systemInputUID = try? AudioDevices.defaultInputUID()
-            let realInput = systemInputUID.flatMap { uid in
+            let realInput = defaultInputUID.flatMap { uid in
                 inputDevices.first(where: { $0.uid == uid })
             }.flatMap { device in
                 Self.canSelectInputAutomatically(transport: device.transport)
@@ -6333,6 +6438,55 @@ final class RouterModel: ScriptTarget {
     private func requestDeviceChangeRefresh() {
         guard let token = deviceRefreshGate.request() else { return }
         runDeviceChangeRefresh(token)
+    }
+
+    private func runInitialDeviceRefresh(_ token: LatestRefreshGate.Token) {
+        let queue = engineQueue
+        queue.async {
+            // Launch is inventory only. A persisted Bluetooth microphone is a
+            // remembered row, not consent to open its input profile and drop
+            // the headset out of high-quality playback. Picker inspection or
+            // an explicit Start performs the direct topology hydration later.
+            let snapshot = Self.readDeviceRefreshSnapshot(
+                selectedSourceUID: nil,
+                selectedDestinationUID: nil,
+                detailUIDs: [],
+                readsDefaultInput: true)
+            Task { @MainActor in
+                self.finishInitialDeviceRefresh(snapshot, token: token)
+            }
+        }
+    }
+
+    private func finishInitialDeviceRefresh(
+        _ snapshot: DeviceRefreshSnapshot, token: LatestRefreshGate.Token
+    ) {
+        guard deviceRefreshGate.accepts(token) else { return }
+
+        // Inventory first, restored identities second, controls last. Selection
+        // observers therefore see value-only metadata and do not schedule their
+        // own duplicate HAL reads while the restore flag is held.
+        applyDeviceInventory(snapshot)
+        resolveRestoredDeviceIntent(defaultInputUID: snapshot.defaultInputUID)
+        applyDeviceControlSnapshot(snapshot)
+        deviceInventoryIsReady = true
+        deviceWatcher?.establishBaseline(snapshot.inventoryIDs)
+        refreshRestoredDeviceControlsIfSafe()
+
+        if case .start(let next) = deviceRefreshGate.finish(token) {
+            runDeviceChangeRefresh(next)
+        }
+        requestAutomaticStartIfConfigured()
+    }
+
+    private func refreshRestoredDeviceControlsIfSafe() {
+        let configured = [selectedSource, selectedDestination].compactMap { $0 }
+        guard !configured.isEmpty,
+            configured.allSatisfy({
+                Self.canProbeRestoredDeviceControls(transport: $0.transport)
+            })
+        else { return }
+        refreshDeviceControls()
     }
 
     private func runDeviceChangeRefresh(_ token: LatestRefreshGate.Token) {

@@ -39,6 +39,20 @@ struct DeviceChangeWatcherTests {
         }
     }
 
+    @Test("constructing a notification probe performs zero inventory reads")
+    func constructionDoesNotReadInventory() {
+        let inventory = Inventory([12, 34])
+        let probe = DeviceInventoryProbe(initial: nil, read: inventory.read)
+
+        #expect(inventory.reads == 0)
+        probe.establishBaseline([12, 34])
+        #expect(!probe.readChanged())
+        #expect(inventory.reads == 1)
+        inventory.set([12, 34, 56])
+        #expect(probe.readChanged())
+        #expect(inventory.reads == 2)
+    }
+
     @Test("one thousand identical notifications perform six inventory reads")
     func identicalNotificationStormBacksOff() {
         let inventory = Inventory([12, 34])

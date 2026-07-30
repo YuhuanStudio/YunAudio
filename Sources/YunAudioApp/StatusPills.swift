@@ -187,7 +187,7 @@ extension StatusPills {
         // Only the absence is worth a pill. The bar used to print the driver's
         // name when it was installed, which is the normal state of a working
         // machine and therefore says nothing.
-        if !model.isDriverInstalled {
+        if model.deviceInventoryIsReady && !model.isDriverInstalled {
             pills.append(
                 Pill(id: "driver", label: loc("no driver"), tone: .warning, showsDot: true))
         }

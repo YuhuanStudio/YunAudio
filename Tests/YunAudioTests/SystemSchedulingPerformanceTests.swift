@@ -124,12 +124,13 @@ struct SystemSchedulingPerformanceTests {
         #expect(run.ranges(of: "AudioDevices.device(uid:").count == 1)
         #expect(run.ranges(of: "AudioDevices.all(").isEmpty)
 
-        let initStart = try #require(model.range(of: "init() {"))
-        let initEnd = try #require(
+        let beginStart = try #require(
+            model.range(of: "func beginInitialDeviceDiscovery()"))
+        let beginEnd = try #require(
             model.range(
-                of: "// MARK: Push to talk",
-                range: initStart.upperBound..<model.endIndex))
-        let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
+                of: "@ObservationIgnored private var automaticStartAwaitsDeviceHydration",
+                range: beginStart.upperBound..<model.endIndex))
+        let initialisation = model[beginStart.lowerBound..<beginEnd.lowerBound]
         #expect(
             initialisation.ranges(of: "hydrateConfiguredDevicesAsynchronously()").count == 1)
 
@@ -142,6 +143,67 @@ struct SystemSchedulingPerformanceTests {
         let hydration = model[hydrationStart.lowerBound..<hydrationEnd.lowerBound]
         #expect(hydration.contains("guard !deviceDetailUIDs.isEmpty"))
         #expect(hydration.contains("deviceHydrationGate.invalidate()"))
+    }
+
+    @Test("production construction schedules zero HAL work before the live run loop")
+    func launchInventoryStartsAfterApplicationDidFinish() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let initStart = try #require(model.range(of: "init() {"))
+        let initEnd = try #require(
+            model.range(
+                of: "func beginInitialDeviceDiscovery()",
+                range: initStart.upperBound..<model.endIndex))
+        let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
+        #expect(
+            initialisation.contains("if Self.isVerificationProcess { refreshDevices() }"))
+        #expect(initialisation.ranges(of: "DeviceChangeWatcher").isEmpty)
+        #expect(initialisation.ranges(of: "runInitialDeviceRefresh").isEmpty)
+        #expect(initialisation.ranges(of: "AudioDevices.").isEmpty)
+
+        let app = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
+            encoding: .utf8)
+        let launchStart = try #require(
+            app.range(of: "func applicationDidFinishLaunching("))
+        let launchEnd = try #require(
+            app.range(
+                of: "var flowCheckModel:",
+                range: launchStart.upperBound..<app.endIndex))
+        let launch = app[launchStart.lowerBound..<launchEnd.lowerBound]
+        #expect(launch.ranges(of: "beginInitialDeviceDiscovery()").count == 1)
+
+        let workerStart = try #require(
+            model.range(of: "private func runInitialDeviceRefresh("))
+        let workerEnd = try #require(
+            model.range(
+                of: "private func finishInitialDeviceRefresh(",
+                range: workerStart.upperBound..<model.endIndex))
+        let worker = model[workerStart.lowerBound..<workerEnd.lowerBound]
+        #expect(worker.contains("selectedSourceUID: nil"))
+        #expect(worker.contains("selectedDestinationUID: nil"))
+        #expect(worker.contains("detailUIDs: []"))
+        #expect(worker.ranges(of: "readDeviceRefreshSnapshot(").count == 1)
+    }
+
+    @Test("unknown inventory never renders a missing-driver verdict")
+    func driverWarningWaitsForInventory() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        for path in [
+            "Sources/YunAudioApp/MainWindow.swift",
+            "Sources/YunAudioApp/PanelView.swift",
+            "Sources/YunAudioApp/StatusPills.swift",
+        ] {
+            let source = try String(
+                contentsOfFile: root + path,
+                encoding: .utf8)
+            #expect(
+                source.contains("deviceInventoryIsReady")
+                    && source.contains("!model.isDriverInstalled"),
+                Comment(rawValue: path))
+        }
     }
 
     @Test("Audio Unit registry discovery is absent from the first MainActor frame")

@@ -92,7 +92,7 @@ struct MainWindow: View {
         VStack(spacing: 0) {
             header
 
-            if !model.isDriverInstalled {
+            if model.deviceInventoryIsReady && !model.isDriverInstalled {
                 DriverOnboarding(model: model, isCompact: true)
                     .padding(.horizontal, Yun.Space.xl)
                     .padding(.bottom, Yun.Space.md)

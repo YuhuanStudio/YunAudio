@@ -6,10 +6,15 @@ import Foundation
 /// Everything the app persists is keyed on a device UID rather than an
 /// `AudioObjectID`, because the numeric ID is reassigned on replug. This is the
 /// signal that tells the app to go and re-resolve those UIDs.
-public final class DeviceChangeWatcher {
+public final class DeviceChangeWatcher: @unchecked Sendable {
     private var block: AudioObjectPropertyListenerBlock?
     private let queue: DispatchQueue
     private let coalescer: DeviceChangeCoalescer
+    private let inventory: DeviceInventoryProbe
+    /// Accessed only on `queue`.
+    private var hasBaseline = false
+    /// Accessed only on `queue`.
+    private var notificationBeforeBaseline = false
 
     private static let deviceListAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDevices,
@@ -20,8 +25,15 @@ public final class DeviceChangeWatcher {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
         self.queue = queue
         let inventory = DeviceInventoryProbe(
-            initial: Self.inventorySignature(),
+            // Construction happens before the application's first frame. A
+            // baseline read here blocked MainActor on coreaudiod even though
+            // there had not been a device-change notification to answer.
+            // Starting unknown keeps construction read-free. RouterModel seeds
+            // this probe from the launch snapshot before a notification is
+            // allowed to ask HAL whether anything changed.
+            initial: nil,
             read: Self.inventorySignature)
+        self.inventory = inventory
         coalescer = DeviceChangeCoalescer(queue: queue) {
             // Some audio plug-ins announce the device-list property after a
             // harmless property read. Re-enumerating complete devices in
@@ -34,8 +46,17 @@ public final class DeviceChangeWatcher {
             return changed
         }
 
-        let listener: AudioObjectPropertyListenerBlock = { [coalescer] _, _ in
-            coalescer.signal()
+        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            // The listener itself is delivered on `queue`. Until RouterModel
+            // publishes its launch snapshot there is no baseline against which
+            // a notification can mean "changed", so remember the event without
+            // starting a second inventory beside the first.
+            if self.hasBaseline {
+                self.coalescer.signal()
+            } else {
+                self.notificationBeforeBaseline = true
+            }
         }
         block = listener
 
@@ -43,6 +64,23 @@ public final class DeviceChangeWatcher {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID.system, &deviceList, queue, listener)
 
+    }
+
+    /// Supplies the ID set already read by RouterModel's launch inventory.
+    ///
+    /// A notification received during that read is replayed once. If the set
+    /// is unchanged, the probe suppresses it; if hardware really changed in
+    /// the read's window, the ordinary refresh is delivered.
+    public func establishBaseline(_ ids: Set<AudioObjectID>) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            self.inventory.establishBaseline(ids)
+            self.hasBaseline = true
+            if self.notificationBeforeBaseline {
+                self.notificationBeforeBaseline = false
+                self.coalescer.signal()
+            }
+        }
     }
 
     deinit {
@@ -161,6 +199,10 @@ final class DeviceInventoryGate: @unchecked Sendable {
         current = initial
     }
 
+    func establishBaseline(_ baseline: Set<AudioObjectID>) {
+        current = baseline
+    }
+
     func shouldDeliver(_ candidate: Set<AudioObjectID>?) -> Bool {
         guard let candidate, candidate != current else { return false }
         current = candidate
@@ -186,5 +228,9 @@ final class DeviceInventoryProbe: @unchecked Sendable {
 
     func readChanged() -> Bool {
         gate.shouldDeliver(read())
+    }
+
+    func establishBaseline(_ baseline: Set<AudioObjectID>) {
+        gate.establishBaseline(baseline)
     }
 }

@@ -146,6 +146,24 @@ struct BluetoothEnumerationPolicyTests {
         #expect(RouterModel.canSelectInputAutomatically(transport: .builtIn))
     }
 
+    @Test("no persisted Bluetooth input may auto-start")
+    func persistedBluetoothAlwaysNeedsThisSessionToStartIt() {
+        #expect(!RouterModel.canAutoStartPersistedInput(transport: .bluetooth))
+        #expect(!RouterModel.canAutoStartPersistedInput(transport: .bluetoothLE))
+        #expect(
+            !RouterModel.canAutoStartPersistedInput(transport: .continuityCapture))
+        #expect(RouterModel.canAutoStartPersistedInput(transport: .usb))
+        #expect(RouterModel.canAutoStartPersistedInput(transport: .builtIn))
+
+        #expect(!RouterModel.canProbeRestoredDeviceControls(transport: .bluetooth))
+        #expect(!RouterModel.canProbeRestoredDeviceControls(transport: .bluetoothLE))
+        #expect(
+            !RouterModel.canProbeRestoredDeviceControls(
+                transport: .continuityCapture))
+        #expect(RouterModel.canProbeRestoredDeviceControls(transport: .usb))
+        #expect(RouterModel.canProbeRestoredDeviceControls(transport: .builtIn))
+    }
+
     @Test("missing Bluetooth role metadata remains visible on the safe side")
     func missingRoleMetadataFallsBackToUnresolvedOutput() {
         let snapshot = AudioDevice.topologySnapshot(
@@ -244,8 +262,21 @@ struct BluetoothEnumerationPolicyTests {
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
             encoding: .utf8)
-        #expect(source.contains("guard configuredDevicesHaveCompleteTopology else"))
-        #expect(source.contains("automaticStartAwaitsDeviceHydration = true"))
+        let requestStart = try #require(
+            source.range(of: "private func requestAutomaticStartIfConfigured()"))
+        let requestEnd = try #require(
+            source.range(
+                of: "private var configuredDevicesHaveCompleteTopology",
+                range: requestStart.upperBound..<source.endIndex))
+        let request = source[requestStart.lowerBound..<requestEnd.lowerBound]
+        let manualGuard = try #require(
+            request.range(of: "!persistedRouteRequiresManualStart"))
+        let topologyGuard = try #require(
+            request.range(of: "guard configuredDevicesHaveCompleteTopology else"))
+        #expect(manualGuard.lowerBound < topologyGuard.lowerBound)
+        #expect(request.contains("automaticStartAwaitsDeviceHydration = true"))
+        #expect(
+            request.ranges(of: "hydrateConfiguredDevicesAsynchronously()").count == 1)
         #expect(
             source.contains(
                 "if automaticStartAwaitsDeviceHydration, configuredDevicesHaveCompleteTopology")
