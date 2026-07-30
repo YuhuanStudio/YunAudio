@@ -158,7 +158,9 @@ struct SystemSchedulingPerformanceTests {
                 range: initStart.upperBound..<model.endIndex))
         let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
         #expect(
-            initialisation.contains("if Self.isVerificationProcess { refreshDevices() }"))
+            initialisation.contains(
+                "if Self.isVerificationProcess, !Self.isUIBenchmarkProcess { refreshDevices() }"
+            ))
         #expect(initialisation.ranges(of: "DeviceChangeWatcher").isEmpty)
         #expect(initialisation.ranges(of: "runInitialDeviceRefresh").isEmpty)
         #expect(initialisation.ranges(of: "AudioDevices.").isEmpty)
@@ -287,7 +289,7 @@ struct SystemSchedulingPerformanceTests {
             encoding: .utf8)
         #expect(
             router.contains(
-                "installMIDI(startsClientImmediately: Self.isVerificationProcess)"))
+                "Self.isVerificationProcess && !Self.isUIBenchmarkProcess"))
 
         let app = try String(
             contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",

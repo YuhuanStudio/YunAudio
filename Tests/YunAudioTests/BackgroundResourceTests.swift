@@ -237,7 +237,14 @@ struct BackgroundResourceTests {
         }
 
         #expect(snapshotsBuilt == 0)
-        try await Task.sleep(for: .milliseconds(100))
+        // The writer's contract is one coalesced value, not that a heavily
+        // loaded test process schedules its MainActor task within exactly
+        // twice the 50 ms window. Poll to a bounded deadline so concurrent
+        // compiler and render work cannot turn correct coalescing into a red
+        // build, while a task that never fires still fails within one second.
+        for _ in 0..<100 where snapshotsBuilt == 0 {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         #expect(snapshotsBuilt == 1)
         #expect(written == [99])
     }

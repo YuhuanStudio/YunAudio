@@ -2956,6 +2956,11 @@ public final class RoutingEngine: @unchecked Sendable {
     public var measuredRateRatio: Double { clockPublisher?.rateRatio ?? 1.0 }
 
     public var pathQuality: PathQuality? {
+        // Polled by the interface. A route rebuild can hold the state lock
+        // across CoreAudio work, so retain the last published answer instead of
+        // freezing a frame or reading a graph that is being retired.
+        guard stateLock.try() else { return nil }
+        defer { stateLock.unlock() }
         guard let aggregate, let device = aggregate.device else { return nil }
         let drifted = aggregate.driftCorrectedUIDs
         // The destination's own level control counts as processing. Ours has
