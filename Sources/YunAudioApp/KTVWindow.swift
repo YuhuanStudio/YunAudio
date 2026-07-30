@@ -178,9 +178,18 @@ struct KTVStage: View {
                     emptyStage
                 }
 
-                VStack {
-                    HStack {
-                        Spacer()
+                // Overlays rather than a column with a `Spacer`, which is the
+                // better structure whether or not it fixes anything: pinned to
+                // their corners the controls ask for no height at all, where a
+                // spacer has no upper bound.
+                //
+                // It does not fix it. The column still reports both `496@111`
+                // and `473@303` in a 619-point stage, so the unbounded spacer
+                // was not what made the stack taller than its window either —
+                // the eighth candidate on this fault to be ruled out by
+                // measurement rather than by argument.
+                Color.clear
+                    .overlay(alignment: .topTrailing) {
                         Button {
                             KTVWindow.toggleFullScreen()
                         } label: {
@@ -194,34 +203,9 @@ struct KTVStage: View {
                         .accessibilityLabel(loc("Full screen"))
                         .accessibilityIdentifier("OpenKTVFullScreen")
                     }
-                    Spacer()
-                    scoreStrip
-                }
-                .background {
-                    GeometryReader { controls in
-                        // A background fills the frame it is given, so this
-                        // reports the ZStack's height rather than what the
-                        // controls demand: 1036 in a 720-point window, and
-                        // 1136 in another. That the stack is far taller than
-                        // the window is the finding; which child made it so is
-                        // still open, and it is not this one.
-                        let _ = {
-                            let frame = controls.frame(in: .named("ktv-stage"))
-                            let now = "\(Int(controls.size.height))@\(Int(frame.minY))"
-                            if now != Self.lastControlsPlacement {
-                                Self.lastControlsPlacement = now
-                                SongArtwork.record("controls \(now)")
-                            }
-                        }()
-                        Color.clear
-                    }
-                }
-                // The artwork owns the title-bar row, so the controls inset
-                // themselves from it explicitly: there is no safe area left to
-                // do it for them, and at `lg` the full-screen button sat level
-                // with the traffic lights and read as clipped by the frame.
-                .padding(.top, WindowChrome.controlClearance)
-                .padding([.horizontal, .bottom], Yun.Space.lg)
+                    .overlay(alignment: .bottomTrailing) { scoreStrip }
+                    .padding(.top, WindowChrome.controlClearance)
+                    .padding([.horizontal, .bottom], Yun.Space.lg)
 
             }
         }
