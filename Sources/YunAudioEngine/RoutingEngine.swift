@@ -2881,25 +2881,56 @@ public final class RoutingEngine: @unchecked Sendable {
         orderedUIDs: [String],
         channelCount: (String) -> Int
     ) -> [ChannelRef: (buffer: Int32, channel: Int32)] {
-        // Walk the aggregate's channels in sub-device order, consuming each
-        // stream's channels as we go.
+        map(
+            streamLayouts: streams.enumerated().map { index, stream in
+                ChannelStreamLayout(
+                    buffer: Int32(index),
+                    startingChannel: stream.startingChannel,
+                    channelCount: stream.currentPhysicalFormat?.channels ?? 0)
+            },
+            orderedUIDs: orderedUIDs,
+            channelCount: channelCount)
+    }
+
+    /// Maps logical member channels onto the buffers CoreAudio will hand over.
+    ///
+    /// `kAudioStreamPropertyStartingChannel` is the ordering fact. HAL does not
+    /// promise that the stream-object array itself is ordered, and a disabled
+    /// or reserved pair can leave a gap between two starting-channel values.
+    /// Flattening the array in enumeration order silently swaps those streams.
+    static func map(
+        streamLayouts: [ChannelStreamLayout],
+        orderedUIDs: [String],
+        channelCount: (String) -> Int
+    ) -> [ChannelRef: (buffer: Int32, channel: Int32)] {
+        // Slots remain tied to the original AudioBufferList index while their
+        // ordering follows the owning device's one-based channel numbers.
+        let orderedStreams =
+            streamLayouts
+            .filter { $0.startingChannel > 0 && $0.channelCount > 0 }
+            .sorted {
+                if $0.startingChannel == $1.startingChannel {
+                    return $0.buffer < $1.buffer
+                }
+                return $0.startingChannel < $1.startingChannel
+            }
+
         var result: [ChannelRef: (buffer: Int32, channel: Int32)] = [:]
         var streamIndex = 0
         var channelInStream = 0
 
-        func channelsIn(_ index: Int) -> Int {
-            streams[index].currentPhysicalFormat?.channels ?? 0
-        }
-
         for uid in orderedUIDs {
-            for channel in 0..<channelCount(uid) {
-                while streamIndex < streams.count, channelInStream >= channelsIn(streamIndex) {
+            for channel in 0..<max(0, channelCount(uid)) {
+                while streamIndex < orderedStreams.count,
+                    channelInStream >= orderedStreams[streamIndex].channelCount
+                {
                     streamIndex += 1
                     channelInStream = 0
                 }
-                guard streamIndex < streams.count else { break }
+                guard streamIndex < orderedStreams.count else { break }
+                let stream = orderedStreams[streamIndex]
                 result[ChannelRef(deviceUID: uid, channel: channel)] =
-                    (buffer: Int32(streamIndex), channel: Int32(channelInStream))
+                    (buffer: stream.buffer, channel: Int32(channelInStream))
                 channelInStream += 1
             }
         }
@@ -3141,6 +3172,16 @@ public final class RoutingEngine: @unchecked Sendable {
             bufferFrames: Int(device.currentBufferFrameSize ?? 0),
             sampleRate: device.currentSampleRate ?? 0)
     }
+}
+
+/// One CoreAudio stream's position in an IOProc `AudioBufferList`.
+///
+/// Separate from `AudioStream` so ordering and gap behaviour can be proved
+/// without constructing HAL objects.
+struct ChannelStreamLayout: Sendable, Equatable {
+    let buffer: Int32
+    let startingChannel: Int
+    let channelCount: Int
 }
 
 public enum RoutingError: Error, CustomStringConvertible {

@@ -35,7 +35,6 @@ public final class FarEndCapture: @unchecked Sendable {
     /// is a Swift object, so the realtime thread never touches ARC.
     private struct Context {
         var ring: OpaquePointer
-        var channels: Int32
         var scratch: UnsafeMutablePointer<Float>
         var scratchCapacity: Int32
     }
@@ -78,7 +77,7 @@ public final class FarEndCapture: @unchecked Sendable {
         // that its frames use the same clock as the canceller.
         guard let format = tap.format,
             format.mSampleRate.isFinite, format.mSampleRate > 0,
-            format.mChannelsPerFrame > 0
+            Self.supportsTapFormat(format)
         else { return nil }
         sampleRate = format.mSampleRate
         sourceChannels = Int(format.mChannelsPerFrame)
@@ -103,8 +102,31 @@ public final class FarEndCapture: @unchecked Sendable {
         context = .allocate(capacity: 1)
         context.initialize(
             to: Context(
-                ring: ring, channels: Int32(sourceChannels), scratch: scratch,
+                ring: ring, scratch: scratch,
                 scratchCapacity: Int32(scratchCapacity)))
+    }
+
+    /// Whether the callback can interpret the tap without conversion.
+    ///
+    /// The realtime path reads `Float` directly and derives each buffer's
+    /// stride from `mNumberChannels`. Packed float32 is therefore a contract,
+    /// not a convenient cast; padded or integer PCM would need an explicit
+    /// converter before it reached this callback.
+    static func supportsTapFormat(_ format: AudioStreamBasicDescription) -> Bool {
+        guard format.mFormatID == kAudioFormatLinearPCM,
+            format.mFormatFlags & kAudioFormatFlagIsFloat != 0,
+            format.mFormatFlags & kAudioFormatFlagIsPacked != 0,
+            format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0,
+            format.mBitsPerChannel == 32,
+            format.mChannelsPerFrame > 0
+        else { return false }
+
+        let nonInterleaved =
+            format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
+        let expectedBytes =
+            UInt32(MemoryLayout<Float>.size)
+            * (nonInterleaved ? 1 : format.mChannelsPerFrame)
+        return format.mBytesPerFrame == expectedBytes
     }
 
     deinit {
@@ -177,34 +199,61 @@ public final class FarEndCapture: @unchecked Sendable {
         let context = clientData.assumingMemoryBound(to: Context.self)
         let buffers = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData))
-        guard buffers.count > 0, let raw = buffers[0].mData else { return noErr }
-
-        let channels = Int(context.pointee.channels)
-        let samples = Int(buffers[0].mDataByteSize) / MemoryLayout<Float>.size
-        let frames = min(
-            samples / max(1, channels), Int(context.pointee.scratchCapacity))
+        let frames = FarEndCapture.downmix(
+            buffers,
+            into: context.pointee.scratch,
+            capacity: Int(context.pointee.scratchCapacity))
         guard frames > 0 else { return noErr }
-
-        let source = raw.assumingMemoryBound(to: Float.self)
-        let scratch = context.pointee.scratch
-
-        if channels == 1 {
-            scratch.update(from: source, count: frames)
-        } else {
-            // Average rather than sum: a stereo far end summed to mono would
-            // sit 6 dB hot, and the canceller matches levels as well as
-            // waveforms.
-            let scale = 1 / Float(channels)
-            for frame in 0..<frames {
-                var total: Float = 0
-                for channel in 0..<channels {
-                    total += source[frame * channels + channel]
-                }
-                scratch[frame] = total * scale
-            }
-        }
-
-        _ = yun_rt_ring_write(context.pointee.ring, scratch, UInt32(frames))
+        _ = yun_rt_ring_write(
+            context.pointee.ring, context.pointee.scratch, UInt32(frames))
         return noErr
+    }
+
+    /// Folds every buffer and channel in one IO cycle to mono.
+    ///
+    /// An `AudioBufferList` may describe one interleaved buffer, one buffer per
+    /// channel, or several interleaved groups. `mNumberChannels` is therefore
+    /// the stride of each buffer, not a property the first buffer can stand in
+    /// for. The shortest populated buffer bounds the cycle so no group can be
+    /// read past its own byte count.
+    @inline(__always)
+    static func downmix(
+        _ buffers: UnsafeMutableAudioBufferListPointer,
+        into destination: UnsafeMutablePointer<Float>,
+        capacity: Int
+    ) -> Int {
+        guard capacity > 0 else { return 0 }
+
+        var totalChannels = 0
+        var frames = capacity
+        var hasPopulatedBuffer = false
+        for buffer in buffers {
+            let channels = Int(buffer.mNumberChannels)
+            guard channels > 0 else { continue }
+            totalChannels += channels
+            guard buffer.mData != nil else { continue }
+            let samples = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+            frames = min(frames, samples / channels)
+            hasPopulatedBuffer = true
+        }
+        guard hasPopulatedBuffer, totalChannels > 0, frames > 0 else { return 0 }
+
+        // Average rather than sum: a stereo far end summed to mono would sit
+        // 6 dB hot, and the canceller matches levels as well as waveforms.
+        let scale = 1 / Float(totalChannels)
+        for frame in 0..<frames {
+            var total: Float = 0
+            for buffer in buffers {
+                let channels = Int(buffer.mNumberChannels)
+                guard channels > 0, let raw = buffer.mData else { continue }
+                let source = raw.assumingMemoryBound(to: Float.self)
+                let offset = frame * channels
+                for channel in 0..<channels {
+                    total += source[offset + channel]
+                }
+            }
+            destination[frame] = total * scale
+        }
+        return frames
     }
 }
