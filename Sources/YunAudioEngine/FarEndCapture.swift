@@ -73,9 +73,15 @@ public final class FarEndCapture: @unchecked Sendable {
         else { return nil }
         self.tap = tap
 
-        let format = tap.format
-        sampleRate = format?.mSampleRate ?? 48000
-        sourceChannels = max(1, Int(format?.mChannelsPerFrame ?? 2))
+        // Unknown is not 48 kHz. Treating a missing format as that convenient
+        // default would let this ring pass the rate contract with no evidence
+        // that its frames use the same clock as the canceller.
+        guard let format = tap.format,
+            format.mSampleRate.isFinite, format.mSampleRate > 0,
+            format.mChannelsPerFrame > 0
+        else { return nil }
+        sampleRate = format.mSampleRate
+        sourceChannels = Int(format.mChannelsPerFrame)
 
         guard
             let aggregate = try? AggregateDevice(

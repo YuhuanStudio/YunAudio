@@ -33,6 +33,74 @@ public struct EchoCancellationSettings: Sendable {
     }
 }
 
+/// The clock contract across the two rings surrounding echo cancellation.
+///
+/// A ring carries frames, not time. Reading one 44.1 kHz frame for every
+/// 48 kHz frame requested does not convert the signal: it plays it at the wrong
+/// speed and drains 3,900 frames per second faster than they arrive. The same
+/// rule applies on both sides of the voice-processing unit, so all three rates
+/// have to agree before callbacks are allowed to exchange frames one for one.
+struct EchoCancellationRateContract: Sendable, Equatable {
+    let farEndRate: Double?
+    let captureRate: Double
+    let routerRate: Double
+
+    static let tolerance = 0.5
+
+    var captureMatchesRouter: Bool {
+        Self.ratesMatch(captureRate, routerRate)
+    }
+
+    var farEndMatchesCapture: Bool {
+        guard let farEndRate else { return false }
+        return Self.ratesMatch(farEndRate, captureRate)
+    }
+
+    var canCarryCancelledAudio: Bool {
+        captureMatchesRouter
+    }
+
+    var canCarryFarEndReference: Bool {
+        farEndMatchesCapture && captureMatchesRouter
+    }
+
+    static func ratesMatch(_ lhs: Double, _ rhs: Double) -> Bool {
+        lhs.isFinite && rhs.isFinite && lhs > 0 && rhs > 0
+            && abs(lhs - rhs) < tolerance
+    }
+
+    /// Signed ring drift when frames are exchanged one for one.
+    ///
+    /// Positive means the producer fills the ring; negative means the consumer
+    /// asks for frames faster than they arrive.
+    static func driftFramesPerSecond(
+        producerRate: Double, consumerRate: Double
+    )
+        -> Double?
+    {
+        guard producerRate.isFinite, producerRate > 0,
+            consumerRate.isFinite, consumerRate > 0
+        else { return nil }
+        return producerRate - consumerRate
+    }
+
+    /// Time for a rate mismatch to consume one ring's worth of slack.
+    ///
+    /// A ring that starts empty can underflow immediately; this number measures
+    /// how quickly an equivalent standing fill would be lost, or an empty ring
+    /// would be filled to capacity.
+    static func secondsToConsumeSlack(
+        capacityFrames: Int, producerRate: Double, consumerRate: Double
+    ) -> Double? {
+        guard capacityFrames > 0,
+            let drift = driftFramesPerSecond(
+                producerRate: producerRate, consumerRate: consumerRate),
+            abs(drift) >= tolerance
+        else { return nil }
+        return Double(capacityFrames) / abs(drift)
+    }
+}
+
 /// Wires the echo canceller into the router.
 ///
 /// Three realtime threads meet here and none of them may block, so both meeting
@@ -84,28 +152,44 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     /// - Parameters:
     ///   - microphoneUID: The microphone to capture and cancel for.
     ///   - settings: Speaker and far-end reference.
+    ///   - routerSampleRate: Rate at which the router will drain cancelled
+    ///     frames. The bridge refuses any capture clock that differs.
     ///   - maximumFrames: Largest block the unit will be asked for.
     public init?(
         microphoneUID: String,
         settings: EchoCancellationSettings,
+        routerSampleRate: Double,
         maximumFrames: Int = 512
     ) {
-        // The far end first: its rate decides the canceller's, and building the
-        // unit against one rate and then discovering the tap runs at another
-        // would mean cancelling a signal that no longer lines up in time.
-        let reference =
+        // Build the far end first so its actual rate is known before accepting
+        // it as a reference. The router's rate decides the canceller clock; a
+        // tap on another clock is left out rather than consumed at the wrong
+        // speed.
+        let candidateReference =
             settings.farEndProcessIDs.isEmpty
             ? nil
             : FarEndCapture(
                 processIDs: settings.farEndProcessIDs,
                 muteBehavior: settings.tapMuteBehavior)
-        farEnd = reference
 
         guard
             let capture = EchoCancellingCapture(
                 microphoneUID: microphoneUID, speakerUID: settings.speakerUID,
+                requiredSampleRate: routerSampleRate,
                 maximumFrames: maximumFrames)
         else { return nil }
+
+        let contract = EchoCancellationRateContract(
+            farEndRate: candidateReference?.sampleRate,
+            captureRate: capture.sampleRate,
+            routerRate: routerSampleRate)
+        guard contract.canCarryCancelledAudio else { return nil }
+
+        // A mismatched process tap is not a reference at this clock. Running
+        // the canceller blind is less capable, but remains time-correct; feeding
+        // the ring one for one would change speed and inevitably underflow or
+        // overflow it.
+        farEnd = contract.canCarryFarEndReference ? candidateReference : nil
         self.capture = capture
         sampleRate = capture.sampleRate
 

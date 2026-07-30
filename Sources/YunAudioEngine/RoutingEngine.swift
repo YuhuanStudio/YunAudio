@@ -958,6 +958,7 @@ public final class RoutingEngine: @unchecked Sendable {
         if let settings = echoCancellation {
             bridge = EchoCancellationBridge(
                 microphoneUID: sourceDeviceUID, settings: settings,
+                routerSampleRate: targetRate,
                 maximumFrames: Int(bufferFrames) * 4)
             if bridge == nil {
                 lastEchoCancellationError = EchoFailure.notBuilt
@@ -1039,6 +1040,12 @@ public final class RoutingEngine: @unchecked Sendable {
         graphBufferFrames = cycleFrames
         graphMaximumFrames = maximumFrames
         if abs(rate - targetRate) >= 0.5 { sampleRateMismatch = true }
+        if let bridge,
+            !EchoCancellationRateContract.ratesMatch(bridge.sampleRate, rate)
+        {
+            lastEchoCancellationError = EchoFailure.notBuilt
+            throw RoutingError.echoCancellerFailed
+        }
 
         // Isolation is a mono stage fed from one source channel, so it is set
         // up before the routes are resolved: a route that reads the model's

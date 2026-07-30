@@ -83,6 +83,9 @@ public final class EchoCancellingCapture {
     ///   - speakerUID: The speaker whose output should be cancelled out of it.
     ///     Pass nil to leave the unit on the system defaults, which the HAL will
     ///     pair for it.
+    ///   - requiredSampleRate: Rate of the frame consumer. A ring does not
+    ///     resample, so a dedicated microphone/speaker pair has to present this
+    ///     exact rate before the unit may exchange frames with that consumer.
     ///   - maximumFrames: Lower bound on the block size to allocate for. The
     ///     actual size comes from the device this unit ends up bound to, which
     ///     is the only thing that decides how much it will hand over per pull.
@@ -94,36 +97,63 @@ public final class EchoCancellingCapture {
     ///     `AudioUnitRender` then wrote 3528 bytes past the end of the capture
     ///     buffer on every cycle. The clamp in the callback below means an
     ///     underestimate can now only cost audio, never memory.
-    public init?(microphoneUID: String, speakerUID: String?, maximumFrames: Int = 512) {
+    public init?(
+        microphoneUID: String,
+        speakerUID: String?,
+        requiredSampleRate: Double? = nil,
+        maximumFrames: Int = 512
+    ) {
 
         // Bind the two devices into one duplex object when both are named.
         var builtAggregate: AggregateDevice?
         var boundDeviceID: AudioObjectID?
         var rate: Double = 48000
+        var ratesToRestoreOnFailure: [String: Double] = [:]
+        var keepsAlignedRates = false
+        defer {
+            if !keepsAlignedRates {
+                AggregateDevice.restoreSampleRates(ratesToRestoreOnFailure)
+            }
+        }
 
-        if let speakerUID,
-            let microphone = try? AudioDevices.device(uid: microphoneUID),
-            let speaker = try? AudioDevices.device(uid: speakerUID)
-        {
+        if let speakerUID {
+            guard
+                let microphone = try? AudioDevices.device(uid: microphoneUID),
+                let speaker = try? AudioDevices.device(uid: speakerUID),
+                let selectedRate = Self.sampleRate(
+                    microphoneRates: microphone.availableSampleRates,
+                    speakerRates: speaker.availableSampleRates,
+                    requiredRate: requiredSampleRate)
+            else { return nil }
             let members = [microphone, speaker]
-            // 48 kHz unless neither device offers it: echo cancellation is a
-            // voice feature and gains nothing from a higher rate.
-            let shared = Set(microphone.availableSampleRates)
-                .intersection(speaker.availableSampleRates)
-            rate = shared.contains(48000) ? 48000 : (shared.max() ?? 48000)
-            restorableRates =
-                (try? AggregateDevice.alignSampleRate(rate, across: members)) ?? [:]
+            rate = selectedRate
+            guard
+                let alignedRates = try? AggregateDevice.alignSampleRate(
+                    rate, across: members)
+            else { return nil }
+            ratesToRestoreOnFailure = alignedRates
+            restorableRates = alignedRates
 
-            builtAggregate = try? AggregateDevice(
-                name: "YunAudio Echo Cancellation",
-                subDevices: [
-                    .init(uid: microphoneUID, driftCompensation: false),
-                    .init(uid: speakerUID, driftCompensation: true),
-                ],
-                clockMasterUID: microphoneUID)
-            boundDeviceID = builtAggregate?.id
+            guard
+                let dedicated = try? AggregateDevice(
+                    name: "YunAudio Echo Cancellation",
+                    subDevices: [
+                        .init(uid: microphoneUID, driftCompensation: false),
+                        .init(uid: speakerUID, driftCompensation: true),
+                    ],
+                    clockMasterUID: microphoneUID)
+            else { return nil }
+            builtAggregate = dedicated
+            boundDeviceID = dedicated.id
         } else if let microphone = try? AudioDevices.device(uid: microphoneUID) {
-            rate = microphone.currentSampleRate ?? 48000
+            let currentRate = microphone.currentSampleRate ?? 48000
+            if let requiredSampleRate,
+                !EchoCancellationRateContract.ratesMatch(
+                    currentRate, requiredSampleRate)
+            {
+                return nil
+            }
+            rate = currentRate
         }
         aggregate = builtAggregate
         sampleRate = rate
@@ -295,6 +325,32 @@ public final class EchoCancellingCapture {
             free(bufferList.unsafeMutablePointer)
             return nil
         }
+        keepsAlignedRates = true
+    }
+
+    /// Chooses one exact clock for the microphone and speaker.
+    ///
+    /// The standalone capture keeps its established voice-oriented preference
+    /// for 48 kHz. A bridge supplies `requiredRate`, because frames crossing a
+    /// ring have no metadata with which a downstream consumer could discover
+    /// that they need resampling.
+    static func sampleRate(
+        microphoneRates: [Double],
+        speakerRates: [Double],
+        requiredRate: Double?
+    ) -> Double? {
+        let microphone = Set(microphoneRates.filter { $0.isFinite && $0 > 0 })
+        let speaker = Set(speakerRates.filter { $0.isFinite && $0 > 0 })
+        let shared = microphone.intersection(speaker)
+        guard !shared.isEmpty else { return nil }
+
+        if let requiredRate {
+            guard requiredRate.isFinite, requiredRate > 0 else { return nil }
+            return shared.first {
+                EchoCancellationRateContract.ratesMatch($0, requiredRate)
+            }
+        }
+        return shared.contains(48_000) ? 48_000 : shared.max()
     }
 
     deinit {
