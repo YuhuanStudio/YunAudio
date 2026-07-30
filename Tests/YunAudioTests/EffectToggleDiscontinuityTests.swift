@@ -3,12 +3,11 @@ import Testing
 
 @testable import YunAudioEngine
 
-/// Quantifies the audible edge made by publishing a cold effect graph.
+/// Quantifies the handover at the boundary where an effect graph is published.
 ///
-/// These are known issues rather than disabled tests: the measurements still
-/// run and print on every pass, while the acceptance bounds describe what a
-/// graph-level transition has to achieve. A UI animation cannot change any of
-/// these numbers.
+/// The chain render remains deliberately cold on enable. The transition has to
+/// hide that real 1024-frame hole and the latency change; replacing the chain
+/// with a warmed fixture would let this test pass for the wrong reason.
 @Suite("Effect toggle continuity", .serialized)
 struct EffectToggleDiscontinuityTests {
     private let blockFrames = 128
@@ -19,12 +18,15 @@ struct EffectToggleDiscontinuityTests {
         let source = sine(frames: 16_384)
         let coldInput = Array(source[switchFrame...])
         let coldOutput = try render(coldInput)
+        let transitioned = transition(
+            old: coldInput, new: coldOutput,
+            oldLatency: 0, newLatency: FormantShifter.windowSize)
         let combined =
             Array(source[(switchFrame - blockFrames)..<switchFrame])
-            + Array(coldOutput.prefix(blockFrames))
+            + transitioned
         let jump = maximumStep(combined)
         let naturalStep = maximumStep(source)
-        let zeroFrames = coldOutput.prefix { abs($0) < 1e-7 }.count
+        let zeroFrames = transitioned.prefix { abs($0) < 1e-7 }.count
 
         var impulse = [Float](repeating: 0, count: 2_048)
         impulse[0] = 0.5
@@ -36,36 +38,32 @@ struct EffectToggleDiscontinuityTests {
             "cold enable: max jump \(jump), natural \(naturalStep), "
                 + "zero \(zeroFrames) frames, latency shift \(latencyShift) frames")
         #expect(latencyShift == FormantShifter.windowSize)
-        withKnownIssue(
-            "a cold graph is published before it has output to crossfade"
-        ) {
-            #expect(
-                jump <= naturalStep * 1.1,
-                "enable jump \(jump) exceeded the signal's \(naturalStep)")
-            #expect(
-                zeroFrames == 0,
-                "enable inserted \(zeroFrames) consecutive silent frames")
-        }
+        #expect(
+            jump <= naturalStep * 1.1,
+            "enable jump \(jump) exceeded the signal's \(naturalStep)")
+        #expect(
+            zeroFrames == 0,
+            "enable inserted \(zeroFrames) consecutive silent frames")
     }
 
     @Test("disabling a delayed chain does not jump to current input")
     func disablingDelayedChain() throws {
         let source = sine(frames: 16_384)
         let processed = try render(source)
+        let transitioned = transition(
+            old: Array(processed[switchFrame...]),
+            new: Array(source[switchFrame...]),
+            oldLatency: FormantShifter.windowSize, newLatency: 0)
         let combined =
             Array(processed[(switchFrame - blockFrames)..<switchFrame])
-            + Array(source[switchFrame..<(switchFrame + blockFrames)])
+            + transitioned
         let jump = maximumStep(combined)
         let naturalStep = maximumStep(source)
 
         print("disable: max jump \(jump), natural \(naturalStep)")
-        withKnownIssue(
-            "removing a graph jumps from its delayed output to current input"
-        ) {
-            #expect(
-                jump <= naturalStep * 1.1,
-                "disable jump \(jump) exceeded the signal's \(naturalStep)")
-        }
+        #expect(
+            jump <= naturalStep * 1.1,
+            "disable jump \(jump) exceeded the signal's \(naturalStep)")
     }
 
     private func sine(frames: Int) -> [Float] {
@@ -99,6 +97,34 @@ struct EffectToggleDiscontinuityTests {
                     from: chain.outputBuffer, count: frames)
             }
             start += frames
+        }
+        return output
+    }
+
+    private func transition(
+        old: [Float], new: [Float],
+        oldLatency: Int, newLatency: Int
+    ) -> [Float] {
+        let controller = EffectTransition(
+            sampleRate: 48_000, oldLatencyFrames: oldLatency,
+            newLatencyFrames: newLatency)
+        var output = [Float](repeating: 0, count: min(old.count, new.count))
+        let count = output.count
+        old.withUnsafeBufferPointer { oldBuffer in
+            new.withUnsafeBufferPointer { newBuffer in
+                output.withUnsafeMutableBufferPointer { outputBuffer in
+                    var start = 0
+                    while start < count {
+                        let frames = min(blockFrames, count - start)
+                        controller.process(
+                            old: oldBuffer.baseAddress! + start,
+                            new: newBuffer.baseAddress! + start,
+                            output: outputBuffer.baseAddress! + start,
+                            frames: frames)
+                        start += frames
+                    }
+                }
+            }
         }
         return output
     }
