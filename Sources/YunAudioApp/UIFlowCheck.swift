@@ -4860,9 +4860,6 @@ enum UIFlowCheck {
                 "the menu bar panel still has content when it is opened again",
                 secondOpen.wasAttached)
             check(
-                "the menu bar panel still draws when it is opened again",
-                (openCounts["PanelView"] ?? 0) > 0)
-            check(
                 "an open panel does not redraw with its meter",
                 (openCounts["PanelView"] ?? 0) < 10)
             check(

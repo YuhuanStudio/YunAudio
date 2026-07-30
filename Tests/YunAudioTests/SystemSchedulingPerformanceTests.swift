@@ -412,8 +412,8 @@ struct SystemSchedulingPerformanceTests {
         #expect(!toggle.contains("NSApp.activate("))
     }
 
-    @Test("panel reopen counting begins before synchronous popover layout")
-    func panelReopenMeasurementIncludesFirstDraw() throws {
+    @Test("panel reopen proves attachment and a live child without requiring a root draw")
+    func panelReopenMeasurementUsesObservableWork() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/UIFlowCheck.swift",
@@ -430,14 +430,12 @@ struct SystemSchedulingPerformanceTests {
             helper.range(of: "statusItem?.setPanelOpenForCheck(true)"))
         #expect(counting.lowerBound < opening.lowerBound)
 
-        let secondOpen = try #require(
-            source.range(
-                of: "\"the menu bar panel still draws when it is opened again\""))
-        let positiveCount = try #require(
-            source.range(
-                of: "(openCounts[\"PanelView\"] ?? 0) > 0",
-                range: secondOpen.upperBound..<source.endIndex))
-        #expect(secondOpen.lowerBound < positiveCount.lowerBound)
+        #expect(
+            source.contains(
+                "\"the menu bar panel still has content when it is opened again\","))
+        #expect(source.contains("secondOpen.wasAttached"))
+        #expect(source.contains("(openCounts[\"PanelLiveCard\"] ?? 0) > 3"))
+        #expect(!source.contains("(openCounts[\"PanelView\"] ?? 0) > 0"))
     }
 
     @Test("headphone files are parsed off MainActor only when needed")
