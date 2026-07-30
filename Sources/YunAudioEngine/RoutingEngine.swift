@@ -406,6 +406,54 @@ public final class RoutingEngine: @unchecked Sendable {
         let processingCapacity: Int
     }
 
+    struct SampleRatePlan: Sendable, Equatable {
+        let targetRate: Double
+        let hasMismatch: Bool
+    }
+
+    /// Chooses the clock master's rate before the aggregate is built.
+    ///
+    /// A common rate avoids nominal conversion and therefore wins. When no
+    /// common rate exists, the source remains the clock master and another
+    /// member must be converted whatever rate it chooses. In that case using
+    /// the source's highest advertised rate is not extra fidelity: a 48/96 kHz
+    /// microphone feeding a 44.1 kHz Bluetooth output still ends at 44.1 kHz,
+    /// while 96 kHz doubles every per-frame DSP cost. Honour the preferred
+    /// source rate, then preserve its current rate, before falling back to the
+    /// highest value only when neither is usable.
+    static func sampleRatePlan(
+        sourceRates: [Double],
+        destinationRates: [Double],
+        preferredRate: Double?,
+        sourceCurrentRate: Double?
+    ) -> SampleRatePlan? {
+        let source = Set(sourceRates.filter { $0.isFinite && $0 > 0 })
+        guard !source.isEmpty else { return nil }
+        let destination = Set(destinationRates.filter { $0.isFinite && $0 > 0 })
+        let shared = source.intersection(destination)
+
+        if let preferredRate, preferredRate.isFinite,
+            shared.contains(preferredRate)
+        {
+            return SampleRatePlan(targetRate: preferredRate, hasMismatch: false)
+        }
+        if let highest = shared.max() {
+            return SampleRatePlan(targetRate: highest, hasMismatch: false)
+        }
+        if let preferredRate, preferredRate.isFinite,
+            source.contains(preferredRate)
+        {
+            return SampleRatePlan(targetRate: preferredRate, hasMismatch: true)
+        }
+        if let sourceCurrentRate, sourceCurrentRate.isFinite,
+            source.contains(sourceCurrentRate)
+        {
+            return SampleRatePlan(targetRate: sourceCurrentRate, hasMismatch: true)
+        }
+        guard let highest = source.max() else { return nil }
+        return SampleRatePlan(targetRate: highest, hasMismatch: true)
+    }
+
     /// Builds one timing answer from live aggregate properties.
     ///
     /// Four thousand and ninety-six frames is storage headroom, not work to do:
@@ -851,31 +899,17 @@ public final class RoutingEngine: @unchecked Sendable {
         // it is about to belong to the canceller rather than to this aggregate:
         // a rate mismatch there would be resampled somewhere regardless.
         let alignedDevices = [source, destination] + extras
-        let shared = Set(source.availableSampleRates)
-            .intersection(destination.availableSampleRates)
-        let targetRate: Double
-        var mismatched = false
-        if let preferred = preferredSampleRate, shared.contains(preferred) {
-            targetRate = preferred
-        } else if let highest = shared.max() {
-            targetRate = highest
-        } else if let best = source.availableSampleRates.max() {
-            // No rate both ends can present. This used to be refused outright,
-            // and refusing is wrong: a Razer Barracuda does 44.1 kHz out and
-            // 16 kHz in, a Seiren V3 Pro does 48 and 96, and a person who owns
-            // both is not doing anything unusual. The path cannot be bit-exact
-            // across that gap whatever happens, so the question is only who
-            // resamples — and the HAL does it well and reports that it did.
-            //
-            // The clock master's rate wins because the master is the one thing
-            // that cannot be resampled; every other member keeps whatever it
-            // can do and the aggregate reconciles them.
-            targetRate = best
-            mismatched = true
-        } else {
+        guard
+            let ratePlan = Self.sampleRatePlan(
+                sourceRates: source.availableSampleRates,
+                destinationRates: destination.availableSampleRates,
+                preferredRate: preferredSampleRate,
+                sourceCurrentRate: source.nominalSampleRate)
+        else {
             throw RoutingError.noCommonSampleRate
         }
-        sampleRateMismatch = mismatched
+        let targetRate = ratePlan.targetRate
+        sampleRateMismatch = ratePlan.hasMismatch
         // Remembered so the devices go back the way they were found. Merged
         // rather than replaced: a restart must not forget what the first start
         // changed.
