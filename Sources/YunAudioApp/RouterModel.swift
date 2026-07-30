@@ -4303,6 +4303,12 @@ final class RouterModel: ScriptTarget {
             // out twice. Every render and every photograph of this stage took
             // the first branch, so the one a user actually sees was untested.
             artworkURL: URL(string: "https://p2.music.126.net/VZBj5FRD5zQpvkquGkBYEw==/109951173224181614.jpg"))
+        // The line being sung carries word times, because a fixture without
+        // them can only ever exercise the linear sweep — the compositor's
+        // key-frame path had no picture of itself at all. Held syllables are
+        // deliberately uneven: 「时光」 is quick and 「橡皮」 is slow, which is
+        // the difference a linear fill gets wrong.
+        //
         // A real file, parsed rather than assembled: the credit block that
         // opens it, the timestamps as the index sends them, and a rest in the
         // middle. Every earlier fixture was three short sentences written to
@@ -4320,7 +4326,7 @@ final class RouterModel: ScriptTarget {
             [01:02.16]我只追到你的背影
             [01:09.39]原来年少心动是逆行在一场雨季
             [01:14.79]注定了无法走进同一个晴天里
-            [01:20.70]可偏偏时光的橡皮
+            [01:20.70]<01:20.70>可<01:20.95>偏<01:21.20>偏<01:21.60>时<01:21.85>光<01:22.10>的<01:22.55>橡<01:23.10>皮
             [01:23.91]擦去很多却放过你姓名
             [01:28.00]
             [01:33.15]原来有些相遇明明知道会分离
