@@ -56,6 +56,16 @@ public struct LoudnessMeter: Sendable {
         shortTermBlocks = [Double](repeating: 0, count: 30)
     }
 
+    /// Bytes occupied by the meter's fixed Array elements at one sample rate.
+    ///
+    /// Array headers and allocator metadata are deliberately excluded; this is
+    /// the portable lower bound whose lifecycle the analyser can assert.
+    static func retainedArrayBytes(sampleRate: Double) -> Int {
+        LoudnessDistribution.retainedArrayBytes
+            + Int(sampleRate * 0.4) * MemoryLayout<Double>.stride
+            + 30 * MemoryLayout<Double>.stride
+    }
+
     /// Feeds mono samples. Multi-channel material should be summed by the
     /// caller with the standard's channel weights; for a microphone there is
     /// one channel and its weight is one.
@@ -204,6 +214,19 @@ struct LoudnessDistribution: Sendable {
         repeating: 0, count: binCount * centroidCapacity)
     private(set) var blockCount: UInt64 = 0
     private var totalEnergy: Double = 0
+
+    static var retainedArrayBytes: Int {
+        let ordinaryBins =
+            binCount
+            * (MemoryLayout<UInt64>.stride + MemoryLayout<Double>.stride)
+        let treeBins =
+            (binCount + 1)
+            * (MemoryLayout<UInt64>.stride + MemoryLayout<Double>.stride)
+        let centroidBins =
+            binCount * centroidCapacity
+            * (MemoryLayout<UInt64>.stride + MemoryLayout<Double>.stride)
+        return ordinaryBins + treeBins + centroidBins
+    }
 
     mutating func add(_ meanSquare: Double) {
         let loudness = LoudnessMeter.loudness(ofMeanSquare: meanSquare)

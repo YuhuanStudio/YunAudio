@@ -61,12 +61,18 @@ public final class SignalAnalyser {
         public static let silent = Reading(
             momentary: -.infinity, shortTerm: -.infinity, integrated: -.infinity,
             range: 0, peak: -.infinity,
-            bands: [Float](repeating: 0, count: SpectrumAnalyser.bandCount),
+            bands: SignalAnalyser.silentBands,
             duration: 0, verdict: .quiet, verdictConfidence: 0, verdictLabel: "",
             pitchHertz: 0)
     }
 
-    private var loudness: LoudnessMeter
+    /// One copy-on-write zero spectrum shared by readings which did not ask for
+    /// an FFT. Auto-levelling reads at the poll rate; allocating 24 floats for
+    /// every one of those readings was work whose visible result was always the
+    /// same row of zeroes.
+    static let silentBands = [Float](repeating: 0, count: SpectrumAnalyser.bandCount)
+
+    private var loudness: LoudnessMeter?
     private var spectrum: SpectrumAnalyser?
     /// Apple's on-device sound model.
     ///
@@ -84,7 +90,27 @@ public final class SignalAnalyser {
     private var lastPitch: Float = 0
     private let sampleRate: Double
     private var buffer: [Float]
-    private var measuredFrames: Int = 0
+    /// Frames which actually reached loudness, not frames consumed by some
+    /// other analyser before loudness was requested.
+    private var loudnessMeasuredFrames: Int = 0
+    /// A quarter of a second at 96 kHz. The drain runs far more often than
+    /// that; the headroom is for the case where the main thread was busy and
+    /// several polls' worth piled up.
+    static let workingBufferFrames = 24_576
+
+    /// Storage retained solely to drain the analysis ring.
+    ///
+    /// Internal so the idle-memory contract can assert bytes rather than infer
+    /// them from a source declaration.
+    var workingBufferBytes: Int {
+        buffer.count * MemoryLayout<Float>.stride
+    }
+
+    /// Fixed Array elements retained by the loudness meter, excluding Array and
+    /// allocator metadata.
+    var loudnessStorageBytes: Int {
+        loudness == nil ? 0 : LoudnessMeter.retainedArrayBytes(sampleRate: sampleRate)
+    }
 
     /// What the caller currently wants computed. Everything not asked for is
     /// not merely skipped but not allocated.
@@ -108,6 +134,24 @@ public final class SignalAnalyser {
     public func require(_ wanted: Needs) {
         guard wanted != needs else { return }
         needs = wanted
+
+        if wanted.isEmpty {
+            // An idle analyser is kept around so integrated loudness can resume
+            // within the same route, but its drain storage has no state worth
+            // preserving. Releasing it saves 98,304 bytes whenever every
+            // analysis consumer is closed.
+            buffer = []
+        } else if buffer.isEmpty {
+            buffer = [Float](repeating: 0, count: Self.workingBufferFrames)
+        }
+
+        // Integrated loudness is session state, so once requested it survives a
+        // window closing. It is nevertheless absent from a menu-bar-only route
+        // and from ducking, whose classifier never reads it: 3,033,856 bytes at
+        // 48 kHz should not be a prerequisite for recognising speech.
+        if wanted.contains(.loudness), loudness == nil {
+            loudness = LoudnessMeter(sampleRate: sampleRate)
+        }
 
         if wanted.contains(.spectrum) {
             if spectrum == nil { spectrum = SpectrumAnalyser(sampleRate: sampleRate) }
@@ -140,11 +184,8 @@ public final class SignalAnalyser {
     ) {
         self.sampleRate = sampleRate
         self.makeClassifier = makeClassifier
-        loudness = LoudnessMeter(sampleRate: sampleRate)
-        // A quarter of a second at 96 kHz. The drain runs far more often than
-        // that; the headroom is for the case where the main thread was busy and
-        // several polls' worth piled up.
-        buffer = [Float](repeating: 0, count: 24576)
+        loudness = nil
+        buffer = []
     }
 
     /// Pulls from the engine and folds the result into both meters.
@@ -153,22 +194,18 @@ public final class SignalAnalyser {
     /// backlog is measured rather than discarded — dropping it would make the
     /// integrated reading depend on how busy the interface happened to be.
     public func drain(from engine: RoutingEngine) {
+        // `drain` is public and can be called independently of RouterModel's
+        // `isIdle` gate. An empty Array has no base address to force-unwrap,
+        // and an idle analyser has deliberately released this buffer.
+        guard !buffer.isEmpty else { return }
         while true {
             let taken = buffer.withUnsafeMutableBufferPointer { pointer in
                 engine.drainAnalysis(into: pointer.baseAddress!, capacity: pointer.count)
             }
             guard taken > 0 else { return }
             buffer.withUnsafeBufferPointer { pointer in
-                let base = pointer.baseAddress!
-                loudness.add(base, count: taken)
-                spectrum?.add(base, count: taken)
-                classifier?.add(base, count: taken)
-                if tracker != nil {
-                    pitchPending.append(
-                        contentsOf: UnsafeBufferPointer(start: base, count: taken))
-                }
+                add(pointer.baseAddress!, count: taken)
             }
-            measuredFrames += taken
             // One frame at a time, keeping only the newest: a backlog of pitch
             // frames is a backlog of answers nobody will read.
             while pitchPending.count >= PitchTracker.frameSize {
@@ -191,6 +228,31 @@ public final class SignalAnalyser {
         }
     }
 
+    private func add(_ samples: UnsafePointer<Float>, count: Int) {
+        if loudness != nil {
+            loudness?.add(samples, count: count)
+            loudnessMeasuredFrames += count
+        }
+        spectrum?.add(samples, count: count)
+        classifier?.add(samples, count: count)
+        if tracker != nil {
+            pitchPending.append(
+                contentsOf: UnsafeBufferPointer(start: samples, count: count))
+        }
+    }
+
+    /// Deterministic control-thread feed for lifecycle tests.
+    ///
+    /// The production path differs only in where the same contiguous samples
+    /// came from; constructing a CoreAudio graph to verify a frame counter
+    /// would make a memory test depend on hardware.
+    func addForTesting(_ samples: [Float]) {
+        samples.withUnsafeBufferPointer {
+            guard let base = $0.baseAddress else { return }
+            add(base, count: $0.count)
+        }
+    }
+
     /// True when nothing at all is wanted, so the drain can skip the ring
     /// entirely rather than copying audio nobody will look at.
     public var isIdle: Bool { needs.isEmpty }
@@ -204,13 +266,13 @@ public final class SignalAnalyser {
 
     public func reading() -> Reading {
         Reading(
-            momentary: loudness.momentary,
-            shortTerm: loudness.shortTerm,
-            integrated: loudness.integrated,
-            range: loudness.range,
-            peak: loudness.peak,
-            bands: spectrum?.bands ?? [Float](repeating: 0, count: SpectrumAnalyser.bandCount),
-            duration: Double(measuredFrames) / sampleRate,
+            momentary: loudness?.momentary ?? -.infinity,
+            shortTerm: loudness?.shortTerm ?? -.infinity,
+            integrated: loudness?.integrated ?? -.infinity,
+            range: loudness?.range ?? 0,
+            peak: loudness?.peak ?? -.infinity,
+            bands: spectrum?.bands ?? Self.silentBands,
+            duration: Double(loudnessMeasuredFrames) / sampleRate,
             verdict: classifier?.verdict ?? .quiet,
             verdictConfidence: classifier?.confidence ?? 0,
             verdictLabel: classifier?.label ?? "",
@@ -222,11 +284,11 @@ public final class SignalAnalyser {
     /// answers a question nobody asked — the useful one is "how loud was I in
     /// the take I just did".
     public func reset() {
-        loudness.reset()
+        loudness?.reset()
         spectrum?.reset()
         classifier?.reset()
         pitchPending.removeAll(keepingCapacity: true)
         lastPitch = 0
-        measuredFrames = 0
+        loudnessMeasuredFrames = 0
     }
 }

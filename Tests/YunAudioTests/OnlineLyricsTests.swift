@@ -1029,6 +1029,60 @@ struct MusicRecognitionTests {
         #expect(stillCooling.remaining == 200)
     }
 
+    @Test("scripted players and a closed panel construct no catalogue session")
+    func catalogueSessionIsDemandDriven() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        #expect(source.contains("private var musicRecognition: MusicRecognition?"))
+        #expect(!source.contains("private lazy var musicRecognition"))
+        #expect(source.ranges(of: "let service = MusicRecognition {").count == 1)
+
+        let clearStart = try #require(source.range(of: "private func clearSinging()"))
+        let clearEnd = try #require(
+            source.range(
+                of: "// MARK: Scoring, and duets",
+                range: clearStart.upperBound..<source.endIndex))
+        let clear = source[clearStart.lowerBound..<clearEnd.lowerBound]
+        #expect(clear.contains("releaseMusicRecognition()"))
+        #expect(!clear.contains("recognitionService()"))
+
+        let releaseStart = try #require(
+            source.range(of: "private func releaseMusicRecognition()"))
+        let releaseEnd = try #require(
+            source.range(
+                of: "private func receiveTranscript",
+                range: releaseStart.upperBound..<source.endIndex))
+        let release = source[releaseStart.lowerBound..<releaseEnd.lowerBound]
+        #expect(release.contains("musicRecognition = nil"))
+    }
+
+    @Test("a player answer cannot restart KTV work after the panel closes")
+    func latePlayerAnswerIsRejected() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        let askStart = try #require(source.range(of: "private func askThePlayer()"))
+        let askEnd = try #require(
+            source.range(
+                of: "private func receivePosition(",
+                range: askStart.upperBound..<source.endIndex))
+        let ask = source[askStart.lowerBound..<askEnd.lowerBound]
+
+        #expect(ask.contains("let generation = nowPlayingSessionGeneration"))
+        #expect(ask.contains("self.isSingingVisible"))
+        #expect(ask.contains("generation == self.nowPlayingSessionGeneration"))
+
+        let clearStart = try #require(source.range(of: "private func clearSinging()"))
+        let clearEnd = try #require(
+            source.range(
+                of: "// MARK: Scoring, and duets",
+                range: clearStart.upperBound..<source.endIndex))
+        let clear = source[clearStart.lowerBound..<clearEnd.lowerBound]
+        #expect(clear.contains("nowPlayingSessionGeneration &+= 1"))
+        #expect(clear.contains("isAskingThePlayer = false"))
+    }
+
     @Test("reference signature ranges never become a track duration")
     func matchRangeIsNotDuration() throws {
         let source = try String(

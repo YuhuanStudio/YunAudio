@@ -77,9 +77,17 @@ final class MusicRecognition: @unchecked Sendable {
         }
     }
 
-    func reset() {
+    /// Invalidates the current request and clears accumulated audio.
+    ///
+    /// Closing KTV releases the six-second allocation rather than retaining
+    /// 1,152,000 bytes for a panel that may never open again.
+    func reset(releasingBuffers: Bool = false) {
         queue.async { [self] in
-            pending.removeAll(keepingCapacity: true)
+            if releasingBuffers {
+                pending = []
+            } else {
+                pending.removeAll(keepingCapacity: true)
+            }
             sampleRate = 0
             isMatching = false
             isDisabled = false

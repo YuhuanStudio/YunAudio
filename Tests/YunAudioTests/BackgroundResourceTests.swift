@@ -930,6 +930,26 @@ struct BackgroundResourceTests {
                 isOpen: true, openedCount: 2, openedFor: sources, wanted: ["player"]) == nil)
     }
 
+    @Test("source-tap scratch exists only for a live consumer")
+    func sourceTapScratchLifetime() {
+        var scratch = SourceTapScratch()
+        #expect(scratch.retainedSampleBytes == 0)
+        #expect(scratch.allocationIdentity == nil)
+
+        scratch.activate()
+        #expect(SourceTapScratch.frameCapacity == 96_000)
+        #expect(scratch.retainedSampleBytes == 384_000)
+        weak let allocation: AnyObject? = scratch.allocationIdentity
+        #expect(allocation != nil)
+        scratch.activate()
+        #expect(scratch.retainedSampleBytes == 384_000)
+
+        scratch.release()
+        #expect(scratch.retainedSampleBytes == 0)
+        #expect(scratch.allocationIdentity == nil)
+        #expect(allocation == nil)
+    }
+
     @Test("new transcript lines stay chronological and are never duplicated")
     func incrementalTranscriptMerge() {
         let late = Transcriber.Line(

@@ -26,6 +26,52 @@ public enum SourceChannelMode: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// Control-thread storage for draining source taps.
+///
+/// A route that is only forwarding audio has no source-tap consumer. Keeping
+/// this separate makes both sides of that lifetime measurable: no allocation
+/// before a tap opens or after the last one closes, and 96,000 Float samples
+/// while a tap is live.
+struct SourceTapScratch {
+    static let frameCapacity = 96_000
+
+    private final class Storage {
+        var samples = [Float](repeating: 0, count: SourceTapScratch.frameCapacity)
+    }
+
+    private var storage: Storage?
+
+    /// Bytes occupied by live Float elements, separate from allocator metadata.
+    var retainedSampleBytes: Int {
+        (storage?.samples.count ?? 0) * MemoryLayout<Float>.stride
+    }
+
+    /// Identity used to prove the owner and its uniquely-held Array die at the
+    /// lifecycle boundary rather than merely reporting a count of zero.
+    var allocationIdentity: AnyObject? {
+        storage
+    }
+
+    mutating func activate() {
+        guard storage == nil else { return }
+        storage = Storage()
+    }
+
+    mutating func release() {
+        storage = nil
+    }
+
+    mutating func withUnsafeMutableBufferPointer<Result>(
+        _ body: (inout UnsafeMutableBufferPointer<Float>) throws -> Result
+    ) rethrows -> Result {
+        guard let storage else {
+            var empty = UnsafeMutableBufferPointer<Float>(start: nil, count: 0)
+            return try body(&empty)
+        }
+        return try storage.samples.withUnsafeMutableBufferPointer(body)
+    }
+}
+
 @Observable
 @MainActor
 final class RouterModel: ScriptTarget {
@@ -986,10 +1032,10 @@ final class RouterModel: ScriptTarget {
     private(set) var nowPlaying: NowPlaying.Track?
     /// Why source-independent audio recognition could not answer.
     private(set) var musicRecognitionProblem: String?
-    @ObservationIgnored private lazy var musicRecognition = MusicRecognition {
-        [weak self] result in
-        self?.receiveMusicRecognition(result)
-    }
+    /// Nil until captured audio from a player without scripting support needs
+    /// identifying. `SHSession` is not a harmless placeholder: constructing it
+    /// owns catalogue machinery, so Spotify and Music must never create one.
+    @ObservationIgnored private var musicRecognition: MusicRecognition?
     @ObservationIgnored private var recognisedApplication: AudioApplication?
     @ObservationIgnored private var recognitionSourceUID: String?
     /// Lyrics for it, when a file was found.
@@ -1203,7 +1249,9 @@ final class RouterModel: ScriptTarget {
 
     private func clearSinging() {
         cancelLyricsLookup()
-        musicRecognition.reset()
+        releaseMusicRecognition()
+        nowPlayingSessionGeneration &+= 1
+        isAskingThePlayer = false
         recognisedApplication = nil
         recognitionSourceUID = nil
         musicRecognitionProblem = nil
@@ -2018,17 +2066,24 @@ final class RouterModel: ScriptTarget {
         // that is actually on the bus.
         guard recognisedApplication == nil, !isAskingThePlayer else { return }
         isAskingThePlayer = true
+        let generation = nowPlayingSessionGeneration
         NowPlaying.positionAsynchronously(
             preferring: lastPlayer, knownIdentity: nowPlaying?.identity
         ) { [weak self] position, track, failure, middle in
-            self?.isAskingThePlayer = false
-            self?.receivePosition(
+            guard let self else { return }
+            self.isAskingThePlayer = false
+            guard self.isSingingVisible,
+                generation == self.nowPlayingSessionGeneration
+            else { return }
+            self.receivePosition(
                 position, track: track, failure: failure, trueAt: middle)
         }
     }
 
     /// True while an ask is in flight.
     @ObservationIgnored private var isAskingThePlayer = false
+    /// Invalidates an Apple-event answer when KTV closes before it arrives.
+    @ObservationIgnored private var nowPlayingSessionGeneration = 0
 
     /// What the player said, applied on the main actor.
     private func receivePosition(
@@ -8302,9 +8357,10 @@ final class RouterModel: ScriptTarget {
     /// to that session, but if somebody has already started another one its
     /// late callback must not appear among the new conversation.
     @ObservationIgnored private var transcriptSessionGeneration = 0
-    /// Reused across polls. Two seconds at 48 kHz, which is more than the ring
-    /// behind it holds, so a drain is never cut short by this buffer.
-    @ObservationIgnored private var transcriptScratch = [Float](repeating: 0, count: 96_000)
+    /// Reused across polls only while a source tap exists. Two seconds at
+    /// 48 kHz is more than the ring behind it holds, so a drain is never cut
+    /// short by this buffer.
+    @ObservationIgnored private var transcriptScratch = SourceTapScratch()
     @ObservationIgnored private var transcriptRate: Double = 48000
 
     /// Starts writing down what every source says, each under its own name.
@@ -8443,7 +8499,7 @@ final class RouterModel: ScriptTarget {
         }
         if sourceTapsOpen { engine.stopTranscriptTaps() }
         invalidateSourceTaps()
-        musicRecognition.reset()
+        musicRecognition?.reset(releasingBuffers: true)
         recognisedApplication = nil
         recognitionSourceUID = nil
         musicRecognitionProblem = nil
@@ -8451,6 +8507,7 @@ final class RouterModel: ScriptTarget {
         sourceTapsOpen = opened > 0
         sourceTapsFor = opened > 0 ? uids : []
         openedSourceTapCount = opened
+        if opened > 0 { transcriptScratch.activate() }
         transcriptRate = engine.pathQuality?.sampleRate ?? 48000
         return opened
     }
@@ -8463,6 +8520,7 @@ final class RouterModel: ScriptTarget {
         sourceTapsOpen = false
         sourceTapsFor = []
         openedSourceTapCount = 0
+        transcriptScratch.release()
     }
 
     /// Closes them once nothing is listening. Not before: stopping the
@@ -8510,7 +8568,7 @@ final class RouterModel: ScriptTarget {
                     }
                     if let application {
                         recognisedApplication = application
-                        musicRecognition.add(owned, sampleRate: rate)
+                        recognitionService().add(owned, sampleRate: rate)
                     }
                 }
             }
@@ -8553,6 +8611,22 @@ final class RouterModel: ScriptTarget {
         }
         guard recognitionSourceUID == group.uid else { return nil }
         return application
+    }
+
+    /// Creates the Shazam catalogue session at the first block that can use it,
+    /// not when a KTV view happens to close or a scripted player is selected.
+    private func recognitionService() -> MusicRecognition {
+        if let musicRecognition { return musicRecognition }
+        let service = MusicRecognition { [weak self] result in
+            self?.receiveMusicRecognition(result)
+        }
+        musicRecognition = service
+        return service
+    }
+
+    private func releaseMusicRecognition() {
+        musicRecognition?.reset(releasingBuffers: true)
+        musicRecognition = nil
     }
 
     /// Inserts one finished line into the attributed conversation.
