@@ -191,6 +191,7 @@ struct KTVStage: View {
         // considered to have appeared would explain that without any of it
         // being about artwork.
         .task { SongArtwork.record("stage task ran") }
+        .coordinateSpace(name: "ktv-stage")
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))
         .focusEffectDisabled()
@@ -274,7 +275,12 @@ struct KTVStage: View {
                             // it clipped must be a timing artefact. It is not:
                             // an extra 400 ms of real suspension changed
                             // nothing. The size was never the question.
-                            let frame = column.frame(in: .global)
+                            // Relative to the stage, which is named for the
+                            // purpose. `.global` gave -88, a number in a space
+                            // whose origin was never established — and a
+                            // measurement whose frame of reference is unknown
+                            // is not a measurement.
+                            let frame = column.frame(in: .named("ktv-stage"))
                             SongArtwork.record(
                                 "column \(Int(column.size.height)) at"
                                     + " y=\(Int(frame.minY)) in stage"
