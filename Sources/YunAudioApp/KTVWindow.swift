@@ -313,6 +313,15 @@ struct KTVStage: View {
             .frame(maxWidth: .infinity)
             .frame(height: stageHeight)
             .clipped()
+            .background {
+                GeometryReader { words in
+                    Color.clear.onAppear {
+                        SongArtwork.record(
+                            "words \(Int(words.size.height)) at y="
+                                + "\(Int(words.frame(in: .named("ktv-stage")).minY))")
+                    }
+                }
+            }
         }
         .padding(.horizontal, max(32, size.width * 0.055))
         .padding(.vertical, max(34, size.height * 0.07))
