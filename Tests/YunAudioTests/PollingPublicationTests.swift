@@ -80,6 +80,33 @@ struct PollingPublicationTests {
         #expect(publications == 0)
     }
 
+    @Test("stable ducking queues one graph command per state")
+    func duckingPermissionPublishesOnlyTransitions() {
+        var gate = DuckingAllowedGate()
+        var commands = 0
+
+        for _ in 0..<(20 * 60 * 60) {
+            if gate.shouldSend(false) { commands += 1 }
+        }
+        #expect(commands == 1)
+
+        for _ in 0..<(20 * 5) {
+            if gate.shouldSend(true) { commands += 1 }
+        }
+        #expect(commands == 2)
+
+        for _ in 0..<(20 * 5) {
+            if gate.shouldSend(false) { commands += 1 }
+        }
+        #expect(commands == 3)
+
+        gate.reset()
+        let afterReset = gate.shouldSend(false)
+        let duplicateAfterReset = gate.shouldSend(false)
+        #expect(afterReset)
+        #expect(!duplicateAfterReset)
+    }
+
     @Test("the publication gate handles every polled value shape")
     func gatePreservesChangedValues() {
         #expect(!RouterModel.shouldPublish(current: Float(0.25), incoming: Float(0.25)))

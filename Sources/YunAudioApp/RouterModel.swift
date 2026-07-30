@@ -72,6 +72,26 @@ struct SourceTapScratch {
     }
 }
 
+/// Suppresses engine-queue work while ducking's coarse permission is unchanged.
+///
+/// The classifier is sampled at the meter's 20 Hz rate, but the realtime graph
+/// needs only the two edges: speech became recent, or its hold expired. Keeping
+/// the last value here turns a stable hour from 72,000 queued lock acquisitions
+/// into one without delaying either edge.
+struct DuckingAllowedGate {
+    private var published: Bool?
+
+    mutating func reset() {
+        published = nil
+    }
+
+    mutating func shouldSend(_ value: Bool) -> Bool {
+        guard published != value else { return false }
+        published = value
+        return true
+    }
+}
+
 @Observable
 @MainActor
 final class RouterModel: ScriptTarget {
@@ -9165,6 +9185,7 @@ final class RouterModel: ScriptTarget {
     private func applyDucking() {
         let enabled = isDucking
         let depth = Self.gain(fromDecibels: duckDecibels)
+        duckingAllowedGate.reset()
         applyLiveControl { $0.setDucking(enabled: enabled, depth: depth) }
         appliedToGraph.insert(.ducking)
     }
@@ -9183,6 +9204,7 @@ final class RouterModel: ScriptTarget {
     /// stopped saying "speech" would let the music surge back between words.
     private static let speechHold: TimeInterval = 2.5
     @ObservationIgnored private var lastSpeechAt: Date?
+    @ObservationIgnored private var duckingAllowedGate = DuckingAllowedGate()
 
     /// True while the model's verdict still counts.
     var isSpeechRecent: Bool {
@@ -9194,6 +9216,7 @@ final class RouterModel: ScriptTarget {
         guard isDucking else { return }
         if analyser?.classifier?.hearsSpeech == true { lastSpeechAt = Date() }
         let allowed = isSpeechRecent
+        guard duckingAllowedGate.shouldSend(allowed) else { return }
         applyLiveControl { $0.setDuckingAllowed(allowed) }
     }
 
