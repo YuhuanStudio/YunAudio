@@ -1102,6 +1102,13 @@ final class RouterModel: ScriptTarget {
     /// Which line is being sung, and how far through it.
     private(set) var lyricLine: Int?
     private(set) var lyricProgress: Double = 0
+    /// A sparse clock anchor for the layer-backed lyric compositor.
+    ///
+    /// `lyricProgress` remains as the legacy benchmark control and numerical
+    /// flow-check value. Production views use this anchor instead, so a smooth
+    /// fill does not put ten animation frames a second through Observation.
+    private(set) var lyricPlaybackAnchor: LyricPlaybackAnchor?
+    @ObservationIgnored private var lyricPlaybackRevision: UInt64 = 0
     /// Where the song has got to, extrapolated between the once-a-second
     /// answers a player will give. See `TrackClock` for why it is not simply
     /// asked every poll.
@@ -1280,6 +1287,7 @@ final class RouterModel: ScriptTarget {
         melody = nil
         lyricLine = nil
         lyricProgress = 0
+        lyricPlaybackAnchor = nil
         songSecond = 0
         lyricNudge = 0
         isHandRun = false
@@ -1842,10 +1850,11 @@ final class RouterModel: ScriptTarget {
         pollsSinceLyricFrame += 1
         followTheWords(
             publishingProgress: Self.isLyricProgressFrameDue(
-                afterPolls: pollsSinceLyricFrame))
+                afterPolls: pollsSinceLyricFrame),
+            reanchoringCompositor: false)
     }
 
-    /// Ten progress targets a second, joined by the views' 100 ms interpolation.
+    /// Ten legacy progress targets a second for the flow check and A/B control.
     nonisolated static func isLyricProgressFrameDue(afterPolls polls: Int) -> Bool {
         polls >= lyricFrameEveryNPolls
     }
@@ -1909,6 +1918,7 @@ final class RouterModel: ScriptTarget {
         trackClock.stop()
         lyricLine = nil
         lyricProgress = 0
+        lyricPlaybackAnchor = nil
         songSecond = 0
         adopt(track)
 
@@ -1970,6 +1980,7 @@ final class RouterModel: ScriptTarget {
         trackClock.duration = ends
         lyricLine = nil
         lyricProgress = 0
+        lyricPlaybackAnchor = nil
         songSecond = 0
         if isScoringSinging { rebuildScoringReference() }
         return true
@@ -2004,6 +2015,7 @@ final class RouterModel: ScriptTarget {
             track.isPlaying = false
             nowPlaying = track
         }
+        followTheWords()
     }
 
     /// Hands the panel back to whatever a player says.
@@ -2022,6 +2034,7 @@ final class RouterModel: ScriptTarget {
         melody = nil
         lyricLine = nil
         lyricProgress = 0
+        lyricPlaybackAnchor = nil
         songSecond = 0
         lyricsLookupStatus = .idle
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
@@ -2037,10 +2050,8 @@ final class RouterModel: ScriptTarget {
     /// the correction when one happens is measured rather than assumed —
     /// `trackClock.lastCorrection`.
     private static let nowPlayingEveryNPolls = 20
-    /// The views interpolate progress for 100 ms, so publishing another target
-    /// at 50 ms only restarts an animation that is still running. This bounds
-    /// the scheduled progress latency at 100 ms; line changes and direct clock
-    /// actions bypass the wait.
+    /// The legacy A/B renderer interpolates each target for 100 ms. Production
+    /// does not observe this value; its sparse anchor drives Core Animation.
     nonisolated static let lyricFrameEveryNPolls = 2
 
     @ObservationIgnored private var trackClock = TrackClock()
@@ -2413,10 +2424,14 @@ final class RouterModel: ScriptTarget {
 
     /// Moves the highlight to wherever the clock now says the song is.
     ///
-    /// The line is checked on every poll. Progress is published at the views'
-    /// ten-hertz interpolation cadence; direct clock changes and line boundaries
-    /// still publish in the same turn.
-    private func followTheWords(publishingProgress periodicFrameDue: Bool = true) {
+    /// The line is checked on every poll. Production publishes only a sparse
+    /// compositor anchor on direct clock changes and line boundaries. The
+    /// numerical flow check and legacy A/B renderer retain their ten-hertz
+    /// `lyricProgress` value, but no production view observes it.
+    private func followTheWords(
+        publishingProgress periodicFrameDue: Bool = true,
+        reanchoringCompositor: Bool = true
+    ) {
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
         let position = trackClock.position(at: now)
         // Published only when the second it displays changes. The timecode is
@@ -2426,12 +2441,30 @@ final class RouterModel: ScriptTarget {
         guard let lyrics else {
             if lyricLine != nil { lyricLine = nil }
             if lyricProgress != 0 { lyricProgress = 0 }
+            if lyricPlaybackAnchor != nil { lyricPlaybackAnchor = nil }
             return
         }
         let heard = position + lyricNudge
         let index = lyrics.index(at: heard)
         let lineChanged = lyricLine != index
         if lineChanged { lyricLine = index }
+        if reanchoringCompositor || lineChanged || lyricPlaybackAnchor?.lineIndex != index {
+            lyricPlaybackRevision &+= 1
+            lyricPlaybackAnchor = LyricPlaybackAnchor(
+                lineIndex: index,
+                lineStart: index.map {
+                    lyrics.lines[$0].time - lyrics.offset - lyricNudge
+                } ?? 0,
+                lineEnd: index.map {
+                    $0 + 1 < lyrics.lines.count
+                        ? lyrics.lines[$0 + 1].time - lyrics.offset - lyricNudge
+                        : lyrics.lines[$0].time - lyrics.offset - lyricNudge + 4
+                } ?? 0,
+                position: position,
+                trueAt: now,
+                isPlaying: trackClock.isPlaying,
+                revision: lyricPlaybackRevision)
+        }
         if Self.shouldPublishLyricProgress(
             periodicFrameDue: periodicFrameDue, lineChanged: lineChanged)
         {

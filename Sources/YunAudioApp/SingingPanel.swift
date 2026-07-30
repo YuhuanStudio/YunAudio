@@ -637,32 +637,21 @@ private struct SingingLyrics: View {
     var body: some View {
         let _ = BodyCount.tick("SingingLyrics")
         let current = model.lyricLine ?? 0
-        let freezesFill =
-            YunUIBenchmarkConfiguration.process.effectiveVariant == .lyricFillStatic
-        // Keep the same TextRenderer and the same partially filled shape. Only
-        // its moving Observation input is removed, so this remains one variable.
-        let lyricProgress = freezesFill ? 0.5 : model.lyricProgress
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             ForEach(-1...1, id: \.self) { offset in
                 let index = current + offset
                 let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
                 if offset == 0 {
-                    ZStack(alignment: .leading) {
-                        Text(text.isEmpty ? " " : text)
-                            .font(.system(size: 27, weight: .semibold))
-                            .foregroundStyle(Yun.Palette.textMuted)
-                            .contentTransition(.opacity)
-                        // The sweep is the point: a line that lights up all at
-                        // once tells you which line, and a line that fills
-                        // tells you where in it.
-                        Text(text.isEmpty ? " " : text)
-                            .font(.system(size: 27, weight: .semibold))
-                            .foregroundStyle(Yun.Palette.accent)
-                            .textRenderer(
-                                SequentialTextFillRenderer(progress: lyricProgress)
-                            )
-                            .contentTransition(.opacity)
-                    }
+                    // The sweep is the point: a line that lights up all at
+                    // once tells you which line, and a line that fills tells
+                    // you where in it. Core Animation now advances that sweep
+                    // without making this Observation leaf a display link.
+                    CompositedLyricSurface(
+                        model: model,
+                        text: text.isEmpty ? " " : text,
+                        style: .inspector
+                    )
+                    .contentTransition(.opacity)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Yun.Space.lg)
                     .padding(.vertical, Yun.Space.lg)
@@ -690,10 +679,6 @@ private struct SingingLyrics: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(
-            reduceMotion || freezesFill ? nil : .linear(duration: 0.1),
-            value: lyricProgress
-        )
         .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
     }
 }

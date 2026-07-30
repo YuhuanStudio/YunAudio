@@ -699,16 +699,22 @@ struct BackgroundResourceTests {
         let singing = try String(
             contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
             encoding: .utf8)
+        let compositor = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/CompositedLyricFill.swift",
+            encoding: .utf8)
         #expect(window.ranges(of: "SingingPanel(model: model").count == 1)
         #expect(ktv.ranges(of: "SingingPanel(model: model").count == 0)
         #expect(window.ranges(of: "model.lyricProgress").count == 0)
         #expect(window.ranges(of: "model.singers").count == 0)
-        #expect(ktv.ranges(of: "model.lyricProgress").count >= 2)
+        #expect(ktv.ranges(of: "model.lyricProgress").count == 0)
         #expect(ktv.ranges(of: "model.singers").count == 1)
         #expect(ktv.ranges(of: "SongArtwork(url:").count == 2)
         #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
-        #expect(singing.ranges(of: "model.lyricProgress").count == 1)
+        #expect(singing.ranges(of: "model.lyricProgress").count == 0)
         #expect(singing.ranges(of: "model.singers").count == 1)
+        #expect(compositor.ranges(of: "model.lyricProgress").count == 1)
+        #expect(compositor.contains("variant == .lyricFillLegacy"))
+        #expect(compositor.contains("variant == .lyricFillStatic ? 0.5 : nil"))
         #expect(singing.contains("Choose the words…"))
         #expect(singing.contains("Find words by title"))
         #expect(singing.contains("Score the singing"))
@@ -717,18 +723,14 @@ struct BackgroundResourceTests {
         #expect(singing.contains(".clipShape(.rect(cornerRadius: Yun.Radius.card))"))
         #expect(singing.contains(".frame(width: 72, height: 72)"))
         #expect(singing.contains("let current = model.lyricLine ?? 0"))
-        #expect(
-            singing.contains(
-                "YunUIBenchmarkConfiguration.process.effectiveVariant == .lyricFillStatic"))
-        #expect(
-            singing.contains(
-                "let lyricProgress = freezesFill ? 0.5 : model.lyricProgress"))
-        #expect(singing.contains("SequentialTextFillRenderer(progress: lyricProgress)"))
+        #expect(singing.contains("CompositedLyricSurface("))
+        #expect(ktv.contains("CompositedLyricSurface(model: model"))
+        #expect(compositor.contains("SequentialTextFillRenderer(progress: progress)"))
         let header = try #require(singing.range(of: "trackHeader(track)"))
         let bottomTools = try #require(
             singing.range(of: "handRun", range: header.upperBound..<singing.endIndex))
         #expect(header.lowerBound < bottomTools.lowerBound)
-        #expect(ktv.contains(".foregroundStyle(.white.opacity(0.62))"))
+        #expect(compositor.contains(".white.opacity(0.62)"))
     }
 
     @Test("the reopened KTV stage keeps its accessibility identity")

@@ -139,6 +139,12 @@ enum UIResourceBenchmark {
                 + "card shadows \(composition.cardShadows), "
                 + "moving lyric fills \(composition.movingLyricFills)")
 
+        // A compositor keeps moving without a SwiftUI update, so merely
+        // withholding the twenty-hertz model pump is no longer a static pass.
+        // Pause explicitly and make the baseline mean the same thing for the
+        // production, frozen and legacy variants.
+        model.stopWords()
+        await settle(for: 0.15)
         let seeded = usage()
         let staticSeconds = 4.0
         let staticBefore = usage()
@@ -150,6 +156,11 @@ enum UIResourceBenchmark {
             .flatMap(Double.init) ?? 4
         let movingSeconds = max(4, min(60, requested))
         model.runWords(from: 0)
+        guard await verifyLyricControl(in: window, variant: variant, model: model) else {
+            return false
+        }
+        model.runWords(from: 0)
+        await settle(for: 0.15)
         BodyCount.reset()
         BodyCount.isCounting = true
         report("UI benchmark counted moving pass started")
@@ -158,15 +169,27 @@ enum UIResourceBenchmark {
         let countedAfter = usage()
         BodyCount.isCounting = false
 
-        model.runWords(from: 0)
-        report("UI benchmark uncounted moving pass started")
-        let movingBefore = usage()
-        await advance(model, for: movingSeconds)
-        let movingAfter = usage()
+        var movingSamples: [Double] = []
+        var movingAfter = countedAfter
+        for sample in 1...3 {
+            model.runWords(from: 0)
+            await settle(for: 0.15)
+            report("UI benchmark uncounted moving pass \(sample) started")
+            let movingBefore = usage()
+            await advance(model, for: movingSeconds)
+            movingAfter = usage()
+            movingSamples.append(movingAfter.processorSeconds - movingBefore.processorSeconds)
+        }
 
         let staticCPU = staticAfter.processorSeconds - staticBefore.processorSeconds
         let countedCPU = countedAfter.processorSeconds - countedBefore.processorSeconds
-        let movingCPU = movingAfter.processorSeconds - movingBefore.processorSeconds
+        let sortedMoving = movingSamples.sorted()
+        let movingCPU = sortedMoving[sortedMoving.count / 2]
+        report(
+            "UI benchmark uncounted samples "
+                + movingSamples.map { String(format: "%.0f ms", $0 * 1_000) }
+                .joined(separator: ", ")
+                + "; median selected")
         report(
             String(
                 format:
@@ -190,6 +213,78 @@ enum UIResourceBenchmark {
                     Double(count) / movingSeconds))
         }
         return true
+    }
+
+    /// Proves that each A/B control changes the intended moving boundary.
+    ///
+    /// The production assertion reads the presentation layer, not the model
+    /// layer: a CABasicAnimation can be installed with the right endpoints and
+    /// still fail to reach the window's compositor tree.
+    private static func verifyLyricControl(
+        in window: NSWindow,
+        variant: YunUIBenchmarkVariant,
+        model: RouterModel
+    ) async -> Bool {
+        switch variant {
+        case .lyricFillLegacy:
+            guard findCompositedLyricView(in: window.contentView) == nil else {
+                report("UI benchmark refused: legacy lyrics still contain a compositor leaf")
+                return false
+            }
+            report("UI benchmark lyric control legacy Observation renderer")
+            return true
+        default:
+            guard let view = findCompositedLyricView(in: window.contentView) else {
+                report("UI benchmark refused: compositor lyric leaf is missing")
+                return false
+            }
+            await settle(for: 0.06)
+            guard let before = view.presentationProgress() else {
+                report("UI benchmark refused: lyric presentation layer is unavailable")
+                return false
+            }
+            await settle(for: 0.22)
+            guard let after = view.presentationProgress() else {
+                report("UI benchmark refused: lyric presentation layer disappeared")
+                return false
+            }
+            let delta = after - before
+            if variant == .lyricFillStatic {
+                guard abs(delta) < 0.002 else {
+                    report(
+                        String(
+                            format:
+                                "UI benchmark refused: frozen lyric presentation moved %.4f",
+                            delta))
+                    return false
+                }
+                report("UI benchmark lyric control static presentation stayed fixed")
+            } else {
+                guard delta > 0.03, model.lyricPlaybackAnchor?.isPlaying == true else {
+                    report(
+                        String(
+                            format:
+                                "UI benchmark refused: production lyric presentation moved %.4f",
+                            delta))
+                    return false
+                }
+                report(
+                    String(
+                        format:
+                            "UI benchmark lyric presentation advanced %.4f without an Observation frame",
+                        delta))
+            }
+            return true
+        }
+    }
+
+    private static func findCompositedLyricView(in root: NSView?) -> CompositedLyricView? {
+        guard let root else { return nil }
+        if let lyric = root as? CompositedLyricView { return lyric }
+        for child in root.subviews {
+            if let lyric = findCompositedLyricView(in: child) { return lyric }
+        }
+        return nil
     }
 
     /// Verifies the state whose compositor counts are logged above.
@@ -227,7 +322,15 @@ enum UIResourceBenchmark {
         guard hasExpectedTree else {
             report(
                 "UI benchmark refused: main-window fixture no longer has "
-                    + "7 cards, 3 columns and 1 status pill")
+                    + "7 cards, 3 columns and 1 status pill "
+                    + "(running \(model.isRunning), inputs \(model.inputDevices.count), "
+                    + "outputs \(model.outputDevices.count), "
+                    + "source \(model.selectedSource != nil), "
+                    + "destination \(model.selectedDestination != nil), "
+                    + "buses \(model.buses.count), routes \(model.activeRoutes.count), "
+                    + "tab \(model.inspectorTab), track \(model.nowPlaying != nil), "
+                    + "lyrics \(model.lyrics != nil), "
+                    + "pills \(StatusPills.pills(for: model).count))")
             return false
         }
         return true

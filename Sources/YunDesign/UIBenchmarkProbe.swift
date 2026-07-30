@@ -11,6 +11,7 @@ public enum YunUIBenchmarkVariant: String, CaseIterable, Sendable {
     case cardEffectsOff = "card-effects-off"
     case windowMaterialOff = "window-material-off"
     case lyricFillStatic = "lyric-fill-static"
+    case lyricFillLegacy = "lyric-fill-legacy"
 }
 
 /// The guarded process environment seen by benchmark-aware views.

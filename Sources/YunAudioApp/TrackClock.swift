@@ -1,5 +1,34 @@
 import Foundation
 
+/// One compositor correction on the song's monotonic timeline.
+///
+/// The anchor is deliberately a value rather than a timer. A view can recover
+/// the exact current position from it whenever it is configured, while Core
+/// Animation carries every frame between sparse player answers.
+struct LyricPlaybackAnchor: Sendable, Equatable {
+    let lineIndex: Int?
+    let lineStart: Double
+    let lineEnd: Double
+    let position: Double
+    let trueAt: Double
+    let isPlaying: Bool
+    let revision: UInt64
+
+    /// Position on the song clock at a later monotonic instant.
+    nonisolated func position(at uptime: Double) -> Double {
+        guard isPlaying else { return position }
+        return position + max(0, uptime - trueAt)
+    }
+
+    /// Overall fill through this line at a monotonic instant.
+    nonisolated func progress(at uptime: Double) -> Double {
+        guard lineIndex != nil else { return 0 }
+        guard lineEnd > lineStart else { return 1 }
+        let value = (position(at: uptime) - lineStart) / (lineEnd - lineStart)
+        return max(0, min(1, value.isFinite ? value : 0))
+    }
+}
+
 /// Where the song has got to, between the rare moments a player will say.
 ///
 /// **The words and the player are on two different clocks, and the difference

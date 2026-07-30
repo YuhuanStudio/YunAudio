@@ -297,20 +297,8 @@ struct KTVStage: View {
     @ViewBuilder
     private func lyricLine(_ text: String, offset: Int) -> some View {
         if offset == 0 {
-            ZStack(alignment: .leading) {
-                Text(text)
-                    .foregroundStyle(.white.opacity(0.62))
-                    .contentTransition(.opacity)
-                Text(text)
-                    .foregroundStyle(.white)
-                    .textRenderer(
-                        SequentialTextFillRenderer(progress: model.lyricProgress)
-                    )
-                    .contentTransition(.opacity)
-            }
-            .font(.system(size: 34, weight: .bold))
-            .fixedSize(horizontal: false, vertical: true)
-            .animation(reduceMotion ? nil : .linear(duration: 0.1), value: model.lyricProgress)
+            CompositedLyricSurface(model: model, text: text, style: .stage)
+                .contentTransition(.opacity)
         } else {
             Text(text)
                 .font(.system(size: offset < 0 ? 23 : 26, weight: .semibold))

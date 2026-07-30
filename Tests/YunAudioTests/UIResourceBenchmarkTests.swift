@@ -25,6 +25,20 @@ struct UIResourceBenchmarkTests {
         #expect(guarded.effectiveVariant == .scrollFadesOff)
         #expect(guarded.suppressesApplicationRefresh)
 
+        let legacy = YunUIBenchmarkConfiguration.resolve(environment: [
+            "YUNAUDIO_UI_BENCHMARK": "1",
+            "YUNAUDIO_SCREENSHOT_NO_AUDIO": "1",
+            "YUNAUDIO_UI_BENCHMARK_VARIANT": "lyric-fill-legacy",
+        ])
+        #expect(legacy.requestedVariant == .lyricFillLegacy)
+
+        let frozen = YunUIBenchmarkConfiguration.resolve(environment: [
+            "YUNAUDIO_UI_BENCHMARK": "1",
+            "YUNAUDIO_SCREENSHOT_NO_AUDIO": "1",
+            "YUNAUDIO_UI_BENCHMARK_VARIANT": "lyric-fill-static",
+        ])
+        #expect(frozen.requestedVariant == .lyricFillStatic)
+
         let invalid = YunUIBenchmarkConfiguration.resolve(environment: [
             "YUNAUDIO_UI_BENCHMARK": "1",
             "YUNAUDIO_SCREENSHOT_NO_AUDIO": "1",
@@ -118,15 +132,25 @@ struct UIResourceBenchmarkTests {
             contentsOf: repository.appendingPathComponent(
                 "Sources/YunDesign/Components.swift"),
             encoding: .utf8)
-        let singing = try String(
+        let probe = try String(
             contentsOf: repository.appendingPathComponent(
-                "Sources/YunAudioApp/SingingPanel.swift"),
+                "Sources/YunDesign/UIBenchmarkProbe.swift"),
+            encoding: .utf8)
+        let compositor = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/YunAudioApp/CompositedLyricFill.swift"),
             encoding: .utf8)
 
         #expect(theme.ranges(of: ".cardEffectsOff").count == 2)
         #expect(theme.ranges(of: ".windowMaterialOff").count == 1)
         #expect(components.ranges(of: ".scrollFadesOff").count == 1)
-        #expect(singing.ranges(of: ".lyricFillStatic").count == 1)
-        #expect(singing.contains("let lyricProgress = freezesFill ? 0.5 : model.lyricProgress"))
+        #expect(probe.ranges(of: "case lyricFillStatic").count == 1)
+        #expect(probe.ranges(of: "case lyricFillLegacy").count == 1)
+        // One branch removes the anchor dependency and the other freezes the
+        // compositor value. Both are required for a genuinely static control.
+        #expect(compositor.ranges(of: ".lyricFillStatic").count == 2)
+        #expect(compositor.ranges(of: ".lyricFillLegacy").count == 1)
+        #expect(compositor.contains("variant == .lyricFillStatic ? 0.5 : nil"))
+        #expect(compositor.contains("let progress = model.lyricProgress"))
     }
 }
