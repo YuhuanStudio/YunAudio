@@ -448,20 +448,28 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
 /// how Audio Units are meant to be chained — the alternative, rendering each
 /// into a scratch buffer by hand, means one more copy per stage and no benefit.
 final class EffectChain {
+    /// What owns one hosted unit.
+    ///
+    /// Kept beside the instance rather than in a parallel list: inserting a
+    /// plugin before the limiter used to move only `units`, so every built-in
+    /// lookup from the limiter onwards reached somebody else's unit.
+    enum UnitOwner: Equatable {
+        case stage(EffectKind)
+        case plugin(String)
+    }
+
+    private struct HostedUnit {
+        let owner: UnitOwner
+        let instance: AudioComponentInstance
+    }
+
     /// Buffer the first stage pulls from. The IOProc fills it before rendering.
     let inputBuffer: UnsafeMutablePointer<Float>
     let outputBuffer: UnsafeMutablePointer<Float>
     let maximumFrames: Int
 
     private(set) var stages: [EffectKind] = []
-    /// The stages that became units, in the same order as `units`.
-    ///
-    /// Not `stages`: the native stage produces no unit, so pairing `stages`
-    /// with `units` by index silently hands every stage after it the wrong
-    /// unit — the compressor would be configured as a limiter and nothing
-    /// would say so.
-    private var hostedStages: [EffectKind] = []
-    private var units: [AudioComponentInstance] = []
+    private var units: [HostedUnit] = []
     /// The one stage written here rather than hosted, and where it sits in the
     /// run of units.
     private var native: FormantShifter?
@@ -482,13 +490,37 @@ final class EffectChain {
 
     /// Third-party units in the chain, in the order given.
     private(set) var plugins: [AudioUnitPlugin] = []
-    /// Which of `units` each plugin is, so its parameters can be reached.
-    private var pluginUnits: [String: AudioComponentInstance] = [:]
     /// Plugins that would not load, each with the step that refused and the
     /// status it returned, so the interface can say why rather than only that.
     private(set) var pluginFailures: [AudioUnitLoadFailure] = []
     /// The same list by name alone.
     var failedPlugins: [String] { pluginFailures.map(\.name) }
+
+    /// Plugins are the final shaping stage but never the final safety stage.
+    ///
+    /// Pure so the ownership layout can be asserted without loading somebody
+    /// else's code on the test machine.
+    static func pluginInsertionIndex(in owners: [UnitOwner]) -> Int {
+        owners.firstIndex(of: .stage(.limiter)) ?? owners.count
+    }
+
+    /// Finds an owner without assuming stages and plugins occupy separate
+    /// index spaces.
+    static func unitIndex<Element>(
+        ownedBy owner: UnitOwner, in elements: [Element],
+        ownerOf: (Element) -> UnitOwner
+    ) -> Int? {
+        elements.firstIndex { ownerOf($0) == owner }
+    }
+
+    /// The instance owned by one stage or plugin.
+    private func unit(ownedBy owner: UnitOwner) -> AudioComponentInstance? {
+        guard
+            let index = Self.unitIndex(
+                ownedBy: owner, in: units, ownerOf: { $0.owner })
+        else { return nil }
+        return units[index].instance
+    }
 
     convenience init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
         self.init(
@@ -502,7 +534,7 @@ final class EffectChain {
     ) {
         guard !kinds.isEmpty || !requested.isEmpty else { return nil }
         self.maximumFrames = maximumFrames
-        stages = kinds.sorted { $0.chainOrder < $1.chainOrder }
+        let requestedStages = kinds.sorted { $0.chainOrder < $1.chainOrder }
         plugins = requested
 
         inputBuffer = .allocate(capacity: maximumFrames)
@@ -528,14 +560,14 @@ final class EffectChain {
         // position among them is remembered so the chain can be split around
         // it. Everything before it pulls from the staging buffer as before;
         // everything after pulls from what the native stage produced.
-        for kind in stages {
+        for kind in requestedStages {
             if kind.isNative {
                 nativeIndex = units.count
                 native = FormantShifter(sampleRate: sampleRate)
                 guard native != nil else { return nil }
+                stages.append(kind)
                 continue
             }
-            hostedStages.append(kind)
             var description = AudioComponentDescription(
                 componentType: kind.componentType,
                 componentSubType: kind.subType,
@@ -557,7 +589,8 @@ final class EffectChain {
             AudioUnitSetProperty(
                 unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
                 &frames, UInt32(MemoryLayout<UInt32>.size))
-            units.append(unit)
+            units.append(HostedUnit(owner: .stage(kind), instance: unit))
+            stages.append(kind)
         }
 
         // Third-party units go in one place, and it is not arbitrary: after
@@ -568,8 +601,8 @@ final class EffectChain {
         // user drags around. Everywhere else in the chain is a matter of taste
         // and this is not.
         if !plugins.isEmpty {
-            let insertAt = hostedStages.firstIndex(of: .limiter) ?? units.count
-            var built: [AudioComponentInstance] = []
+            let insertAt = Self.pluginInsertionIndex(in: units.map(\.owner))
+            var built: [HostedUnit] = []
             for plugin in plugins {
                 var description = plugin.componentDescription
                 guard let component = AudioComponentFindNext(nil, &description) else {
@@ -632,8 +665,7 @@ final class EffectChain {
                 }
                 AudioUnitUninitialize(unit)
 
-                built.append(unit)
-                pluginUnits[plugin.id] = unit
+                built.append(HostedUnit(owner: .plugin(plugin.id), instance: unit))
             }
             if !built.isEmpty {
                 units.insert(contentsOf: built, at: insertAt)
@@ -697,7 +729,8 @@ final class EffectChain {
                 firstCallback.inputProcRefCon = UnsafeMutableRawPointer(nativeBuffer)
             }
             AudioUnitSetProperty(
-                units[0], kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+                units[0].instance, kAudioUnitProperty_SetRenderCallback,
+                kAudioUnitScope_Input, 0,
                 &firstCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
         }
 
@@ -710,21 +743,22 @@ final class EffectChain {
                     inputProc: headCallback.inputProc,
                     inputProcRefCon: UnsafeMutableRawPointer(buffer))
                 AudioUnitSetProperty(
-                    units[index], kAudioUnitProperty_SetRenderCallback,
+                    units[index].instance, kAudioUnitProperty_SetRenderCallback,
                     kAudioUnitScope_Input, 0,
                     &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
                 continue
             }
             var connection = AudioUnitConnection(
-                sourceAudioUnit: units[index - 1],
+                sourceAudioUnit: units[index - 1].instance,
                 sourceOutputNumber: 0,
                 destInputNumber: 0)
             AudioUnitSetProperty(
-                units[index], kAudioUnitProperty_MakeConnection, kAudioUnitScope_Input, 0,
+                units[index].instance, kAudioUnitProperty_MakeConnection,
+                kAudioUnitScope_Input, 0,
                 &connection, UInt32(MemoryLayout<AudioUnitConnection>.size))
         }
 
-        for unit in units where AudioUnitInitialize(unit) != noErr {
+        for unit in units where AudioUnitInitialize(unit.instance) != noErr {
             // A stage that will not initialise is worse than no chain: the
             // signal would silently skip it while the UI claimed it was on.
             // Only this application's own stages can reach here now — a
@@ -739,7 +773,7 @@ final class EffectChain {
             var latency: Float64 = 0
             var size = UInt32(MemoryLayout<Float64>.size)
             AudioUnitGetProperty(
-                unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
+                unit.instance, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
                 &latency, &size)
             total += Int(latency * sampleRate)
         }
@@ -759,8 +793,8 @@ final class EffectChain {
 
     private func teardown() {
         for unit in units {
-            AudioUnitUninitialize(unit)
-            AudioComponentInstanceDispose(unit)
+            AudioUnitUninitialize(unit.instance)
+            AudioComponentInstanceDispose(unit.instance)
         }
         units.removeAll()
     }
@@ -768,8 +802,9 @@ final class EffectChain {
     /// Starting points chosen for a voice signal rather than the units' own
     /// defaults, which are tuned for music.
     private func applyDefaults(sampleRate: Double) {
-        for (index, kind) in hostedStages.enumerated() where index < units.count {
-            let unit = units[index]
+        for hosted in units {
+            guard case .stage(let kind) = hosted.owner else { continue }
+            let unit = hosted.instance
             switch kind {
             case .voiceIsolation:
                 AudioUnitSetParameter(
@@ -886,9 +921,9 @@ final class EffectChain {
                     kAudioUnitScope_Global, 0, 1, 0)
             case .formant:
                 // Never reached: the native stage produces no unit and is not
-                // in `hostedStages`. Stated rather than left to `default`, so
-                // that adding another native stage fails to compile here
-                // instead of silently configuring the wrong unit.
+                // a `HostedUnit`. Stated rather than left to `default`, so that
+                // adding another native stage fails to compile here instead
+                // of silently configuring the wrong unit.
                 break
             case .character:
                 applyFlavour(.robot, amount: 60, to: unit)
@@ -1076,7 +1111,7 @@ final class EffectChain {
     /// the parameter is whatever the plugin's author called it, and the only
     /// description of it is the one the unit handed out at runtime.
     func set(_ parameter: String, ofPlugin id: String, to value: Float) {
-        guard let unit = pluginUnits[id],
+        guard let unit = unit(ownedBy: .plugin(id)),
             let identifier = AudioUnitPlugins.parameterID(from: parameter)
         else { return }
         AudioUnitSetParameter(unit, identifier, kAudioUnitScope_Global, 0, value, 0)
@@ -1094,12 +1129,12 @@ final class EffectChain {
     /// the unit's own opinion rather than anything inferred.
     func gainReduction(of kind: EffectKind) -> Float {
         guard kind == .compressor || kind == .gate,
-            let index = hostedStages.firstIndex(of: kind), index < units.count
+            let unit = unit(ownedBy: .stage(kind))
         else { return 0 }
         var value: AudioUnitParameterValue = 0
         guard
             AudioUnitGetParameter(
-                units[index], kDynamicsProcessorParam_CompressionAmount,
+                unit, kDynamicsProcessorParam_CompressionAmount,
                 kAudioUnitScope_Global, 0, &value) == noErr
         else { return 0 }
         // Reported as a negative number of decibels; returned as a positive
@@ -1130,13 +1165,13 @@ final class EffectChain {
             guard parameter == "shift", let native else { return nil }
             return (native.ratio - 1) * 100
         }
-        guard let index = hostedStages.firstIndex(of: kind), index < units.count,
+        guard let unit = unit(ownedBy: .stage(kind)),
             let mapping = Self.directParameter(parameter, of: kind)
         else { return nil }
         var value: AudioUnitParameterValue = 0
         guard
             AudioUnitGetParameter(
-                units[index], mapping.id, kAudioUnitScope_Global, 0, &value) == noErr
+                unit, mapping.id, kAudioUnitScope_Global, 0, &value) == noErr
         else { return nil }
         return value / mapping.scale
     }
@@ -1190,7 +1225,7 @@ final class EffectChain {
 
     /// What a hosted plugin says its controls are.
     func parameters(ofPlugin id: String) -> [EffectParameter] {
-        guard let unit = pluginUnits[id] else { return [] }
+        guard let unit = unit(ownedBy: .plugin(id)) else { return [] }
         return AudioUnitPlugins.parameters(of: unit)
     }
 
@@ -1201,10 +1236,9 @@ final class EffectChain {
             if parameter == "shift" { native?.ratio = 1 + value / 100 }
             return
         }
-        guard let index = hostedStages.firstIndex(of: kind), index < units.count else {
+        guard let unit = unit(ownedBy: .stage(kind)) else {
             return
         }
-        let unit = units[index]
         switch (kind, parameter) {
         case (.character, "flavour"):
             let flavour =
@@ -1312,7 +1346,7 @@ final class EffectChain {
                     var flags = AudioUnitRenderActionFlags()
                     guard
                         AudioUnitRender(
-                            units[split - 1], &flags, &nativeTimestamp, 0,
+                            units[split - 1].instance, &flags, &nativeTimestamp, 0,
                             UInt32(frames), bufferList.unsafeMutablePointer) == noErr
                     else { return false }
                 } else {
@@ -1329,8 +1363,8 @@ final class EffectChain {
                 var flags = AudioUnitRenderActionFlags()
                 guard
                     AudioUnitRender(
-                        units[split - 1], &flags, &nativeTimestamp, 0, UInt32(frames),
-                        nativeList.unsafeMutablePointer) == noErr
+                        units[split - 1].instance, &flags, &nativeTimestamp, 0,
+                        UInt32(frames), nativeList.unsafeMutablePointer) == noErr
                 else { return false }
             } else {
                 nativeBuffer.update(from: inputBuffer, count: frames)
@@ -1339,7 +1373,7 @@ final class EffectChain {
             native.process(nativeBuffer, count: frames)
         }
 
-        guard let tail = units.last else { return false }
+        guard let tail = units.last?.instance else { return false }
         timestamp.mSampleTime = sampleTime
         bufferList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
         var flags = AudioUnitRenderActionFlags()

@@ -3848,6 +3848,45 @@ struct NativeStageTests {
 @Suite("Audio Unit plugins")
 struct AudioUnitPluginTests {
 
+    /// The unit and its owner used to live in separate arrays. Inserting a
+    /// plugin moved the instance but not the stage name, so limiter defaults
+    /// and every later read or write landed on the plugin. This is pure: the
+    /// ownership arithmetic must be right even on a machine with no plugins.
+    @Test("multiple plugins keep every built-in unit at its owned index")
+    func ownershipLayout() {
+        let builtIns: [EffectChain.UnitOwner] = [
+            .stage(.equaliser),
+            .stage(.compressor),
+            .stage(.limiter),
+        ]
+        let plugins: [EffectChain.UnitOwner] = [
+            .plugin("first"),
+            .plugin("second"),
+        ]
+
+        let insertAt = EffectChain.pluginInsertionIndex(in: builtIns)
+        var layout = builtIns
+        layout.insert(contentsOf: plugins, at: insertAt)
+
+        #expect(insertAt == 2)
+        #expect(
+            layout == [
+                .stage(.equaliser),
+                .stage(.compressor),
+                .plugin("first"),
+                .plugin("second"),
+                .stage(.limiter),
+            ])
+        func index(of owner: EffectChain.UnitOwner) -> Int? {
+            EffectChain.unitIndex(ownedBy: owner, in: layout, ownerOf: { $0 })
+        }
+        #expect(index(of: .stage(.equaliser)) == 0)
+        #expect(index(of: .stage(.compressor)) == 1)
+        #expect(index(of: .plugin("first")) == 2)
+        #expect(index(of: .plugin("second")) == 3)
+        #expect(index(of: .stage(.limiter)) == 4)
+    }
+
     /// Enumeration must not crash, must not list Apple's own units twice, and
     /// must come back in a stable order.
     @Test("enumeration is well-formed whatever is installed")
