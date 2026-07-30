@@ -23,7 +23,13 @@ enum KTVStageLayout: String, Sendable, CaseIterable {
     /// artist, the progress row and the player row, with the gaps between them.
     /// Measured on the 1080×720 stage at 138 points with a one-line title; 170
     /// covers a title that takes two.
-    static let metadataHeight: CGFloat = 170
+    /// Re-measured against a real cover and a real transport row: title
+    /// (up to two lines), artist, the progress bar with its two times, and the
+    /// three transport buttons, with the gaps between them. 170 was estimated
+    /// from a stage whose placeholder tile never grew large enough to push the
+    /// bottom of the column out of the window; photographed with artwork, the
+    /// buttons were outside the frame and the progress bar was on its edge.
+    static let metadataHeight: CGFloat = 216
 
     /// Below this a tile is a stamp rather than artwork, and an arrangement
     /// built around one is not worth keeping.

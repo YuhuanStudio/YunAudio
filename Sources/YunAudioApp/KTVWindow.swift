@@ -224,7 +224,12 @@ struct KTVStage: View {
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing)
         }
-        Color.black.opacity(0.58)
+        // Judged against a real cover for the first time. At 0.58 a bright
+        // sleeve — a face in daylight, which is most of them — came through
+        // hard enough that the words sat on top of it and stopped being
+        // legible. The placeholder gradient this was tuned against could never
+        // have shown that.
+        Color.black.opacity(0.74)
         LinearGradient(
             colors: [
                 .black.opacity(0.20),
@@ -233,6 +238,14 @@ struct KTVStage: View {
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing)
+        // And darker still where the words are. The lyric column occupies the
+        // right of every arrangement that has one, so the side that has to
+        // carry text gets the weight rather than the whole frame being dimmed
+        // to the level its worst corner needs.
+        LinearGradient(
+            colors: [.black.opacity(0.0), .black.opacity(0.34)],
+            startPoint: .leading,
+            endPoint: .trailing)
     }
 
     // MARK: Arrangements
@@ -425,7 +438,7 @@ struct KTVStage: View {
     nonisolated static func artworkSide(
         columnWidth: CGFloat, stageHeight: CGFloat
     ) -> CGFloat {
-        max(120, min(columnWidth, stageHeight - 170))
+        max(120, min(columnWidth, stageHeight - KTVStageLayout.metadataHeight))
     }
 
     private func trackColumn(
