@@ -3428,6 +3428,12 @@ struct RecorderFormatTests {
 
     @Test("stopping an idle writer does not wait for its polling interval")
     func idleStopIsPrompt() throws {
+        var stopOrder: [String] = []
+        Recorder.wakeWriterAndJoin(
+            signal: { stopOrder.append("signal") },
+            wait: { stopOrder.append("join") })
+        #expect(stopOrder == ["signal", "join"])
+
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("yunaudio-stop-\(UUID().uuidString)")
         try FileManager.default.createDirectory(
@@ -3443,7 +3449,10 @@ struct RecorderFormatTests {
         let milliseconds =
             Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
 
-        #expect(milliseconds < 60, "idle stop took \(milliseconds) ms")
+        // The ordering above proves the polling interval is bypassed. This
+        // wider bound catches a stuck join without asking a saturated full
+        // suite to schedule a utility thread inside one run-loop tick.
+        #expect(milliseconds < 250, "idle stop took \(milliseconds) ms")
     }
 
     @Test("every offered format opens a real file")

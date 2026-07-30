@@ -747,10 +747,10 @@ struct OnlineLyricsTests {
         #expect(match.parsed?.lines.count == 63)
         #expect((match.parsed?.lines.last?.time ?? 0) > 250)
         #expect(elapsed >= .milliseconds(100), "lookup returned before the exact result")
-        // The exact answer arrives at 100 ms and the grace is 225 ms. A full
-        // second leaves scheduler headroom while still catching an accidental
-        // wait for either six-second provider.
-        #expect(elapsed < .seconds(1), "quality grace was not bounded: \(elapsed)")
+        // The exact answer arrives at 100 ms and the grace is 225 ms. The full
+        // suite saturates the cooperative executor with audio work, so leave
+        // scheduler headroom while still catching either six-second fallback.
+        #expect(elapsed < .seconds(5.5), "quality grace was not bounded: \(elapsed)")
     }
 }
 

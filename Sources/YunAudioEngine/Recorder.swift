@@ -157,9 +157,17 @@ public final class Recorder: @unchecked Sendable {
         // directly makes an idle stop immediate without raising its permanent
         // wake rate, and the completion semaphore is a real join rather than a
         // 20 ms polling loop on whichever thread asked to stop.
-        writerWake.signal()
-        writerFinished.wait()
+        Self.wakeWriterAndJoin(
+            signal: { self.writerWake.signal() },
+            wait: { self.writerFinished.wait() })
         writer = nil
+    }
+
+    /// Makes the ordering testable without asking wall-clock scheduling to
+    /// prove that an explicit wake happened.
+    static func wakeWriterAndJoin(signal: () -> Void, wait: () -> Void) {
+        signal()
+        wait()
     }
 
     /// Waits until the writer has entered the loop that `stop()` wakes.
