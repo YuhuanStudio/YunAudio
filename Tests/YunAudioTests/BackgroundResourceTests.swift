@@ -952,18 +952,29 @@ struct BackgroundResourceTests {
     @Test("source taps are reused only while their engine rings still exist")
     func sourceTapReuse() {
         let sources = ["microphone", "player"]
+        let groups = [
+            RouterModel.SourceGroup(uid: "microphone", routes: [0]),
+            RouterModel.SourceGroup(uid: "player", routes: [1, 2]),
+        ]
         #expect(
             RouterModel.reusableSourceTapCount(
-                isOpen: true, openedCount: 2, openedFor: sources, wanted: sources) == 2)
+                isOpen: true, openedCount: 2, groups: groups, cached: sources) == 2)
         #expect(
             RouterModel.reusableSourceTapCount(
-                isOpen: true, openedCount: 0, openedFor: sources, wanted: sources) == nil)
+                isOpen: true, openedCount: 0, groups: groups, cached: sources) == nil)
         #expect(
             RouterModel.reusableSourceTapCount(
-                isOpen: false, openedCount: 2, openedFor: sources, wanted: sources) == nil)
+                isOpen: false, openedCount: 2, groups: groups, cached: sources) == nil)
         #expect(
             RouterModel.reusableSourceTapCount(
-                isOpen: true, openedCount: 2, openedFor: sources, wanted: ["player"]) == nil)
+                isOpen: true, openedCount: 2, groups: groups, cached: ["player"]) == nil)
+        #expect(
+            !RouterModel.sourceUIDsMatch(
+                groups: groups, prefixCount: 2,
+                cached: ["player", "microphone"]))
+        #expect(
+            RouterModel.sourceUIDsMatch(
+                groups: groups, prefixCount: 1, cached: ["microphone"]))
     }
 
     @Test("source-tap scratch exists only for a live consumer")
@@ -1029,6 +1040,20 @@ struct BackgroundResourceTests {
                 range: openStart.upperBound..<source.endIndex))
         let open = source[openStart.lowerBound..<openEnd.lowerBound]
         #expect(open.ranges(of: "engine.transcriptTapCount").count == 0)
+        let reuse = try #require(open.range(of: "Self.reusableSourceTapCount("))
+        let materialise = try #require(open.range(of: "groups.compactMap("))
+        #expect(reuse.lowerBound < materialise.lowerBound)
+
+        let singersStart = try #require(
+            source.range(of: "private func refreshSingerTracks()"))
+        let singersEnd = try #require(
+            source.range(
+                of: "private func releaseSingerTracks()",
+                range: singersStart.upperBound..<source.endIndex))
+        let singers = source[singersStart.lowerBound..<singersEnd.lowerBound]
+        let stableCheck = try #require(singers.range(of: "Self.sourceUIDsMatch("))
+        let rebuild = try #require(singers.range(of: "Array(allGroups.prefix(groupCount))"))
+        #expect(stableCheck.lowerBound < rebuild.lowerBound)
 
         let stopStart = try #require(source.range(of: "private func finishStop()"))
         let stopEnd = try #require(

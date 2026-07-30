@@ -1492,10 +1492,16 @@ final class RouterModel: ScriptTarget {
         guard isSingingVisible || isScoringSinging, isRunning else { return false }
         let opened = openSourceTaps()
         guard opened > 0 else { return false }
-        let groups = Array(sourceGroups.prefix(opened))
-        guard groups.map(\.uid) != scoringUIDs || singerTracks.count != groups.count else {
+        let allGroups = sourceGroups
+        let groupCount = min(opened, allGroups.count)
+        guard
+            !Self.sourceUIDsMatch(
+                groups: allGroups, prefixCount: groupCount, cached: scoringUIDs)
+                || singerTracks.count != groupCount
+        else {
             return !singerTracks.isEmpty
         }
+        let groups = Array(allGroups.prefix(groupCount))
         scoringUIDs = groups.map(\.uid)
         scoringNames = groups.map {
             representative(of: $0).map(routeTitle) ?? loc("Source")
@@ -8620,13 +8626,29 @@ final class RouterModel: ScriptTarget {
     /// an invariant that only changes when a tap opens or the graph stops.
     @ObservationIgnored private var openedSourceTapCount = 0
 
+    /// Compares a cached source identity without materialising a mapped array.
+    nonisolated static func sourceUIDsMatch(
+        groups: [SourceGroup], prefixCount: Int, cached: [String]
+    ) -> Bool {
+        guard prefixCount >= 0, prefixCount <= groups.count,
+            cached.count == prefixCount
+        else { return false }
+        for index in 0..<prefixCount where groups[index].uid != cached[index] {
+            return false
+        }
+        return true
+    }
+
     /// Whether the open rings can serve this request without touching the
     /// engine. A zero count is never reusable: it is the exact stale state a
     /// full route stop used to leave behind.
     nonisolated static func reusableSourceTapCount(
-        isOpen: Bool, openedCount: Int, openedFor: [String], wanted: [String]
+        isOpen: Bool, openedCount: Int, groups: [SourceGroup], cached: [String]
     ) -> Int? {
-        guard isOpen, openedCount > 0, openedFor == wanted else { return nil }
+        guard isOpen, openedCount > 0,
+            sourceUIDsMatch(
+                groups: groups, prefixCount: groups.count, cached: cached)
+        else { return nil }
         return openedCount
     }
 
@@ -8654,15 +8676,15 @@ final class RouterModel: ScriptTarget {
     @discardableResult
     private func openSourceTaps() -> Int {
         let groups = sourceGroups
-        let first = groups.compactMap(\.routes.first)
-        guard !first.isEmpty else { return 0 }
-        let uids = groups.map(\.uid)
         if let count = Self.reusableSourceTapCount(
             isOpen: sourceTapsOpen, openedCount: openedSourceTapCount,
-            openedFor: sourceTapsFor, wanted: uids)
+            groups: groups, cached: sourceTapsFor)
         {
             return count
         }
+        let first = groups.compactMap(\.routes.first)
+        guard !first.isEmpty else { return 0 }
+        let uids = groups.map(\.uid)
         if sourceTapsOpen { engine.stopTranscriptTaps() }
         invalidateSourceTaps()
         musicRecognition?.reset(releasingBuffers: true)
