@@ -34,6 +34,17 @@ final class LatestValueApplier<Value: Sendable, Result: Sendable> {
         startPending()
     }
 
+    /// Makes every queued or in-flight answer belong to an obsolete lifetime.
+    ///
+    /// A route graph can finish after Stop and deliver its MainActor callback
+    /// after a new Start. Submission order alone cannot distinguish those two
+    /// engine lifetimes, so stopping invalidates the publisher and clears work
+    /// that has not reached the serial queue yet.
+    func invalidate() {
+        generation &+= 1
+        pending = nil
+    }
+
     /// Applies a value before returning, after any already-running work.
     ///
     /// Used by deterministic verification and route-start finalisation. The

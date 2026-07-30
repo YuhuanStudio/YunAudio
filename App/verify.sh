@@ -50,7 +50,7 @@ for argument in "$@"; do
 verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
-  tests                          682 of them                          ~7 s
+  tests                          687 of them                          ~7 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build-app.sh                        ~50 s
   settings entry                 opens a real settings window          ~2 s

@@ -151,6 +151,40 @@ struct BackgroundResourceTests {
         #expect(published == [99])
     }
 
+    @MainActor
+    @Test("an old lifetime cannot publish after a new one starts")
+    func latestValueInvalidation() async throws {
+        let queue = DispatchQueue(label: "yunaudio.test.latest-value-lifetime")
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let applied = Values<Int>()
+        var published: [Int] = []
+        let applier = LatestValueApplier<Int, Int>(
+            queue: queue,
+            apply: { value in
+                applied.append(value)
+                if value == 0 {
+                    releaseFirst.wait()
+                }
+                return value
+            },
+            publish: { published.append($0) })
+
+        applier.submit(0)
+        for _ in 0..<100 where applied.snapshot.isEmpty {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [0])
+        applier.invalidate()
+        applier.submit(99)
+        releaseFirst.signal()
+
+        for _ in 0..<100 where published != [99] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [0, 99])
+        #expect(published == [99])
+    }
+
     @Test("a correction snapshot builds only its named buses")
     func correctionSnapshot() {
         let profile = ParametricEQ(
@@ -242,15 +276,27 @@ struct BackgroundResourceTests {
         let pending = try #require(swap.range(of: "if effectSwapIsInFlight"))
         #expect(pending.lowerBound < busy.lowerBound)
         #expect(swap.ranges(of: "effectSwapIsPending = true").count == 1)
-        #expect(swap.ranges(of: "effectSwapIsPending = false").count == 3)
+        #expect(swap.ranges(of: "effectSwapIsPending = false").count == 4)
         #expect(swap.ranges(of: "swapChainIfPossible()").count == 2)
 
+        let restart = try #require(swap.range(of: "if self.restartIsPending"))
         let replay = try #require(swap.range(of: "if self.effectSwapIsPending"))
+        #expect(restart.lowerBound < replay.lowerBound)
         let staleResult = try #require(
             swap.range(
                 of: "guard swapped else",
                 range: replay.upperBound..<swap.endIndex))
         #expect(replay.lowerBound < staleResult.lowerBound)
+
+        let restartStart = try #require(source.range(of: "private func restartIfRunning()"))
+        let restartEnd = try #require(
+            source.range(
+                of: "private var isStarting",
+                range: restartStart.upperBound..<source.endIndex))
+        let restartFunction = source[restartStart.lowerBound..<restartEnd.lowerBound]
+        #expect(
+            restartFunction.ranges(of: "if isStarting || effectSwapIsInFlight").count
+                == 1)
     }
 
     /// `updateRoutes` allocates and clears a graph, publishes it, then can wait
@@ -270,7 +316,26 @@ struct BackgroundResourceTests {
                 range: patchStart.upperBound..<model.endIndex))
         let patch = model[patchStart.lowerBound..<patchEnd.lowerBound]
         #expect(patch.ranges(of: "routeApplier.submit(routes)").count == 1)
+        #expect(patch.ranges(of: "guard routeUpdatesAreAccepted").count == 2)
         #expect(patch.ranges(of: "engine.updateRoutes").count == 0)
+
+        let rebuildStart = try #require(model.range(of: "private func rebuiltRoutes()"))
+        let rebuildEnd = try #require(
+            model.range(
+                of: "private func remapMonitorRoutes",
+                range: rebuildStart.upperBound..<model.endIndex))
+        let rebuild = model[rebuildStart.lowerBound..<rebuildEnd.lowerBound]
+        #expect(rebuild.ranges(of: "scheduleCorrections()").count == 1)
+        #expect(rebuild.ranges(of: "applyCorrections()").count == 0)
+
+        let liveStart = try #require(model.range(of: "private func applyLiveControl("))
+        let liveEnd = try #require(
+            model.range(
+                of: "private(set) var isBusy",
+                range: liveStart.upperBound..<model.endIndex))
+        let live = model[liveStart.lowerBound..<liveEnd.lowerBound]
+        #expect(live.ranges(of: "engineQueue.async").count == 1)
+        #expect(live.ranges(of: "if isBusy").count == 0)
 
         let connectStart = try #require(model.range(of: "func connect(source:"))
         let connectEnd = try #require(

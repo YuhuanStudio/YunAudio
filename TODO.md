@@ -32,6 +32,25 @@ accessory 模式都能回報「事件已處理」，但實測等 **1,544 ms** �
 修後結果是 `handled=1 window=1 elapsed=98ms`，而且這一項已成為非硬體 acceptance gate
 的一部分，不再用「有人接到動作」冒充「使用者看得到視窗」。
 
+### 快速切換後介面與真正的音訊圖分叉 —— **已修** [數值測試 + 程式邊界]
+
+這一輪找到四個同一形狀的競態：
+
+- Audio Unit chain 還在建置時改 buffer、sample rate、裝置或 echo，完整 restart 會被
+  `isBusy` 吞掉；現在完整 restart 排在 effect-only replay 前，而且 Stop 永遠第一。
+- route A 還在發佈、route B 等待時按 Stop/Start，舊 callback 可能在新 run 回來後把 B
+  當成新 run 的結果；現在 Stop 會使整個 route publication generation 失效，未進 queue
+  的舊 topology 也會清掉。純測試把 lifetime 0 卡在背景、失效後送 99，實際 apply
+  **恰為 `[0, 99]`**、publish **只有 `[99]`**。
+- fader 原本只在 `isBusy` 時排到 engine queue；route publication 的 graph retirement
+  最久 **200 ms**、clock recovery 又都不設 `isBusy`，所以 MainActor 仍可能直接等
+  `stateLock`。現在 live control 一律排進同一條序列 queue，route rebuild 後的 headphone
+  correction 也改成非同步 latest-wins，不再從 callback `sync` 回去等 Audio Unit。
+- live route/effect swap 成功後沒有更新 `lastConfiguration`，clock recovery 會把聲音退回
+  上次 Start 的舊 routes/effects/plugins/voice isolation，而介面仍顯示新值。現在 recovery
+  snapshot 只在新 graph 成功 publish 後更新；3 個純測試逐欄斷言 route 與三個 processing
+  inputs 不會拆開或改錯其他設定。
+
 ### 延遲補償 —— **已修**，而且這一段留著是因為它的形狀值得記得 [本機實測]
 
 當時的狀況：`EffectChain` 把每一級 AU 的延遲加總成 `latencyFrames`，`RoutingEngine`

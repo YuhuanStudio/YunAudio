@@ -1663,6 +1663,122 @@ struct CarriedRouteTests {
     }
 }
 
+/// Clock recovery replays `StartConfiguration`, so a live graph swap is only
+/// complete when the snapshot describes the graph that was just published.
+///
+/// These assertions stay below CoreAudio deliberately. A real lock failure is
+/// a hardware event; the bug was the value handed to that event, and that value
+/// can be proved exactly without taking anybody's microphone or output.
+@Suite("Recovery configuration after a live graph swap")
+struct LiveRecoveryConfigurationTests {
+    private func route(_ source: String, _ destination: String) -> Route {
+        Route(
+            source: ChannelRef(deviceUID: source, channel: 0),
+            destination: ChannelRef(deviceUID: destination, channel: 0))
+    }
+
+    private func plugin(_ name: String) -> AudioUnitPlugin {
+        AudioUnitPlugin(
+            type: kAudioUnitType_Effect, subType: 0x7465_7374,
+            manufacturer: 0x7961_7564, name: name, manufacturerName: "Test",
+            loadsInProcess: true)
+    }
+
+    private func configuration() -> RoutingEngine.StartConfiguration {
+        RoutingEngine.StartConfiguration(
+            sourceDeviceUID: "Mic",
+            destinationDeviceUID: "Out",
+            routes: [route("Mic", "Out")],
+            taps: [],
+            additionalSourceUIDs: ["Line"],
+            additionalDestinationUIDs: ["Stream"],
+            monitorDeviceUID: "Headphones",
+            effects: [.gate],
+            plugins: [plugin("Before")],
+            preferredSampleRate: 48_000,
+            bufferFrames: 256,
+            voiceIsolation: VoiceIsolationSettings(mixPercent: 20, isHighQuality: false),
+            echoCancellation: EchoCancellationSettings(speakerUID: "Out"),
+            outputLatencyTrim: ["Out": 12],
+            selftest: true)
+    }
+
+    @Test("a live route edit replaces only the recovery patchbay")
+    func routesReplaceOnlyRoutes() {
+        var snapshot = configuration()
+        let before = snapshot
+        let routes = [route("Spotify", "Out"), route("Mic", "Stream")]
+
+        snapshot.rememberLiveRoutes(routes)
+
+        #expect(snapshot.routes == routes)
+        #expect(snapshot.effects == before.effects)
+        #expect(snapshot.plugins == before.plugins)
+        #expect(snapshot.voiceIsolation == before.voiceIsolation)
+        #expect(snapshot.sourceDeviceUID == before.sourceDeviceUID)
+        #expect(snapshot.destinationDeviceUID == before.destinationDeviceUID)
+        #expect(snapshot.monitorDeviceUID == before.monitorDeviceUID)
+        #expect(snapshot.bufferFrames == before.bufferFrames)
+        #expect(snapshot.outputLatencyTrim == before.outputLatencyTrim)
+    }
+
+    @Test("a live chain edit keeps all three processing inputs together")
+    func effectsReplaceTheWholeProcessingDecision() {
+        var snapshot = configuration()
+        let before = snapshot
+        let plugins = [plugin("After")]
+        let isolation = VoiceIsolationSettings(mixPercent: 73, isHighQuality: true)
+
+        snapshot.rememberLiveEffects(
+            [.voiceIsolation, .compressor, .limiter],
+            plugins: plugins,
+            voiceIsolation: isolation)
+
+        #expect(snapshot.effects == [.voiceIsolation, .compressor, .limiter])
+        #expect(snapshot.plugins == plugins)
+        #expect(snapshot.voiceIsolation == isolation)
+        #expect(snapshot.routes == before.routes)
+        #expect(snapshot.taps.count == before.taps.count)
+        #expect(snapshot.additionalSourceUIDs == before.additionalSourceUIDs)
+        #expect(snapshot.additionalDestinationUIDs == before.additionalDestinationUIDs)
+        #expect(
+            snapshot.echoCancellation?.speakerUID
+                == before.echoCancellation?.speakerUID)
+        #expect(snapshot.preferredSampleRate == before.preferredSampleRate)
+        #expect(snapshot.selftest == before.selftest)
+    }
+
+    @Test("snapshots change only after the matching graph is published")
+    func snapshotFollowsPublication() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let routesStart = try #require(source.range(of: "public func updateRoutes("))
+        let effectsStart = try #require(
+            source.range(
+                of: "public func updateEffects(",
+                range: routesStart.upperBound..<source.endIndex))
+        let liveControl = try #require(
+            source.range(
+                of: "// MARK: Live control",
+                range: effectsStart.upperBound..<source.endIndex))
+        let routeUpdate = source[routesStart.lowerBound..<effectsStart.lowerBound]
+        let effectUpdate = source[effectsStart.lowerBound..<liveControl.lowerBound]
+
+        let routePublish = try #require(routeUpdate.range(of: "yun_rt_cell_publish"))
+        let routeSnapshot = try #require(
+            routeUpdate.range(of: "lastConfiguration?.rememberLiveRoutes"))
+        #expect(routePublish.lowerBound < routeSnapshot.lowerBound)
+        #expect(routeUpdate.ranges(of: "rememberLiveRoutes").count == 1)
+
+        let effectPublish = try #require(effectUpdate.range(of: "yun_rt_cell_publish"))
+        let effectSnapshot = try #require(
+            effectUpdate.range(of: "lastConfiguration?.rememberLiveEffects"))
+        #expect(effectPublish.lowerBound < effectSnapshot.lowerBound)
+        #expect(effectUpdate.ranges(of: "rememberLiveEffects").count == 1)
+    }
+}
+
 // MARK: - Giving up on a monitor
 
 /// A monitor is an additional output, and the mix has to survive one that will

@@ -8,7 +8,7 @@ and a signal path you can prove is bit-exact.**
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![672 tests](https://img.shields.io/badge/tests-672-brightgreen)](#verify-it-yourself)
+[![687 tests](https://img.shields.io/badge/tests-687-brightgreen)](#verify-it-yourself)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
@@ -215,7 +215,7 @@ One command runs everything, and says what it did **not** run.
 ./App/verify.sh --flow="more than one input"  # one section of the flow check, 44 s
 ```
 
-The steps are deliberately blind to each other: 672 unit tests, a string-table
+The steps are deliberately blind to each other: 687 unit tests, a string-table
 comparison across three languages, an offscreen render of every panel, a
 photograph of the real window the window server drew, an assertion that nobody
 else holds the audio devices, a release-build bit-exactness measurement, and a

@@ -231,6 +231,31 @@ public final class RoutingEngine: @unchecked Sendable {
         var outputLatencyTrim: [String: Int]
         var selftest: Bool
 
+        /// Keeps recovery pointed at the graph that is now live.
+        ///
+        /// A route edit does not restart the aggregate, so the start snapshot
+        /// otherwise continues naming the graph that was replaced. The next
+        /// clock-lock recovery would faithfully rebuild that stale patchbay.
+        mutating func rememberLiveRoutes(_ routes: [Route]) {
+            self.routes = routes
+        }
+
+        /// Keeps recovery pointed at the processing graph that is now live.
+        ///
+        /// These three values are one decision: plugins change whether voice
+        /// isolation uses its dedicated unit or the full chain, and the
+        /// settings belong to that decision. Remembering only the stage names
+        /// would still rebuild a different graph after a clock-lock failure.
+        mutating func rememberLiveEffects(
+            _ effects: [EffectKind],
+            plugins: [AudioUnitPlugin],
+            voiceIsolation: VoiceIsolationSettings?
+        ) {
+            self.effects = effects
+            self.plugins = plugins
+            self.voiceIsolation = voiceIsolation
+        }
+
         /// The same start with the monitor given up on: the second mix and
         /// every route into it gone, the main mix untouched.
         ///
@@ -1843,6 +1868,7 @@ public final class RoutingEngine: @unchecked Sendable {
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         graph = next
         activeRoutes = routes
+        lastConfiguration?.rememberLiveRoutes(routes)
 
         // A false return means the device is not producing cycles, so nothing
         // can be holding the old graph and it is safe to free anyway.
@@ -2074,6 +2100,8 @@ public final class RoutingEngine: @unchecked Sendable {
 
         _ = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         graph = next
+        lastConfiguration?.rememberLiveEffects(
+            kinds, plugins: plugins, voiceIsolation: voiceIsolation)
 
         effectChain = chain
         isolationUnit = unit

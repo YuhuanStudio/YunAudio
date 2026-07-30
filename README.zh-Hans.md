@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系统需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![672 tests](https://img.shields.io/badge/tests-672-brightgreen)](#自己验一遍)
+[![687 tests](https://img.shields.io/badge/tests-687-brightgreen)](#自己验一遍)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系统需求)
 
 [English](README.md) · [繁體中文](README.zh-Hant.md) · 简体中文
@@ -185,7 +185,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # flow check 的其中一节，44 秒
 ```
 
-这些步骤是故意互相看不见的：672 个单元测试、三语言字符串表互相比对、每个面板的离屏
+这些步骤是故意互相看不见的：687 个单元测试、三语言字符串表互相比对、每个面板的离屏
 渲染、窗口服务器实际绘制出的真实窗口照片、一个“没有别人正占用音频设备”的断言、
 release 构建的比特精确测量，以及一次驱动整个界面对着真实硬件跑的 flow check。每一种
 都能抓到其他抓不到的东西 —— 曾经有一整个功能发布时连标签页都没有，只有照片抓到了它。

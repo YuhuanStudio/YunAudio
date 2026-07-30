@@ -3668,6 +3668,12 @@ final class RouterModel: ScriptTarget {
     /// the UI happened to last observe, or two quick cable additions collapse
     /// into whichever one completed last.
     @ObservationIgnored private var pendingTopologyRoutes: [Route]?
+    /// False from the instant Stop is requested until a new graph has started.
+    ///
+    /// `isRunning` stays true throughout the asynchronous teardown. Using it
+    /// as the admission check let a cable edit queue after Stop and report its
+    /// old-run result after the next Start.
+    @ObservationIgnored private var routeUpdatesAreAccepted = false
 
     private var desiredTopologyRoutes: [Route] {
         pendingTopologyRoutes ?? activeRoutes
@@ -3680,6 +3686,7 @@ final class RouterModel: ScriptTarget {
             activeRoutes = routes
             return
         }
+        guard routeUpdatesAreAccepted else { return }
         pendingTopologyRoutes = routes
         routeApplier.submit(routes)
     }
@@ -3690,6 +3697,7 @@ final class RouterModel: ScriptTarget {
     }
 
     private func finishRouteUpdate(_ result: RouteUpdateResult) {
+        guard routeUpdatesAreAccepted else { return }
         if pendingTopologyRoutes == result.requested { pendingTopologyRoutes = nil }
         guard isRunning else { return }
         guard let installed = result.installed else {
@@ -3713,7 +3721,7 @@ final class RouterModel: ScriptTarget {
     private func rebuiltRoutes() {
         remapMonitorRoutes()
         appliedToGraph.remove(.headphoneCorrection)
-        applyCorrections()
+        scheduleCorrections()
     }
 
     /// Rebuilds the source-to-monitor-route map from the routes that are
@@ -4199,6 +4207,15 @@ final class RouterModel: ScriptTarget {
                     self.effectSwapIsPending = false
                     return
                 }
+                // A device, rate, buffer or echo edit needs a whole graph, and
+                // that latest graph already contains every intervening effect
+                // toggle. It outranks another effect-only build.
+                if self.restartIsPending {
+                    self.restartIsPending = false
+                    self.effectSwapIsPending = false
+                    self.restartIfRunning()
+                    return
+                }
                 // The result belongs to the snapshot captured above. If the
                 // model moved while it was building, neither its plugin errors
                 // nor its default parameters are the current answer. Coalesce
@@ -4494,25 +4511,21 @@ final class RouterModel: ScriptTarget {
             self?.finishRouteUpdate(result)
         })
 
-    /// Applies a control immediately unless an engine rebuild already owns the
-    /// state lock.
+    /// Applies a live control without ever taking an engine lock on MainActor.
     ///
     /// Faders and mutes travel through the realtime command queue, but reaching
     /// that queue still takes the engine's state lock because a graph swap can
     /// replace and free it. Calling those methods on the main actor while
     /// `start` or `updateEffects` held the lock therefore froze every control
-    /// for the whole CoreAudio or Audio Unit operation. Queueing behind the
-    /// rebuild preserves the order and the model's latest value without making
-    /// the interface wait for it.
+    /// for the whole CoreAudio or Audio Unit operation. `isBusy` covers starts
+    /// and effect swaps, but not route publication or automatic clock recovery.
+    /// Always using the serial queue preserves order across all four and keeps
+    /// a 200 ms graph-retirement wait out of a fader gesture.
     private func applyLiveControl(
         _ work: @escaping @Sendable (RoutingEngine) -> Void
     ) {
         let engine = engine
-        if isBusy {
-            engineQueue.async { work(engine) }
-        } else {
-            work(engine)
-        }
+        engineQueue.async { work(engine) }
     }
 
     /// Set while a start or stop is in flight so the button cannot be pressed
@@ -5713,6 +5726,8 @@ final class RouterModel: ScriptTarget {
             : loc("Those two devices share no usable channels.")
 
         clockLockFailed = false
+        routeUpdatesAreAccepted = false
+        routeApplier.invalidate()
         tapOwners = [:]
         unresolvedCaptures = []
         refusedCaptures = []
@@ -5841,6 +5856,7 @@ final class RouterModel: ScriptTarget {
         isBusy = false
         isStarting = false
         isRunning = false
+        routeUpdatesAreAccepted = false
         if honourPendingStop() { return }
         if restartIsPending {
             restartIsPending = false
@@ -5887,6 +5903,7 @@ final class RouterModel: ScriptTarget {
 
         if let failure = report.failure {
             isRunning = false
+            routeUpdatesAreAccepted = false
             lastError = failure
             startFailed = true
             let stayDown = stopIsPending
@@ -5904,6 +5921,7 @@ final class RouterModel: ScriptTarget {
         }
 
         isRunning = true
+        routeUpdatesAreAccepted = true
         lastError =
             report.refused.isEmpty
             ? nil
@@ -5956,6 +5974,11 @@ final class RouterModel: ScriptTarget {
     ///   the completion exists to chain a rebuild behind a teardown, and a
     ///   rebuild is the one thing a stop request rules out.
     func stop(then completion: (@MainActor () -> Void)? = nil) {
+        // Invalidate before the busy guard. The engine may still be rendering,
+        // but no route result from this lifetime may reach the interface or
+        // trigger a fallback restart after Stop has been asked for.
+        routeUpdatesAreAccepted = false
+        routeApplier.invalidate()
         guard !isBusy else {
             stopIsPending = true
             if isStarting { currentStartIntent?.cancel() }
@@ -6019,6 +6042,7 @@ final class RouterModel: ScriptTarget {
         routeMutes = []
         pathQuality = nil
         isClockLocked = false
+        routeUpdatesAreAccepted = false
         pendingTopologyRoutes = nil
         // There is no graph to have been told anything, and no routes for the
         // monitor map to be pointing at. A restart waiting for the queue is
@@ -6295,6 +6319,8 @@ final class RouterModel: ScriptTarget {
         midiControl.tearDown()
         stopPolling()
         stopAnalysis()
+        routeUpdatesAreAccepted = false
+        routeApplier.invalidate()
         engine.stop()
         isRunning = false
     }
@@ -6483,9 +6509,9 @@ final class RouterModel: ScriptTarget {
             // which is why the old guard below never even saw it. A stop in
             // flight needs no note: the start chained after it reads the model
             // fresh.
-            if isStarting {
+            if isStarting || effectSwapIsInFlight {
                 restartIsPending = true
-                currentStartIntent?.cancel()
+                if isStarting { currentStartIntent?.cancel() }
             }
             return
         }
