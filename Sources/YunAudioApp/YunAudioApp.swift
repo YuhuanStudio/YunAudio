@@ -40,6 +40,19 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         InterfaceOptions.apply()
         FirstLaunchPermissions.requestIfNeeded(environment: environment)
 
+        if environment["YUNAUDIO_SETTINGS_CHECK"] != nil {
+            NSApp.activate(ignoringOtherApps: true)
+            Task { @MainActor in
+                let passed = await SettingsEntryCheck.run()
+                if passed {
+                    NSApp.terminate(nil)
+                } else {
+                    exit(1)
+                }
+            }
+            return
+        }
+
         // Photographing the real window has to happen here for the same reason:
         // there is no window until the scene has been through the run loop.
         if let directory = environment["YUNAUDIO_SCREENSHOT"] {
@@ -118,6 +131,7 @@ struct YunAudioApp: App {
         if environment["YUNAUDIO_RENDER"] == nil,
             environment["YUNAUDIO_FLOWCHECK"] == nil,
             environment["YUNAUDIO_SCREENSHOT"] == nil,
+            environment["YUNAUDIO_SETTINGS_CHECK"] == nil,
             environment["YUNAUDIO_ICON"] == nil,
             !MainActor.assumeIsolated({ SingleInstance.claim() })
         {
@@ -237,11 +251,6 @@ struct YunAudioApp: App {
         .windowResizability(.contentMinSize)
 
         .onChange(of: hasLaunched, initial: true) { _, _ in installStatusItem() }
-
-        Settings {
-            PreferencesWindow(model: model)
-                .onAppear { installStatusItem() }
-        }
 
     }
 }

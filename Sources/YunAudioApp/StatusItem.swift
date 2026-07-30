@@ -596,7 +596,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
 
     @objc private func openSettings() {
         popover.performClose(nil)
-        SettingsWindow.open()
+        SettingsWindow.open(model: model)
     }
 
     @objc private func quit() {

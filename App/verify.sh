@@ -50,9 +50,10 @@ for argument in "$@"; do
 verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
-  tests                          642 of them                          ~7 s
+  tests                          682 of them                          ~7 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build-app.sh                        ~50 s
+  settings entry                 opens a real settings window          ~2 s
   offscreen render               every panel, no window server       ~20 s
   photograph the real window     what the window server drew         ~70 s
   --full adds:
@@ -210,6 +211,20 @@ if [[ "${APP_BUNDLE_FAILED}" == "1" ]]; then
 	exit 1
 fi
 
+settings_entry_opened() {
+	local output
+	output=$(
+		YUNAUDIO_SETTINGS_CHECK=1 ./build/YunAudio.app/Contents/MacOS/YunAudioApp 2>&1
+	) || {
+		echo "${output}"
+		return 1
+	}
+	echo "${output}"
+	grep -q "settings entry: handled=1 window=1 " <<<"${output}"
+}
+
+step "settings entry" settings_entry_opened
+
 # ------------------------------------------------------- it looks like itself
 #
 # Two different pictures, because each is blind to what the other catches.
@@ -240,7 +255,13 @@ photographed_the_real_window() {
 	# had already been written. Waiting for a clean exit would make the gate
 	# hostage to a broken audio server; the photographs are what this step is
 	# for, and they are all there.
-	YUNAUDIO_SCREENSHOT="${WORK}/shot" ./build/YunAudio.app/Contents/MacOS/YunAudioApp &
+	if [[ "${FULL}" == "1" ]]; then
+		YUNAUDIO_SCREENSHOT="${WORK}/shot" \
+			./build/YunAudio.app/Contents/MacOS/YunAudioApp &
+	else
+		YUNAUDIO_SCREENSHOT="${WORK}/shot" YUNAUDIO_SCREENSHOT_NO_AUDIO=1 \
+			./build/YunAudio.app/Contents/MacOS/YunAudioApp &
+	fi
 	local capture=$!
 	local waited=0
 	while kill -0 "${capture}" 2>/dev/null && [[ ${waited} -lt 90 ]]; do
@@ -256,7 +277,8 @@ photographed_the_real_window() {
 	fi
 	local count
 	count=$(find "${WORK}/shot" -name '*.png' | wc -l | tr -d ' ')
-	# Both appearances at both sizes, plus the running state.
+	# Both appearances at both sizes and every tab. A full run also adds the
+	# running state; the ordinary gate never reserves an input just for a photo.
 	[[ "${count}" -ge 6 ]] || {
 		echo "only ${count} photographs taken"
 		return 1

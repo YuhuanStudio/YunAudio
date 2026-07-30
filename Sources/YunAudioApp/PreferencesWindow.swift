@@ -1,33 +1,42 @@
+import AppKit
 import SwiftUI
 import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
 import YunDesign
 
-/// Opening the settings window, from wherever asks.
+/// Owns the settings window instead of relying on the Settings scene responder.
 ///
-/// AppKit menu items cannot hold a SwiftUI `SettingsLink`, so the status item's
-/// menu still needs a responder action. SwiftUI views use `SettingsLink`
-/// directly: the responder can accept this selector without presenting a
-/// window, which makes it unsuitable for a visible SwiftUI control.
+/// Both `showSettingsWindow:` and `SettingsLink` were measured accepting their
+/// action without presenting a window while YunAudio ran as a menu-bar
+/// accessory. Retaining the controller makes the result concrete: every entry
+/// point orders this exact window forward, and a check can find it afterwards.
 @MainActor
 enum SettingsWindow {
-    /// True when a responder took the action, which is the part worth knowing:
-    /// the `Settings` scene installs the handler, and without the scene the
-    /// send is a silent no-op rather than an error.
-    ///
-    /// The returned true is not a promise that a window appeared. Measured: the
-    /// scene's window only comes up for an *active* application, and a process
-    /// that cannot become active gets true and no window. That is why the flow
-    /// check asserts the action and says out loud that it did not check the
-    /// window — a person pressing the gear is active by definition, and a run
-    /// launched from a terminal never is.
+    private static var controller: NSWindowController?
+
     @discardableResult
-    static func open() -> Bool {
-        // Without this the window opens behind whatever has focus when the app
-        // is an accessory, which looks like nothing happened.
+    static func open(model: RouterModel) -> Bool {
+        let controller = controller ?? makeController(model: model)
+        self.controller = controller
         NSApp.activate(ignoringOtherApps: true)
-        return NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+        controller.showWindow(nil)
+        controller.window?.makeKeyAndOrderFront(nil)
+        return controller.window?.isVisible == true
+    }
+
+    private static func makeController(model: RouterModel) -> NSWindowController {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 760, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.title = loc("Settings")
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(rootView: PreferencesWindow(model: model))
+        window.setFrameAutosaveName("YunAudioSettingsWindow")
+        window.center()
+        return NSWindowController(window: window)
     }
 }
 
@@ -133,6 +142,12 @@ struct PreferencesWindow: View {
     /// somewhere worth writing down.
     @MainActor
     static func openWindow() -> NSWindow? {
+        if let owned = NSApp.windows.first(where: {
+            $0.frameAutosaveName == "YunAudioSettingsWindow" && $0.isVisible
+        }) {
+            return owned
+        }
+
         func carriesIdentifier(_ view: NSView) -> Bool {
             view.accessibilityIdentifier() == accessibilityIdentifier
                 || view.subviews.contains(where: carriesIdentifier)

@@ -47,6 +47,7 @@ enum FirstLaunchPermissions {
             environment["YUNAUDIO_RENDER"] == nil
             && environment["YUNAUDIO_FLOWCHECK"] == nil
             && environment["YUNAUDIO_SCREENSHOT"] == nil
+            && environment["YUNAUDIO_SETTINGS_CHECK"] == nil
             && environment["YUNAUDIO_ICON"] == nil
     }
 }

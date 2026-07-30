@@ -20,6 +20,18 @@
 
 ## 已知問題
 
+### 設定入口接受動作卻沒有視窗 —— **已修** [本機實測]
+
+主視窗齒輪原本送 `showSettingsWindow:`，後來換成 `SettingsLink`；兩者在 menu-bar
+accessory 模式都能回報「事件已處理」，但實測等 **1,544 ms** 與 **2,164 ms** 後仍找不到
+設定視窗。舊 flow check 只斷言 responder 回傳 true，所以正好會讓這個壞法通過。
+
+現在三個入口（主視窗、menu-bar panel、右鍵選單）都打開應用程式自己持有的
+`NSWindowController`。專用 `YUNAUDIO_SETTINGS_CHECK=1` 模式會跳過首次權限請求、不啟動
+任何 route，從真實主視窗送出齒輪的 `⌘,` key equivalent，再量指定設定視窗是否真的可見。
+修後結果是 `handled=1 window=1 elapsed=98ms`，而且這一項已成為非硬體 acceptance gate
+的一部分，不再用「有人接到動作」冒充「使用者看得到視窗」。
+
 ### 延遲補償 —— **已修**，而且這一段留著是因為它的形狀值得記得 [本機實測]
 
 當時的狀況：`EffectChain` 把每一級 AU 的延遲加總成 `latencyFrames`，`RoutingEngine`

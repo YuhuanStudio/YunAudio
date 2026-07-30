@@ -314,34 +314,10 @@ enum UIFlowCheck {
             "the in-window shortcuts are listed too",
             model.hotkeyDescriptions.contains { !$0.isGlobal })
 
-        // The status item's AppKit menu cannot contain a SwiftUI SettingsLink,
-        // so it still sends the responder action. The main-window gear uses the
-        // scene link directly; a source-level regression check keeps it from
-        // being replaced with this weaker path again.
-        check("the menu's settings action reaches a handler", SettingsWindow.open())
-        // The negative control, and it is what makes the line above mean
-        // anything. `sendAction` returns true for a selector somebody handles
-        // and false for one nobody does — measured here rather than assumed,
-        // because "true" from a call that always returns true would be a check
-        // that passes with the Settings scene deleted.
-        check(
-            "and an action nobody handles is refused",
-            !NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil))
-        // What this cannot check, said out loud rather than left as a gap.
-        // SwiftUI's settings window only comes up for an active application,
-        // and a process launched from a terminal cannot make itself one:
-        // measured here as `NSApp.isActive == false` and no key window at all,
-        // after both `NSApp.activate` and `NSRunningApplication.activate`. So
-        // the action is asserted and the window it opens is not. A person
-        // clicking the gear is active by definition; this run never is.
-        note(
-            "the settings window itself was not opened — this process is not active "
-                + "(isActive=\(NSApp.isActive), key window: "
-                + "\(NSApp.keyWindow?.title ?? "none"))")
-        if let stray = PreferencesWindow.openWindow() {
-            // Shut again if it did come up, or every screenshot after this is
-            // taken with a settings window over the one being photographed.
-            stray.close()
+        check("the settings entry presents a window", SettingsWindow.open(model: model))
+        check("and that window contains the preferences", PreferencesWindow.openWindow() != nil)
+        if let settings = PreferencesWindow.openWindow() {
+            settings.close()
             NSApp.windows.first { $0.title == "YunAudio" }?.makeKeyAndOrderFront(nil)
         }
 

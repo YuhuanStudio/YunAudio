@@ -76,6 +76,13 @@ enum WindowCapture {
             model.inspectorTab = wasShowing
         }
 
+        // The ordinary acceptance gate is deliberately non-hardware: opening a
+        // window must not reserve a microphone or wake a Continuity device.
+        // `--full` omits this flag and owns the hardware checks that follow.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil {
+            return
+        }
+
         // The state that matters most is the one nothing else can show: meters
         // moving, the status strip carrying real numbers, a mixer with strips
         // in it. Every capture until now was of an idle window, which is the

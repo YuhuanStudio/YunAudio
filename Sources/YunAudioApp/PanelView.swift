@@ -517,7 +517,9 @@ struct PanelView: View {
 
             Spacer()
 
-            SettingsLink {
+            Button {
+                SettingsWindow.open(model: model)
+            } label: {
                 Text(loc("Settings"))
             }
             .buttonStyle(YunButtonStyle(.ghost, small: true))

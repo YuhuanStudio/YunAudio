@@ -287,11 +287,13 @@ struct MainWindow: View {
                     .help(error)
             }
 
-            // Use the scene's own link here. Sending `showSettingsWindow:` can
-            // return true without presenting anything, so the old gear looked
-            // connected while doing nothing. The framework link owns the
-            // presentation lifetime as well as the visible control.
-            SettingsLink {
+            // The Settings scene accepted both its responder action and its
+            // link without presenting a window while the app was an accessory.
+            // This opens the retained window that the non-audio UI check can
+            // find and measure.
+            Button {
+                SettingsWindow.open(model: model)
+            } label: {
                 Image(systemName: "gearshape")
                     .font(.system(size: 11))
                     .frame(width: 14)
