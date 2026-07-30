@@ -596,6 +596,13 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// open here".
     var isPanelShownForCheck: Bool { popover.isShown }
 
+    /// A retained hosting graph need not recompute its root merely because it
+    /// was reattached. This is the structural proof that a reopened popover has
+    /// real content; the live-child body count separately proves it is moving.
+    var isPanelContentAttachedForCheck: Bool {
+        panelHost != nil && popover.contentViewController === panelHost
+    }
+
     func setPanelOpenForCheck(_ isOpen: Bool) {
         guard let button = item.button else { return }
         if isOpen {

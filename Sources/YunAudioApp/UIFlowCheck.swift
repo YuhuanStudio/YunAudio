@@ -4810,10 +4810,11 @@ enum UIFlowCheck {
 
         /// Opens the panel, counts what it draws while it is up, and shuts it.
         ///
-        /// - Returns: How many `PanelView` bodies ran while it was open, or nil
-        ///   when it would not open and shut here at all — in which case
-        ///   nothing below has been exercised and the caller must say so.
-        func openAndShutPanel() async -> [String: Int]? {
+        /// - Returns: Body counts and proof that content was attached while it
+        ///   was open, or nil when it would not open and shut here at all — in
+        ///   which case nothing below has been exercised and the caller must
+        ///   say so.
+        func openAndShutPanel() async -> (counts: [String: Int], wasAttached: Bool)? {
             statusItem?.setPanelOpenForCheck(true)
             BodyCount.reset()
             BodyCount.isCounting = true
@@ -4821,11 +4822,13 @@ enum UIFlowCheck {
             BodyCount.isCounting = false
             guard statusItem?.isPanelShownForCheck == true else { return nil }
             let counts = BodyCount.counts
+            let wasAttached = statusItem?.isPanelContentAttachedForCheck == true
             statusItem?.setPanelOpenForCheck(false)
             // Long enough for the close animation to finish, or the panel is
             // still shown when this is read and the check disqualifies itself.
             await pause(1.0)
-            return statusItem?.isPanelShownForCheck == false ? counts : nil
+            return statusItem?.isPanelShownForCheck == false
+                ? (counts: counts, wasAttached: wasAttached) : nil
         }
 
         // Twice. The panel is detached from the popover when it shuts, so the
@@ -4833,12 +4836,23 @@ enum UIFlowCheck {
         // counted rather than assumed, because an empty panel and a panel that
         // costs nothing look exactly alike from outside.
         let firstOpen = await openAndShutPanel()
-        let secondOpen = firstOpen == nil ? nil : await openAndShutPanel()
-        let panelClosed = secondOpen != nil
-        if let openCounts = secondOpen {
+        let secondOpen: (counts: [String: Int], wasAttached: Bool)?
+        if let _ = firstOpen {
+            secondOpen = await openAndShutPanel()
+        } else {
+            secondOpen = nil
+        }
+        let panelClosed: Bool
+        if let _ = secondOpen {
+            panelClosed = true
+        } else {
+            panelClosed = false
+        }
+        if let secondOpen {
+            let openCounts = secondOpen.counts
             check(
-                "the menu bar panel still draws when it is opened again",
-                (openCounts["PanelView"] ?? 0) > 0)
+                "the menu bar panel still has content when it is opened again",
+                secondOpen.wasAttached)
             check(
                 "an open panel does not redraw with its meter",
                 (openCounts["PanelView"] ?? 0) < 10)
