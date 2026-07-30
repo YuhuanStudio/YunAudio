@@ -3965,6 +3965,15 @@ final class RouterModel: ScriptTarget {
         return Self.echoMessage(reason)
     }
 
+    /// The numbers behind the sentence — the rates a device offered against the
+    /// one that was needed. Not shown to a user, who cannot act on it, but a
+    /// report that says only "pick another speaker" is not enough to fix the
+    /// code with when the speaker was not the problem.
+    var echoCancellationDetail: String? {
+        guard cancelsEcho, isRunning else { return nil }
+        return engine.lastEchoCancellationDetail
+    }
+
     /// Split out for the reason `isolationMessage` is: the failure cannot be
     /// produced on demand, and the mapping is the testable part of it.
     /// Each sentence names the thing the user could change. "It could not be

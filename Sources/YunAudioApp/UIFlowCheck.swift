@@ -1944,6 +1944,18 @@ enum UIFlowCheck {
             check("the route is up", model.isRunning)
             if let status = model.echoStatus {
                 note("reference \(status.hasReference ? "present" : "absent")")
+            } else {
+                // The canceller declining is not an error — the route is meant
+                // to come up without it. But a section that reads zero frames
+                // and says nothing about why sent the last three people to the
+                // engine. The engine has recorded a reason since it was
+                // written; nothing ever asked it.
+                note(
+                    "no canceller: "
+                        + (model.echoCancellationMessage ?? "no reason recorded"))
+                if let detail = model.echoCancellationDetail {
+                    note("  \(detail)")
+                }
             }
             // The microphone belongs to the canceller now, so nothing may be
             // reading it off the aggregate: a route still pointed at a buffer
