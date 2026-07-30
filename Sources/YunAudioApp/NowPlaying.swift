@@ -32,6 +32,8 @@ enum NowPlaying {
         var nativeLyrics: String? = nil
         /// Album artwork exposed by the player or recognition catalogue.
         var artworkURL: URL? = nil
+        /// Apple Music catalogue destination exposed by ShazamKit.
+        var appleMusicURL: URL? = nil
         /// `id of current track`, so a change of song is noticed without asking
         /// what the song is. Empty when the player would not say.
         var identity: String = ""
@@ -44,7 +46,13 @@ enum NowPlaying {
         }
     }
 
-    /// Bundle identifiers, in the order they are asked.
+    struct AutomationTarget: Identifiable, Equatable {
+        let name: String
+        let bundleID: String
+        var id: String { bundleID }
+    }
+
+    /// Players, in the order they are asked.
     ///
     /// Music first because a Mac has it whether or not anybody uses it, and a
     /// stopped player answers quickly.
@@ -52,6 +60,13 @@ enum NowPlaying {
         ("Music", "com.apple.Music"),
         ("Spotify", "com.spotify.client"),
     ]
+
+    static var installedAutomationTargets: [AutomationTarget] {
+        players.compactMap { name, bundleID in
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
+                ? nil : AutomationTarget(name: name, bundleID: bundleID)
+        }
+    }
 
     /// What is loaded in a player, preferring one that is actually playing.
     ///
@@ -428,17 +443,26 @@ enum NowPlaying {
     }
 
     static var installedPlayerBundleIDs: [String] {
-        players.compactMap { _, bundleID in
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
-                ? nil : bundleID
-        }
+        installedAutomationTargets.map(\.bundleID)
+    }
+
+    /// Reads Automation state without displaying a prompt or asking the player
+    /// for data.
+    nonisolated static func automationPermissionStatus(for bundleID: String) -> OSStatus {
+        determineAutomationPermission(for: bundleID, askingUser: false)
     }
 
     /// Asks TCC for one player's Automation permission without reading a track.
     nonisolated static func requestAutomationPermission(for bundleID: String) -> OSStatus {
+        determineAutomationPermission(for: bundleID, askingUser: true)
+    }
+
+    nonisolated private static func determineAutomationPermission(
+        for bundleID: String, askingUser: Bool
+    ) -> OSStatus {
         let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
         guard let descriptor = target.aeDesc else { return OSStatus(paramErr) }
         return AEDeterminePermissionToAutomateTarget(
-            descriptor, AEEventClass(kAECoreSuite), AEEventID(kAEGetData), true)
+            descriptor, AEEventClass(kAECoreSuite), AEEventID(kAEGetData), askingUser)
     }
 }

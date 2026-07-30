@@ -450,6 +450,16 @@ struct RTGraph {
         return Float(exp(-perCycle / seconds))
     }
 
+    /// Frames one processing stage may consume from this callback.
+    ///
+    /// Capacity is storage, never a request to manufacture more audio. Keeping
+    /// this decision shared by the steady and transition paths makes a 4096-
+    /// frame safety allocation harmless to an ordinary 64- or 256-frame slice.
+    @inline(__always)
+    static func processingFrames(available: Int, capacity: Int) -> Int {
+        max(0, min(available, capacity))
+    }
+
     /// Storage whose lifetime is the route's rather than any one graph's.
     struct SharedClock {
         var cycleCounter: UnsafeMutablePointer<UInt64>
@@ -989,7 +999,9 @@ func yunAudioIOProc(
                     ? cancelledFrames
                     : Int(input[sourceIndex].mDataByteSize)
                         / (MemoryLayout<Float>.size * stride)
-                let frames = min(available, Int(handover.pointee.maximumFrames))
+                let frames = RTGraph.processingFrames(
+                    available: available,
+                    capacity: Int(handover.pointee.maximumFrames))
                 let source =
                     fromCancelled
                     ? UnsafePointer(graph.pointee.cancelledBuffer)
@@ -1077,7 +1089,9 @@ func yunAudioIOProc(
                     ? cancelledFrames
                     : Int(input[sourceIndex].mDataByteSize)
                         / (MemoryLayout<Float>.size * stride)
-                let frames = min(available, Int(isolation.pointee.maximumFrames))
+                let frames = RTGraph.processingFrames(
+                    available: available,
+                    capacity: Int(isolation.pointee.maximumFrames))
                 let source =
                     fromCancelled
                     ? UnsafePointer(graph.pointee.cancelledBuffer)

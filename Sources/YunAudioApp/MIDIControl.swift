@@ -396,6 +396,11 @@ extension MIDIAction {
 @Observable
 @MainActor
 final class MIDIController {
+    struct Diagnostic: Equatable {
+        let message: MIDIMessage
+        let receivedAt: Date
+    }
+
     /// What each control drives, by what it drives.
     private(set) var bindings: [MIDITarget: MIDIAddress] = [:]
 
@@ -407,8 +412,9 @@ final class MIDIController {
     /// The whole point of showing it is the case where nothing is bound yet:
     /// without it, a controller that is not connected and a controller that is
     /// connected but sending on another channel look identical.
-    private(set) var lastMessage: MIDIMessage?
-    private(set) var lastMessageAt: Date?
+    private(set) var lastDiagnostic: Diagnostic?
+    var lastMessage: MIDIMessage? { lastDiagnostic?.message }
+    var lastMessageAt: Date? { lastDiagnostic?.receivedAt }
 
     /// The names CoreMIDI is offering, for the same reason.
     private(set) var sourceNames: [String] = []
@@ -424,6 +430,24 @@ final class MIDIController {
     var onBindingsChanged: (() -> Void)?
 
     @ObservationIgnored private var pickups: [MIDITarget: MIDIPickup] = [:]
+    /// Updated for every event without invalidating a view. Opening the MIDI
+    /// page publishes it immediately, so hiding diagnostics never loses the
+    /// answer to "did this controller send anything?".
+    @ObservationIgnored private var latestDiagnostic: Diagnostic?
+    @ObservationIgnored private var lastDiagnosticPublicationNanoseconds: UInt64?
+    @ObservationIgnored private(set) var diagnosticPublications = 0
+    /// Only the MIDI preferences page reads this information. Control delivery
+    /// remains live regardless of whether that page exists.
+    @ObservationIgnored var diagnosticsAreVisible = false {
+        didSet {
+            guard oldValue != diagnosticsAreVisible else { return }
+            if diagnosticsAreVisible {
+                publishLatestDiagnostic(now: DispatchTime.now().uptimeNanoseconds)
+            } else {
+                lastDiagnosticPublicationNanoseconds = nil
+            }
+        }
+    }
     /// The receive path runs for every controller message. Bindings are shown
     /// by target, but incoming messages arrive by address; keeping both indices
     /// avoids scanning every bound fader for every MIDI word.
@@ -501,8 +525,14 @@ final class MIDIController {
 
     /// One decoded message, from the hardware or from the flow check.
     func receive(_ message: MIDIMessage) {
-        lastMessage = message
-        lastMessageAt = Date()
+        let now = DispatchTime.now().uptimeNanoseconds
+        latestDiagnostic = Diagnostic(message: message, receivedAt: Date())
+        if Self.shouldPublishDiagnostics(
+            isVisible: diagnosticsAreVisible, now: now,
+            previous: lastDiagnosticPublicationNanoseconds)
+        {
+            publishLatestDiagnostic(now: now)
+        }
 
         if let target = learningTarget {
             // Learn on the press, so holding a pad down does not bind and then
@@ -523,6 +553,26 @@ final class MIDIController {
         pickups[target] = pickup
         guard action != .ignore else { return }
         perform?(target, action)
+    }
+
+    /// Ten hertz is faster than somebody can read a diagnostic row and two
+    /// orders of magnitude below a high-resolution controller's message rate.
+    nonisolated static let diagnosticPublishIntervalNanoseconds: UInt64 = 100_000_000
+
+    nonisolated static func shouldPublishDiagnostics(
+        isVisible: Bool, now: UInt64, previous: UInt64?
+    ) -> Bool {
+        guard isVisible else { return false }
+        guard let previous, now >= previous else { return true }
+        return now - previous >= diagnosticPublishIntervalNanoseconds
+    }
+
+    private func publishLatestDiagnostic(now: UInt64) {
+        guard let latestDiagnostic else { return }
+        lastDiagnosticPublicationNanoseconds = now
+        guard lastDiagnostic != latestDiagnostic else { return }
+        lastDiagnostic = latestDiagnostic
+        diagnosticPublications += 1
     }
 
     /// The constant-time receive index, internal so tests can prove it stays

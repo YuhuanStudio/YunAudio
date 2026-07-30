@@ -1327,6 +1327,73 @@ struct MIDIActionTests {
     }
 }
 
+@MainActor
+@Suite("MIDI diagnostic publication")
+struct MIDIDiagnosticPublicationTests {
+    @Test("a thousand messages per second publish diagnostics ten times")
+    func visibleRateIsBounded() {
+        var previous: UInt64?
+        var publications = 0
+        for millisecond in 0..<1_000 {
+            let now = UInt64(millisecond) * 1_000_000
+            if MIDIController.shouldPublishDiagnostics(
+                isVisible: true, now: now, previous: previous)
+            {
+                publications += 1
+                previous = now
+            }
+        }
+        #expect(publications == 10)
+    }
+
+    @Test("hidden diagnostics publish nothing without dropping a command")
+    func hiddenDiagnosticsDoNotThrottleControl() {
+        let controller = MIDIController()
+        let address = MIDIAddress(channel: 0, kind: .note(36))
+        let target = MIDITarget.command(url: "yunaudio://mute")
+        controller.bind(address, to: target)
+
+        var actions = 0
+        var wrongActions = 0
+        controller.perform = { received, action in
+            if received != target || action != .press { wrongActions += 1 }
+            actions += 1
+        }
+        for _ in 0..<1_000 {
+            controller.receive(.note(36, velocity: 127))
+        }
+
+        #expect(actions == 1_000)
+        #expect(wrongActions == 0)
+        #expect(controller.diagnosticPublications == 0)
+        #expect(controller.lastMessage == nil)
+
+        // Opening the page publishes the latest ignored diagnostic once.
+        controller.diagnosticsAreVisible = true
+        #expect(controller.diagnosticPublications == 1)
+        #expect(controller.lastMessage == .note(36, velocity: 127))
+    }
+
+    @Test("the MIDI section owns the diagnostic visibility gate")
+    func preferencesVisibilityIsExplicit() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/PreferencesWindow.swift", encoding: .utf8)
+        let section = try #require(source.range(of: "private var midiSection: some View"))
+        let row = try #require(
+            source.range(
+                of: "private func midiRow",
+                range: section.upperBound..<source.endIndex))
+        let implementation = source[section.lowerBound..<row.lowerBound]
+        #expect(
+            implementation.contains(
+                ".onAppear { model.midiControl.diagnosticsAreVisible = true }"))
+        #expect(
+            implementation.contains(
+                ".onDisappear { model.midiControl.diagnosticsAreVisible = false }"))
+    }
+}
+
 @Suite("MIDI bindings")
 struct MIDIBindingTests {
     @Test("every kind of target and address survives being written and read back")
@@ -4278,6 +4345,68 @@ struct NowPlayingIsolationTests {
                 knownIdentity: "previous", receivedIdentity: "next"))
     }
 
+    @Test("sixty empty-id metadata reads adopt one song and start one provider round")
+    func unchangedEmptyIdentityIsNotReadopted() {
+        var current: NowPlaying.Track?
+        var metadataReads = 0
+        var adoptions = 0
+        var providerRequests = 0
+
+        for second in 0..<60 {
+            metadataReads += 1
+            let incoming = NowPlaying.Track(
+                application: "Spotify",
+                title: "年少心動雨季",
+                artist: "Test Artist",
+                album: "Test Album",
+                position: Double(second),
+                duration: 265,
+                isPlaying: true,
+                identity: "")
+            if RouterModel.shouldAdoptPlayerTrack(
+                current: current,
+                incoming: incoming)
+            {
+                current = incoming
+                adoptions += 1
+                // Four keyless providers plus optional Musixmatch is the largest
+                // production round. Sixty replies must still create one round.
+                providerRequests += 5
+            }
+        }
+
+        print(
+            "empty-id player: \(metadataReads) metadata reads, \(adoptions) adoption, "
+                + "\(providerRequests) maximum provider requests")
+        #expect(metadataReads == 60)
+        #expect(adoptions == 1)
+        #expect(providerRequests == 5)
+    }
+
+    @Test("empty-id fingerprint changes still adopt a new stream")
+    func changedEmptyIdentityIsAdopted() {
+        let current = NowPlaying.Track(
+            application: "Music",
+            title: "First",
+            artist: "Singer",
+            album: "",
+            position: 0,
+            duration: 180,
+            isPlaying: true,
+            identity: "")
+        var changed = current
+        changed.title = "Second"
+
+        #expect(
+            !RouterModel.shouldAdoptPlayerTrack(
+                current: current,
+                incoming: current))
+        #expect(
+            RouterModel.shouldAdoptPlayerTrack(
+                current: current,
+                incoming: changed))
+    }
+
     @Test("an empty Music artwork field still produces the eight useful fields")
     func musicReplyWithoutArtwork() throws {
         let separator = "\u{1F}"
@@ -4369,30 +4498,75 @@ struct PermissionRequestTests {
                 == .failed(application: "Spotify", code: -50))
     }
 
-    @Test("permission prompts run once and never in verification processes")
+    @Test("first-launch Automation attempts are independent and verification stays silent")
     func firstLaunchOnly() {
-        #expect(FirstLaunchPermissions.shouldRequest(storedVersion: 0, environment: [:]))
-        #expect(!FirstLaunchPermissions.shouldRequest(storedVersion: 1, environment: [:]))
+        let music = "com.apple.Music"
+        let spotify = "com.spotify.client"
+        #expect(FirstLaunchPermissions.shouldRequest(in: [:]))
         #expect(
             !FirstLaunchPermissions.shouldRequest(
-                storedVersion: 0, environment: ["YUNAUDIO_FLOWCHECK": "1"]))
+                in: ["YUNAUDIO_FLOWCHECK": "1"]))
         #expect(
             !FirstLaunchPermissions.shouldRequest(
-                storedVersion: 0, environment: ["YUNAUDIO_RENDER": "out"]))
+                in: ["YUNAUDIO_RENDER": "out"]))
+        #expect(
+            FirstLaunchPermissions.automaticRequestBundleIDs(
+                installed: [music, spotify], attempted: []) == [music, spotify])
+        #expect(
+            FirstLaunchPermissions.automaticRequestBundleIDs(
+                installed: [music, spotify], attempted: [music]) == [spotify])
+        #expect(
+            FirstLaunchPermissions.automaticRequestBundleIDs(
+                installed: [music, spotify], attempted: [music, spotify]
+            ).isEmpty)
+        #expect(
+            FirstLaunchPermissions.attemptKey(for: music)
+                != FirstLaunchPermissions.attemptKey(for: spotify))
     }
 
-    @Test("the first launch asks for every protected input in sequence")
+    @Test("the first launch never touches an audio capture API")
     func firstLaunchSequence() throws {
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/FirstLaunchPermissions.swift", encoding: .utf8)
-        let microphone = try #require(source.range(of: "requestAccess(for: .audio)"))
-        let systemAudio = try #require(source.range(of: "requestCaptureAccess()"))
-        let automation = try #require(
-            source.range(of: "requestAutomationPermission(for: bundleID)"))
-        #expect(microphone.lowerBound < systemAudio.lowerBound)
-        #expect(systemAudio.lowerBound < automation.lowerBound)
-        #expect(source.contains("defaults.set(currentVersion"))
+        #expect(source.contains("requestAutomationPermission(for: bundleID)"))
+        #expect(!source.contains("requestCaptureAccess()"))
+        #expect(!source.contains("AudioHardwareCreateProcessTap"))
+        #expect(!source.contains("AVCaptureDevice"))
+        #expect(!source.contains("requestAccess(for: .audio)"))
+        #expect(source.contains("defaults.set(true, forKey: attemptKey(for: bundleID))"))
+        #expect(!source.contains("firstLaunchPermissionsVersion"))
+    }
+
+    @Test("the duplicate check asks Launch Services only for this bundle")
+    func singleInstanceUsesTargetedProcessLookup() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/SingleInstance.swift", encoding: .utf8)
+        #expect(
+            source.contains(
+                "NSRunningApplication.runningApplications(\n"
+                    + "            withBundleIdentifier: identifier"))
+        #expect(!source.contains("NSWorkspace.shared.runningApplications"))
+    }
+
+    @Test("one matching process among ten thousand is enough to refuse a duplicate")
+    func singleInstanceCandidateReduction() {
+        let current: pid_t = 41
+        let onlyThisProcess = [pid_t](repeating: current, count: 10_000)
+        #expect(
+            onlyThisProcess.first {
+                SingleInstance.isOtherProcessIdentifier(
+                    current: current, candidate: $0)
+            } == nil)
+
+        var withAnotherProcess = onlyThisProcess
+        withAnotherProcess.append(42)
+        #expect(
+            withAnotherProcess.first {
+                SingleInstance.isOtherProcessIdentifier(
+                    current: current, candidate: $0)
+            } == 42)
     }
 
     @Test("the system-audio prompt reads and mutes nothing")

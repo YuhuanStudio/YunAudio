@@ -12,15 +12,29 @@ enum SingleInstance {
     /// it to show itself.
     static func claim() -> Bool {
         let identifier = Bundle.main.bundleIdentifier ?? "com.yuhuanstudio.yunaudio"
-        let others = NSWorkspace.shared.runningApplications.filter {
-            $0.bundleIdentifier == identifier
-                && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
+        let current = ProcessInfo.processInfo.processIdentifier
+        let other = NSRunningApplication.runningApplications(
+            withBundleIdentifier: identifier
+        ).first {
+            isOtherProcessIdentifier(
+                current: current, candidate: $0.processIdentifier)
         }
-        guard !others.isEmpty else { return true }
+        guard let other else { return true }
 
         // Hand the user over to the copy that is already running rather than
         // failing silently, which would look like the app refusing to launch.
-        others.first?.activate()
+        other.activate()
         return false
+    }
+
+    /// Finds a different process without depending on AppKit state.
+    ///
+    /// Kept as values so the launch boundary can be exercised without starting
+    /// another application. The candidates have already been narrowed by
+    /// Launch Services to this bundle identifier.
+    nonisolated static func isOtherProcessIdentifier(
+        current: pid_t, candidate: pid_t
+    ) -> Bool {
+        candidate != current
     }
 }

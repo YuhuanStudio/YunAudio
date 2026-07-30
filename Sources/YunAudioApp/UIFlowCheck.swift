@@ -317,7 +317,57 @@ enum UIFlowCheck {
         check("the settings entry presents a window", SettingsWindow.open(model: model))
         check("and that window contains the preferences", PreferencesWindow.openWindow() != nil)
         if let settings = PreferencesWindow.openWindow() {
-            settings.close()
+            if inWantedSection {
+                let originalKey = model.musixmatchSessionKey
+                let retainedHost = SettingsWindow.retainedHostIdentityForCheck
+
+                func pulseSettings(_ prefix: String) async {
+                    for index in 0..<6 {
+                        model.setMusixmatchSessionKey("\(prefix)-\(index)")
+                        await pause(0.06)
+                    }
+                }
+
+                BodyCount.reset()
+                BodyCount.isCounting = true
+                await pulseSettings("visible")
+                BodyCount.isCounting = false
+                check(
+                    "visible settings respond to observable changes",
+                    (BodyCount.counts["PreferencesWindow"] ?? 0) > 0)
+
+                settings.close()
+                await pause(0.2)
+                check(
+                    "closing settings detaches its retained view graph",
+                    !SettingsWindow.isContentAttachedForCheck)
+
+                BodyCount.reset()
+                BodyCount.isCounting = true
+                await pulseSettings("closed")
+                BodyCount.isCounting = false
+                let hiddenBodies = BodyCount.counts["PreferencesWindow"] ?? 0
+                note("closed settings: \(hiddenBodies) bodies for 6 observable changes")
+                check("closed settings redraw exactly zero times", hiddenBodies == 0)
+
+                BodyCount.reset()
+                BodyCount.isCounting = true
+                check("settings reopen after detaching", SettingsWindow.open(model: model))
+                await pulseSettings("reopened")
+                BodyCount.isCounting = false
+                check(
+                    "reopening keeps the same settings host and its local state",
+                    SettingsWindow.retainedHostIdentityForCheck == retainedHost)
+                check(
+                    "the retained settings graph resumes when reattached",
+                    (BodyCount.counts["PreferencesWindow"] ?? 0) > 0)
+
+                model.setMusixmatchSessionKey(originalKey)
+                PreferencesWindow.openWindow()?.close()
+                await pause(0.2)
+            } else {
+                settings.close()
+            }
             NSApp.windows.first { $0.title == "YunAudio" }?.makeKeyAndOrderFront(nil)
         }
 

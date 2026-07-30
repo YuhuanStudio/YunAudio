@@ -226,6 +226,8 @@ struct OnlineLyrics: Sendable {
     private struct WantedMatch: Sendable {
         let title: String
         let latinTitle: String
+        let fullTitle: String
+        let latinFullTitle: String
         let isBacking: Bool
         let artist: String
         let latinArtist: String
@@ -234,6 +236,8 @@ struct OnlineLyrics: Sendable {
         init(_ query: Query) {
             title = OnlineLyrics.canonicalTitle(query.title)
             latinTitle = OnlineLyrics.transliterated(title)
+            fullTitle = OnlineLyrics.normalised(query.title)
+            latinFullTitle = OnlineLyrics.transliterated(query.title)
             isBacking = OnlineLyrics.isBackingTitle(query.title)
             artist = OnlineLyrics.normalised(query.artist)
             latinArtist = OnlineLyrics.transliterated(query.artist)
@@ -312,15 +316,14 @@ struct OnlineLyrics: Sendable {
     /// A beta-session opt-in: the key is read once from the launch environment
     /// and never copied into preferences, cache names or diagnostic output.
     /// Relaunching without the variable returns to the four keyless providers.
-    static let live = OnlineLyrics(
-        musixmatch: liveMusixmatch(environment: ProcessInfo.processInfo.environment))
-
     static func liveMusixmatch(
         environment: [String: String]
     ) -> MusixmatchSubtitleAdapter? {
-        guard
-            let key = environment["MUSIXMATCH_API_KEY"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
+        musixmatchAdapter(apiKey: environment["MUSIXMATCH_API_KEY"])
+    }
+
+    static func musixmatchAdapter(apiKey: String?) -> MusixmatchSubtitleAdapter? {
+        guard let key = apiKey?.trimmingCharacters(in: .whitespacesAndNewlines),
             !key.isEmpty
         else { return nil }
         return MusixmatchSubtitleAdapter(apiKey: key) { request in
@@ -412,9 +415,12 @@ struct OnlineLyrics: Sendable {
 
     private func quality(of match: Match, wanted: WantedMatch) -> MatchQuality {
         let candidateTitle = Self.canonicalTitle(match.trackName)
+        let candidateFullTitle = Self.normalised(match.trackName)
         let exactTitle =
             candidateTitle == wanted.title
             || Self.transliterated(candidateTitle) == wanted.latinTitle
+            || candidateFullTitle == wanted.fullTitle
+            || Self.transliterated(match.trackName) == wanted.latinFullTitle
         let candidateArtist = Self.normalised(match.artistName)
         let exactArtist =
             wanted.artist.isEmpty || candidateArtist == wanted.artist
@@ -734,10 +740,13 @@ struct OnlineLyrics: Sendable {
         title: String, artist: String, duration: Double, wanted: WantedMatch
     ) -> Bool {
         let candidateTitle = Self.canonicalTitle(title)
+        let candidateFullTitle = Self.normalised(title)
         let candidateIsBacking = Self.isBackingTitle(title)
         let titleFits =
             candidateTitle == wanted.title
             || Self.transliterated(candidateTitle) == wanted.latinTitle
+            || candidateFullTitle == wanted.fullTitle
+            || Self.transliterated(title) == wanted.latinFullTitle
             || (min(candidateTitle.count, wanted.title.count) >= 4
                 && (candidateTitle.contains(wanted.title)
                     || wanted.title.contains(candidateTitle)))

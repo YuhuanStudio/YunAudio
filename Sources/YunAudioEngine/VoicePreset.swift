@@ -109,7 +109,10 @@ public enum VoicePreset: String, CaseIterable, Codable, Sendable, Identifiable {
     /// short of voice isolation.
     public func latencyFrames(sampleRate: Double) -> Int {
         var frames = 0
-        if formantPercent != 0 { frames += FormantShifter.windowSize }
+        if formantPercent != 0 {
+            frames +=
+                FormantShifter.configuration(sampleRate: sampleRate)?.latencyFrames ?? 0
+        }
         // The pitch unit's own latency is read from the unit when the chain is
         // built; this is the published figure for planning.
         if cents != 0 { frames += Int(sampleRate * 0.03) }

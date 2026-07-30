@@ -1,0 +1,3 @@
+"NSMicrophoneUsageDescription" = "YunAudio 会读取麦克风，并将信号传送到虚拟音频设备。";
+"NSAudioCaptureUsageDescription" = "YunAudio 可采集其他应用程序的音频，并混入音频路由。";
+"NSAppleEventsUsageDescription" = "YunAudio 会询问“音乐”和 Spotify 正在播放的内容，以同步显示歌词。";

@@ -134,6 +134,8 @@ struct OnlineLyricsTests {
         let adapter = OnlineLyrics.liveMusixmatch(
             environment: ["MUSIXMATCH_API_KEY": "session-token"])
         #expect(adapter?.isConfigured == true)
+        #expect(OnlineLyrics.musixmatchAdapter(apiKey: " session-token ")?.isConfigured == true)
+        #expect(OnlineLyrics.musixmatchAdapter(apiKey: " ") == nil)
         #expect(OnlineLyrics(musixmatch: adapter).isMusixmatchConfigured)
         #expect(!OnlineLyrics(musixmatch: nil).isMusixmatchConfigured)
     }
@@ -185,6 +187,55 @@ struct OnlineLyricsTests {
         #expect(match.parsed?.lines.count == 2)
         #expect(abs((match.parsed?.lines[0].time ?? 0) - 18.96) < 0.001)
         #expect(match.cacheExtension == "lrc")
+    }
+
+    @Test("Spotify punctuation still finds the exact QQ Music edition")
+    func qqEditionPunctuation() async throws {
+        let client = OnlineLyrics { request in
+            let url = try #require(request.url)
+            let body: String
+            let status: Int
+            switch (url.host, url.path) {
+            case ("c.y.qq.com", let path) where path.contains("client_search"):
+                body =
+                    """
+                    {"data":{"song":{"list":[{
+                      "songmid":"001KRONb1Gw4eo","songname":"慢冷 (深情版)",
+                      "albumname":"慢冷（深情版）","interval":231,
+                      "singer":[{"name":"en (王翊恩)"}]
+                    }]}}}
+                    """
+                status = 200
+            case ("c.y.qq.com", let path) where path.contains("lyric"):
+                body = #"{"lyric":"[00:12.00]第一句\n[00:18.00]第二句"}"#
+                status = 200
+            case ("lrclib.net", _):
+                body = "[]"
+                status = 200
+            case ("music.163.com", _):
+                body = #"{"result":{"songs":[]}}"#
+                status = 200
+            case ("api.lyrics.ovh", _):
+                body = "{}"
+                status = 404
+            default:
+                Issue.record("unexpected request \(url)")
+                body = "{}"
+                status = 500
+            }
+            return (Data(body.utf8), response(for: request, status: status))
+        }
+
+        let match = try #require(
+            try await client.fetch(
+                .init(
+                    title: "慢冷 - 深情版", artist: "en 王翊恩",
+                    album: "慢冷（深情版）", duration: 231)))
+
+        #expect(match.source == .qqMusic)
+        #expect(match.trackName == "慢冷 (深情版)")
+        #expect(match.artistName == "en (王翊恩)")
+        #expect(match.parsed?.lines.count == 2)
     }
 
     @Test("all four databases are started together")
@@ -439,8 +490,14 @@ struct OnlineLyricsTests {
                 of: "private static func lyricsIdentity",
                 range: start.upperBound..<source.endIndex))
         let implementation = source[start.lowerBound..<end.lowerBound]
-        #expect(implementation.contains("OnlineLyrics.live.fetch(query)"))
+        #expect(implementation.contains("let client = OnlineLyrics("))
+        #expect(implementation.contains("OnlineLyrics.musixmatchAdapter("))
+        #expect(implementation.contains("apiKey: musixmatchSessionKey"))
+        #expect(implementation.contains("client.fetch(query)"))
+        #expect(!implementation.contains("OnlineLyrics.live.fetch(query)"))
         #expect(!implementation.contains("let match = try await Task.detached"))
+        #expect(implementation.contains("OnlineLyrics.cacheAttributionURL(for: url)"))
+        #expect(implementation.contains("match.cacheAttribution"))
     }
 
     @Test("cache names identify the database and timing format")
@@ -498,6 +555,37 @@ struct OnlineLyricsTests {
         #expect(
             OnlineLyrics.cacheAttributionURL(for: lyricsURL).lastPathComponent
                 == "年少心動雨季.lrc.attribution.json")
+    }
+
+    @Test("the router restores only attribution matching the cached provider")
+    @MainActor
+    func routerRestoresCacheAttribution() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("YunAudio-attribution-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let query = OnlineLyrics.Query(
+            title: "年少心動雨季", artist: "黃霄雲",
+            album: "天賜的聲音", duration: 265)
+        let lyricsURL = OnlineLyrics.cacheURL(
+            for: query, source: .musixmatch, extension: "lrc", in: directory)
+        let sidecarURL = OnlineLyrics.cacheAttributionURL(for: lyricsURL)
+        let expected = OnlineLyrics.CacheAttribution(
+            provider: .musixmatch,
+            copyright: "Lyrics © Publisher",
+            region: "TW")
+        try OnlineLyrics.encodeCacheAttribution(expected)
+            .write(to: sidecarURL, options: .atomic)
+
+        #expect(RouterModel.cachedLyricsAttribution(for: lyricsURL) == expected)
+
+        let mismatched = OnlineLyrics.CacheAttribution(
+            provider: .qqMusic, copyright: "Wrong catalogue", region: "CN")
+        try OnlineLyrics.encodeCacheAttribution(mismatched)
+            .write(to: sidecarURL, options: .atomic)
+        #expect(RouterModel.cachedLyricsAttribution(for: lyricsURL) == nil)
     }
 
     @Test("untrusted attribution sidecars are bounded")
@@ -666,6 +754,100 @@ struct OnlineLyricsTests {
     }
 }
 
+@Suite("Session-only lyric provider key")
+struct SessionLyricKeyTests {
+    @Test("the launch default is trimmed, bounded and absent without an environment key")
+    @MainActor
+    func keyBoundary() {
+        #expect(RouterModel.initialMusixmatchSessionKey(environment: [:]).isEmpty)
+        #expect(
+            RouterModel.initialMusixmatchSessionKey(
+                environment: ["MUSIXMATCH_API_KEY": " session-token \n"])
+                == "session-token")
+
+        let oversized = String(
+            repeating: "k",
+            count: RouterModel.maximumMusixmatchSessionKeyLength + 50)
+        let bounded = RouterModel.boundedMusixmatchSessionKey(oversized)
+        #expect(bounded.count == RouterModel.maximumMusixmatchSessionKeyLength)
+    }
+
+    @Test("the secure setting is session-only and absent from persistence and diagnostics")
+    func sourceBoundary() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let router = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let persistStart = try #require(router.range(of: "private func persist()"))
+        let persistEnd = try #require(
+            router.range(
+                of: "// MARK: Devices",
+                range: persistStart.upperBound..<router.endIndex))
+        let persistence = router[persistStart.lowerBound..<persistEnd.lowerBound]
+        #expect(!persistence.contains("musixmatchSessionKey"))
+
+        let storedPreferences = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/Preferences.swift",
+            encoding: .utf8)
+        #expect(!storedPreferences.contains("musixmatchSessionKey"))
+
+        let preferencesWindow = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+        #expect(preferencesWindow.contains("loc(\"Official Musixmatch API key\")"))
+        #expect(preferencesWindow.contains("model.setMusixmatchSessionKey"))
+        #expect(preferencesWindow.contains("model.clearMusixmatchSessionKey()"))
+        #expect(preferencesWindow.contains("model.isMusixmatchSessionConfigured"))
+
+        let diagnosticsStart = try #require(
+            preferencesWindow.range(of: "private var diagnosticsSection"))
+        let diagnosticsEnd = try #require(
+            preferencesWindow.range(
+                of: "private var aboutSection",
+                range: diagnosticsStart.upperBound..<preferencesWindow.endIndex))
+        let diagnostics = preferencesWindow[
+            diagnosticsStart.lowerBound..<diagnosticsEnd.lowerBound]
+        #expect(!diagnostics.contains("musixmatchSessionKey"))
+    }
+
+    @Test("the session key never enters lyric cache names or sidecars")
+    func cacheBoundary() throws {
+        let secret = "session-secret-that-must-not-be-cached"
+        let directory = URL(fileURLWithPath: "/tmp/lyrics")
+        let query = OnlineLyrics.Query(
+            title: "年少心動雨季",
+            artist: "黃霄雲",
+            album: "天賜的聲音",
+            duration: 265)
+        let lyricsURL = OnlineLyrics.cacheURL(
+            for: query,
+            source: .musixmatch,
+            extension: "lrc",
+            in: directory)
+        let sidecar = try OnlineLyrics.encodeCacheAttribution(
+            .init(
+                provider: .musixmatch,
+                copyright: "Lyrics © Publisher",
+                region: "TW"))
+
+        #expect(!lyricsURL.absoluteString.contains(secret))
+        #expect(!String(decoding: sidecar, as: UTF8.self).contains(secret))
+
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/OnlineLyrics.swift",
+            encoding: .utf8)
+        let cacheStart = try #require(source.range(of: "static func cacheURL("))
+        let cacheEnd = try #require(
+            source.range(
+                of: "static func cachedSource(",
+                range: cacheStart.upperBound..<source.endIndex))
+        let cacheName = source[cacheStart.lowerBound..<cacheEnd.lowerBound]
+        #expect(!cacheName.contains("apiKey"))
+        #expect(!cacheName.contains("musixmatchSessionKey"))
+    }
+}
+
 @Suite("Hand-run lyric fallback")
 struct HandRunLyricsTests {
     @Test("a Chinese title and artist become a stopped, bounded manual track")
@@ -748,7 +930,8 @@ struct HandRunLyricsTests {
         #expect(source.contains("TextField(loc(\"Song title\")"))
         #expect(source.contains("TextField(loc(\"Artist (optional)\")"))
         #expect(source.contains("model.findWordsByTitle(handTitle, artist: handArtist)"))
-        #expect(source.contains("OnlineLyrics.live.isMusixmatchConfigured"))
+        #expect(source.contains("model.isMusixmatchSessionConfigured"))
+        #expect(!source.contains("OnlineLyrics.live.isMusixmatchConfigured"))
         #expect(
             source.contains(
                 "Searching LRCLIB, QQ Music, NetEase, lyrics.ovh and Musixmatch…"))
@@ -879,5 +1062,57 @@ struct MusicRecognitionTests {
             appleMusicURL: link)
 
         #expect(match.appleMusicURL == link)
+    }
+
+    @Test("an Apple Music destination remains optional on the now-playing track")
+    @MainActor
+    func catalogueLinkTrackRoundTrip() throws {
+        let link = try #require(
+            URL(string: "https://music.apple.com/tw/album/example/123?i=456"))
+        let linked = NowPlaying.Track(
+            application: "QQ Music",
+            title: "年少心動雨季",
+            artist: "黃霄雲",
+            album: "天賜的聲音",
+            position: 18.96,
+            duration: 265,
+            isPlaying: true,
+            appleMusicURL: link)
+        let unlinked = NowPlaying.Track(
+            application: "QQ Music",
+            title: "年少心動雨季",
+            artist: "黃霄雲",
+            album: "天賜的聲音",
+            position: 18.96,
+            duration: 265,
+            isPlaying: true)
+
+        #expect(linked.appleMusicURL == link)
+        #expect(unlinked.appleMusicURL == nil)
+    }
+
+    @Test("recognition maps the destination and the interface renders it conditionally")
+    func catalogueLinkMappingStructure() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let router = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let recognitionStart = try #require(
+            router.range(of: "private func receiveMusicRecognition("))
+        let recognitionEnd = try #require(
+            router.range(
+                of: "var nowPlayingProblem:",
+                range: recognitionStart.upperBound..<router.endIndex))
+        let recognition = router[
+            recognitionStart.lowerBound..<recognitionEnd.lowerBound]
+
+        #expect(recognition.contains("appleMusicURL: match.appleMusicURL"))
+
+        let panel = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
+            encoding: .utf8)
+        #expect(panel.contains("if let appleMusicURL = track.appleMusicURL"))
+        #expect(panel.contains("Button(loc(\"Open in Apple Music\"))"))
+        #expect(panel.contains("NSWorkspace.shared.open(appleMusicURL)"))
     }
 }

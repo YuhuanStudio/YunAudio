@@ -147,6 +147,22 @@ enum PanelRenderer {
                     height: tab == .sound ? 1900 : 1480))
         }
 
+        // Rendering the compact singing inspector drives its disappearance hook
+        // before the later tabs are built, which correctly clears the live
+        // singing state. Re-seed the fixture so the standalone stage is judged
+        // with the track, artwork and timed words it exists to display.
+        model.prepareForRendering()
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-content\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 1280))
+
         for section in PreferencesWindow.Section.allCases {
             render(
                 PreferencesWindow(model: model, initialSection: section, isRendering: true),

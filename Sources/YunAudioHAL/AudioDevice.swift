@@ -187,6 +187,26 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public var hasOutput: Bool { outputChannels > 0 }
 
     public init(id: AudioObjectID) throws {
+        try self.init(id: id, loadingBluetoothCapabilitiesFor: nil)
+    }
+
+    /// Builds an enumeration snapshot without waking an unrelated Bluetooth
+    /// plug-in for live timing capabilities.
+    ///
+    /// Identity and topology are still loaded for every endpoint so device
+    /// pickers can name it and put it on the correct side. Timing is different:
+    /// a Bluetooth plug-in can perform real endpoint work while answering its
+    /// nominal rate, available rates or clock domain. Merely opening YunAudio
+    /// must not do that to a headset the application is not using.
+    ///
+    /// A nil set means an explicit `AudioDevice(id:)` lookup and preserves that
+    /// public initialiser's complete snapshot. A non-nil set comes only from
+    /// whole-system enumeration and names the Bluetooth endpoints whose timing
+    /// the caller genuinely needs.
+    init(
+        id: AudioObjectID,
+        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String>?
+    ) throws {
         self.id = id
         uid = try id.string(of: .deviceUID)
         name = id.optionalString(of: .deviceName) ?? uid
@@ -195,15 +215,27 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         transport = AudioTransport(rawValue: id.optionalValue(of: .transportType))
         inputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeInput)
         outputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeOutput)
-        nominalSampleRate = id.optionalValue(of: .nominalSampleRate) ?? 0
+        let loadsTiming: Bool
+        if let selectedUIDs {
+            loadsTiming = AudioDevices.shouldLoadTimingCapabilities(
+                transport: transport, uid: uid, selectedUIDs: selectedUIDs)
+        } else {
+            loadsTiming = true
+        }
+        if loadsTiming {
+            nominalSampleRate = id.optionalValue(of: .nominalSampleRate) ?? 0
+            let ranges = (try? id.array(of: .availableNominalSampleRates)) ?? []
+            availableSampleRates = Self.expand(ranges)
 
-        let ranges = (try? id.array(of: .availableNominalSampleRates)) ?? []
-        availableSampleRates = Self.expand(ranges)
-
-        // A published domain of 0 means the device did not join a domain, so it
-        // is preserved as nil rather than being compared as a real value.
-        let domain = id.optionalValue(of: .clockDomain)
-        clockDomain = (domain == 0) ? nil : domain
+            // A published domain of 0 means the device did not join a domain, so it
+            // is preserved as nil rather than being compared as a real value.
+            let domain = id.optionalValue(of: .clockDomain)
+            clockDomain = (domain == 0) ? nil : domain
+        } else {
+            nominalSampleRate = 0
+            availableSampleRates = []
+            clockDomain = nil
+        }
     }
 
     /// Sums the channels across every buffer in the stream configuration for a
@@ -588,12 +620,60 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 // MARK: - Enumeration
 
 public enum AudioDevices {
-    public static func all() throws -> [AudioDevice] {
-        try AudioObjectID.system.array(of: .devices).compactMap { try? AudioDevice(id: $0) }
+    public static func all(
+        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String> = []
+    ) throws -> [AudioDevice] {
+        try AudioObjectID.system.array(of: .devices).compactMap {
+            try? AudioDevice(
+                id: $0, loadingBluetoothCapabilitiesFor: selectedUIDs)
+        }
+    }
+
+    /// Whether a whole-system enumeration should inspect live timing.
+    ///
+    /// Non-Bluetooth devices keep the complete historical snapshot. Bluetooth
+    /// timing is loaded only for an endpoint the caller named; everything else
+    /// still carries identity and topology but causes no rate/profile query.
+    static func shouldLoadTimingCapabilities(
+        transport: AudioTransport, uid: String, selectedUIDs: Set<String>
+    ) -> Bool {
+        !transport.isBluetooth || selectedUIDs.contains(uid)
     }
 
     public static func device(uid: String) throws -> AudioDevice? {
-        try all().first { $0.uid == uid }
+        // A UID already identifies one endpoint. Enumerating every endpoint to
+        // resolve it asks every plug-in for its stream topology, live nominal
+        // rate, available rates and clock domain. Besides making one lookup
+        // proportional to the whole machine, that needlessly wakes unrelated
+        // Bluetooth plug-ins during route start, clock setup and rate restore.
+        //
+        // CoreAudio provides this translation specifically so none of those
+        // other endpoints has to be inspected. A missing UID is reported as
+        // kAudioObjectUnknown rather than as an error.
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var outputSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        var qualifier = uid as CFString
+        let status = withUnsafePointer(to: &qualifier) { pointer in
+            AudioObjectGetPropertyData(
+                AudioObjectID.system, &address,
+                UInt32(MemoryLayout<CFString>.size), UnsafeRawPointer(pointer),
+                &outputSize, &deviceID)
+        }
+        guard status == noErr else {
+            throw AudioHALError.status(
+                status, selector: kAudioHardwarePropertyTranslateUIDToDevice,
+                object: AudioObjectID.system)
+        }
+        guard outputSize == UInt32(MemoryLayout<AudioObjectID>.size) else {
+            throw AudioHALError.unexpectedSize(
+                expected: MemoryLayout<AudioObjectID>.size, actual: Int(outputSize),
+                selector: kAudioHardwarePropertyTranslateUIDToDevice)
+        }
+        return deviceID == kAudioObjectUnknown ? nil : try AudioDevice(id: deviceID)
     }
 
     public static func defaultInput() throws -> AudioDevice? {

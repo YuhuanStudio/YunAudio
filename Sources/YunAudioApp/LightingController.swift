@@ -91,20 +91,23 @@ private final class LightingRenderWorker: @unchecked Sendable {
     private let deviceLock: NSLock
     private let state: LightingRenderState
     private let generation: Int
+    private let frameInterval: TimeInterval
 
     init(
         device: RazerDevice, deviceLock: NSLock, state: LightingRenderState,
-        generation: Int
+        generation: Int, frameInterval: TimeInterval
     ) {
         self.device = device
         self.deviceLock = deviceLock
         self.state = state
         self.generation = generation
+        self.frameInterval = frameInterval
     }
 
     func run() {
         var step = 0
         var frameGate = LightingFrameGate()
+        var retryBackoff = LightingRetryBackoff()
         // The ring's own smoothing. The meters fall at 20 dB a second, which is
         // right for reading a number and too fast for something in peripheral
         // vision — it reads as flicker.
@@ -125,18 +128,33 @@ private final class LightingRenderWorker: @unchecked Sendable {
                     (try? device.send(frame)) == .success
                 }
                 // A busy or failed request did not put these pixels on the
-                // hardware. Let the next tick retry even if the image itself
-                // is unchanged.
-                if !delivered { frameGate.invalidate() }
+                // hardware. Retry even if the image is unchanged, but not at
+                // video rate: a missing device otherwise makes 1,800 blocking
+                // HID requests a minute for ever.
+                if delivered {
+                    retryBackoff.succeeded()
+                } else {
+                    frameGate.invalidate()
+                }
             }
             step &+= 1
-            // A solid colour has no next frame. Ending the worker here removes
-            // thirty state locks, array builds and HID round trips a second
-            // until the colour or mode actually changes and `restart` sends a
-            // new one.
-            if snapshot.mode == .solid, delivered { return }
-            Thread.sleep(forTimeInterval: 1.0 / 30)
+            Thread.sleep(
+                forTimeInterval: delivered || !frameGate.isInvalidated
+                    ? frameInterval : retryBackoff.failed(frameInterval: frameInterval))
         }
+    }
+}
+
+/// Carries a discovered HID object back across the utility queue.
+///
+/// The controller remains the only owner that uses the object, and every use
+/// still goes through `deviceLock`. The box records that ownership boundary
+/// without claiming the third-party HID wrapper itself is generally Sendable.
+private final class LightingDiscoveryResult: @unchecked Sendable {
+    let device: RazerDevice?
+
+    init(device: RazerDevice?) {
+        self.device = device
     }
 }
 
@@ -148,15 +166,18 @@ private final class LightingRenderWorker: @unchecked Sendable {
 /// identical frames.
 struct LightingFrameGate {
     private var previous: [RazerRing.Colour]?
+    private(set) var isInvalidated = false
 
     mutating func shouldSend(_ colours: [RazerRing.Colour]) -> Bool {
         if let previous, Self.equal(previous, colours) { return false }
         previous = colours
+        isInvalidated = false
         return true
     }
 
     mutating func invalidate() {
         previous = nil
+        isInvalidated = true
     }
 
     private static func equal(
@@ -166,6 +187,27 @@ struct LightingFrameGate {
         return zip(lhs, rhs).allSatisfy { pair in
             pair.0.r == pair.1.r && pair.0.g == pair.1.g && pair.0.b == pair.1.b
         }
+    }
+}
+
+/// Backs a failed HID device away without making recovery a manual operation.
+///
+/// A successful frame resets the delay immediately. A disconnected device
+/// therefore gets at most a handful of probes per minute once the cap is
+/// reached, while plugging it back in resumes the normal frame cadence on the
+/// first successful probe.
+struct LightingRetryBackoff {
+    static let maximumDelay: TimeInterval = 8
+    private var consecutiveFailures = 0
+
+    mutating func failed(frameInterval: TimeInterval) -> TimeInterval {
+        let exponent = min(consecutiveFailures, 30)
+        consecutiveFailures &+= 1
+        return min(Self.maximumDelay, frameInterval * pow(2, Double(exponent)))
+    }
+
+    mutating func succeeded() {
+        consecutiveFailures = 0
     }
 }
 
@@ -211,6 +253,10 @@ final class LightingController {
     private var device: RazerDevice?
     private var thread: Thread?
     private let renderState = LightingRenderState()
+    private var isSignalActive = false
+    @ObservationIgnored private var discoveryGate = LatestRefreshGate()
+    private static let discoveryQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.lighting-discovery", qos: .utility)
 
     /// One owner of the device at a time.
     ///
@@ -221,17 +267,73 @@ final class LightingController {
     /// millisecond, and nothing here is realtime.
     private let deviceLock = NSLock()
 
-    init() { refreshDevice() }
+    init() {}
 
+    /// Performs an explicit, deterministic rescan for the settings action.
     func refreshDevice() {
-        device = RazerDevice.discover().first
-        isAvailable = device != nil
+        discoveryGate.invalidate()
+        applyDiscoveredDevice(RazerDevice.discover().first)
+    }
+
+    /// Discovers the optional HID device without delaying the application's
+    /// first MainActor frame.
+    func refreshDeviceAsynchronously() {
+        guard let token = discoveryGate.request() else { return }
+        runDeviceDiscovery(token)
+    }
+
+    private func runDeviceDiscovery(_ token: LatestRefreshGate.Token) {
+        Self.discoveryQueue.async {
+            let result = LightingDiscoveryResult(device: RazerDevice.discover().first)
+            Task { @MainActor in
+                self.finishDeviceDiscovery(result, token: token)
+            }
+        }
+    }
+
+    private func finishDeviceDiscovery(
+        _ result: LightingDiscoveryResult, token: LatestRefreshGate.Token
+    ) {
+        guard discoveryGate.accepts(token) else { return }
+        applyDiscoveredDevice(result.device)
+        if case .start(let next) = discoveryGate.finish(token) {
+            runDeviceDiscovery(next)
+        }
+    }
+
+    /// Publishes only an already-discovered object on the MainActor.
+    private func applyDiscoveredDevice(_ discoveredDevice: RazerDevice?) {
+        renderState.advanceGeneration()
+        thread = nil
+        deviceLock.withLock {
+            device = discoveredDevice
+        }
+        let available = discoveredDevice != nil
+        if isAvailable != available { isAvailable = available }
+        if available {
+            restart()
+        } else {
+            lastError = nil
+        }
     }
 
     /// Called from the router's poll, so the ring follows the same numbers the
     /// meters do.
     func update(level: Float, isMuted: Bool) {
         renderState.update(level: level, isMuted: isMuted)
+    }
+
+    /// Starts or withdraws the live signal that animated modes represent.
+    ///
+    /// Level has no honest frame without a route, and spectrum has no audio to
+    /// accompany its animation. A held solid colour needs no worker at all.
+    func setSignalActive(_ isActive: Bool) {
+        guard isSignalActive != isActive else { return }
+        isSignalActive = isActive
+        if !isActive {
+            renderState.update(level: 0, isMuted: false)
+        }
+        if mode == .level || mode == .spectrum { restart() }
     }
 
     func stop() {
@@ -246,7 +348,9 @@ final class LightingController {
     }
 
     private func applyBrightness() {
-        guard let device, mode != .off else { return }
+        guard let device,
+            Self.shouldApplyBrightness(mode: mode, isSignalActive: isSignalActive)
+        else { return }
         deviceLock.lock()
         defer { deviceLock.unlock() }
         _ = try? device.send(RazerLightingCommand.brightness(brightness))
@@ -264,6 +368,32 @@ final class LightingController {
             _ = try? device.send(RazerLightingCommand.brightness(0))
             return
         }
+        if mode == .solid {
+            do {
+                _ = try device.send(RazerLightingCommand.streamMode())
+                _ = try device.send(RazerLightingCommand.brightness(brightness))
+                _ = try device.send(
+                    RazerLightingCommand.frame(
+                        Self.frame(
+                            mode: mode, colour: colour, level: 0,
+                            isMuted: false, step: 0),
+                        transactionID: 0))
+                lastError = nil
+            } catch {
+                lastError = String(describing: error)
+            }
+            return
+        }
+        guard
+            let frameInterval = Self.workerInterval(
+                mode: mode, isSignalActive: isSignalActive
+            )
+        else {
+            // Animated modes with no route are absence of signal, not the last
+            // frame that happened to arrive before Stop.
+            _ = try? device.send(RazerLightingCommand.brightness(0))
+            return
+        }
 
         do {
             _ = try device.send(RazerLightingCommand.streamMode())
@@ -276,7 +406,7 @@ final class LightingController {
 
         let worker = LightingRenderWorker(
             device: device, deviceLock: deviceLock, state: renderState,
-            generation: generation)
+            generation: generation, frameInterval: frameInterval)
         let thread = Thread { worker.run() }
         thread.name = "com.yuhuanstudio.yunaudio.lighting"
         // Below the audio threads and above nothing: a late frame is a late
@@ -284,6 +414,24 @@ final class LightingController {
         thread.qualityOfService = .utility
         thread.start()
         self.thread = thread
+    }
+
+    /// Nil means no render thread and therefore exactly zero background loops.
+    nonisolated static func workerInterval(
+        mode: LightingMode, isSignalActive: Bool
+    ) -> TimeInterval? {
+        guard isSignalActive else { return nil }
+        return switch mode {
+        case .level, .spectrum: 1.0 / 30
+        case .off, .solid: nil
+        }
+    }
+
+    /// Animated modes must not relight their last frame after routing stopped.
+    nonisolated static func shouldApplyBrightness(
+        mode: LightingMode, isSignalActive: Bool
+    ) -> Bool {
+        mode == .solid || isSignalActive && (mode == .level || mode == .spectrum)
     }
 
     /// The frame the device is currently holding, read back off it.

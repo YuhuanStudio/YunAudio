@@ -1,0 +1,3 @@
+"NSMicrophoneUsageDescription" = "YunAudio reads your microphone so it can forward the signal to its virtual audio device.";
+"NSAudioCaptureUsageDescription" = "YunAudio can capture audio from other applications so it can be mixed into a route.";
+"NSAppleEventsUsageDescription" = "YunAudio asks Music and Spotify what is playing, so it can show the words in time with it.";

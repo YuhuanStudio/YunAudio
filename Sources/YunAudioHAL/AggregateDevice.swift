@@ -1,6 +1,36 @@
 import CoreAudio
 import Foundation
 
+/// Builds one immutable snapshot at most once, including a failed optional one.
+///
+/// `lazy` properties do not promise thread-safe initialisation. Aggregate state
+/// is read by the engine queue, recording controls and clock reporting, so two
+/// first readers can legitimately arrive together. Holding the lock through
+/// construction makes one of them pay for HAL and lets every other reader reuse
+/// the same answer.
+final class ExactlyOnceSnapshot<Value>: @unchecked Sendable {
+    private enum State {
+        case empty
+        case value(Value)
+    }
+
+    private let lock = NSLock()
+    private var state = State.empty
+
+    func get(_ build: () -> Value) -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        switch state {
+        case .empty:
+            let value = build()
+            state = .value(value)
+            return value
+        case .value(let value):
+            return value
+        }
+    }
+}
+
 /// A private aggregate device assembled at runtime.
 ///
 /// This is the whole reason the router works. `AVAudioEngine` drives a single
@@ -89,6 +119,7 @@ public final class AggregateDevice {
     public let taps: [ProcessTap]
 
     private var isDestroyed = false
+    private let deviceSnapshot = ExactlyOnceSnapshot<AudioDevice?>()
 
     /// Builds the aggregate.
     ///
@@ -213,7 +244,18 @@ public final class AggregateDevice {
 
     // MARK: Configuration
 
-    public var device: AudioDevice? { try? AudioDevice(id: id) }
+    /// The aggregate's immutable identity and channel topology.
+    ///
+    /// Constructing `AudioDevice` is not a struct copy: it asks HAL for the
+    /// identity, transport, both stream configurations, available rates and
+    /// clock domain. `pathQuality` used to reconstruct all of that twice a
+    /// second. The aggregate cannot change members during its lifetime, so one
+    /// snapshot is the honest answer. Live properties remain live:
+    /// `currentSampleRate`, `currentBufferFrameSize` and `alters` still query
+    /// their AudioObject every time they are read.
+    public var device: AudioDevice? {
+        deviceSnapshot.get { try? AudioDevice(id: id) }
+    }
 
     /// Aligns every member to one rate before the aggregate starts, returning
     /// what each device was set to beforehand.
@@ -229,12 +271,36 @@ public final class AggregateDevice {
         _ rate: Double, across devices: [AudioDevice]
     ) throws -> [String: Double] {
         var previous: [String: Double] = [:]
-        for device in devices {
-            guard let current = device.currentSampleRate, current != rate else { continue }
-            previous[device.uid] = current
-            try device.setNominalSampleRate(rate)
+        do {
+            for device in devices {
+                guard let current = device.currentSampleRate, current != rate else { continue }
+                previous[device.uid] = current
+                let arrived = try device.setNominalSampleRate(rate)
+                try requireSampleRateArrival(arrived, uid: device.uid, rate: rate)
+            }
+        } catch {
+            // This function has not returned the originals to its caller yet.
+            // Put back every earlier member here, or a late failure leaves a
+            // successfully changed microphone at a rate nobody chose and gives
+            // the caller no record with which to restore it.
+            for device in devices {
+                guard let original = previous[device.uid] else { continue }
+                _ = try? device.setNominalSampleRate(original)
+            }
+            throw error
         }
         return previous
+    }
+
+    /// Turns the asynchronous setter's timeout into an actionable start error.
+    ///
+    /// Separate so the decision can be asserted without changing real hardware.
+    /// Continuing would configure every frequency- and time-dependent DSP stage
+    /// for a rate the samples are not actually using.
+    static func requireSampleRateArrival(
+        _ arrived: Bool, uid: String, rate: Double
+    ) throws {
+        guard arrived else { throw AggregateError.sampleRateDidNotSet(uid, rate) }
     }
 
     /// Puts sample rates back the way `alignSampleRate` found them.
@@ -282,6 +348,7 @@ public enum AggregateError: Error, CustomStringConvertible {
     case noSubDevices
     case clockMasterNotAMember(String)
     case creationFailed(OSStatus)
+    case sampleRateDidNotSet(String, Double)
 
     public var description: String {
         switch self {
@@ -291,6 +358,8 @@ public enum AggregateError: Error, CustomStringConvertible {
             "clock master \(uid) is not among the sub-devices"
         case let .creationFailed(status):
             "AudioHardwareCreateAggregateDevice failed with \(fourCharDescription(status))"
+        case let .sampleRateDidNotSet(uid, rate):
+            "\(uid) did not reach \(rate) Hz before the sample-rate deadline"
         }
     }
 }

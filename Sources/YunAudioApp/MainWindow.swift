@@ -112,21 +112,10 @@ struct MainWindow: View {
             HStack(alignment: .top, spacing: Yun.Space.lg) {
                 sources
                     .frame(width: 268)
-                if model.inspectorTab == .singing {
-                    // Singing is a workspace, not a property inspector. At
-                    // 292 points the cover, three lyric lines, pitch lane and
-                    // duet score all fought for the same narrow strip while
-                    // the patchbay kept most of the window. Give the activity
-                    // somebody selected the stage until they choose another
-                    // inspector tab.
-                    singingWorkspace
-                        .frame(maxWidth: .infinity)
-                } else {
-                    mixer
-                        .frame(maxWidth: .infinity)
-                    inspector
-                        .frame(width: 292)
-                }
+                mixer
+                    .frame(maxWidth: .infinity)
+                inspector
+                    .frame(width: 292)
             }
             .padding(.horizontal, Yun.Space.xl)
             .padding(.bottom, Yun.Space.lg)
@@ -296,6 +285,14 @@ struct MainWindow: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .help(error)
+            }
+            if PermissionCentre.shared.systemAudio == .needsRequest
+                || PermissionCentre.shared.microphone == .needsRequest
+            {
+                Button(loc("Review permissions")) {
+                    SettingsWindow.open(model: model, initialSection: .permissions)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
 
             // The Settings scene accepted both its responder action and its
@@ -1156,15 +1153,6 @@ struct MainWindow: View {
             wraps: true)
     }
 
-    private var singingWorkspace: some View {
-        column {
-            VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                inspectorPicker
-                singingTab
-            }
-        }
-    }
-
     /// Three regions rather than one column of eleven switches.
     ///
     /// The stages were listed in the order the enum happened to declare them,
@@ -1387,10 +1375,22 @@ struct MainWindow: View {
     private var singingTab: some View {
         Group {
             sectionHeading(loc("Sing"))
-            YunCard { SingingPanel(model: model) }
+            Button {
+                KTVWindow.open(model: model)
+            } label: {
+                Label(loc("Open KTV window"), systemImage: "rectangle.inset.filled")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(YunButtonStyle(.primary, small: true))
+            .accessibilityIdentifier("OpenKTV")
+            YunCard(padding: 0) { SingingPanel(model: model) }
         }
         .onAppear { model.isSingingVisible = true }
-        .onDisappear { model.isSingingVisible = false }
+        .onDisappear {
+            if !KTVWindow.isVisible {
+                model.isSingingVisible = false
+            }
+        }
     }
 
     /// The script that stays loaded.

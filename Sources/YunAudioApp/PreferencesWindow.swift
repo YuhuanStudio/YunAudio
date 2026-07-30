@@ -5,6 +5,49 @@ import YunAudioEngine
 import YunAudioHAL
 import YunDesign
 
+enum PreferencesSection: String, CaseIterable, Identifiable {
+    case general, appearance, audio, permissions, shortcuts, midi, streaming, diagnostics, about
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .general: loc("General")
+        case .appearance: loc("Appearance")
+        case .audio: loc("Audio")
+        case .permissions: loc("Permissions")
+        case .shortcuts: loc("Shortcuts")
+        case .midi: loc("MIDI control")
+        case .streaming: loc("Streaming")
+        case .diagnostics: loc("Diagnostics")
+        case .about: loc("About")
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "gearshape"
+        case .appearance: "paintpalette"
+        case .audio: "waveform"
+        case .permissions: "hand.raised"
+        case .shortcuts: "command"
+        case .midi: "pianokeys"
+        case .streaming: "dot.radiowaves.left.and.right"
+        case .diagnostics: "waveform.path.ecg"
+        case .about: "info.circle"
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class SettingsNavigation {
+    var selection: PreferencesSection
+
+    init(selection: PreferencesSection = .general) {
+        self.selection = selection
+    }
+}
+
 /// Owns the settings window instead of relying on the Settings scene responder.
 ///
 /// Both `showSettingsWindow:` and `SettingsLink` were measured accepting their
@@ -14,15 +57,38 @@ import YunDesign
 @MainActor
 enum SettingsWindow {
     private static var controller: NSWindowController?
+    /// Retained separately from the window so closing can detach the view graph
+    /// without throwing away the sidebar selection and other local view state.
+    private static var host: NSViewController?
+    private static var delegate: Delegate?
+    private static let navigation = SettingsNavigation()
 
     @discardableResult
-    static func open(model: RouterModel) -> Bool {
+    static func open(
+        model: RouterModel, initialSection: PreferencesSection? = nil
+    ) -> Bool {
+        if let initialSection {
+            navigation.selection = initialSection
+        }
         let controller = controller ?? makeController(model: model)
         self.controller = controller
+        if controller.window?.contentViewController == nil {
+            controller.window?.contentViewController = host
+        }
         NSApp.activate(ignoringOtherApps: true)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
         return controller.window?.isVisible == true
+    }
+
+    /// Identity used by the flow check to prove reopening retains view state.
+    static var retainedHostIdentityForCheck: ObjectIdentifier? {
+        host.map(ObjectIdentifier.init)
+    }
+
+    /// Whether the retained graph is currently allowed to receive observations.
+    static var isContentAttachedForCheck: Bool {
+        controller?.window?.contentViewController === host && host != nil
     }
 
     private static func makeController(model: RouterModel) -> NSWindowController {
@@ -31,12 +97,27 @@ enum SettingsWindow {
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false)
+        let host = NSHostingController(
+            rootView: PreferencesWindow(model: model, navigation: navigation))
+        let delegate = Delegate()
+        self.host = host
+        self.delegate = delegate
+        window.delegate = delegate
         window.title = loc("Settings")
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: PreferencesWindow(model: model))
+        window.contentViewController = host
         window.setFrameAutosaveName("YunAudioSettingsWindow")
         window.center()
         return NSWindowController(window: window)
+    }
+
+    private final class Delegate: NSObject, NSWindowDelegate {
+        func windowWillClose(_ notification: Notification) {
+            // An ordered-out hosting view can continue evaluating observations.
+            // Keep the controller, which owns @State, but remove its graph from
+            // the closed window exactly as the menu-bar panel does.
+            (notification.object as? NSWindow)?.contentViewController = nil
+        }
     }
 }
 
@@ -46,11 +127,14 @@ enum SettingsWindow {
 /// what you change during a session, and this is for what you set once. Mixing
 /// them made the panel tall enough to matter on a laptop screen.
 struct PreferencesWindow: View {
+    typealias Section = PreferencesSection
+
     @Bindable var model: RouterModel
     /// The design system's own settings — language, appearance and accent —
     /// which are not the router's state and outlive any particular model.
     @Bindable private var theme = YunTheme.shared
-    @State private var selection: Section
+    @Bindable private var navigation: SettingsNavigation
+    @Bindable private var permissions = PermissionCentre.shared
     /// Mirrored rather than read through a computed binding: the activation
     /// policy lives on `NSApp`, nothing observes it, and a switch bound
     /// straight to it would not move when clicked.
@@ -63,44 +147,18 @@ struct PreferencesWindow: View {
     /// come out as an empty pane unless the scrolling is taken out of the way.
     private let isRendering: Bool
 
-    init(model: RouterModel, initialSection: Section = .general, isRendering: Bool = false) {
+    init(
+        model: RouterModel, initialSection: Section = .general,
+        isRendering: Bool = false, navigation: SettingsNavigation? = nil
+    ) {
         self.model = model
         self.isRendering = isRendering
-        _selection = State(initialValue: initialSection)
-    }
-
-    enum Section: String, CaseIterable, Identifiable {
-        case general, appearance, audio, shortcuts, midi, streaming, diagnostics, about
-        var id: String { rawValue }
-
-        var title: String {
-            switch self {
-            case .general: loc("General")
-            case .appearance: loc("Appearance")
-            case .audio: loc("Audio")
-            case .shortcuts: loc("Shortcuts")
-            case .midi: loc("MIDI control")
-            case .streaming: loc("Streaming")
-            case .diagnostics: loc("Diagnostics")
-            case .about: loc("About")
-            }
-        }
-
-        var symbol: String {
-            switch self {
-            case .general: "gearshape"
-            case .appearance: "paintpalette"
-            case .audio: "waveform"
-            case .shortcuts: "command"
-            case .midi: "pianokeys"
-            case .streaming: "dot.radiowaves.left.and.right"
-            case .diagnostics: "waveform.path.ecg"
-            case .about: "info.circle"
-            }
-        }
+        _navigation = Bindable(
+            wrappedValue: navigation ?? SettingsNavigation(selection: initialSection))
     }
 
     var body: some View {
+        let _ = BodyCount.tick("PreferencesWindow")
         HStack(spacing: 0) {
             sidebar
             Rectangle()
@@ -161,7 +219,7 @@ struct PreferencesWindow: View {
         VStack(alignment: .leading, spacing: 2) {
             ForEach(Section.allCases) { section in
                 Button {
-                    selection = section
+                    navigation.selection = section
                 } label: {
                     HStack(spacing: Yun.Space.sm) {
                         Image(systemName: section.symbol)
@@ -172,13 +230,13 @@ struct PreferencesWindow: View {
                         Spacer(minLength: 0)
                     }
                     .foregroundStyle(
-                        selection == section
+                        navigation.selection == section
                             ? Yun.Palette.textPrimary : Yun.Palette.textSecondary
                     )
                     .padding(.horizontal, Yun.Space.sm)
                     .padding(.vertical, 6)
                     .background(
-                        selection == section ? Yun.Palette.accentSubtle : .clear,
+                        navigation.selection == section ? Yun.Palette.accentSubtle : .clear,
                         in: .rect(cornerRadius: Yun.Radius.control)
                     )
                     .contentShape(.rect(cornerRadius: Yun.Radius.control))
@@ -194,10 +252,11 @@ struct PreferencesWindow: View {
 
     @ViewBuilder
     private var content: some View {
-        switch selection {
+        switch navigation.selection {
         case .general: generalSection
         case .appearance: appearanceSection
         case .audio: audioSection
+        case .permissions: permissionsSection
         case .shortcuts: shortcutsSection
         case .midi: midiSection
         case .streaming: streamingSection
@@ -224,6 +283,52 @@ struct PreferencesWindow: View {
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            heading(loc("Lyric sources"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    HStack(spacing: Yun.Space.sm) {
+                        Text(loc("Musixmatch"))
+                            .font(Yun.Text.body)
+                            .foregroundStyle(Yun.Palette.textPrimary)
+                        Spacer()
+                        YunBadge(
+                            model.isMusixmatchSessionConfigured
+                                ? loc("Configured for this session")
+                                : loc("Not configured"))
+                    }
+                    if isRendering {
+                        YunDetailRow(
+                            loc("Official Musixmatch API key"),
+                            value: model.isMusixmatchSessionConfigured
+                                ? loc("Configured") : loc("Not configured"))
+                    } else {
+                        SecureField(
+                            loc("Official Musixmatch API key"),
+                            text: Binding(
+                                get: { model.musixmatchSessionKey },
+                                set: { model.setMusixmatchSessionKey($0) })
+                        )
+                        .textFieldStyle(.roundedBorder)
+                    }
+                    HStack(alignment: .center, spacing: Yun.Space.sm) {
+                        Text(
+                            loc(
+                                "Use an official Musixmatch API key to add its catalogue to lyric searches. The key stays only for this run of YunAudio and is never written to preferences, caches or diagnostics."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: Yun.Space.sm)
+                        Button(loc("Clear key")) {
+                            model.clearMusixmatchSessionKey()
+                        }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                        .disabled(!model.isMusixmatchSessionConfigured)
+                    }
                 }
             }
 
@@ -262,7 +367,6 @@ struct PreferencesWindow: View {
                             })
                     )
                     .toggleStyle(YunToggleStyle())
-                    .disabled(model.isDebugBuild)
                     Text(
                         loc(
                             "Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it."
@@ -543,6 +647,110 @@ struct PreferencesWindow: View {
         return Double(model.bufferFrames) / rate * 1000
     }
 
+    // MARK: Permissions
+
+    private var permissionsSection: some View {
+        VStack(alignment: .leading, spacing: Yun.Space.lg) {
+            heading(loc("Audio access"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    permissionRow(
+                        title: loc("Microphone"),
+                        detail: loc(
+                            "Used only when you start a route whose source is a microphone."
+                        ),
+                        state: permissions.microphone,
+                        requestKey: "microphone",
+                        request: { permissions.requestMicrophone() },
+                        destination: .microphone)
+                    YunDivider()
+                    permissionRow(
+                        title: loc("System audio"),
+                        detail: loc(
+                            "Used when a selected application is captured or supplies echo cancellation's far-end reference. macOS provides no passive status check, so YunAudio does not create a tap merely to inspect it."
+                        ),
+                        state: permissions.systemAudio,
+                        requestKey: "system-audio",
+                        request: { permissions.requestSystemAudio() },
+                        destination: .systemAudio)
+                }
+            }
+
+            heading(loc("Music player Automation"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    if NowPlaying.installedAutomationTargets.isEmpty {
+                        Text(loc("Music and Spotify are not installed."))
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                    } else {
+                        ForEach(
+                            Array(NowPlaying.installedAutomationTargets.enumerated()),
+                            id: \.element.id
+                        ) { index, target in
+                            if index > 0 { YunDivider() }
+                            permissionRow(
+                                title: target.name,
+                                detail: loc(
+                                    "Reads the current song and playback position for synchronised lyrics."
+                                ),
+                                state: permissions.automationState(for: target.bundleID),
+                                requestKey: target.bundleID,
+                                request: {
+                                    permissions.requestAutomation(for: target.bundleID)
+                                },
+                                destination: .automation)
+                        }
+                    }
+                }
+            }
+
+            Text(
+                loc(
+                    "Opening YunAudio never requests microphone or system-audio access. Those requests occur only from the buttons above or when you explicitly start the feature that needs them."
+                )
+            )
+            .font(Yun.Text.caption)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .onAppear { permissions.refreshSafeStatuses() }
+    }
+
+    private func permissionRow(
+        title: String, detail: String, state: PermissionCentre.State,
+        requestKey: String, request: @escaping () -> Void,
+        destination: PermissionCentre.Destination
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            HStack(spacing: Yun.Space.sm) {
+                Text(title)
+                    .font(Yun.Text.body)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                Spacer()
+                YunBadge(state.title)
+                if state != .allowed {
+                    Button(loc("Request access")) {
+                        request()
+                    }
+                    .buttonStyle(YunButtonStyle(.primary, small: true))
+                    .disabled(permissions.requestInFlight.contains(requestKey))
+                }
+            }
+            HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+                Text(detail)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: Yun.Space.sm)
+                Button(loc("Open System Settings")) {
+                    permissions.openSettings(destination)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+        }
+    }
+
     // MARK: Shortcuts
 
     private var shortcutsSection: some View {
@@ -700,6 +908,8 @@ struct PreferencesWindow: View {
             .foregroundStyle(Yun.Palette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
         }
+        .onAppear { model.midiControl.diagnosticsAreVisible = true }
+        .onDisappear { model.midiControl.diagnosticsAreVisible = false }
     }
 
     /// One row: what it drives, what it is bound to, and the two buttons.
@@ -957,6 +1167,7 @@ struct PreferencesWindow: View {
                         isOn: $model.watchesIOAllocations
                     )
                     .toggleStyle(YunToggleStyle())
+                    .disabled(model.isDebugBuild)
                     Text(
                         loc(
                             "The hook sits in front of every allocation the whole process makes, so it is a measurement to switch on rather than leave running."

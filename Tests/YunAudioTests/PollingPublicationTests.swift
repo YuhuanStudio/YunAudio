@@ -107,6 +107,71 @@ struct PollingPublicationTests {
                 incoming: Optional<Float>.some(0)))
     }
 
+    @Test("continuous peaks publish one discrete output verdict")
+    func outputVerdictPublishesOnlyAtBoundaries() {
+        let polls = 20 * 60
+        let goodPeaks: [Float] = [0.08, 0.12, 0.16, 0.20]
+        var peak: Float = 0
+        var verdict = RouterModel.OutputVerdict.silent
+        var peakPublications = 0
+        var verdictPublications = 0
+
+        for poll in 0..<polls {
+            let incoming = goodPeaks[poll % goodPeaks.count]
+            if RouterModel.shouldPublish(current: peak, incoming: incoming) {
+                peak = incoming
+                peakPublications += 1
+            }
+            let incomingVerdict = RouterModel.classifyOutput(
+                peak: incoming, clippedSamples: 0)
+            if RouterModel.shouldPublish(
+                current: verdict,
+                incoming: incomingVerdict)
+            {
+                verdict = incomingVerdict
+                verdictPublications += 1
+            }
+        }
+
+        print(
+            "moving output peak: \(peakPublications) peak publications, "
+                + "\(verdictPublications) status verdict publication in one minute")
+        #expect(peakPublications == polls)
+        #expect(verdictPublications == 1)
+        #expect(verdict == .good)
+    }
+
+    @Test("the output verdict preserves every level and latch boundary")
+    func outputVerdictBoundaries() {
+        func peak(at decibels: Float) -> Float {
+            pow(10, decibels / 20)
+        }
+
+        #expect(RouterModel.classifyOutput(peak: 0, clippedSamples: 0) == .silent)
+        #expect(
+            RouterModel.classifyOutput(
+                peak: peak(at: -40), clippedSamples: 0)
+                == .veryQuiet)
+        #expect(
+            RouterModel.classifyOutput(
+                peak: peak(at: -30), clippedSamples: 0)
+                == .quiet)
+        #expect(
+            RouterModel.classifyOutput(
+                peak: peak(at: -12), clippedSamples: 0)
+                == .good)
+        #expect(
+            RouterModel.classifyOutput(
+                peak: peak(at: -2), clippedSamples: 0)
+                == .hot)
+        #expect(RouterModel.classifyOutput(peak: 1, clippedSamples: 0) == .clipping)
+        #expect(
+            RouterModel.classifyOutput(
+                peak: peak(at: -40), clippedSamples: 1)
+                == .clipping)
+        #expect(RouterModel.classifyOutput(peak: .nan, clippedSamples: 0) == .silent)
+    }
+
     @Test("meter ballistics retain their rise and decay")
     func meterBallisticsAreNumericallyUnchanged() {
         #expect(RouterModel.nextPeakHold(previous: 0, incoming: 0) == 0)
@@ -120,6 +185,47 @@ struct PollingPublicationTests {
         #expect(
             abs(RouterModel.nextGainReduction(previous: 8, incoming: 2) - 6.92)
                 < 0.000_001)
+    }
+
+    @Test("meter releases become an exact stable zero after an impulse")
+    func meterReleaseStopsPublishing() {
+        var peak: Float = 1
+        var reduction: Float = 8
+        var peakSettlePolls = 0
+        var reductionSettlePolls = 0
+
+        while peak != 0, peakSettlePolls < 20 * 60 {
+            peak = RouterModel.nextPeakHold(previous: peak, incoming: 0)
+            peakSettlePolls += 1
+        }
+        while reduction != 0, reductionSettlePolls < 20 * 60 {
+            reduction = RouterModel.nextGainReduction(
+                previous: reduction,
+                incoming: 0)
+            reductionSettlePolls += 1
+        }
+
+        var publications = 0
+        for _ in 0..<(20 * 60) {
+            let nextPeak = RouterModel.nextPeakHold(previous: peak, incoming: 0)
+            let nextReduction = RouterModel.nextGainReduction(
+                previous: reduction,
+                incoming: 0)
+            publications += nextPeak == peak ? 0 : 1
+            publications += nextReduction == reduction ? 0 : 1
+            peak = nextPeak
+            reduction = nextReduction
+        }
+
+        print(
+            "meter impulse settled after \(peakSettlePolls) peak polls and "
+                + "\(reductionSettlePolls) reduction polls; "
+                + "\(publications) publications in the following minute")
+        #expect(peakSettlePolls < 20 * 60)
+        #expect(reductionSettlePolls < 20 * 60)
+        #expect(peak == 0)
+        #expect(reduction == 0)
+        #expect(publications == 0)
     }
 
     @Test("every high-frequency observable write uses the publication gate")
@@ -142,6 +248,7 @@ struct PollingPublicationTests {
             "to: \\.gainReduction)",
             "publish(analyser.reading(), to: \\.analysis)",
             "publish(offset, to: \\.autoLevelOffset)",
+            "to: \\.outputVerdict)",
         ] {
             #expect(source.contains(statement), "missing publication gate: \(statement)")
         }

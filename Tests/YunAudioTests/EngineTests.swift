@@ -4,6 +4,7 @@ import Testing
 import YunAudioRT
 
 @testable import YunAudioEngine
+@testable import YunAudioHAL
 
 // MARK: - Self-test signal
 
@@ -44,6 +45,107 @@ struct SelftestSignalTests {
         // 24 bits of range over 20k samples: a handful of collisions is
         // expected by the birthday bound, a short period is not.
         #expect(seen.count > 19900)
+    }
+}
+
+// MARK: - Negotiated graph timing
+
+@Suite("Negotiated graph timing")
+struct NegotiatedGraphTimingTests {
+    @Test("actual rate and slice size are the graph's only timing")
+    func actualTimingWins() throws {
+        let timing = try #require(
+            RoutingEngine.graphTiming(
+                actualSampleRate: 44100,
+                actualBufferFrames: 256))
+
+        #expect(timing.sampleRate == 44100)
+        #expect(timing.cycleFrames == 256)
+        #expect(timing.processingCapacity == 4096)
+
+        // A tracker configured from the requested 48 kHz would report this A4
+        // almost a semitone and a half sharp. Configured from the live rate, the
+        // same 44.1 kHz period remains exactly 440 Hz.
+        let period = 44100.0 / 440.0
+        let correctlyConfiguredPitch = timing.sampleRate / period
+        let requestedRatePitch = 48000.0 / period
+        #expect(abs(correctlyConfiguredPitch - 440) < 0.000_001)
+        #expect(abs(requestedRatePitch - 478.911_564_625_850_3) < 0.000_001)
+        #expect(12 * log2(requestedRatePitch / correctlyConfiguredPitch) > 1.46)
+    }
+
+    @Test("capacity never makes a callback consume frames it did not receive")
+    func capacityIsOnlyAClampedUpperBound() throws {
+        let timing = try #require(
+            RoutingEngine.graphTiming(
+                actualSampleRate: 48000,
+                actualBufferFrames: 256))
+        #expect(
+            RTGraph.processingFrames(
+                available: timing.cycleFrames,
+                capacity: timing.processingCapacity) == 256)
+        #expect(RTGraph.processingFrames(available: 8192, capacity: 4096) == 4096)
+        #expect(RTGraph.processingFrames(available: -1, capacity: 4096) == 0)
+
+        let chain = try #require(
+            EffectChain(
+                kinds: [.limiter],
+                sampleRate: timing.sampleRate,
+                maximumFrames: timing.processingCapacity))
+        let sentinel: Float = 123
+        for block in 0..<16 {
+            for frame in 0..<timing.processingCapacity {
+                chain.inputBuffer[frame] = frame < timing.cycleFrames ? 0.25 : 0.9
+                chain.outputBuffer[frame] = frame < timing.cycleFrames ? 0 : sentinel
+            }
+            #expect(
+                chain.render(
+                    frames: timing.cycleFrames,
+                    sampleTime: Double(block * timing.cycleFrames)))
+            var tailIsUntouched = true
+            for frame in timing.cycleFrames..<timing.processingCapacity {
+                if chain.outputBuffer[frame] != sentinel {
+                    tailIsUntouched = false
+                    break
+                }
+            }
+            #expect(tailIsUntouched)
+        }
+
+        var energy: Float = 0
+        for frame in 0..<timing.cycleFrames {
+            energy += chain.outputBuffer[frame] * chain.outputBuffer[frame]
+        }
+        let rms = sqrt(energy / Float(timing.cycleFrames))
+        #expect(rms > 0.2)
+
+        // The old 64-frame capacity against this 256-frame callback left three
+        // quarters of the cleared output untouched: a precise 6.02 dB loss and
+        // a 187.5 Hz gate at 48 kHz.
+        let truncatedRMS = sqrt((64 * 0.25 * 0.25) / 256)
+        let loss = 20 * log10(Double(0.5 / truncatedRMS))
+        #expect(abs(truncatedRMS - 0.25) < 0.000_001)
+        #expect(abs(loss - 6.020_599_913_279_624) < 0.000_001)
+        #expect(timing.sampleRate / Double(timing.cycleFrames) == 187.5)
+    }
+
+    @Test("a sample-rate timeout cannot start mismatched DSP")
+    func sampleRateTimeoutIsAnError() throws {
+        try AggregateDevice.requireSampleRateArrival(
+            true, uid: "ready", rate: 48000)
+
+        do {
+            try AggregateDevice.requireSampleRateArrival(
+                false, uid: "slow-device", rate: 48000)
+            Issue.record("a timed-out device was accepted")
+        } catch let error as AggregateError {
+            guard case .sampleRateDidNotSet(let uid, let rate) = error else {
+                Issue.record("wrong error: \(error)")
+                return
+            }
+            #expect(uid == "slow-device")
+            #expect(rate == 48000)
+        }
     }
 }
 

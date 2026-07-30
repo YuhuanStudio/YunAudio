@@ -62,6 +62,112 @@ struct BackgroundResourceTests {
         #expect(count.current == 2)
     }
 
+    @Test("an unselected system-default Bluetooth output receives no live rate read")
+    func headsetHealthIgnoresSystemDefaultOutput() {
+        struct Output {
+            let uid: String
+            let isBluetooth: Bool
+            let isInCallQuality: Bool
+        }
+        let outputs = [
+            Output(uid: "routed", isBluetooth: false, isInCallQuality: false),
+            Output(uid: "system-default-bt", isBluetooth: true, isInCallQuality: true),
+        ]
+        var liveRateReads: [String] = []
+
+        let match = RouterModel.firstPreferredMatch(
+            in: outputs,
+            preferredIDs: ["routed"],
+            id: \.uid
+        ) { output in
+            // Mirrors `hasFallenToCallQuality`: transport is checked before the
+            // live sample rate, so a non-Bluetooth candidate makes no HAL read.
+            guard output.isBluetooth else { return false }
+            liveRateReads.append(output.uid)
+            return output.isInCallQuality
+        }
+
+        #expect(match == nil)
+        #expect(liveRateReads.isEmpty)
+    }
+
+    @Test("duplicate headset roles produce one live rate read")
+    func headsetHealthDeduplicatesRoles() {
+        struct Output {
+            let uid: String
+        }
+        let outputs = [Output(uid: "same-bt")]
+        var liveRateReads: [String] = []
+
+        let match = RouterModel.firstPreferredMatch(
+            in: outputs,
+            preferredIDs: ["same-bt", "same-bt", "same-bt"],
+            id: \.uid
+        ) { output in
+            liveRateReads.append(output.uid)
+            return false
+        }
+
+        #expect(match == nil)
+        #expect(liveRateReads == ["same-bt"])
+    }
+
+    @Test("ten minutes of polling perform zero Bluetooth health reads")
+    func headsetHealthHasNoPeriodicCadence() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let pollStart = try #require(source.range(of: "private func poll()"))
+        let pollEnd = try #require(
+            source.range(
+                of: "// MARK: Transcription",
+                range: pollStart.upperBound..<source.endIndex))
+        let poll = source[pollStart.lowerBound..<pollEnd.lowerBound]
+        let callsPerPoll = poll.ranges(of: "refreshHeadsetQualityAsynchronously()").count
+        let tenMinutesOfPolls = 20 * 60 * 10
+
+        #expect(tenMinutesOfPolls == 12_000)
+        #expect(callsPerPoll * tenMinutesOfPolls == 0)
+        #expect(source.ranges(of: "systemDefaultOutputUID").isEmpty)
+    }
+
+    @Test("an aggregate snapshot is built exactly once under concurrent reads")
+    func aggregateSnapshotIsExactlyOnce() {
+        let cache = ExactlyOnceSnapshot<Int>()
+        let builds = Count()
+        let values = Values<Int>()
+
+        DispatchQueue.concurrentPerform(iterations: 128) { _ in
+            values.append(
+                cache.get {
+                    builds.increment()
+                    Thread.sleep(forTimeInterval: 0.001)
+                    return 48_000
+                })
+        }
+
+        #expect(builds.current == 1)
+        #expect(values.snapshot.count == 128)
+        #expect(values.snapshot.allSatisfy { $0 == 48_000 })
+
+        // A missing aggregate is an answer too. Forgetting nil would repeat the
+        // complete failed HAL snapshot on every path-quality refresh.
+        let missing = ExactlyOnceSnapshot<Int?>()
+        let failedBuilds = Count()
+        #expect(
+            missing.get {
+                failedBuilds.increment()
+                return nil
+            } == nil)
+        #expect(
+            missing.get {
+                failedBuilds.increment()
+                return 1
+            } == nil)
+        #expect(failedBuilds.current == 1)
+    }
+
     @MainActor
     @Test("a hundred control changes become one preferences write")
     func preferenceWritesAreCoalesced() async throws {
@@ -563,23 +669,82 @@ struct BackgroundResourceTests {
                 rescore: false) == 235)
     }
 
-    @Test("singing motion is isolated from the whole window")
-    func singingMotionHasItsOwnObservationBoundary() throws {
+    @Test("the compact inspector keeps every control while KTV has its own stage")
+    func compactSingingKeepsControlsAndKTVKeepsTheStage() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
         let window = try String(
             contentsOfFile: root + "Sources/YunAudioApp/MainWindow.swift",
             encoding: .utf8)
+        let ktv = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/KTVWindow.swift",
+            encoding: .utf8)
         let singing = try String(
             contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
             encoding: .utf8)
-        #expect(window.ranges(of: "SingingPanel(model: model)").count == 1)
+        #expect(window.ranges(of: "SingingPanel(model: model").count == 1)
+        #expect(ktv.ranges(of: "SingingPanel(model: model").count == 0)
         #expect(window.ranges(of: "model.lyricProgress").count == 0)
         #expect(window.ranges(of: "model.singers").count == 0)
+        #expect(ktv.ranges(of: "model.lyricProgress").count >= 2)
+        #expect(ktv.ranges(of: "model.singers").count == 1)
+        #expect(ktv.ranges(of: "SongArtwork(url:").count == 2)
         #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
         #expect(singing.ranges(of: "model.lyricProgress").count >= 2)
         #expect(singing.ranges(of: "model.singers").count == 1)
-        #expect(window.contains("if model.inspectorTab == .singing"))
-        #expect(window.contains("singingWorkspace"))
+        #expect(singing.contains("Choose the words…"))
+        #expect(singing.contains("Find words by title"))
+        #expect(singing.contains("Score the singing"))
+        #expect(window.contains("YunCard(padding: 0) { SingingPanel(model: model) }"))
+        #expect(singing.contains("cardBackground"))
+        #expect(singing.contains(".clipShape(.rect(cornerRadius: Yun.Radius.card))"))
+        #expect(singing.contains(".frame(width: 72, height: 72)"))
+        #expect(singing.contains("let current = model.lyricLine ?? 0"))
+        #expect(singing.contains("SequentialTextFillRenderer(progress: model.lyricProgress)"))
+        let header = try #require(singing.range(of: "trackHeader(track)"))
+        let bottomTools = try #require(
+            singing.range(of: "handRun", range: header.upperBound..<singing.endIndex))
+        #expect(header.lowerBound < bottomTools.lowerBound)
+        #expect(ktv.contains(".foregroundStyle(.white.opacity(0.62))"))
+    }
+
+    @Test("the main window keeps all three columns on every inspector tab")
+    func mainWindowAlwaysKeepsItsThreeColumnLayout() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let window = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/MainWindow.swift",
+            encoding: .utf8)
+        let columnsStart = try #require(
+            window.range(of: "HStack(alignment: .top, spacing: Yun.Space.lg)"))
+        let columnsEnd = try #require(
+            window.range(
+                of: ".padding(.horizontal, Yun.Space.xl)",
+                range: columnsStart.upperBound..<window.endIndex))
+        let columns = window[columnsStart.lowerBound..<columnsEnd.lowerBound]
+
+        #expect(columns.ranges(of: "sources").count == 1)
+        #expect(columns.contains(".frame(width: 268)"))
+        #expect(columns.ranges(of: "mixer").count == 1)
+        #expect(columns.contains(".frame(maxWidth: .infinity)"))
+        #expect(columns.ranges(of: "inspector").count == 1)
+        #expect(columns.contains(".frame(width: 292)"))
+        #expect(!columns.contains("inspectorTab"))
+        #expect(!window.contains("singingWorkspace"))
+    }
+
+    @Test("the KTV window is retained and supports native full screen")
+    func ktvWindowOwnsOneReusableFullScreenWindow() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let ktv = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/KTVWindow.swift",
+            encoding: .utf8)
+
+        #expect(ktv.contains("private static var controller: NSWindowController?"))
+        #expect(ktv.contains("let controller = controller ?? makeController(model: model)"))
+        #expect(ktv.contains("self.controller = controller"))
+        #expect(ktv.contains("window.isReleasedWhenClosed = false"))
+        #expect(ktv.contains("window.collectionBehavior.insert(.fullScreenPrimary)"))
+        #expect(ktv.contains("controller?.window?.toggleFullScreen(nil)"))
+        #expect(ktv.contains("window.setFrameAutosaveName(\"YunAudioKTVWindow\")"))
     }
 
     @Test("an unoptimised app cannot arm a meaningless allocation tripwire")
@@ -680,7 +845,7 @@ struct BackgroundResourceTests {
         #expect(
             model.ranges(of: "private(set) var headsetInCallQuality: AudioDevice?").count
                 == 1)
-        #expect(model.ranges(of: "publish(headset, to: \\.headsetInCallQuality)").count == 2)
+        #expect(model.ranges(of: "publish(headset, to: \\.headsetInCallQuality)").count == 1)
 
         let latencyStart = try #require(
             model.range(of: "var monitorLatencyMilliseconds: Double"))

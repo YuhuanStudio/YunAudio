@@ -142,6 +142,13 @@ public final class RoutingEngine: @unchecked Sendable {
     /// the stronger answer as well as the cheaper one.
     private var graphSampleRate: Double = 48000
     private var graphBufferFrames = 128
+    /// Storage ceiling for processing stages, distinct from one IO cycle.
+    ///
+    /// CoreAudio tells a unit its maximum slice separately from the number of
+    /// frames in this callback. Conflating the two made a later effect rebuild
+    /// shrink its buffers back to the ordinary cycle size and truncate the next
+    /// larger slice.
+    private var graphMaximumFrames = 4096
     private var clockPublisher: ClockAnchorPublisher?
     private var selftestBlock: UnsafeMutablePointer<RTSelftest>?
     /// Retained here so the unit outlives the unmanaged pointer the IO thread
@@ -338,6 +345,38 @@ public final class RoutingEngine: @unchecked Sendable {
             }
             return list
         }
+    }
+
+    /// The timing the graph actually runs at, read back after configuration.
+    ///
+    /// Requested values are intentions. Filter coefficients, pitch arithmetic,
+    /// meter releases and buffer bounds all have to follow what the aggregate
+    /// reports, or the graph processes a different clock from the samples it
+    /// receives.
+    struct GraphTiming: Sendable, Equatable {
+        let sampleRate: Double
+        let cycleFrames: Int
+        let processingCapacity: Int
+    }
+
+    /// Builds one timing answer from live aggregate properties.
+    ///
+    /// Four thousand and ninety-six frames is storage headroom, not work to do:
+    /// the callback still takes the minimum of the slice's available frames and
+    /// this capacity. It covers a device changing its slice after start without
+    /// making an ordinary 64- or 256-frame callback process one sample more.
+    static func graphTiming(
+        actualSampleRate: Double?,
+        actualBufferFrames: UInt32?
+    ) -> GraphTiming? {
+        guard let sampleRate = actualSampleRate, sampleRate.isFinite, sampleRate > 0,
+            let reportedFrames = actualBufferFrames, reportedFrames > 0
+        else { return nil }
+        let cycleFrames = min(Int(reportedFrames), Int(Int32.max))
+        return GraphTiming(
+            sampleRate: sampleRate,
+            cycleFrames: cycleFrames,
+            processingCapacity: max(cycleFrames, 4096))
     }
     /// Set once a lock failure has forced drift correction back on, so the
     /// recovery cannot loop.
@@ -765,12 +804,12 @@ public final class RoutingEngine: @unchecked Sendable {
         let alignedDevices = [source, destination] + extras
         let shared = Set(source.availableSampleRates)
             .intersection(destination.availableSampleRates)
-        let rate: Double
+        let targetRate: Double
         var mismatched = false
         if let preferred = preferredSampleRate, shared.contains(preferred) {
-            rate = preferred
+            targetRate = preferred
         } else if let highest = shared.max() {
-            rate = highest
+            targetRate = highest
         } else if let best = source.availableSampleRates.max() {
             // No rate both ends can present. This used to be refused outright,
             // and refusing is wrong: a Razer Barracuda does 44.1 kHz out and
@@ -782,14 +821,12 @@ public final class RoutingEngine: @unchecked Sendable {
             // The clock master's rate wins because the master is the one thing
             // that cannot be resampled; every other member keeps whatever it
             // can do and the aggregate reconciles them.
-            rate = best
+            targetRate = best
             mismatched = true
         } else {
             throw RoutingError.noCommonSampleRate
         }
         sampleRateMismatch = mismatched
-        graphSampleRate = rate
-        graphBufferFrames = Int(bufferFrames)
         // Remembered so the devices go back the way they were found. Merged
         // rather than replaced: a restart must not forget what the first start
         // changed.
@@ -798,7 +835,10 @@ public final class RoutingEngine: @unchecked Sendable {
         // one device that could not oblige.
         let changed = try timed("align sample rates") {
             try AggregateDevice.alignSampleRate(
-                rate, across: alignedDevices.filter { $0.availableSampleRates.contains(rate) })
+                targetRate,
+                across: alignedDevices.filter {
+                    $0.availableSampleRates.contains(targetRate)
+                })
         }
         for (uid, previous) in changed where originalSampleRates[uid] == nil {
             originalSampleRates[uid] = previous
@@ -898,6 +938,25 @@ public final class RoutingEngine: @unchecked Sendable {
 
         try buildChannelMaps(aggregate: aggregate, members: members, taps: taps)
 
+        // Requests above are asynchronous and can also be refused. Every
+        // frequency, time constant and processing buffer below follows what the
+        // aggregate says it settled on, never what was asked for.
+        guard
+            let aggregateDevice = aggregate.device,
+            let timing = Self.graphTiming(
+                actualSampleRate: aggregateDevice.currentSampleRate,
+                actualBufferFrames: aggregateDevice.currentBufferFrameSize)
+        else {
+            throw RoutingError.aggregateUnavailable
+        }
+        let rate = timing.sampleRate
+        let cycleFrames = timing.cycleFrames
+        let maximumFrames = timing.processingCapacity
+        graphSampleRate = rate
+        graphBufferFrames = cycleFrames
+        graphMaximumFrames = maximumFrames
+        if abs(rate - targetRate) >= 0.5 { sampleRateMismatch = true }
+
         // Isolation is a mono stage fed from one source channel, so it is set
         // up before the routes are resolved: a route that reads the model's
         // output has a different stride and channel index from one that reads
@@ -925,7 +984,7 @@ public final class RoutingEngine: @unchecked Sendable {
             let built = timed("build the effect chain") {
                 EffectChain(
                     kinds: effects, plugins: plugins, sampleRate: rate,
-                    maximumFrames: Int(bufferFrames))
+                    maximumFrames: maximumFrames)
             }
             if let chain = built {
                 effectChain = chain
@@ -942,7 +1001,7 @@ public final class RoutingEngine: @unchecked Sendable {
         } else if let settings = voiceIsolation, let first = routes.first {
             isolatedSource = first.source
             let unit = VoiceIsolationUnit(
-                sampleRate: rate, maximumFrames: Int(bufferFrames))
+                sampleRate: rate, maximumFrames: maximumFrames)
             if let unit {
                 unit.setMix(settings.mixPercent)
                 unit.setHighQuality(settings.isHighQuality)
@@ -991,7 +1050,7 @@ public final class RoutingEngine: @unchecked Sendable {
         let clock = RTGraph.SharedClock.allocate()
         sharedClock = clock
         let graph = RTGraph.allocate(
-            routes: rtRoutes, bufferFrames: Int(bufferFrames), sampleRate: rate,
+            routes: rtRoutes, bufferFrames: cycleFrames, sampleRate: rate,
             sharedClock: clock)
         self.graph = graph
         activeRoutes = routes
@@ -1251,6 +1310,7 @@ public final class RoutingEngine: @unchecked Sendable {
         effectLatencyFrames = 0
         graphSampleRate = 48000
         graphBufferFrames = 128
+        graphMaximumFrames = 4096
 
         inputMap.removeAll()
         outputMap.removeAll()
@@ -2000,11 +2060,14 @@ public final class RoutingEngine: @unchecked Sendable {
             aggregate != nil, !activeRoutes.isEmpty
         else { return false }
 
-        // What the device settled on rather than what was asked for. A chain
-        // built for a smaller block than the IOProc delivers would process only
-        // part of every cycle and pass the rest through.
+        // What the device settled on rather than what was asked for. The cycle
+        // drives time constants; the separate ceiling sizes storage. A chain
+        // built for only the ordinary cycle can truncate a larger slice after a
+        // live device change, while using the ceiling as the cycle would make
+        // every release and envelope sixteen times too fast.
         let rate = graphSampleRate
-        let frames = graphBufferFrames
+        let cycleFrames = graphBufferFrames
+        let maximumFrames = graphMaximumFrames
 
         // Held so that assigning the new ones below does not release units the
         // IO thread is still rendering through. They go at the end, once the
@@ -2027,10 +2090,11 @@ public final class RoutingEngine: @unchecked Sendable {
         var unit: VoiceIsolationUnit?
         if !kinds.isEmpty || !plugins.isEmpty, !isolationOnly {
             chain = EffectChain(
-                kinds: kinds, plugins: plugins, sampleRate: rate, maximumFrames: frames)
+                kinds: kinds, plugins: plugins, sampleRate: rate,
+                maximumFrames: maximumFrames)
             if chain == nil { lastIsolationError = IsolationFailure.chainNotBuilt }
         } else if isolationOnly, let settings = voiceIsolation {
-            unit = VoiceIsolationUnit(sampleRate: rate, maximumFrames: frames)
+            unit = VoiceIsolationUnit(sampleRate: rate, maximumFrames: maximumFrames)
             if let unit {
                 unit.setMix(settings.mixPercent)
                 unit.setHighQuality(settings.isHighQuality)
@@ -2142,13 +2206,14 @@ public final class RoutingEngine: @unchecked Sendable {
                 newStage: block,
                 newIsChain: stage?.isChain ?? false,
                 controller: controller,
-                maximumFrames: frames,
+                maximumFrames: maximumFrames,
                 oldAlignmentFrames: oldLatency,
                 newAlignmentFrames: newLatency)
         }
 
         let next = RTGraph.allocate(
-            routes: rtRoutes, bufferFrames: frames, sampleRate: rate, sharedClock: sharedClock)
+            routes: rtRoutes, bufferFrames: cycleFrames, sampleRate: rate,
+            sharedClock: sharedClock)
         if let block, let stage {
             next.pointee.voiceIsolation = block
             next.pointee.isolationIsChain = stage.isChain ? 1 : 0

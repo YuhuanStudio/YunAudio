@@ -390,10 +390,21 @@ struct PanelView: View {
     }
 
     private func errorRow(_ message: String) -> some View {
-        Text(message)
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.danger)
-            .fixedSize(horizontal: false, vertical: true)
+        HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+            Text(message)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
+            if PermissionCentre.shared.systemAudio == .needsRequest
+                || PermissionCentre.shared.microphone == .needsRequest
+            {
+                Spacer(minLength: Yun.Space.sm)
+                Button(loc("Review permissions")) {
+                    SettingsWindow.open(model: model, initialSection: .permissions)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+        }
     }
 
     // MARK: Application sources

@@ -33,7 +33,6 @@ final class RouterModel: ScriptTarget {
 
     private(set) var inputDevices: [AudioDevice] = []
     private(set) var outputDevices: [AudioDevice] = []
-
     /// Inputs automation may open without waking another personal device.
     ///
     /// Continuity Capture remains in `inputDevices` so a person can choose it
@@ -109,6 +108,7 @@ final class RouterModel: ScriptTarget {
             pendingHardwareGain = nil
             pendingHardwareMonitor = nil
             refreshDeviceControls()
+            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -123,6 +123,8 @@ final class RouterModel: ScriptTarget {
                 displacedDestinationName = nil
             }
             refreshDeviceControls()
+            refreshHeadsetQualityAsynchronously()
+            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -229,6 +231,7 @@ final class RouterModel: ScriptTarget {
             return
         }
         additionalSourceUIDs.append(uid)
+        hydrateConfiguredDevicesAsynchronously()
         persist()
         rerouteAfterDeviceChange()
     }
@@ -248,6 +251,7 @@ final class RouterModel: ScriptTarget {
         }
         guard let index = additionalSourceUIDs.firstIndex(of: uid) else { return }
         additionalSourceUIDs.remove(at: index)
+        hydrateConfiguredDevicesAsynchronously()
         persist()
         rerouteAfterDeviceChange()
     }
@@ -261,6 +265,7 @@ final class RouterModel: ScriptTarget {
             return
         }
         additionalDestinationUIDs.append(uid)
+        hydrateConfiguredDevicesAsynchronously()
         persist()
         rerouteAfterDeviceChange()
     }
@@ -276,6 +281,7 @@ final class RouterModel: ScriptTarget {
         }
         guard let index = additionalDestinationUIDs.firstIndex(of: uid) else { return }
         additionalDestinationUIDs.remove(at: index)
+        hydrateConfiguredDevicesAsynchronously()
         persist()
         rerouteAfterDeviceChange()
     }
@@ -755,6 +761,38 @@ final class RouterModel: ScriptTarget {
     private(set) var plainLyrics: String?
     /// The source actually shown, so a fallback is visible rather than opaque.
     private(set) var lyricsSourceName: String?
+    /// Rights text supplied by the online catalogue, restored with its cache.
+    private(set) var lyricsCopyright: String?
+    /// Catalogue region attached to the online result, restored with its cache.
+    private(set) var lyricsRegion: String?
+    static let maximumMusixmatchSessionKeyLength = 1_024
+    /// An official API key held in memory for this process only.
+    ///
+    /// There is deliberately no `didSet` persistence hook. The preferences
+    /// file and diagnostic surfaces are not credential stores.
+    private(set) var musixmatchSessionKey = RouterModel.initialMusixmatchSessionKey(
+        environment: ProcessInfo.processInfo.environment)
+    var isMusixmatchSessionConfigured: Bool { !musixmatchSessionKey.isEmpty }
+
+    func setMusixmatchSessionKey(_ rawValue: String) {
+        musixmatchSessionKey = Self.boundedMusixmatchSessionKey(rawValue)
+    }
+
+    func clearMusixmatchSessionKey() {
+        musixmatchSessionKey = ""
+    }
+
+    static func initialMusixmatchSessionKey(
+        environment: [String: String]
+    ) -> String {
+        boundedMusixmatchSessionKey(environment["MUSIXMATCH_API_KEY"] ?? "")
+    }
+
+    static func boundedMusixmatchSessionKey(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.prefix(maximumMusixmatchSessionKeyLength))
+    }
+
     enum LyricsLookupStatus: Equatable {
         case idle
         case local
@@ -943,6 +981,8 @@ final class RouterModel: ScriptTarget {
         lyrics = nil
         plainLyrics = nil
         lyricsSourceName = nil
+        lyricsCopyright = nil
+        lyricsRegion = nil
         melody = nil
         lyricLine = nil
         lyricProgress = 0
@@ -951,6 +991,7 @@ final class RouterModel: ScriptTarget {
         isHandRun = false
         trackClock.stop()
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
+        pollsSinceLyricFrame = Self.lyricFrameEveryNPolls
         releaseSingerTracks()
     }
 
@@ -1504,7 +1545,22 @@ final class RouterModel: ScriptTarget {
                 askThePlayer()
             }
         }
-        followTheWords()
+        pollsSinceLyricFrame += 1
+        followTheWords(
+            publishingProgress: Self.isLyricProgressFrameDue(
+                afterPolls: pollsSinceLyricFrame))
+    }
+
+    /// Ten progress targets a second, joined by the views' 100 ms interpolation.
+    nonisolated static func isLyricProgressFrameDue(afterPolls polls: Int) -> Bool {
+        polls >= lyricFrameEveryNPolls
+    }
+
+    /// A line boundary is semantic state, not an animation frame.
+    nonisolated static func shouldPublishLyricProgress(
+        periodicFrameDue: Bool, lineChanged: Bool
+    ) -> Bool {
+        periodicFrameDue || lineChanged
     }
 
     // MARK: Words with no player to ask
@@ -1594,6 +1650,8 @@ final class RouterModel: ScriptTarget {
         lyrics = parsed
         plainLyrics = nil
         lyricsSourceName = loc("Local file")
+        lyricsCopyright = nil
+        lyricsRegion = nil
         lyricsLookupStatus = .local
         melody =
             ["mid", "midi"]
@@ -1665,12 +1723,15 @@ final class RouterModel: ScriptTarget {
         lyrics = nil
         plainLyrics = nil
         lyricsSourceName = nil
+        lyricsCopyright = nil
+        lyricsRegion = nil
         melody = nil
         lyricLine = nil
         lyricProgress = 0
         songSecond = 0
         lyricsLookupStatus = .idle
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
+        pollsSinceLyricFrame = Self.lyricFrameEveryNPolls
     }
 
     /// How many polls apart a player is asked where it is.
@@ -1682,11 +1743,18 @@ final class RouterModel: ScriptTarget {
     /// the correction when one happens is measured rather than assumed —
     /// `trackClock.lastCorrection`.
     private static let nowPlayingEveryNPolls = 20
+    /// The views interpolate progress for 100 ms, so publishing another target
+    /// at 50 ms only restarts an animation that is still running. This bounds
+    /// the scheduled progress latency at 100 ms; line changes and direct clock
+    /// actions bypass the wait.
+    nonisolated static let lyricFrameEveryNPolls = 2
 
     @ObservationIgnored private var trackClock = TrackClock()
     /// Starts at the interval so that opening the panel asks at once rather
     /// than showing an empty header for a second.
     @ObservationIgnored private var pollsSinceNowPlaying = RouterModel.nowPlayingEveryNPolls
+    /// Starts due so the first visible lyric frame is immediate.
+    @ObservationIgnored private var pollsSinceLyricFrame = RouterModel.lyricFrameEveryNPolls
     /// Which player answered last, so the cheap read asks that one first rather
     /// than paying a round trip per installed player.
     @ObservationIgnored private var lastPlayer: String?
@@ -1767,13 +1835,15 @@ final class RouterModel: ScriptTarget {
             if lyrics != nil { lyrics = nil }
             if plainLyrics != nil { plainLyrics = nil }
             if lyricsSourceName != nil { lyricsSourceName = nil }
+            if lyricsCopyright != nil { lyricsCopyright = nil }
+            if lyricsRegion != nil { lyricsRegion = nil }
             if melody != nil { melody = nil }
             return
         }
         lastPlayer = position.application
-        // Fetched on the other thread only when the song had actually changed,
-        // so arriving with one here *is* the change.
-        if let track { adopt(track) }
+        if let track, Self.shouldAdoptPlayerTrack(current: nowPlaying, incoming: track) {
+            adopt(track)
+        }
         if var current = nowPlaying, current.isPlaying != position.isPlaying {
             current.isPlaying = position.isPlaying
             nowPlaying = current
@@ -1781,6 +1851,45 @@ final class RouterModel: ScriptTarget {
         trackClock.duration = nowPlaying?.duration ?? 0
         trackClock.adopt(position.seconds, isPlaying: position.isPlaying, trueAt: middle)
         reanchorIfSeeked(to: position.seconds)
+        // A fresh player answer can be a seek or a newly adopted song. Neither
+        // waits for the periodic progress frame: the authoritative position is
+        // already here, so the words move in the same turn.
+        followTheWords()
+    }
+
+    struct PlayerTrackFingerprint: Equatable {
+        let application: String
+        let title: String
+        let artist: String
+        let durationSeconds: Int
+    }
+
+    /// Whether fresh metadata represents a song the model has not adopted.
+    ///
+    /// A player with no track id still needs its metadata read every second:
+    /// otherwise a stream can change underneath one empty identifier and remain
+    /// frozen forever. The unchanged metadata is not a new song, though. Treating
+    /// every read as one cancelled and restarted the four or five lyric-provider
+    /// requests every second and repeatedly rescanned the local library.
+    nonisolated static func shouldAdoptPlayerTrack(
+        current: NowPlaying.Track?,
+        incoming: NowPlaying.Track
+    ) -> Bool {
+        guard let current else { return true }
+        if !incoming.identity.isEmpty {
+            return incoming.identity != current.identity
+        }
+        return playerTrackFingerprint(current) != playerTrackFingerprint(incoming)
+    }
+
+    nonisolated static func playerTrackFingerprint(
+        _ track: NowPlaying.Track
+    ) -> PlayerTrackFingerprint {
+        PlayerTrackFingerprint(
+            application: track.application,
+            title: track.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            artist: track.artist.trimmingCharacters(in: .whitespacesAndNewlines),
+            durationSeconds: Int(exactly: track.duration.rounded()) ?? 0)
     }
 
     private(set) var nowPlayingFailure: NowPlaying.QueryFailure?
@@ -1808,7 +1917,8 @@ final class RouterModel: ScriptTarget {
                 application: application.name, title: match.title,
                 artist: match.artist, album: match.album,
                 position: match.position, duration: match.duration,
-                isPlaying: true, artworkURL: match.artworkURL, identity: match.identity)
+                isPlaying: true, artworkURL: match.artworkURL,
+                appleMusicURL: match.appleMusicURL, identity: match.identity)
             if nowPlaying?.identity != match.identity {
                 adopt(track)
             } else {
@@ -1861,6 +1971,10 @@ final class RouterModel: ScriptTarget {
             localLyrics.map { Self.lyricsSourceName(forLocalURL: $0.url) }
             ?? localPlain.map { Self.lyricsSourceName(forLocalURL: $0.url) }
             ?? (track?.nativeLyrics == nil ? nil : loc("Music"))
+        let cachedAttribution = (localLyrics?.url ?? localPlain?.url)
+            .flatMap(Self.cachedLyricsAttribution)
+        lyricsCopyright = cachedAttribution?.copyright
+        lyricsRegion = cachedAttribution?.region
         melody = track.flatMap(Self.findMelody)
         if let track {
             if let localURL = localLyrics?.url ?? localPlain?.url {
@@ -1885,14 +1999,17 @@ final class RouterModel: ScriptTarget {
             title: track.title, artist: track.artist, album: track.album,
             duration: track.duration)
         let identity = Self.lyricsIdentity(for: track)
+        let client = OnlineLyrics(
+            musixmatch: OnlineLyrics.musixmatchAdapter(
+                apiKey: musixmatchSessionKey))
         if plainLyrics == nil { lyricsLookupStatus = .loading }
         lyricsLookupTask = Task { [weak self] in
             do {
                 // OnlineLyrics is nonisolated, so its network and decoding work
                 // runs on the generic executor. Keeping it as this task's child
-                // also means changing songs cancels all four provider requests;
+                // also means changing songs cancels every configured provider;
                 // Task.detached left them running after their answer was stale.
-                let match = try await OnlineLyrics.live.fetch(query)
+                let match = try await client.fetch(query)
                 try Task.checkCancellation()
                 guard let self,
                     let current = self.nowPlaying,
@@ -1914,6 +2031,8 @@ final class RouterModel: ScriptTarget {
                     return
                 }
                 self.lyricsSourceName = Self.lyricsSourceName(for: match.source)
+                self.lyricsCopyright = match.providerMetadata?.copyright
+                self.lyricsRegion = match.providerMetadata?.region
                 self.lyricsLookupStatus = .online
                 if var current = self.nowPlaying,
                     current.duration <= 0,
@@ -1933,10 +2052,16 @@ final class RouterModel: ScriptTarget {
                 let url = OnlineLyrics.cacheURL(
                     for: query, source: match.source,
                     extension: match.cacheExtension, in: directory)
+                let attributionURL = OnlineLyrics.cacheAttributionURL(for: url)
+                let attributionData = try? OnlineLyrics.encodeCacheAttribution(
+                    match.cacheAttribution)
                 await Task.detached(priority: .utility) {
                     try? FileManager.default.createDirectory(
                         at: directory, withIntermediateDirectories: true)
                     try? text.write(to: url, atomically: true, encoding: .utf8)
+                    if let attributionData {
+                        try? attributionData.write(to: attributionURL, options: .atomic)
+                    }
                 }.value
             } catch is CancellationError {
                 return
@@ -1987,9 +2112,10 @@ final class RouterModel: ScriptTarget {
 
     /// Moves the highlight to wherever the clock now says the song is.
     ///
-    /// Every poll, and costing nothing: this is the half that had to be
-    /// separated from the asking for the sweep to be able to move at all.
-    private func followTheWords() {
+    /// The line is checked on every poll. Progress is published at the views'
+    /// ten-hertz interpolation cadence; direct clock changes and line boundaries
+    /// still publish in the same turn.
+    private func followTheWords(publishingProgress periodicFrameDue: Bool = true) {
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
         let position = trackClock.position(at: now)
         // Published only when the second it displays changes. The timecode is
@@ -2003,9 +2129,17 @@ final class RouterModel: ScriptTarget {
         }
         let heard = position + lyricNudge
         let index = lyrics.index(at: heard)
-        if lyricLine != index { lyricLine = index }
-        let progress = lyrics.progress(at: heard)
-        if lyricProgress != progress { lyricProgress = progress }
+        let lineChanged = lyricLine != index
+        if lineChanged { lyricLine = index }
+        if Self.shouldPublishLyricProgress(
+            periodicFrameDue: periodicFrameDue, lineChanged: lineChanged)
+        {
+            // Direct actions and line changes restart the cadence here too, so
+            // a periodic frame cannot land one poll later and duplicate them.
+            pollsSinceLyricFrame = 0
+            let progress = lyrics.progress(at: heard)
+            if lyricProgress != progress { lyricProgress = progress }
+        }
     }
 
     /// Finds an `.lrc` for a track by name.
@@ -2055,6 +2189,23 @@ final class RouterModel: ScriptTarget {
     /// A provider cache is online evidence even though it is now read from disk.
     static func lyricsStatus(forLocalURL url: URL) -> LyricsLookupStatus {
         OnlineLyrics.cachedSource(for: url) == nil ? .local : .online
+    }
+
+    /// Restores bounded provider attribution beside a downloaded cache.
+    ///
+    /// The provider in the sidecar must agree with the provider encoded in the
+    /// cache filename. A stale or hand-edited sidecar must not relabel another
+    /// catalogue's words on the next play.
+    static func cachedLyricsAttribution(
+        for lyricsURL: URL
+    ) -> OnlineLyrics.CacheAttribution? {
+        guard let source = OnlineLyrics.cachedSource(for: lyricsURL) else { return nil }
+        let url = OnlineLyrics.cacheAttributionURL(for: lyricsURL)
+        guard let data = try? Data(contentsOf: url),
+            let attribution = try? OnlineLyrics.decodeCacheAttribution(data),
+            attribution.provider == source
+        else { return nil }
+        return attribution
     }
 
     /// Finds the tune, which lives beside the words under the same name.
@@ -2382,8 +2533,32 @@ final class RouterModel: ScriptTarget {
     }
     private(set) var loginItemError: String?
 
+    /// Existing installs must opt back into launch routing once.
+    ///
+    /// An older build could leave this preference enabled without making the
+    /// resulting route visible enough. Measured in the system log: opening the
+    /// app created an aggregate eight seconds later while the person reasonably
+    /// believed no route had been started. A versioned consent keeps the useful
+    /// feature without silently inheriting that unsafe state.
+    nonisolated static let autoStartConsentVersion = 1
+    private static let autoStartConsentVersionKey = "autoStartConsentVersion"
+
     var autoStart: Bool = false {
-        didSet { if oldValue != autoStart { persist() } }
+        didSet {
+            guard oldValue != autoStart else { return }
+            if !isRestoring, !Self.isVerificationProcess, autoStart {
+                UserDefaults.standard.set(
+                    Self.autoStartConsentVersion,
+                    forKey: Self.autoStartConsentVersionKey)
+            }
+            persist()
+        }
+    }
+
+    nonisolated static func restoredAutoStart(
+        savedEnabled: Bool, consentVersion: Int
+    ) -> Bool {
+        savedEnabled && consentVersion >= autoStartConsentVersion
     }
 
     // MARK: Voice
@@ -2461,13 +2636,49 @@ final class RouterModel: ScriptTarget {
     /// Ones that were asked for and would not load, with why.
     private(set) var failedPlugins: [AudioUnitLoadFailure] = []
     @ObservationIgnored private var pluginParameterCache: [String: [EffectParameter]] = [:]
+    @ObservationIgnored private var pluginRefreshGate = LatestRefreshGate()
+    private let systemDiscoveryQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.system-discovery", qos: .utility)
 
     func refreshPlugins() {
-        availablePlugins = AudioUnitPlugins.installed()
+        // An explicit Rescan is deterministic: when it returns, the window
+        // shows the answer. It also makes an older launch scan obsolete.
+        pluginRefreshGate.invalidate()
+        applyPluginRefresh(AudioUnitPlugins.installed())
+    }
+
+    private func refreshPluginsAsynchronously() {
+        guard let token = pluginRefreshGate.request() else { return }
+        runPluginRefresh(token)
+    }
+
+    private func runPluginRefresh(_ token: LatestRefreshGate.Token) {
+        let queue = systemDiscoveryQueue
+        queue.async {
+            let installed = AudioUnitPlugins.installed()
+            Task { @MainActor in
+                self.finishPluginRefresh(installed, token: token)
+            }
+        }
+    }
+
+    private func finishPluginRefresh(
+        _ installed: [AudioUnitPlugin], token: LatestRefreshGate.Token
+    ) {
+        guard pluginRefreshGate.accepts(token) else { return }
+        applyPluginRefresh(installed)
+        if case .start(let next) = pluginRefreshGate.finish(token) {
+            runPluginRefresh(next)
+        }
+    }
+
+    /// MainActor half of registry discovery: comparisons and value publication.
+    private func applyPluginRefresh(_ installedPlugins: [AudioUnitPlugin]) {
+        if availablePlugins != installedPlugins { availablePlugins = installedPlugins }
         // Anything remembered that is no longer installed is dropped rather
         // than carried: a reference to a plugin somebody uninstalled would fail
         // to load on every start and say so every time.
-        let installed = Set(availablePlugins.map(\.id))
+        let installed = Set(installedPlugins.map(\.id))
         let surviving = enabledPlugins.filter { installed.contains($0.id) }
         if surviving.count != enabledPlugins.count { enabledPlugins = surviving }
     }
@@ -2634,23 +2845,45 @@ final class RouterModel: ScriptTarget {
     /// one line of interface rather than a feature.
     private(set) var headsetInCallQuality: AudioDevice?
 
-    /// Reads the live sample rate off likely outputs first, then the rest.
+    /// Reads the live sample rate only from outputs YunAudio is using.
     ///
-    /// Synchronous HAL work, so callers run it on `engineQueue` except for the
-    /// one initial device enumeration. Keeping it out of the computed property
-    /// stops every recording-pill redraw from asking CoreAudio the same
-    /// question at 20 Hz.
+    /// Even the system default is deliberately absent when it is not selected
+    /// or monitored here. Some Bluetooth plug-ins suspend audio for about two
+    /// seconds while answering this property; asking an unrelated endpoint as
+    /// background health monitoring would create the interruption it is meant
+    /// to diagnose.
     nonisolated static func headsetInCallQuality(
         outputDevices: [AudioDevice],
         preferredUIDs: [String]
     ) -> AudioDevice? {
-        let preferred = preferredUIDs.compactMap { uid in
-            outputDevices.first { $0.uid == uid }
+        firstPreferredMatch(
+            in: outputDevices,
+            preferredIDs: preferredUIDs,
+            id: \.uid,
+            matches: \.hasFallenToCallQuality)
+    }
+
+    /// Selects the first matching named value without evaluating duplicates or
+    /// anything outside the named set.
+    ///
+    /// Generic so a pure spy can assert the number of expensive reads. The
+    /// production match is a live HAL sample-rate query; making the selection
+    /// testable without an AudioDevice is what proves an unrelated Bluetooth
+    /// endpoint receives zero of them.
+    nonisolated static func firstPreferredMatch<Device, Identifier: Hashable>(
+        in devices: [Device],
+        preferredIDs: [Identifier],
+        id: (Device) -> Identifier,
+        matches: (Device) -> Bool
+    ) -> Device? {
+        var visited: Set<Identifier> = []
+        for preferredID in preferredIDs where visited.insert(preferredID).inserted {
+            guard let device = devices.first(where: { id($0) == preferredID }) else {
+                continue
+            }
+            if matches(device) { return device }
         }
-        // A headset somebody is listening on but not routing to still matters,
-        // which is why the rest remain a fallback.
-        return preferred.first(where: { $0.hasFallenToCallQuality })
-            ?? outputDevices.first(where: { $0.hasFallenToCallQuality })
+        return nil
     }
 
     /// Which applications currently have an input open, most interesting first.
@@ -2966,6 +3199,7 @@ final class RouterModel: ScriptTarget {
             guard oldValue != monitorDeviceUID else { return }
             persist()
             refreshHeadsetQualityAsynchronously()
+            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
             // A monitor the engine itself gave up on is already out of a route
             // that is running. Restarting would take a working mix down to
             // arrive exactly where it already is — and the start it would run
@@ -3506,6 +3740,7 @@ final class RouterModel: ScriptTarget {
             duration: 42, verdict: .speech, verdictConfidence: 0.86,
             verdictLabel: "speech", pitchHertz: 147)
         outputPeak = 0.39
+        outputVerdict = Self.classifyOutput(peak: outputPeak, clippedSamples: 0)
         nowPlaying = NowPlaying.Track(
             application: "Spotify", title: "年少心動雨季", artist: "黃霄雲",
             album: "天賜的聲音", position: 82, duration: 265, isPlaying: true)
@@ -3691,7 +3926,6 @@ final class RouterModel: ScriptTarget {
                     self.appListRevision &+= 1
                     self.availableApps = applications
                     self.appsRefreshedAt = Date()
-                    self.refreshHeadsetQualityAsynchronously()
                 }
                 self.appRefreshInFlight = false
 
@@ -3726,7 +3960,6 @@ final class RouterModel: ScriptTarget {
         appListRevision &+= 1
         availableApps = (try? AudioApplications.grouped(keeping: capturedAppBundleIDs)) ?? []
         appsRefreshedAt = Date()
-        refreshHeadsetQualityAsynchronously()
     }
 
     private func refreshHeadsetQualityAsynchronously() {
@@ -3831,6 +4064,8 @@ final class RouterModel: ScriptTarget {
         clipped = clipped.map { _ in false }
         applyLiveControl { $0.clearOutputClipping() }
         outputClippedSamples = 0
+        let cleared = Self.classifyOutput(peak: outputPeak, clippedSamples: 0)
+        if outputVerdict != cleared { outputVerdict = cleared }
     }
 
     // MARK: What actually leaves
@@ -3857,11 +4092,19 @@ final class RouterModel: ScriptTarget {
     /// conferencing application will run its own automatic gain over whatever
     /// it is given, so a signal 30 dB down arrives as amplified room noise, and
     /// nothing about that looks wrong from this side.
-    enum OutputVerdict: Sendable { case clipping, hot, good, quiet, veryQuiet, silent }
+    enum OutputVerdict: Sendable, Equatable {
+        case clipping, hot, good, quiet, veryQuiet, silent
+    }
 
-    var outputVerdict: OutputVerdict {
-        if outputClippedSamples > 0 { return .clipping }
-        let decibels = outputPeakDecibels
+    /// Discrete so a continuously moving peak does not invalidate every status
+    /// pill when the one-word answer has not changed.
+    private(set) var outputVerdict: OutputVerdict = .silent
+
+    nonisolated static func classifyOutput(
+        peak: Float, clippedSamples: UInt64
+    ) -> OutputVerdict {
+        if clippedSamples > 0 { return .clipping }
+        let decibels = peak > 0 ? Double(20 * log10(peak)) : -.infinity
         guard decibels.isFinite else { return .silent }
         if decibels > -1 { return .clipping }
         if decibels > -3 { return .hot }
@@ -3884,7 +4127,11 @@ final class RouterModel: ScriptTarget {
 
     /// Peak-hold arithmetic without the publication around it.
     nonisolated static func nextPeakHold(previous: Float, incoming: Float) -> Float {
-        incoming > previous ? incoming : previous * 0.97
+        let next = incoming > previous ? incoming : previous * 0.97
+        // The meter floors at −60 dBFS, so anything below this draws exactly
+        // nothing. Without an exact zero the Float decay eventually sticks on a
+        // subnormal value and keeps publishing at 20 Hz for the process lifetime.
+        return next <= 0.001 ? 0 : next
     }
 
     private func refreshPeaks(_ current: [Float]) {
@@ -4615,7 +4862,10 @@ final class RouterModel: ScriptTarget {
 
     /// Dynamics-meter ballistics without the observable dictionary write.
     nonisolated static func nextGainReduction(previous: Float, incoming: Float) -> Float {
-        incoming > previous ? incoming : previous * 0.82 + incoming * 0.18
+        let next = incoming > previous ? incoming : previous * 0.82 + incoming * 0.18
+        // One hundredth of a decibel is below one pixel of the 24 dB meter. Snap
+        // there rather than letting the release stall forever on a subnormal.
+        return next <= 0.01 ? 0 : next
     }
 
     private func refreshGainReduction() {
@@ -4882,6 +5132,8 @@ final class RouterModel: ScriptTarget {
     private(set) var isBusy = false
     private var levelTimer: Timer?
     private var deviceWatcher: DeviceChangeWatcher?
+    @ObservationIgnored private var deviceRefreshGate = LatestRefreshGate()
+    @ObservationIgnored private var deviceHydrationGate = LatestRefreshGate()
 
     var selectedSource: AudioDevice? {
         inputDevices.first { $0.uid == selectedSourceUID }
@@ -4982,13 +5234,18 @@ final class RouterModel: ScriptTarget {
 
     init() {
         refreshDevices()
-        // Before restoring, so a remembered plugin that has since been
-        // uninstalled is dropped rather than failing to load on every start.
-        refreshPlugins()
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
         refreshHeadphoneProfiles()
         restore()
+        // Registry discovery walks every installed Audio Unit. It was one
+        // synchronous MainActor operation before the first frame, and it ran
+        // before restore — when there were no enabled plug-ins to prune anyway.
+        // Verification asks explicitly where it needs a deterministic answer.
+        if !Self.isVerificationProcess {
+            refreshPluginsAsynchronously()
+            lighting.refreshDeviceAsynchronously()
+        }
         // After `restore`, so loading the file does not immediately write it
         // back — and `restore` is guarded anyway, which is belt and braces on
         // the one path where a setting arriving from disk looked like a change.
@@ -5001,8 +5258,12 @@ final class RouterModel: ScriptTarget {
         // Hardware comes and goes; the route has to follow it rather than
         // silently pointing at a device that is no longer there.
         deviceWatcher = DeviceChangeWatcher { [weak self] in
-            Task { @MainActor in self?.handleDeviceChange() }
+            Task { @MainActor in self?.requestDeviceChangeRefresh() }
         }
+        // The launch list is metadata-only so unrelated Bluetooth plug-ins stay
+        // asleep. Restore has now named the endpoints that do need full format
+        // details, and this one background refresh upgrades only those.
+        hydrateConfiguredDevicesAsynchronously()
 
         installHotkeys()
         installMIDI()
@@ -5185,7 +5446,10 @@ final class RouterModel: ScriptTarget {
         defer { isRestoring = false }
 
         let saved = PreferencesStore.load()
-        autoStart = saved.autoStart
+        autoStart = Self.restoredAutoStart(
+            savedEnabled: saved.autoStart,
+            consentVersion: UserDefaults.standard.integer(
+                forKey: Self.autoStartConsentVersionKey))
         excludedAppBundleIDs = Set(saved.excludedAppBundleIDs ?? [])
         // A process with no bundle identifier is listed under its PID, and a
         // PID means nothing after a restart: the number gets reused, and the
@@ -5374,18 +5638,133 @@ final class RouterModel: ScriptTarget {
 
     // MARK: Devices
 
-    func refreshDevices() {
-        let all = (try? AudioDevices.all()) ?? []
-        inputDevices = all.filter(\.hasInput)
-        outputDevices = all.filter(\.hasOutput)
-        for device in all { deviceNames[device.uid] = device.name }
-        // An extra input or output that has been unplugged, or has since become
-        // an end of the main route, is not one any more.
+    struct DeviceRefreshSnapshot: Sendable {
+        let all: [AudioDevice]
+        let selectedSourceUID: String?
+        let selectedDestinationUID: String?
+        let detailUIDs: Set<String>
+        let hardwareGain: AudioDevice.HardwareGain?
+        let hardwareMonitor: AudioDevice.HardwareGain?
+        let destinationHasVolumeControl: Bool
+    }
+
+    /// Reads every HAL-backed value before crossing to MainActor.
+    ///
+    /// A complete snapshot used to ask `coreaudiod` at least thirteen times per
+    /// device. A notification must neither turn that into one long main-thread
+    /// turn nor wake an unrelated Bluetooth capability provider.
+    nonisolated static func readDeviceRefreshSnapshot(
+        selectedSourceUID: String?, selectedDestinationUID: String?,
+        detailUIDs: Set<String>
+    ) -> DeviceRefreshSnapshot {
+        // Only Bluetooth endpoints the user placed in this route earn live
+        // capability reads. RoutingEngine resolves its own full devices again
+        // at Start; unrelated wireless outputs must stay asleep.
+        let all =
+            (try? AudioDevices.all(loadingBluetoothCapabilitiesFor: detailUIDs)) ?? []
+        let source = selectedSourceUID.flatMap { uid in all.first { $0.uid == uid } }
+        let destination = selectedDestinationUID.flatMap { uid in all.first { $0.uid == uid } }
+        return DeviceRefreshSnapshot(
+            all: all,
+            selectedSourceUID: selectedSourceUID,
+            selectedDestinationUID: selectedDestinationUID,
+            detailUIDs: detailUIDs,
+            hardwareGain: source?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
+            hardwareMonitor: source?.playThrough(),
+            destinationHasVolumeControl:
+                destination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput) ?? true)
+    }
+
+    /// Applies an immutable device answer without asking HAL another question.
+    private func applyDeviceRefreshSnapshot(_ snapshot: DeviceRefreshSnapshot) {
+        // This snapshot already contains full details for every configured UID.
+        // A direct hydration queued from an older picker state must not replace
+        // any member of it after publication.
+        deviceHydrationGate.invalidate()
+        let inputs = snapshot.all.filter(\.hasInput)
+        let outputs = snapshot.all.filter(\.hasOutput)
+        if inputDevices != inputs { inputDevices = inputs }
+        if outputDevices != outputs { outputDevices = outputs }
+        for device in snapshot.all { deviceNames[device.uid] = device.name }
         pruneAdditionalDevices()
-        // A new device list can mean a new selected device, and what that
-        // device publishes is what the window draws.
-        refreshDeviceControls()
-        refreshHeadsetQualityAsynchronously()
+        publish(snapshot.hardwareGain, to: \.hardwareGainReading)
+        publish(snapshot.hardwareMonitor, to: \.hardwareMonitorReading)
+        publish(
+            snapshot.destinationHasVolumeControl,
+            to: \.destinationHasVolumeControl)
+    }
+
+    func refreshDevices() {
+        // This deterministic form is for launch and explicit verification.
+        // It supersedes an older event answer that may already be crossing back
+        // from the serial queue.
+        deviceRefreshGate.invalidate()
+        applyDeviceRefreshSnapshot(
+            Self.readDeviceRefreshSnapshot(
+                selectedSourceUID: selectedSourceUID,
+                selectedDestinationUID: selectedDestinationUID,
+                detailUIDs: deviceDetailUIDs))
+    }
+
+    /// Endpoints whose live format is relevant to the configured route.
+    private var deviceDetailUIDs: Set<String> {
+        Self.deviceDetailUIDs(
+            source: selectedSourceUID,
+            destination: selectedDestinationUID,
+            monitor: monitorDeviceUID,
+            additionalSources: additionalSourceUIDs,
+            additionalDestinations: additionalDestinationUIDs)
+    }
+
+    nonisolated static func deviceDetailUIDs(
+        source: String?, destination: String?, monitor: String?,
+        additionalSources: [String], additionalDestinations: [String]
+    ) -> Set<String> {
+        Set(
+            [source, destination, monitor].compactMap { $0 }
+                + additionalSources + additionalDestinations)
+    }
+
+    /// Upgrades only configured endpoints after restore or a picker change.
+    ///
+    /// Re-enumerating the machine here would ask every unrelated plug-in to
+    /// identify itself again. UID translation resolves one endpoint directly,
+    /// and the first/latest gate bounds a rapid sequence of picker changes to
+    /// two queue jobs.
+    private func hydrateConfiguredDevicesAsynchronously() {
+        guard let token = deviceHydrationGate.request() else { return }
+        runConfiguredDeviceHydration(token)
+    }
+
+    private func runConfiguredDeviceHydration(_ token: LatestRefreshGate.Token) {
+        let expectedUIDs = deviceDetailUIDs
+        let queue = engineQueue
+        queue.async {
+            let devices = expectedUIDs.compactMap { try? AudioDevices.device(uid: $0) }
+            Task { @MainActor in
+                self.finishConfiguredDeviceHydration(
+                    devices, expectedUIDs: expectedUIDs, token: token)
+            }
+        }
+    }
+
+    private func finishConfiguredDeviceHydration(
+        _ devices: [AudioDevice], expectedUIDs: Set<String>,
+        token: LatestRefreshGate.Token
+    ) {
+        guard deviceHydrationGate.accepts(token) else { return }
+        if expectedUIDs == deviceDetailUIDs {
+            let detailed = Dictionary(uniqueKeysWithValues: devices.map { ($0.uid, $0) })
+            let inputs = inputDevices.map { detailed[$0.uid] ?? $0 }
+            let outputs = outputDevices.map { detailed[$0.uid] ?? $0 }
+            if inputs != inputDevices { inputDevices = inputs }
+            if outputs != outputDevices { outputDevices = outputs }
+        } else {
+            _ = deviceHydrationGate.request()
+        }
+        if case .start(let next) = deviceHydrationGate.finish(token) {
+            runConfiguredDeviceHydration(next)
+        }
     }
 
     func selectDefaults() {
@@ -5514,9 +5893,55 @@ final class RouterModel: ScriptTarget {
     /// carrying on with another device — which has to be true.
     @ObservationIgnored private var startFailed = false
 
-    private func handleDeviceChange() {
+    /// Starts one background enumeration for the first notification and keeps
+    /// at most one latest rerun behind it.
+    private func requestDeviceChangeRefresh() {
+        guard let token = deviceRefreshGate.request() else { return }
+        runDeviceChangeRefresh(token)
+    }
+
+    private func runDeviceChangeRefresh(_ token: LatestRefreshGate.Token) {
+        let sourceUID = selectedSourceUID
+        let destinationUID = selectedDestinationUID
+        let detailUIDs = deviceDetailUIDs
+        let queue = engineQueue
+        queue.async {
+            let snapshot = Self.readDeviceRefreshSnapshot(
+                selectedSourceUID: sourceUID,
+                selectedDestinationUID: destinationUID,
+                detailUIDs: detailUIDs)
+            Task { @MainActor in
+                self.finishDeviceChangeRefresh(snapshot, token: token)
+            }
+        }
+    }
+
+    private func finishDeviceChangeRefresh(
+        _ snapshot: DeviceRefreshSnapshot, token: LatestRefreshGate.Token
+    ) {
+        guard deviceRefreshGate.accepts(token) else { return }
+
+        // A selection made while HAL was answering needs controls from the new
+        // endpoints. Keep this answer from publishing stale hardware values and
+        // turn the mismatch into the one latest rerun.
+        let selectionIsCurrent =
+            snapshot.selectedSourceUID == selectedSourceUID
+            && snapshot.selectedDestinationUID == selectedDestinationUID
+            && snapshot.detailUIDs == deviceDetailUIDs
+        if selectionIsCurrent {
+            handleDeviceChange(snapshot)
+        } else {
+            _ = deviceRefreshGate.request()
+        }
+
+        if case .start(let next) = deviceRefreshGate.finish(token) {
+            runDeviceChangeRefresh(next)
+        }
+    }
+
+    private func handleDeviceChange(_ snapshot: DeviceRefreshSnapshot) {
         let before = Set((inputDevices + outputDevices).map(\.uid))
-        refreshDevices()
+        applyDeviceRefreshSnapshot(snapshot)
         let after = Set((inputDevices + outputDevices).map(\.uid))
         // Named, because "something changed" is not something a script can act
         // on. Which device arrived is exactly the thing a rule like "when the
@@ -5560,9 +5985,37 @@ final class RouterModel: ScriptTarget {
         confirmationTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled, let self else { return }
-            self.refreshDevices()
+            let snapshot = await self.readDeviceRefreshSnapshotAsynchronously()
+            guard !Task.isCancelled else { return }
+            // The selected endpoints can change during the background read.
+            // A mismatched control snapshot is not safe to publish.
+            guard
+                snapshot.selectedSourceUID == self.selectedSourceUID,
+                snapshot.selectedDestinationUID == self.selectedDestinationUID,
+                snapshot.detailUIDs == self.deviceDetailUIDs
+            else {
+                self.requestDeviceChangeRefresh()
+                return
+            }
+            self.applyDeviceRefreshSnapshot(snapshot)
             guard self.isMissingDevice else { return }
             self.handleConfirmedDeviceLoss()
+        }
+    }
+
+    private func readDeviceRefreshSnapshotAsynchronously() async -> DeviceRefreshSnapshot {
+        let sourceUID = selectedSourceUID
+        let destinationUID = selectedDestinationUID
+        let detailUIDs = deviceDetailUIDs
+        let queue = engineQueue
+        return await withCheckedContinuation { continuation in
+            queue.async {
+                continuation.resume(
+                    returning: Self.readDeviceRefreshSnapshot(
+                        selectedSourceUID: sourceUID,
+                        selectedDestinationUID: destinationUID,
+                        detailUIDs: detailUIDs))
+            }
         }
     }
 
@@ -5763,6 +6216,12 @@ final class RouterModel: ScriptTarget {
         "\(name) (\(String(describing: error)))"
     }
 
+    nonisolated static func capturePermissionWasDenied(_ error: Error) -> Bool {
+        guard let tapError = error as? ProcessTapError else { return false }
+        guard case .creationFailed(let status) = tapError else { return false }
+        return status == kAudioDevicePermissionsError
+    }
+
     /// Process objects the echo canceller may use as its far-end reference.
     nonisolated static func echoReferenceProcessIDs(
         in applications: [AudioApplication],
@@ -5802,6 +6261,7 @@ final class RouterModel: ScriptTarget {
         let owners: [String: String]
         let unresolved: [String]
         let refused: [String]
+        let permissionWasDenied: Bool
         let monitorRouteIndices: [String: [Int]]
     }
 
@@ -5832,6 +6292,7 @@ final class RouterModel: ScriptTarget {
         var taps: [ProcessTap] = []
         var owners: [String: String] = [:]
         var refused: [String] = []
+        var permissionWasDenied = false
 
         for application in captured {
             let tap: ProcessTap
@@ -5842,6 +6303,8 @@ final class RouterModel: ScriptTarget {
                     bundleIDs: [application.bundleID])
             } catch {
                 refused.append(captureFailure(application.name, error))
+                permissionWasDenied =
+                    permissionWasDenied || capturePermissionWasDenied(error)
                 continue
             }
             taps.append(tap)
@@ -5911,6 +6374,7 @@ final class RouterModel: ScriptTarget {
             owners: owners,
             unresolved: unresolved,
             refused: refused,
+            permissionWasDenied: permissionWasDenied,
             monitorRouteIndices: monitorIndices)
     }
 
@@ -6109,6 +6573,7 @@ final class RouterModel: ScriptTarget {
                     owners: preparation.owners,
                     unresolved: preparation.unresolved,
                     refused: preparation.refused,
+                    permissionWasDenied: preparation.permissionWasDenied,
                     monitorRouteIndices: preparation.monitorRouteIndices,
                     failure: emptyRouteError,
                     quality: nil,
@@ -6190,6 +6655,7 @@ final class RouterModel: ScriptTarget {
                 owners: preparation.owners,
                 unresolved: preparation.unresolved,
                 refused: preparation.refused,
+                permissionWasDenied: preparation.permissionWasDenied,
                 monitorRouteIndices: preparation.monitorRouteIndices,
                 failure: failure,
                 quality: quality,
@@ -6246,6 +6712,12 @@ final class RouterModel: ScriptTarget {
         tapOwners = report.didStart ? report.owners : [:]
         unresolvedCaptures = report.unresolved
         refusedCaptures = report.refused
+        PermissionCentre.shared.refreshSafeStatuses()
+        if !report.owners.isEmpty {
+            PermissionCentre.shared.recordSystemAudioAttempt(succeeded: true)
+        } else if report.permissionWasDenied {
+            PermissionCentre.shared.recordSystemAudioAttempt(succeeded: false)
+        }
         monitorRouteIndices = report.didStart ? report.monitorRouteIndices : [:]
         isBusy = false
         isStarting = false
@@ -6270,6 +6742,7 @@ final class RouterModel: ScriptTarget {
         }
 
         isRunning = true
+        lighting.setSignalActive(true)
         routeUpdatesAreAccepted = true
         lastError =
             report.refused.isEmpty
@@ -6303,6 +6776,7 @@ final class RouterModel: ScriptTarget {
         startAnalysis(sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
         applyCorrections()
         startPolling()
+        refreshHeadsetQualityAsynchronously()
         if honourPendingStop() { return }
         drainPendingRestart()
     }
@@ -6326,6 +6800,7 @@ final class RouterModel: ScriptTarget {
         // Invalidate before the busy guard. The engine may still be rendering,
         // but no route result from this lifetime may reach the interface or
         // trigger a fallback restart after Stop has been asked for.
+        lighting.setSignalActive(false)
         routeUpdatesAreAccepted = false
         routeApplier.invalidate()
         guard !isBusy else {
@@ -6386,6 +6861,9 @@ final class RouterModel: ScriptTarget {
         levels = []
         peakHolds = []
         clipped = []
+        outputPeak = 0
+        outputClippedSamples = 0
+        outputVerdict = .silent
         activeRoutes = []
         routeGains = []
         routeMutes = []
@@ -6700,6 +7178,7 @@ final class RouterModel: ScriptTarget {
         let owners: [String: String]
         let unresolved: [String]
         let refused: [String]
+        let permissionWasDenied: Bool
         let monitorRouteIndices: [String: [Int]]
         let failure: String?
         let quality: PathQuality?
@@ -6978,7 +7457,6 @@ final class RouterModel: ScriptTarget {
     /// mattered, because "say when the path is no longer clean" is a promise
     /// this application makes and a stale pill would be breaking it.
     private static let pathQualityEveryNPolls = 10
-
     @ObservationIgnored private var pollsSincePathQuality = 0
     /// Counted in path-quality rounds rather than in polls, because that is
     /// where the refresh hangs.
@@ -7069,17 +7547,12 @@ final class RouterModel: ScriptTarget {
         let monitor = monitorDeviceUID.flatMap { uid in
             outputDevices.first(where: { $0.uid == uid })
         }
-        let outputs = outputDevices
-        let preferredHeadsets = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
         engineQueue.async {
             let quality = engine.pathQuality
             let latency =
                 destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
             let monitorLatency =
                 monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
-            let headset = Self.headsetInCallQuality(
-                outputDevices: outputs,
-                preferredUIDs: preferredHeadsets)
             Task { @MainActor in
                 self.pathQualityReadInFlight = false
                 // A queued read can finish after Stop. Publishing that route's
@@ -7089,7 +7562,6 @@ final class RouterModel: ScriptTarget {
                 self.publish(quality, to: \.pathQuality)
                 self.publish(latency, to: \.destinationLatencyFrames)
                 self.publish(monitorLatency, to: \.monitorLatencyFrames)
-                self.publish(headset, to: \.headsetInCallQuality)
             }
         }
     }
@@ -7119,6 +7591,13 @@ final class RouterModel: ScriptTarget {
             lap("routePeaks") { publish(telemetry.routePeaks, to: \.levels) }
             lap("refreshPeaks") { refreshPeaks(telemetry.routePeaks) }
             lap("outputPeak") { publish(telemetry.outputPeak, to: \.outputPeak) }
+            lap("outputVerdict") {
+                publish(
+                    Self.classifyOutput(
+                        peak: telemetry.outputPeak,
+                        clippedSamples: telemetry.outputClippedSamples),
+                    to: \.outputVerdict)
+            }
             lap("failedPlugins") {
                 publish(telemetry.failedPlugins, to: \.failedPlugins)
             }

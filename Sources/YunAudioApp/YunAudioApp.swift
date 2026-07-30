@@ -125,51 +125,57 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
 
 @main
 struct YunAudioApp: App {
-    @State private var model = RouterModel()
+    @State private var model: RouterModel
     @NSApplicationDelegateAdaptor(TerminationObserver.self) private var termination
 
     init() {
-        // Before anything else: a second copy would put a second icon in the
-        // menu bar and quietly fight the first over the same devices.
         let environment = ProcessInfo.processInfo.environment
-        if environment["YUNAUDIO_RENDER"] == nil,
-            environment["YUNAUDIO_FLOWCHECK"] == nil,
-            environment["YUNAUDIO_SCREENSHOT"] == nil,
-            environment["YUNAUDIO_SETTINGS_CHECK"] == nil,
-            environment["YUNAUDIO_ICON"] == nil,
-            !MainActor.assumeIsolated({ SingleInstance.claim() })
-        {
-            exit(0)
-        }
         // The .lproj folders ship with this module, not with the main bundle.
         YunStrings.bundle = AppResources.bundle
 
-        // The application draws its own icon. `make-icon.sh` used to scale one
-        // 180-point bitmap into all ten slots of the iconset, which meant the
-        // largest was a five-fold upscale of it — soft in Finder, and mushy at
-        // 16 points where the small ones live. Drawing each slot at its own
-        // resolution costs nothing and needs the code that already knows where
-        // the mark's ink is, which is in this binary. See `YunIconBadge`.
-        if let directory = environment["YUNAUDIO_ICON"] {
+        // This decision has to precede model construction. A default value on
+        // the `@State` above runs before `App.init()`, which let a second copy
+        // enumerate every device, open MIDI and even honour auto-start before
+        // the single-instance claim told it to exit.
+        let startup = MainActor.assumeIsolated {
+            AppStartup.prepare(
+                environment: environment,
+                claimSingleInstance: { SingleInstance.claim() },
+                makeModel: { RouterModel() })
+        }
+
+        switch startup {
+        case .duplicate:
+            exit(0)
+        case .normal(let model):
+            _model = State(initialValue: model)
+        case .icon:
+            // The application draws its own icon. `make-icon.sh` used to scale one
+            // 180-point bitmap into all ten slots of the iconset, which meant the
+            // largest was a five-fold upscale of it — soft in Finder, and mushy at
+            // 16 points where the small ones live. Drawing each slot at its own
+            // resolution costs nothing and needs the code that already knows where
+            // the mark's ink is, which is in this binary. See `YunIconBadge`.
+            guard let directory = environment["YUNAUDIO_ICON"] else { exit(1) }
             let style = YunIconBadge.style(named: environment["YUNAUDIO_ICON_STYLE"])
             let wrote = MainActor.assumeIsolated {
                 YunIconBadge.writeIconset(to: directory, style: style)
             }
             exit(wrote ? 0 : 1)
-        }
-
-        // Design verification path. A menu bar popover cannot be opened without
-        // accessibility permission, so the panel is rendered offscreen instead —
-        // in both appearances, which is the only way to catch a colour that
-        // works in one theme and vanishes in the other.
-        if let directory = ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] {
+        case .render(let model):
+            // Design verification path. A menu bar popover cannot be opened without
+            // accessibility permission, so the panel is rendered offscreen instead —
+            // in both appearances, which is the only way to catch a colour that
+            // works in one theme and vanishes in the other.
+            guard let directory = environment["YUNAUDIO_RENDER"] else { exit(1) }
             MainActor.assumeIsolated {
-                PanelRenderer.write(to: directory, model: RouterModel())
+                PanelRenderer.write(to: directory, model: model)
             }
             // Non-zero when anything could not be written. A design check whose
             // output is missing must not look like one that passed.
             exit(MainActor.assumeIsolated { PanelRenderer.wroteEverything } ? 0 : 1)
         }
+
     }
 
     @State private var hasLaunched = false

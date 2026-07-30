@@ -194,9 +194,13 @@ public final class ProcessTap {
         let description = capturePermissionDescription()
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
-        if tapID != kAudioObjectUnknown {
-            AudioHardwareDestroyProcessTap(tapID)
+        guard tapID != kAudioObjectUnknown else {
+            // CoreAudio has returned `noErr` with no tap in production. That
+            // proves neither permission nor capture, so the settings page must
+            // not turn it into an Allowed badge.
+            return status == noErr ? kAudioHardwareUnspecifiedError : status
         }
+        AudioHardwareDestroyProcessTap(tapID)
         return status
     }
 

@@ -16,15 +16,18 @@ public final class DeviceChangeWatcher {
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
 
-    private static let defaultInputAddress = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDefaultInputDevice,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain)
-
     public init(onChange: @escaping @Sendable () -> Void) {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
         self.queue = queue
-        coalescer = DeviceChangeCoalescer(queue: queue, handler: onChange)
+        let inventory = DeviceInventoryGate(initial: Self.inventorySignature())
+        coalescer = DeviceChangeCoalescer(queue: queue) {
+            // Some audio plug-ins announce the device-list property after a
+            // harmless property read. Re-enumerating complete devices in
+            // response asks the same plug-in again and can create a permanent
+            // notification loop. Only an inventory change reaches the model.
+            guard inventory.shouldDeliver(Self.inventorySignature()) else { return }
+            onChange()
+        }
 
         let listener: AudioObjectPropertyListenerBlock = { [coalescer] _, _ in
             coalescer.signal()
@@ -35,9 +38,6 @@ public final class DeviceChangeWatcher {
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID.system, &deviceList, queue, listener)
 
-        var defaultInput = Self.defaultInputAddress
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID.system, &defaultInput, queue, listener)
     }
 
     deinit {
@@ -45,20 +45,21 @@ public final class DeviceChangeWatcher {
         var deviceList = Self.deviceListAddress
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID.system, &deviceList, queue, block)
-        var defaultInput = Self.defaultInputAddress
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID.system, &defaultInput, queue, block)
+    }
+
+    private static func inventorySignature() -> Set<AudioObjectID>? {
+        try? Set(AudioObjectID.system.array(of: .devices))
     }
 }
 
 /// Turns one HAL change into one application refresh, however many properties
 /// announce it.
 ///
-/// Plugging in one device can change the device list and the default input in
-/// the same HAL turn. Both listeners used to run a complete device enumeration
-/// and route-recovery pass. This is a fixed window from the first event rather
-/// than a debounce: a device that keeps producing notifications cannot postpone
-/// recovery indefinitely.
+/// Plugging in one device can publish the device list several times in the same
+/// HAL turn. Those callbacks must not each run a complete device enumeration
+/// and route-recovery pass. This is a fixed window from the first
+/// event rather than a debounce: a device that keeps producing notifications
+/// cannot postpone recovery indefinitely.
 final class DeviceChangeCoalescer: @unchecked Sendable {
     private let queue: DispatchQueue
     private let delay: DispatchTimeInterval
@@ -85,5 +86,24 @@ final class DeviceChangeCoalescer: @unchecked Sendable {
                 handler()
             }
         }
+    }
+}
+
+/// Delivers only a real change to the system's device identifiers.
+///
+/// Accessed on the watcher's serial queue. A failed read is not interpreted as
+/// an empty machine: doing that would report every endpoint missing because one
+/// transient query failed.
+final class DeviceInventoryGate: @unchecked Sendable {
+    private var current: Set<AudioObjectID>?
+
+    init(initial: Set<AudioObjectID>?) {
+        current = initial
+    }
+
+    func shouldDeliver(_ candidate: Set<AudioObjectID>?) -> Bool {
+        guard let candidate, candidate != current else { return false }
+        current = candidate
+        return true
     }
 }

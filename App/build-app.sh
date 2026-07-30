@@ -35,7 +35,7 @@ echo "building (${CONFIGURATION})…"
 swift build -c "${CONFIGURATION}" --product YunAudioApp
 
 BINARY=".build/${CONFIGURATION}/YunAudioApp"
-BUNDLE="build/YunAudio.app"
+BUNDLE="${YUNAUDIO_APP_BUNDLE:-build/YunAudio.app}"
 
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
@@ -68,6 +68,9 @@ for MODULE_BUNDLE in "${MODULE_BUNDLES[@]}"; do
 done
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
+for LOCALISATION in App/Resources/*.lproj; do
+	cp -R "${LOCALISATION}" "${BUNDLE}/Contents/Resources/"
+done
 
 # The driver travels inside the bundle so the app can offer to install it.
 if [[ -d "Driver/build/YunAudioDriver.driver" ]]; then

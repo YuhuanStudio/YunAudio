@@ -466,8 +466,11 @@ final class EffectChain {
     /// run of units.
     private var native: FormantShifter?
     private var nativeIndex: Int?
-    /// What the first half of the chain produced, which the native stage
-    /// rewrites in place and the second half then pulls from.
+    /// What the first half of the chain produced when a hosted stage follows
+    /// the native one.
+    ///
+    /// A native tail renders directly into `outputBuffer`; allocating and
+    /// copying through this buffer there spent one whole block for no consumer.
     private var nativeBuffer: UnsafeMutablePointer<Float>?
     private var nativeList: UnsafeMutableAudioBufferListPointer?
     private var nativeTimestamp = AudioTimeStamp()
@@ -528,7 +531,8 @@ final class EffectChain {
         for kind in stages {
             if kind.isNative {
                 nativeIndex = units.count
-                native = FormantShifter()
+                native = FormantShifter(sampleRate: sampleRate)
+                guard native != nil else { return nil }
                 continue
             }
             hostedStages.append(kind)
@@ -654,6 +658,9 @@ final class EffectChain {
         guard !units.isEmpty || native != nil else { return nil }
 
         if native != nil {
+            nativeTimestamp.mFlags = .sampleTimeValid
+        }
+        if let nativeIndex, nativeIndex < units.count {
             let buffer = UnsafeMutablePointer<Float>.allocate(capacity: maximumFrames)
             buffer.initialize(repeating: 0, count: maximumFrames)
             nativeBuffer = buffer
@@ -663,12 +670,11 @@ final class EffectChain {
                 mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
                 mData: UnsafeMutableRawPointer(buffer))
             nativeList = list
-            nativeTimestamp.mFlags = .sampleTimeValid
         }
 
         // The head pulls from our staging buffer; every later stage pulls from
         // the one before it.
-        var headCallback = AURenderCallbackStruct(
+        let headCallback = AURenderCallbackStruct(
             inputProc: { refCon, _, _, _, frameCount, ioData in
                 guard let ioData else { return noErr }
                 let source = refCon.assumingMemoryBound(to: Float.self)
@@ -682,9 +688,17 @@ final class EffectChain {
             },
             inputProcRefCon: UnsafeMutableRawPointer(inputBuffer))
         if !units.isEmpty {
+            // When the native stage is first, unit zero is already after the
+            // split. Pointing it at `inputBuffer` bypassed the formant output:
+            // a formant followed by only the limiter rendered both stages but
+            // the listener heard the limiter over the unshifted input.
+            var firstCallback = headCallback
+            if nativeIndex == 0, let nativeBuffer {
+                firstCallback.inputProcRefCon = UnsafeMutableRawPointer(nativeBuffer)
+            }
             AudioUnitSetProperty(
                 units[0], kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-                &headCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                &firstCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
         }
 
         for index in 1..<max(units.count, 1) where index < units.count {
@@ -1167,6 +1181,13 @@ final class EffectChain {
     /// How many units the chain built, for tests that care about placement.
     var unitCountForTesting: Int { units.count }
 
+    /// Whether the native stage needs storage between hosted stages.
+    ///
+    /// A native tail must be false: its output is already the chain output, and
+    /// allocating a work buffer there is evidence that the copy fast path was
+    /// lost even when the samples still sound right.
+    var hasNativeWorkBufferForTesting: Bool { nativeBuffer != nil }
+
     /// What a hosted plugin says its controls are.
     func parameters(ofPlugin id: String) -> [EffectParameter] {
         guard let unit = pluginUnits[id] else { return [] }
@@ -1275,8 +1296,33 @@ final class EffectChain {
         // The native stage splits the run in two. Everything before it renders
         // into its own buffer, it rewrites that in place, and everything after
         // pulls from the result.
-        if let native, let nativeBuffer, let nativeList {
+        if let native {
             let split = nativeIndex ?? 0
+            if split == units.count {
+                // The native stage is the tail, so `outputBuffer` is already
+                // its destination. The previous path always went through
+                // `nativeBuffer` and copied the result back: two block copies
+                // for a formant-only chain and one after a hosted head. Here
+                // the only copy left is the unavoidable input staging when
+                // there is no hosted head at all.
+                if split > 0 {
+                    nativeTimestamp.mSampleTime = sampleTime
+                    bufferList[0].mDataByteSize =
+                        UInt32(frames * MemoryLayout<Float>.size)
+                    var flags = AudioUnitRenderActionFlags()
+                    guard
+                        AudioUnitRender(
+                            units[split - 1], &flags, &nativeTimestamp, 0,
+                            UInt32(frames), bufferList.unsafeMutablePointer) == noErr
+                    else { return false }
+                } else {
+                    outputBuffer.update(from: inputBuffer, count: frames)
+                }
+                native.process(outputBuffer, count: frames)
+                return true
+            }
+
+            guard let nativeBuffer, let nativeList else { return false }
             if split > 0 {
                 nativeTimestamp.mSampleTime = sampleTime
                 nativeList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
@@ -1291,12 +1337,6 @@ final class EffectChain {
             }
 
             native.process(nativeBuffer, count: frames)
-
-            guard split < units.count else {
-                // Nothing after it, so what it produced is the output.
-                outputBuffer.update(from: nativeBuffer, count: frames)
-                return true
-            }
         }
 
         guard let tail = units.last else { return false }

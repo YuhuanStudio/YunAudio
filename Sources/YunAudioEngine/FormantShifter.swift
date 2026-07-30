@@ -22,35 +22,72 @@ import Foundation
 /// separation the effect needs.
 public final class FormantShifter {
 
-    /// Power of two. 1024 at 48 kHz is 21 ms of window, which is long enough to
-    /// resolve a male fundamental and short enough that a moving vowel does not
-    /// smear across the transition.
+    /// The analysis geometry for one stream.
+    ///
+    /// Frames are derived from the rate instead of being fixed. A fixed
+    /// 1024-frame window shrinks from 21 ms at 48 kHz to 11 ms at 96 kHz,
+    /// leaving only 1.28 cycles of a 120 Hz voice and doubling the frequency
+    /// width of every bin. The power-of-two window and quarter hop scale
+    /// together so the physical window, overlap and cepstral boundary remain
+    /// stable.
+    public struct Configuration: Equatable, Sendable {
+        public let windowSize: Int
+        public let hop: Int
+        public let cepstralDepth: Int
+
+        /// Nothing can emerge before one whole analysis window has arrived.
+        public var latencyFrames: Int { windowSize }
+    }
+
+    private static let referenceSampleRate = 48_000.0
+    private static let referenceCepstralDepth = 30
+    private static let minimumWindowSize = 256
+    private static let maximumWindowSize = 8192
+
+    /// Reference geometry retained for callers which mean the 48 kHz default.
+    ///
+    /// A live stream must use `configuration(sampleRate:)` or the instance's
+    /// `latencyFrames`; these constants do not describe other rates.
     public static let windowSize = 1024
-    private static let log2n = vDSP_Length(10)
-    /// Quarter-window hop. Smaller callbacks are gathered across calls rather
-    /// than increasing the transform rate: callback geometry must not change
-    /// either the sound or the cost of processing one second of audio.
     public static let hop = windowSize / 4
 
-    /// How many cepstral coefficients count as "envelope".
+    /// Derives a rate-specific power-of-two analysis geometry.
     ///
-    /// Low quefrency is the vocal tract, high quefrency is the pitch. Thirty
-    /// bins at this window puts the boundary around 700 Hz of spectral
-    /// detail — above every formant bandwidth and below every fundamental, so
-    /// the two separate cleanly. Too few and the envelope misses a formant;
-    /// too many and it starts tracking the harmonics, at which point shifting
-    /// it shifts the pitch too and the whole point is lost.
-    private static let cepstralDepth = 30
+    /// The upper bound matches the largest delay line the realtime graph can
+    /// align. It also covers every rate the hardware layer offers, through
+    /// 384 kHz, without allowing an invalid external value to request an
+    /// unbounded allocation while a graph is being built.
+    public static func configuration(sampleRate: Double) -> Configuration? {
+        guard sampleRate.isFinite, sampleRate >= 8_000, sampleRate <= 384_000 else {
+            return nil
+        }
+
+        let target =
+            Int(ceil(Double(Self.windowSize) * sampleRate / Self.referenceSampleRate))
+        var size = Self.minimumWindowSize
+        while size < target, size < Self.maximumWindowSize { size <<= 1 }
+        guard size >= target else { return nil }
+
+        let depth = Int(
+            (Double(Self.referenceCepstralDepth) * sampleRate
+                / Self.referenceSampleRate).rounded())
+        return Configuration(
+            windowSize: size, hop: size / 4,
+            cepstralDepth: min(max(depth, 1), size / 2 - 1))
+    }
+
+    public let configuration: Configuration
 
     /// Latency the shifter introduces, in frames. One window: nothing can come
     /// out until a whole window has gone in.
-    public var latencyFrames: Int { Self.windowSize }
+    public var latencyFrames: Int { configuration.latencyFrames }
 
     /// Formant ratio. 1 is unchanged; above 1 moves the resonances up, which
     /// reads as a smaller speaker.
     public var ratio: Float = 1
 
     private let setup: FFTSetup
+    private let log2n: vDSP_Length
     private let window: [Float]
     /// Normalisation for the overlap-added Hann windows, applied twice.
     private let overlapScale: Float
@@ -78,14 +115,24 @@ public final class FormantShifter {
     private var warped: [Float]
     private var symmetric: [Float]
 
-    public init?() {
-        guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
+    public convenience init?() {
+        self.init(sampleRate: Self.referenceSampleRate)
+    }
+
+    public init?(sampleRate: Double) {
+        guard let configuration = Self.configuration(sampleRate: sampleRate) else {
             return nil
         }
+        let log2n = vDSP_Length(configuration.windowSize.trailingZeroBitCount)
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
+            return nil
+        }
+        self.configuration = configuration
         self.setup = setup
+        self.log2n = log2n
         window = vDSP.window(
             ofType: Float.self, usingSequence: .hanningDenormalized,
-            count: Self.windowSize, isHalfWindow: false)
+            count: configuration.windowSize, isHalfWindow: false)
 
         // Two factors, and both were wrong at first because nothing exercised
         // them: the identity case returns before the transform, so the only
@@ -95,23 +142,23 @@ public final class FormantShifter {
         // Σ w²[n − mH] = (3/8)(N/H) = 1.5 at a quarter-window hop. A
         // forward-then-inverse pass of `vDSP_fft_zrip` also scales by 2N, so
         // reconstruction divides by both.
-        overlapScale = 1 / (1.5 * 2 * Float(Self.windowSize))
+        overlapScale = 1 / (1.5 * 2 * Float(configuration.windowSize))
 
-        let half = Self.windowSize / 2
-        input = [Float](repeating: 0, count: Self.windowSize)
-        output = [Float](repeating: 0, count: Self.windowSize)
-        pendingInput = [Float](repeating: 0, count: Self.hop)
-        readyOutput = [Float](repeating: 0, count: Self.hop)
+        let half = configuration.windowSize / 2
+        input = [Float](repeating: 0, count: configuration.windowSize)
+        output = [Float](repeating: 0, count: configuration.windowSize)
+        pendingInput = [Float](repeating: 0, count: configuration.hop)
+        readyOutput = [Float](repeating: 0, count: configuration.hop)
         real = [Float](repeating: 0, count: half)
         imaginary = [Float](repeating: 0, count: half)
-        frame = [Float](repeating: 0, count: Self.windowSize)
+        frame = [Float](repeating: 0, count: configuration.windowSize)
         magnitudes = [Float](repeating: 0, count: half)
-        logMagnitude = [Float](repeating: 0, count: Self.windowSize)
+        logMagnitude = [Float](repeating: 0, count: configuration.windowSize)
         cepstrumReal = [Float](repeating: 0, count: half)
         cepstrumImaginary = [Float](repeating: 0, count: half)
         envelope = [Float](repeating: 0, count: half)
         warped = [Float](repeating: 0, count: half)
-        symmetric = [Float](repeating: 0, count: Self.windowSize)
+        symmetric = [Float](repeating: 0, count: configuration.windowSize)
     }
 
     deinit { vDSP_destroy_fftsetup(setup) }
@@ -131,9 +178,10 @@ public final class FormantShifter {
     ///   - count: Frames to process. It need not be a multiple of `hop`.
     public func process(_ samples: UnsafeMutablePointer<Float>, count: Int) {
         guard count > 0 else { return }
+        let hop = configuration.hop
         var offset = 0
         while offset < count {
-            let frames = min(Self.hop - pendingFrames, count - offset)
+            let frames = min(hop - pendingFrames, count - offset)
             pendingInput.withUnsafeMutableBufferPointer { pending in
                 readyOutput.withUnsafeBufferPointer { ready in
                     (pending.baseAddress! + pendingFrames).update(
@@ -145,14 +193,14 @@ public final class FormantShifter {
             pendingFrames += frames
             offset += frames
 
-            if pendingFrames == Self.hop {
+            if pendingFrames == hop {
                 pendingInput.withUnsafeMutableBufferPointer {
                     processHop($0.baseAddress!)
                 }
                 readyOutput.withUnsafeMutableBufferPointer { ready in
                     pendingInput.withUnsafeBufferPointer { pending in
                         ready.baseAddress!.update(
-                            from: pending.baseAddress!, count: Self.hop)
+                            from: pending.baseAddress!, count: hop)
                     }
                 }
                 pendingFrames = 0
@@ -161,8 +209,8 @@ public final class FormantShifter {
     }
 
     private func processHop(_ samples: UnsafeMutablePointer<Float>) {
-        let size = Self.windowSize
-        let hop = Self.hop
+        let size = configuration.windowSize
+        let hop = configuration.hop
 
         // Slide the analysis window along and take the new hop.
         input.withUnsafeMutableBufferPointer { buffer in
@@ -181,7 +229,13 @@ public final class FormantShifter {
         // stage on before deciding what to do with it should hear the latency
         // and nothing else. Skipping the transform for it also keeps the cost
         // honest — an effect at zero has no business spending an FFT.
-        if abs(ratio - 1) < 0.001 {
+        // A control write can arrive between hops. One snapshot makes the
+        // whole spectrum use one ratio; clamping also keeps a malformed saved
+        // value from turning a source-bin conversion into a trap.
+        let requestedRatio = ratio
+        let hopRatio =
+            requestedRatio.isFinite ? min(max(requestedRatio, 0.6), 1.6) : 1
+        if abs(hopRatio - 1) < 0.001 {
             // Still delayed by a window, so switching the ratio around does
             // not jump the signal in time. Overlap-add supplies three hops of
             // delay and the ready-output queue supplies the fourth.
@@ -211,11 +265,11 @@ public final class FormantShifter {
                         raw.bindMemory(to: DSPComplex.self).baseAddress!, 2, &split, 1,
                         vDSP_Length(half))
                 }
-                vDSP_fft_zrip(setup, &split, 1, Self.log2n, FFTDirection(FFT_FORWARD))
+                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
 
-                shapeSpectrum(&split, half: half)
+                shapeSpectrum(&split, half: half, inverseRatio: 1 / hopRatio)
 
-                vDSP_fft_zrip(setup, &split, 1, Self.log2n, FFTDirection(FFT_INVERSE))
+                vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_INVERSE))
                 frame.withUnsafeMutableBytes { raw in
                     vDSP_ztoc(
                         &split, 1, raw.bindMemory(to: DSPComplex.self).baseAddress!, 2,
@@ -255,7 +309,9 @@ public final class FormantShifter {
     }
 
     /// Replaces the spectral envelope with a stretched copy of itself.
-    private func shapeSpectrum(_ split: inout DSPSplitComplex, half: Int) {
+    private func shapeSpectrum(
+        _ split: inout DSPSplitComplex, half: Int, inverseRatio: Float
+    ) {
         // Magnitudes. Bin 0 packs DC and Nyquist together in this form and is
         // left out of the envelope entirely — it is not a frequency.
         magnitudes.withUnsafeMutableBufferPointer { output in
@@ -278,7 +334,7 @@ public final class FormantShifter {
         // is what makes the result real rather than complex.
         for index in 0..<half {
             symmetric[index] = logMagnitude[index]
-            symmetric[Self.windowSize - 1 - index] = logMagnitude[index]
+            symmetric[configuration.windowSize - 1 - index] = logMagnitude[index]
         }
 
         cepstrumReal.withUnsafeMutableBufferPointer { realBuffer in
@@ -290,15 +346,15 @@ public final class FormantShifter {
                         raw.bindMemory(to: DSPComplex.self).baseAddress!, 2, &cepstrum, 1,
                         vDSP_Length(half))
                 }
-                vDSP_fft_zrip(setup, &cepstrum, 1, Self.log2n, FFTDirection(FFT_FORWARD))
+                vDSP_fft_zrip(setup, &cepstrum, 1, log2n, FFTDirection(FFT_FORWARD))
 
                 // Lifter: everything above the vocal tract's quefrency goes.
-                for index in Self.cepstralDepth..<half {
+                for index in configuration.cepstralDepth..<half {
                     realBuffer[index] = 0
                     imaginaryBuffer[index] = 0
                 }
 
-                vDSP_fft_zrip(setup, &cepstrum, 1, Self.log2n, FFTDirection(FFT_INVERSE))
+                vDSP_fft_zrip(setup, &cepstrum, 1, log2n, FFTDirection(FFT_INVERSE))
                 symmetric.withUnsafeMutableBytes { raw in
                     vDSP_ztoc(
                         &cepstrum, 1, raw.bindMemory(to: DSPComplex.self).baseAddress!, 2,
@@ -311,7 +367,7 @@ public final class FormantShifter {
         // quieter and worse: the envelope comes back doubled in the log domain,
         // so every correction is applied at twice the decibels asked for and
         // the effect is violent at settings that should be subtle.
-        let unscale = 1 / (2 * Float(Self.windowSize))
+        let unscale = 1 / (2 * Float(configuration.windowSize))
         for index in 0..<half {
             envelope[index] = symmetric[index] * unscale
         }
@@ -320,7 +376,7 @@ public final class FormantShifter {
         // resonance at k to k×ratio, which is the direction anybody expects
         // from a control labelled "higher".
         for index in 0..<half {
-            let source = Float(index) / ratio
+            let source = Float(index) * inverseRatio
             let low = Int(source)
             if low >= half - 1 {
                 // Past the top there is nothing to read, so the envelope is

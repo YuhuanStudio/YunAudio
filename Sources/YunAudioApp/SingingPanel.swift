@@ -13,6 +13,7 @@ import YunDesign
 /// invalidating the header, device pickers, patchbay and the other columns.
 struct SingingPanel: View {
     @Bindable var model: RouterModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isTitleLookupExpanded = false
     @State private var handTitle = ""
     @State private var handArtist = ""
@@ -20,55 +21,18 @@ struct SingingPanel: View {
     var body: some View {
         let _ = BodyCount.tick("SingingPanel")
         singing
+            .padding(Yun.Space.md)
+            .background {
+                cardBackground
+                    .clipShape(.rect(cornerRadius: Yun.Radius.card))
+            }
     }
 
     @ViewBuilder
     private var singing: some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             if let track = model.nowPlaying {
-                HStack(alignment: .center, spacing: Yun.Space.lg) {
-                    songArtwork(track, size: 104)
-                    VStack(alignment: .leading, spacing: Yun.Space.xs) {
-                        Text(track.title)
-                            .font(.system(size: 24, weight: .semibold))
-                            .foregroundStyle(Yun.Palette.textPrimary)
-                            .lineLimit(2)
-                        Text(track.artist)
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundStyle(Yun.Palette.textSecondary)
-                            .lineLimit(1)
-                        if !track.album.isEmpty {
-                            Text(track.album)
-                                .font(Yun.Text.caption)
-                                .foregroundStyle(Yun.Palette.textTertiary)
-                                .lineLimit(1)
-                        }
-                        Spacer(minLength: Yun.Space.xs)
-                        songProgress(track)
-                        HStack(spacing: Yun.Space.sm) {
-                            Text(Self.clock(Double(model.songSecond)))
-                                .font(Yun.Text.mono)
-                                .foregroundStyle(Yun.Palette.textSecondary)
-                                .monospacedDigit()
-                            Spacer()
-                            YunBadge(track.application)
-                            Text(track.duration > 0 ? Self.clock(track.duration) : "--:--")
-                                .font(Yun.Text.mono)
-                                .foregroundStyle(Yun.Palette.textTertiary)
-                                .monospacedDigit()
-                        }
-                    }
-                }
-                .padding(Yun.Space.md)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Yun.Palette.accent.opacity(0.11),
-                            Yun.Palette.info.opacity(0.035),
-                        ],
-                        startPoint: .topLeading, endPoint: .bottomTrailing),
-                    in: .rect(cornerRadius: Yun.Radius.card)
-                )
+                trackHeader(track)
             } else if let problem = model.musicRecognitionProblem {
                 Text(problem)
                     .font(Yun.Text.caption)
@@ -80,14 +44,8 @@ struct SingingPanel: View {
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.warning)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button(loc("Open Automation settings")) {
-                        guard
-                            let url = URL(
-                                string:
-                                    "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
-                            )
-                        else { return }
-                        NSWorkspace.shared.open(url)
+                    Button(loc("Review permissions")) {
+                        SettingsWindow.open(model: model, initialSection: .permissions)
                     }
                     .buttonStyle(YunButtonStyle(.ghost, small: true))
                 }
@@ -105,8 +63,6 @@ struct SingingPanel: View {
                 .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
             }
-
-            handRun
 
             YunDivider()
 
@@ -183,38 +139,87 @@ struct SingingPanel: View {
             YunDivider()
             scoring
 
-            Button(loc("Open the folder")) {
-                guard let directory = RouterModel.lyricsDirectory else { return }
-                try? FileManager.default.createDirectory(
-                    at: directory, withIntermediateDirectories: true)
-                NSWorkspace.shared.open(directory)
-            }
-            .buttonStyle(YunButtonStyle(.ghost, small: true))
+            YunDivider()
+            handRun
         }
     }
 
-    private func songArtwork(_ track: NowPlaying.Track, size: CGFloat) -> some View {
-        SongArtwork(url: track.artworkURL, title: track.title)
-            .frame(width: size, height: size)
-            .background(Yun.Palette.elevated)
-            .clipShape(.rect(cornerRadius: Yun.Radius.card))
-            .shadow(color: .black.opacity(0.12), radius: 8, y: 3)
-            .overlay(
-                RoundedRectangle(cornerRadius: Yun.Radius.card)
-                    .stroke(Yun.Palette.borderHairline, lineWidth: 1)
-            )
-            .accessibilityHidden(true)
+    private var cardBackground: some View {
+        LinearGradient(
+            colors: [
+                Yun.Palette.accent.opacity(model.nowPlaying == nil ? 0.035 : 0.11),
+                Yun.Palette.elevated.opacity(0.32),
+                Yun.Palette.accent.opacity(0.025),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing)
     }
 
-    private func songProgress(_ track: NowPlaying.Track) -> some View {
+    private func trackHeader(_ track: NowPlaying.Track) -> some View {
+        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            HStack(alignment: .top, spacing: Yun.Space.sm) {
+                SongArtwork(url: track.artworkURL, title: track.title)
+                    .frame(width: 72, height: 72)
+                    .background(Yun.Palette.elevated)
+                    .clipShape(.rect(cornerRadius: 10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Yun.Palette.borderHairline, lineWidth: 1)
+                    )
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(track.title)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(track.artist)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !track.album.isEmpty {
+                        Text(track.album)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            trackProgress(track)
+
+            HStack(spacing: Yun.Space.sm) {
+                Text(Self.clock(Double(model.songSecond)))
+                Spacer(minLength: Yun.Space.sm)
+                YunBadge(track.application)
+                Text(track.duration > 0 ? Self.clock(track.duration) : "--:--")
+            }
+            .font(Yun.Text.mono)
+            .foregroundStyle(Yun.Palette.textTertiary)
+            .monospacedDigit()
+
+            if let appleMusicURL = track.appleMusicURL {
+                Button(loc("Open in Apple Music")) {
+                    NSWorkspace.shared.open(appleMusicURL)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
+            }
+        }
+    }
+
+    private func trackProgress(_ track: NowPlaying.Track) -> some View {
         let fraction =
             track.duration > 0
             ? max(0, min(1, Double(model.songSecond) / track.duration))
             : 0
-        return ZStack(alignment: .leading) {
-            Capsule().fill(Yun.Palette.border)
-            HorizontalCapsuleFill(fraction: fraction)
-                .fill(Yun.Palette.accent)
+        return GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Yun.Palette.border)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: geometry.size.width * fraction)
+            }
         }
         .frame(height: 4)
         .accessibilityHidden(true)
@@ -222,20 +227,31 @@ struct SingingPanel: View {
 
     @ViewBuilder
     private func lyricsSource(synchronised: Bool) -> some View {
-        HStack(spacing: Yun.Space.xs) {
-            if let source = model.lyricsSourceName {
-                Text(String(format: loc("Words from %@"), source))
+        VStack(alignment: .leading, spacing: Yun.Space.xs) {
+            HStack(spacing: Yun.Space.xs) {
+                if let source = model.lyricsSourceName {
+                    Text(String(format: loc("Words from %@"), source))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                }
+                YunBadge(synchronised ? loc("timed") : loc("plain words"))
+                if let region = model.lyricsRegion {
+                    YunBadge(String(format: loc("Catalogue region %@"), region))
+                }
+                Spacer(minLength: 0)
+            }
+            if let copyright = model.lyricsCopyright {
+                Text(copyright)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            YunBadge(synchronised ? loc("timed") : loc("plain words"))
-            Spacer(minLength: 0)
         }
     }
 
     @ViewBuilder
     private var lyricsLookupState: some View {
-        let hasMusixmatch = OnlineLyrics.live.isMusixmatchConfigured
+        let hasMusixmatch = model.isMusixmatchSessionConfigured
         switch model.lyricsLookupStatus {
         case .loading:
             HStack(spacing: Yun.Space.sm) {
@@ -357,8 +373,23 @@ struct SingingPanel: View {
                             )
                         )
                     }
+                    Button(loc("Open the folder")) {
+                        guard let directory = RouterModel.lyricsDirectory else { return }
+                        try? FileManager.default.createDirectory(
+                            at: directory, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(directory)
+                    }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
                     Spacer(minLength: 0)
                 }
+            } else {
+                Button(loc("Open the folder")) {
+                    guard let directory = RouterModel.lyricsDirectory else { return }
+                    try? FileManager.default.createDirectory(
+                        at: directory, withIntermediateDirectories: true)
+                    NSWorkspace.shared.open(directory)
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
 
             if isTitleLookupExpanded {
@@ -723,24 +754,29 @@ struct SingingPanel: View {
     /// be findable without reading — that is the difference between lyrics you
     /// can sing to and lyrics you have to search.
     private func lyricView(_ lyrics: Lyrics) -> some View {
-        let current = model.lyricLine
+        let current = model.lyricLine ?? 0
         return VStack(alignment: .leading, spacing: Yun.Space.md) {
             ForEach(-1...1, id: \.self) { offset in
-                let index = (current ?? -1) + offset
+                let index = current + offset
                 let text = lyrics.lines.indices.contains(index) ? lyrics.lines[index].text : ""
                 if offset == 0 {
                     ZStack(alignment: .leading) {
                         Text(text.isEmpty ? " " : text)
                             .font(.system(size: 27, weight: .semibold))
                             .foregroundStyle(Yun.Palette.textMuted)
+                            .contentTransition(.opacity)
                         // The sweep is the point: a line that lights up all at
                         // once tells you which line, and a line that fills
                         // tells you where in it.
                         Text(text.isEmpty ? " " : text)
                             .font(.system(size: 27, weight: .semibold))
                             .foregroundStyle(Yun.Palette.accent)
-                            .mask(HorizontalFillMask(fraction: model.lyricProgress))
+                            .textRenderer(
+                                SequentialTextFillRenderer(progress: model.lyricProgress)
+                            )
+                            .contentTransition(.opacity)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, Yun.Space.lg)
                     .padding(.vertical, Yun.Space.lg)
                     .background(
@@ -760,14 +796,15 @@ struct SingingPanel: View {
                             offset < 0
                                 ? Yun.Palette.textMuted : Yun.Palette.textTertiary
                         )
+                        .contentTransition(.opacity)
                         .fixedSize(horizontal: false, vertical: true)
                         .opacity(offset < 0 ? 0.65 : 1)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(.linear(duration: 0.1), value: model.lyricProgress)
-        .animation(.easeOut(duration: 0.24), value: model.lyricLine)
+        .animation(reduceMotion ? nil : .linear(duration: 0.1), value: model.lyricProgress)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
     }
 
     private static func clock(_ seconds: Double) -> String {
@@ -775,21 +812,6 @@ struct SingingPanel: View {
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
     }
 
-}
-
-/// A left-to-right rectangular mask without a layout reader.
-private struct HorizontalFillMask: Shape {
-    var fraction: Double
-
-    var animatableData: Double {
-        get { fraction }
-        set { fraction = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        let width = rect.width * max(0, min(1, fraction))
-        return Path(CGRect(x: rect.minX, y: rect.minY, width: width, height: rect.height))
-    }
 }
 
 /// The same fill for progress tracks, retaining both rounded ends.
@@ -839,9 +861,10 @@ enum SongArtworkDecoder {
 /// Loads one cover per song and keeps the decoded image out of the moving lyric
 /// body. `AsyncImage` does not load file URLs, which made local artwork look
 /// complete in the model and remain a placeholder on screen.
-private struct SongArtwork: View {
+struct SongArtwork: View {
     let url: URL?
     let title: String
+    var contentMode: ContentMode = .fit
 
     @State private var image: NSImage?
     private static let maxPixelSize = 256
@@ -861,7 +884,7 @@ private struct SongArtwork: View {
                 Image(nsImage: image)
                     .resizable()
                     // Player artwork remains complete and uncropped.
-                    .aspectRatio(contentMode: .fit)
+                    .aspectRatio(contentMode: contentMode)
             } else {
                 ZStack {
                     LinearGradient(
