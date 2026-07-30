@@ -2369,15 +2369,20 @@ final class RouterModel: ScriptTarget {
     /// was producing audio, on a machine playing three things. Nothing had gone
     /// wrong; nothing had ever run.
     ///
-    /// Gated rather than unconditional because it is not free: 12 to 25 ms
-    /// warm on this machine and 118 ms cold, which is fine when a panel opens
-    /// and is not fine on every redraw of a list that is inside a disclosure.
+    /// Gated rather than unconditional because the background half is not
+    /// free: 12 to 27 ms warm on this machine and 118 ms cold. Moving it off
+    /// MainActor prevents a dropped frame; not asking for the same answer on
+    /// every redraw prevents needless work elsewhere.
     ///
     /// - Parameter seconds: How stale the list may be before it is re-read.
     func refreshAppsIfStale(olderThan seconds: TimeInterval = 3) {
         if let refreshed = appsRefreshedAt, Date().timeIntervalSince(refreshed) < seconds {
             return
         }
+        // Two copies of AppSourceList can appear at once. Their `.task`
+        // modifiers are freshness requests, not two reasons to enumerate the
+        // same HAL process list back to back.
+        guard !appRefreshInFlight else { return }
         refreshApps()
     }
 
@@ -3128,7 +3133,7 @@ final class RouterModel: ScriptTarget {
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
     func prepareForRendering() {
-        refreshApps()
+        refreshAppsForVerification()
         // Everything that does not depend on a device comes first.
         //
         // It used to sit after the guard below, so on any machine where no
@@ -3272,7 +3277,56 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Refreshes the application list without putting CoreAudio on MainActor.
+    ///
+    /// The AppKit snapshot is value-only and measured at about 1.23 ms. The HAL
+    /// process enumeration behind `grouped` is 12–27 ms warm and 118 ms cold,
+    /// which is a dropped frame before the list has drawn its first row.
     func refreshApps() {
+        if appRefreshInFlight {
+            // A person pressing Refresh should not be ignored, but neither
+            // should ten presses queue ten identical HAL enumerations.
+            appRefreshPending = true
+            return
+        }
+        appRefreshInFlight = true
+        let workspace = AudioApplications.workspaceSnapshot()
+        let keeping = capturedAppBundleIDs
+        let revision = appListRevision
+        engineQueue.async {
+            let applications =
+                (try? AudioApplications.grouped(keeping: keeping, workspace: workspace)) ?? []
+            Task { @MainActor in
+                // A route start can publish a newer enumeration while this
+                // request is crossing back to MainActor. The old list must not
+                // win merely because its unstructured task ran second.
+                if self.appListRevision == revision {
+                    self.appListRevision &+= 1
+                    self.availableApps = applications
+                    self.appsRefreshedAt = Date()
+                    self.refreshHeadsetQualityAsynchronously()
+                }
+                self.appRefreshInFlight = false
+
+                // A selection changed while HAL was answering, or a manual
+                // refresh arrived. One latest rerun is enough for both.
+                if self.capturedAppBundleIDs != keeping { self.appRefreshPending = true }
+                guard self.appRefreshPending else { return }
+                self.appRefreshPending = false
+                self.refreshApps()
+            }
+        }
+    }
+
+    @ObservationIgnored private var appRefreshInFlight = false
+    @ObservationIgnored private var appRefreshPending = false
+    @ObservationIgnored private var appListRevision = 0
+
+    /// The deterministic, blocking form used only by rendering and flow checks.
+    ///
+    /// Their next assertion has to see the completed list. Production controls
+    /// call `refreshApps()` above and never pay for HAL on the main actor.
+    func refreshAppsForVerification() {
         // Anything already captured is listed whether or not it happens to be
         // audible at this instant. A process with no bundle identifier is listed
         // only while the HAL says it is running output, and that property blinks
@@ -3282,6 +3336,7 @@ final class RouterModel: ScriptTarget {
         // it. Measured with the flow check's own player, one argument apart:
         // without this, two routes and "resolved to no running process"; with
         // it, four routes and the key it was built in.
+        appListRevision &+= 1
         availableApps = (try? AudioApplications.grouped(keeping: capturedAppBundleIDs)) ?? []
         appsRefreshedAt = Date()
         refreshHeadsetQualityAsynchronously()
@@ -3446,7 +3501,9 @@ final class RouterModel: ScriptTarget {
             peakHolds[index] =
                 current[index] > peakHolds[index]
                 ? current[index] : peakHolds[index] * 0.97
-            if current[index] >= Self.clipThreshold { clipped[index] = true }
+            if current[index] >= Self.clipThreshold, !clipped[index] {
+                clipped[index] = true
+            }
         }
     }
 
@@ -3766,17 +3823,36 @@ final class RouterModel: ScriptTarget {
         var id: String { uid }
     }
 
-    /// Routes grouped by where they come from, in the order they appear.
-    var sourceGroups: [SourceGroup] {
+    /// Builds the logical sources for a route list, in first-seen order.
+    ///
+    /// Kept pure so the grouping arithmetic can be asserted independently of
+    /// the model and so the cache below cannot become a second implementation.
+    nonisolated static func groupRoutes(_ routes: [Route]) -> [SourceGroup] {
         var order: [String] = []
         var members: [String: [Int]] = [:]
-        for (index, route) in activeRoutes.enumerated() {
+        for (index, route) in routes.enumerated() {
             let uid = route.source.deviceUID
             if members[uid] == nil { order.append(uid) }
             members[uid, default: []].append(index)
         }
         return order.map { SourceGroup(uid: $0, routes: members[$0] ?? []) }
     }
+
+    /// Routes grouped by source, rebuilt only when the route list changes.
+    ///
+    /// KTV, transcription, MIDI and two visible mixers ask for this repeatedly;
+    /// while singing, the recognition path alone can ask twice per 20 Hz poll.
+    /// The route list changes on graph publication, not on a meter tick, so
+    /// rebuilding a dictionary and several arrays at every read was pure churn.
+    ///
+    /// Touching `activeRoutes` preserves the Observation dependency for views
+    /// while returning the COW cache itself does not allocate.
+    var sourceGroups: [SourceGroup] {
+        _ = activeRoutes
+        return groupedActiveRoutes
+    }
+
+    @ObservationIgnored private var groupedActiveRoutes: [SourceGroup] = []
 
     /// The first route of a group, which is what every per-route accessor is
     /// keyed on.
@@ -3827,6 +3903,16 @@ final class RouterModel: ScriptTarget {
             levels: levels,
             peakHolds: peakHolds,
             clipped: clipped)
+    }
+
+    func isClipped(_ group: SourceGroup) -> Bool {
+        var routeIndex = 0
+        while routeIndex < group.routes.count {
+            let index = group.routes[routeIndex]
+            if index >= 0, index < clipped.count, clipped[index] { return true }
+            routeIndex += 1
+        }
+        return false
     }
 
     func isMuted(_ group: SourceGroup) -> Bool {
@@ -4214,7 +4300,9 @@ final class RouterModel: ScriptTarget {
     private(set) var measuredRateRatio: Double = 1
     private(set) var clockLockFailed = false
     /// The routes actually running, including any built from application taps.
-    private(set) var activeRoutes: [Route] = []
+    private(set) var activeRoutes: [Route] = [] {
+        didSet { groupedActiveRoutes = Self.groupRoutes(activeRoutes) }
+    }
 
     /// Whether the running route has taken the driver's clock. Not
     /// `isClockLocked`, which is whether the anchor has converged yet.
@@ -5644,6 +5732,7 @@ final class RouterModel: ScriptTarget {
 
         currentStartIntent = nil
         if report.refreshedApplications {
+            appListRevision &+= 1
             availableApps = report.applications
             appsRefreshedAt = Date()
         }

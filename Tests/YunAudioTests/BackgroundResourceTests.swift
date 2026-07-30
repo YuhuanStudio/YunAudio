@@ -198,6 +198,31 @@ struct BackgroundResourceTests {
         #expect(body.ranges(of: "named[bundle] = info").count == 1)
     }
 
+    @Test("an interface refresh leaves HAL enumeration on the engine queue")
+    func applicationRefreshDoesNotBlockMainActor() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let refresh = try #require(source.range(of: "func refreshApps()"))
+        let queue = try #require(
+            source.range(
+                of: "engineQueue.async",
+                range: refresh.upperBound..<source.endIndex))
+        let verification = try #require(
+            source.range(
+                of: "func refreshAppsForVerification()",
+                range: queue.upperBound..<source.endIndex))
+        let mainActor = source[refresh.lowerBound..<queue.lowerBound]
+        let worker = source[queue.lowerBound..<verification.lowerBound]
+
+        #expect(mainActor.ranges(of: "AudioApplications.workspaceSnapshot()").count == 1)
+        #expect(mainActor.ranges(of: "AudioApplications.grouped").count == 0)
+        #expect(worker.ranges(of: "AudioApplications.grouped").count == 1)
+        #expect(source.ranges(of: "guard !appRefreshInFlight else { return }").count == 1)
+        #expect(source.ranges(of: "appRefreshPending = true").count == 2)
+    }
+
     @MainActor
     @Test("the AppKit half left on MainActor stays below one frame")
     func workspaceSnapshotFitsAFrame() {
@@ -296,6 +321,54 @@ struct BackgroundResourceTests {
         #expect(singing.ranges(of: "model.singers").count == 1)
     }
 
+    @Test("the remaining live readings have child observation boundaries")
+    func liveReadingsStayOutOfParentViews() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let panelSource = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PanelView.swift",
+            encoding: .utf8)
+        let panelStart = try #require(panelSource.range(of: "struct PanelView: View"))
+        let liveStart = try #require(
+            panelSource.range(
+                of: "private struct PanelLiveCard",
+                range: panelStart.upperBound..<panelSource.endIndex))
+        let panel = panelSource[panelStart.lowerBound..<liveStart.lowerBound]
+        let live = panelSource[liveStart.lowerBound..<panelSource.endIndex]
+        #expect(panel.ranges(of: "PanelLiveCard(model: model)").count == 1)
+        #expect(panel.ranges(of: "model.peakLevel").count == 0)
+        #expect(live.ranges(of: "BodyCount.tick(\"PanelLiveCard\")").count == 1)
+        #expect(live.ranges(of: "model.peakLevel").count == 2)
+
+        let windowSource = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/MainWindow.swift",
+            encoding: .utf8)
+        let windowStart = try #require(windowSource.range(of: "struct MainWindow: View"))
+        let childStart = try #require(
+            windowSource.range(
+                of: "private struct GainReductionRow",
+                range: windowStart.upperBound..<windowSource.endIndex))
+        let window = windowSource[windowStart.lowerBound..<childStart.lowerBound]
+        #expect(window.ranges(of: "ClockLockRows(model: model)").count == 1)
+        #expect(window.ranges(of: "model.measuredRateRatio").count == 0)
+        #expect(
+            windowSource.ranges(of: "BodyCount.tick(\"ClockLockRows\")").count == 1)
+
+        let stripSource = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouteStrip.swift",
+            encoding: .utf8)
+        let stripStart = try #require(stripSource.range(of: "struct RouteStrip: View"))
+        let meterStart = try #require(
+            stripSource.range(
+                of: "private struct SourceLevelMeter",
+                range: stripStart.upperBound..<stripSource.endIndex))
+        let strip = stripSource[stripStart.lowerBound..<meterStart.lowerBound]
+        let meter = stripSource[meterStart.lowerBound..<stripSource.endIndex]
+        #expect(strip.ranges(of: "SourceLevelMeter(").count == 1)
+        #expect(strip.ranges(of: "model.meter(of: group)").count == 0)
+        #expect(meter.ranges(of: "BodyCount.tick(\"SourceLevelMeter\")").count == 1)
+        #expect(meter.ranges(of: "model.meter(of: group)").count == 1)
+    }
+
     /// `AudioDevice.hasFallenToCallQuality` reads the live sample rate through
     /// HAL. The status strip is invalidated by meters, recording state and
     /// pills, so putting that read in its body silently moved synchronous IPC
@@ -337,6 +410,30 @@ struct BackgroundResourceTests {
                 peakHolds: [],
                 clipped: [])
                 == RouterModel.SourceMeter(level: 0, peakHold: 0, isClipped: false))
+    }
+
+    @Test("source grouping preserves first-seen order and every route")
+    func sourceGrouping() {
+        let routes = [
+            Route(
+                source: ChannelRef(deviceUID: "mic", channel: 0),
+                destination: ChannelRef(deviceUID: "out", channel: 0)),
+            Route(
+                source: ChannelRef(deviceUID: "mic", channel: 1),
+                destination: ChannelRef(deviceUID: "out", channel: 1)),
+            Route(
+                source: ChannelRef(deviceUID: "player", channel: 0),
+                destination: ChannelRef(deviceUID: "out", channel: 0)),
+            Route(
+                source: ChannelRef(deviceUID: "mic", channel: 0),
+                destination: ChannelRef(deviceUID: "monitor", channel: 0)),
+        ]
+
+        #expect(
+            RouterModel.groupRoutes(routes) == [
+                RouterModel.SourceGroup(uid: "mic", routes: [0, 1, 3]),
+                RouterModel.SourceGroup(uid: "player", routes: [2]),
+            ])
     }
 }
 
@@ -508,6 +605,78 @@ struct SourceMeterPerformanceTests {
         var checksum: Float = 0
         for index in 0..<10_000 {
             checksum += Float(index & 3)
+        }
+        return checksum
+    }
+}
+
+@Suite("Source grouping performance", .serialized)
+struct SourceGroupingPerformanceTests {
+    #if DEBUG
+        @Test(
+            "ten thousand cache reads avoid ten thousand regroupings",
+            .disabled("allocation and timing evidence requires an optimised build"))
+    #else
+        @Test("ten thousand cache reads avoid ten thousand regroupings")
+    #endif
+    func cachedGrouping() {
+        let routes = (0..<16).map { index in
+            Route(
+                source: ChannelRef(deviceUID: "source-\(index % 4)", channel: index % 2),
+                destination: ChannelRef(deviceUID: "output", channel: index % 2))
+        }
+        let cached = RouterModel.groupRoutes(routes)
+        _ = Self.rebuildMany(routes)
+        _ = Self.readMany(cached)
+
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
+        RoutingEngine.enableAllocationTripwire()
+        defer { RoutingEngine.disableAllocationTripwire() }
+
+        let rebuilt = Self.measure { Self.rebuildMany(routes) }
+        let read = Self.measure { Self.readMany(cached) }
+        print(
+            "10,000 source groups: rebuild \(rebuilt.allocations) allocations / "
+                + "\(rebuilt.nanoseconds) ns; cache \(read.allocations) allocations / "
+                + "\(read.nanoseconds) ns")
+        #expect(rebuilt.checksum == read.checksum)
+        #expect(rebuilt.allocations >= read.allocations + 50_000)
+        #expect(rebuilt.nanoseconds > read.nanoseconds * 10)
+    }
+
+    private static func measure(
+        _ body: () -> Int
+    ) -> (allocations: UInt64, nanoseconds: UInt64, checksum: Int) {
+        let before = RoutingEngine.allocationViolations
+        let started = DispatchTime.now().uptimeNanoseconds
+        yun_rt_tripwire_mark_realtime(true)
+        let checksum = body()
+        yun_rt_tripwire_mark_realtime(false)
+        return (
+            RoutingEngine.allocationViolations - before,
+            DispatchTime.now().uptimeNanoseconds - started,
+            checksum
+        )
+    }
+
+    @inline(never)
+    private static func rebuildMany(_ routes: [Route]) -> Int {
+        var checksum = 0
+        for _ in 0..<10_000 {
+            let groups = RouterModel.groupRoutes(routes)
+            checksum &+= groups.count
+            checksum &+= groups.first?.routes.count ?? 0
+        }
+        return checksum
+    }
+
+    @inline(never)
+    private static func readMany(_ groups: [RouterModel.SourceGroup]) -> Int {
+        var checksum = 0
+        for _ in 0..<10_000 {
+            checksum &+= groups.count
+            checksum &+= groups.first?.routes.count ?? 0
         }
         return checksum
     }

@@ -25,16 +25,14 @@ struct RouteStrip: View {
             let muted = model.isMuted(group)
             let silenced = model.isSilenced(group)
             let soloed = model.soloedGroup == group.uid
-            let meter = model.meter(of: group)
             strip(
                 route: route, muted: muted, silenced: silenced, soloed: soloed,
-                level: meter.level, hold: meter.peakHold, clipping: meter.isClipped)
+                clipping: model.isClipped(group))
         }
     }
 
     private func strip(
-        route: Route, muted: Bool, silenced: Bool, soloed: Bool,
-        level: Float, hold: Float, clipping: Bool
+        route: Route, muted: Bool, silenced: Bool, soloed: Bool, clipping: Bool
     ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             HStack(spacing: Yun.Space.sm) {
@@ -105,10 +103,8 @@ struct RouteStrip: View {
                 }
             }
 
-            YunLevelMeter(
-                level: silenced ? 0 : level,
-                peakHold: silenced ? 0 : hold,
-                segments: isCompact ? 12 : 32)
+            SourceLevelMeter(
+                model: model, group: group, silenced: silenced, isCompact: isCompact)
 
             // Lettered only when there are two mixes to tell apart. With one
             // bus the letter is noise: there is nothing it could be
@@ -192,5 +188,27 @@ struct RouteStrip: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .accessibilityLabel(Text(label))
+    }
+}
+
+/// The moving pixels of one source strip.
+///
+/// The faders, labels, mute and solo controls do not change with the meter.
+/// Reading the level arrays in `RouteStrip` nevertheless rebuilt all of them
+/// twenty times a second per source — eighty full strip bodies for four
+/// sources. This boundary leaves only the segmented meter on that cadence.
+private struct SourceLevelMeter: View {
+    let model: RouterModel
+    let group: RouterModel.SourceGroup
+    let silenced: Bool
+    let isCompact: Bool
+
+    var body: some View {
+        let _ = BodyCount.tick("SourceLevelMeter")
+        let meter = model.meter(of: group)
+        YunLevelMeter(
+            level: silenced ? 0 : meter.level,
+            peakHold: silenced ? 0 : meter.peakHold,
+            segments: isCompact ? 12 : 32)
     }
 }

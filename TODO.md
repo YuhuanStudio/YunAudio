@@ -275,6 +275,40 @@ main-run-loop callback。現在 Observation 只在 route running 時建立 timer
 尺寸淺色真實視窗截圖也已人工檢查，沒有裁切或遺失控制項。硬體 flow 仍因上述全機
 CoreAudio 狀態未執行。
 
+### 開面板、刷新 app 與來源 meter 還在做整棵樹的工作 —— **已修且量過** [release benchmark]
+
+第二輪 redraw 修完主視窗後，選單列面板仍把 `peakLevel` 讀在 `PanelView` 自己的 body；
+面板打開時，一對 meter 會讓 presets、disclosures、兩個裝置 picker、mixer 與 footer
+全部以 20 Hz 重建。現在只有 `PanelLiveCard` 讀 meter。硬體 flow check 已加入兩邊的
+數值門檻：開啟 0.6 秒時 `PanelView` 少於 10 次、`PanelLiveCard` 多於 3 次；目前
+CoreAudio 全機狀態尚未恢復，所以這組 live 數字沒有冒充已跑。
+
+同一問題還在每個 `RouteStrip`：四個來源會每秒重建 **80 次完整控制列**，包括 mute、
+solo、角色、名稱與兩個 fader。現在 `SourceLevelMeter` 是唯一讀 `levels/peakHolds` 的
+葉節點；clip latch 也只在 false → true 時發布，不再對已經為 true 的值每 poll 重寫。
+flow check 要求父 strip 低於半個 poll rate，而 meter 本身高於四分之一，確保不是靠停掉
+動畫作弊。
+
+KTV、轉錄、MIDI 與兩個 mixer 又會反覆把不變的 `activeRoutes` 建成 source dictionary
+與多份陣列。現在 route list 的 `didSet` 才重建一次，getter 只讀 COW cache，同時保留
+對 `activeRoutes` 的 Observation dependency。16 routes、10,000 次 Release tripwire：
+
+- 每次重組：**300,000 allocations／16,640,333 ns**
+- cache：**0 allocations／5,750 ns**
+
+兩者 checksum 相同；另有數值測試斷言 first-seen 順序與不連續 route index 都保留。
+
+AppSourceList 的 `.task` 與 Refresh 按鈕原本仍在 MainActor 跑完整
+`AudioApplications.grouped`，既有量測 **12–27 ms warm／118 ms cold**。現在 MainActor
+只做約 **1.23 ms** 的一次 AppKit value snapshot，HAL enumeration 在 `engineQueue`；
+同時只允許一個 refresh in flight，期間再來的點擊或 selection 變化合併成一個 latest
+rerun，不會排出一串相同的 HAL 工作。結構測試斷言 production `refreshApps()` 在 queue
+前有 0 次 `AudioApplications.grouped`；同步版本只留給下一行立刻要 assert 結果的 render
+與 flow harness。
+
+672 個單元測試、125 個套件與不碰硬體的 acceptance gate 全綠；硬體分頁的真實視窗截圖
+已人工檢查，時脈葉節點拆分沒有改變版面。硬體 flow 仍未執行。
+
 ### AirPods 閒置拆除 [?] [疑似現行 bug]
 
 路由器持有一個常駐 aggregate。裡面有藍牙裝置時，它可能永遠不被允許閒置；而在

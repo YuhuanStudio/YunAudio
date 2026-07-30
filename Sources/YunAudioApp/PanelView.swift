@@ -76,7 +76,7 @@ struct PanelView: View {
                 // than watched still collapse, so the height is the user's
                 // choice instead of a fixed cost.
                 presets
-                live
+                PanelLiveCard(model: model)
                 StatusPills(model: model, isCompact: true)
                 devicePickers
                 quickSwitches
@@ -139,54 +139,6 @@ struct PanelView: View {
                 .buttonStyle(YunButtonStyle(isActive ? .primary : .secondary, small: true))
                 .help(preset.isUserDefined ? preset.note : loc(preset.note))
             }
-        }
-    }
-
-    // MARK: The live card
-
-    /// Where the signal is going, how loud it arrives and how loud it leaves.
-    ///
-    /// The trim and the master were inside the devices disclosure, one click
-    /// away in a panel whose whole point is not needing one. They are the two
-    /// faders somebody opens this to move.
-    private var live: some View {
-        YunCard {
-            VStack(alignment: .leading, spacing: Yun.Space.md) {
-                // Short names here and only here. The panel is 340 points wide
-                // and both ends share it, so a full name is truncated in the
-                // middle — "Razer…en V2 X", which keeps the word every Razer
-                // device has and eats the one that says which device it is.
-                YunSignalPath(
-                    source: model.selectedSource?.shortName ?? loc("No input"),
-                    destination: model.selectedDestination?.shortName ?? loc("No output"),
-                    level: model.peakLevel,
-                    isActive: model.isRunning)
-
-                YunLevelMeter(level: model.isRunning ? model.peakLevel : 0)
-
-                // Named, because two identical faders one above the other are
-                // not two controls — they are one control somebody is guessing
-                // about. The window can lean on the section each sits in; here
-                // they are in the same card.
-                levelRow(
-                    loc("Input"), decibels: $model.inputDecibels,
-                    muted: $model.isInputMuted, label: loc("Input level"))
-                levelRow(
-                    loc("Master"), decibels: $model.outputDecibels,
-                    muted: $model.isOutputMuted, label: loc("Output level"))
-            }
-        }
-    }
-
-    private func levelRow(
-        _ caption: String, decibels: Binding<Float>, muted: Binding<Bool>, label: String
-    ) -> some View {
-        HStack(spacing: Yun.Space.sm) {
-            Text(caption)
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .frame(width: 44, alignment: .leading)
-            LevelRow(decibels: decibels, muted: muted, label: label, isCompact: true)
         }
     }
 
@@ -572,6 +524,58 @@ struct PanelView: View {
 
             Button(loc("Quit")) { NSApplication.shared.terminate(nil) }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
+        }
+    }
+}
+
+/// The only twenty-hertz part of an open menu bar panel.
+///
+/// `PanelView` used to read `peakLevel` in its own body. Observation therefore
+/// rebuilt the presets, every disclosure, both device pickers, the mixer and
+/// the footer for each meter sample. A child boundary keeps the live signal
+/// live without making a 340-point control panel a twenty-hertz animation.
+private struct PanelLiveCard: View {
+    @Bindable var model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("PanelLiveCard")
+        YunCard {
+            VStack(alignment: .leading, spacing: Yun.Space.md) {
+                // Short names here and only here. The panel is 340 points wide
+                // and both ends share it, so a full name is truncated in the
+                // middle — "Razer…en V2 X", which keeps the word every Razer
+                // device has and eats the one that says which device it is.
+                YunSignalPath(
+                    source: model.selectedSource?.shortName ?? loc("No input"),
+                    destination: model.selectedDestination?.shortName ?? loc("No output"),
+                    level: model.peakLevel,
+                    isActive: model.isRunning)
+
+                YunLevelMeter(level: model.isRunning ? model.peakLevel : 0)
+
+                // Named, because two identical faders one above the other are
+                // not two controls — they are one control somebody is guessing
+                // about. The window can lean on the section each sits in; here
+                // they are in the same card.
+                levelRow(
+                    loc("Input"), decibels: $model.inputDecibels,
+                    muted: $model.isInputMuted, label: loc("Input level"))
+                levelRow(
+                    loc("Master"), decibels: $model.outputDecibels,
+                    muted: $model.isOutputMuted, label: loc("Output level"))
+            }
+        }
+    }
+
+    private func levelRow(
+        _ caption: String, decibels: Binding<Float>, muted: Binding<Bool>, label: String
+    ) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            Text(caption)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .frame(width: 44, alignment: .leading)
+            LevelRow(decibels: decibels, muted: muted, label: label, isCompact: true)
         }
     }
 }

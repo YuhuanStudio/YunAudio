@@ -763,7 +763,7 @@ enum UIFlowCheck {
         try checkLocalisation()
 
         try section("application list")
-        model.refreshApps()
+        model.refreshAppsForVerification()
         check("applications were found", !model.availableApps.isEmpty)
         check(
             "every listed application has a name",
@@ -2758,7 +2758,7 @@ enum UIFlowCheck {
         // the pitch tracker, the music players' scripting dictionaries, and a
         // routed microphone. What was missing was the words, and those are a
         // file.
-        model.refreshApps()
+        model.refreshAppsForVerification()
         let playerBundleIDs = Set(["com.apple.Music", "com.spotify.client"])
         let livePlayer = model.availableApps.first {
             playerBundleIDs.contains($0.bundleID) && $0.isPlaying
@@ -3830,7 +3830,7 @@ enum UIFlowCheck {
         // Captured through the application's own process tap, which is the
         // path a person's music takes. Nothing acoustic: a microphone hearing
         // the speakers would be measuring the room.
-        model.refreshApps()
+        model.refreshAppsForVerification()
         let captured = model.availableApps.first {
             $0.name.localizedCaseInsensitiveContains("afplay")
         }
@@ -4298,7 +4298,7 @@ enum UIFlowCheck {
         // alternate runs and read as a defect in the capture path.
         let identity = AudioApplications.identity(forPID: take.processIdentifier)
         await pause(upTo: 5.0) {
-            model.refreshApps()
+            model.refreshAppsForVerification()
             return model.availableApps.contains { $0.bundleID == identity }
         }
         guard let captured = model.availableApps.first(where: { $0.bundleID == identity })
@@ -4784,19 +4784,19 @@ enum UIFlowCheck {
         /// - Returns: How many `PanelView` bodies ran while it was open, or nil
         ///   when it would not open and shut here at all — in which case
         ///   nothing below has been exercised and the caller must say so.
-        func openAndShutPanel() async -> Int? {
+        func openAndShutPanel() async -> [String: Int]? {
             statusItem?.setPanelOpenForCheck(true)
             BodyCount.reset()
             BodyCount.isCounting = true
             await pause(0.6)
             BodyCount.isCounting = false
             guard statusItem?.isPanelShownForCheck == true else { return nil }
-            let drawn = BodyCount.counts["PanelView"] ?? 0
+            let counts = BodyCount.counts
             statusItem?.setPanelOpenForCheck(false)
             // Long enough for the close animation to finish, or the panel is
             // still shown when this is read and the check disqualifies itself.
             await pause(1.0)
-            return statusItem?.isPanelShownForCheck == false ? drawn : nil
+            return statusItem?.isPanelShownForCheck == false ? counts : nil
         }
 
         // Twice. The panel is detached from the popover when it shuts, so the
@@ -4806,8 +4806,16 @@ enum UIFlowCheck {
         let firstOpen = await openAndShutPanel()
         let secondOpen = firstOpen == nil ? nil : await openAndShutPanel()
         let panelClosed = secondOpen != nil
-        if let drawn = secondOpen {
-            check("the menu bar panel still draws when it is opened again", drawn > 0)
+        if let openCounts = secondOpen {
+            check(
+                "the menu bar panel still draws when it is opened again",
+                (openCounts["PanelView"] ?? 0) > 0)
+            check(
+                "an open panel does not redraw with its meter",
+                (openCounts["PanelView"] ?? 0) < 10)
+            check(
+                "the open panel's meter stayed live",
+                (openCounts["PanelLiveCard"] ?? 0) > 3)
         } else {
             note(
                 statusItem == nil
@@ -4871,11 +4879,14 @@ enum UIFlowCheck {
         check(
             "nor the balance panel",
             Double(counts["CalibrationPanel"] ?? 0) < poll / 2)
+        check(
+            "source controls do not redraw with their meters",
+            Double(counts["RouteStrip"] ?? 0) < poll / 2)
         // And the other half: the meters must still be live, or the fix was to
         // stop drawing rather than to stop over-drawing.
         check(
             "the meters are still redrawing",
-            Double(counts["RouteStrip"] ?? 0) > poll / 4)
+            Double(counts["SourceLevelMeter"] ?? 0) > poll / 4)
         // And the one nobody was looking at. The window is on screen here and
         // the panel is not, so a body count for the panel at all is the whole
         // finding: measured at 20.0 Hz — one full evaluation of the header, the
@@ -5706,15 +5717,14 @@ enum UIFlowCheck {
         }
         note(String(format: "  %.1f ms of that is the model's own, warm", warm * 1000))
 
-        // Not on the launch path — on the *start* path, at the top of every
-        // `start()`, whether or not anything is being tapped. It is here
-        // because it is the same kind of question and because the number is
-        // worth having beside the others: enabling one effect tears the route
-        // down and builds it back, and this is part of what that costs.
-        let apps = timed("refreshApps, at the top of every start") { model.refreshApps() }
+        // Opening either application list used to run the 12–118 ms HAL half
+        // synchronously. The operation still takes that long, but the number
+        // that decides whether the click drops a frame is now only its AppKit
+        // snapshot and queue submission.
+        let apps = timed("refreshApps main-actor submission") { model.refreshApps() }
         note(
             String(
-                format: "  %d application(s) enumerated, %d captured",
+                format: "  %d cached application(s), %d captured",
                 model.availableApps.count, model.capturedAppBundleIDs.count))
 
         // Loose, because it is measuring a debug build on a machine that may
@@ -5724,7 +5734,7 @@ enum UIFlowCheck {
         // a hundred milliseconds either way.
         check("launch is under three seconds", launchSeconds < 3)
         check("re-deriving everything the model derives at launch is under a second", warm < 1)
-        check("enumerating applications is under a quarter second", apps < 0.25)
+        check("submitting an application refresh stays inside one frame", apps < 0.016)
     }
 
     /// What the bottom of the window is actually showing.

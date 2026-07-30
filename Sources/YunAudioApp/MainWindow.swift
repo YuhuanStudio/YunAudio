@@ -1333,18 +1333,7 @@ struct MainWindow: View {
                             value: String(
                                 format: "%d · %.2f ms",
                                 quality.bufferFrames, quality.bufferLatencyMilliseconds))
-                        if model.isClockLocked {
-                            YunDetailRow(
-                                loc("Clock"),
-                                value: String(
-                                    format: "locked %.6f", model.measuredRateRatio),
-                                tone: .success)
-                            YunDetailRow(
-                                loc("Crystal"),
-                                value: String(
-                                    format: "%+.1f ppm",
-                                    (model.measuredRateRatio - 1) * 1_000_000))
-                        }
+                        ClockLockRows(model: model)
                     } else {
                         YunEmptyState(
                             symbol: "waveform.path.ecg",
@@ -2058,6 +2047,30 @@ private struct GainReductionRow: View {
         let _ = BodyCount.tick("GainReductionRow")
         if let reduction = model.gainReduction[kind] {
             MainWindow.gainReductionMeter(reduction)
+        }
+    }
+}
+
+/// The clock's moving reading, isolated from the hardware inspector.
+///
+/// The ratio is sampled with the meters and can move by a few parts per
+/// million each poll. Reading it in `MainWindow` made that tiny number rebuild
+/// all three columns even though only these two rows can change.
+private struct ClockLockRows: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("ClockLockRows")
+        if model.isClockLocked {
+            YunDetailRow(
+                loc("Clock"),
+                value: String(format: "locked %.6f", model.measuredRateRatio),
+                tone: .success)
+            YunDetailRow(
+                loc("Crystal"),
+                value: String(
+                    format: "%+.1f ppm",
+                    (model.measuredRateRatio - 1) * 1_000_000))
         }
     }
 }
