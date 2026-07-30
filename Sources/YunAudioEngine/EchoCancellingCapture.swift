@@ -454,13 +454,16 @@ public final class EchoCancellingCapture {
             renderCallback: &renderCallback,
             operations: operations)
         if let setupFailure {
-            AudioComponentInstanceDispose(unit)
-            captureBuffer.deallocate()
-            truncatedBlocks.deinitialize(count: 1)
-            truncatedBlocks.deallocate()
-            callbackDiagnostics.deinitialize(count: 1)
-            callbackDiagnostics.deallocate()
-            free(bufferList.unsafeMutablePointer)
+            // Nothing is freed here. Every stored property is initialised by
+            // this point, so Swift runs `deinit` on the way out of a throwing
+            // initialiser — and `deinit` frees exactly these five allocations.
+            // Doing it here as well was a double free: the flow check aborted
+            // in `malloc` with POINTER_BEING_FREED_WAS_NOT_ALLOCATED, inside
+            // `EchoCancellingCapture.deinit`, called from this very `init`.
+            //
+            // The aggregate is the exception: `deinit` restores the sample
+            // rates it changed but does not destroy the device, because a
+            // successful capture owns it for its lifetime.
             builtAggregate?.destroy()
             throw .unitSetupFailed(setupFailure)
         }
