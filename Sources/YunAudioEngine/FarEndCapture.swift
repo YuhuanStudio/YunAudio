@@ -175,6 +175,38 @@ public final class FarEndCapture: @unchecked Sendable {
         Int(yun_rt_ring_read(ring, buffer, UInt32(frames)))
     }
 
+    /// Discards only the backlog visible when this call begins.
+    ///
+    /// Used between voice-processing start attempts, when this object remains
+    /// the ring's sole consumer but its producer is still running. Draining
+    /// until empty could chase that producer forever; taking one availability
+    /// snapshot removes the stale attempt without consuming audio that arrives
+    /// after it.
+    @discardableResult
+    func discardBufferedFrames(
+        into scratch: UnsafeMutablePointer<Float>, capacity: Int
+    ) -> Int {
+        Self.discardBufferedFrames(
+            from: ring, into: scratch, capacity: capacity)
+    }
+
+    static func discardBufferedFrames(
+        from ring: OpaquePointer,
+        into scratch: UnsafeMutablePointer<Float>,
+        capacity: Int
+    ) -> Int {
+        guard capacity > 0 else { return 0 }
+        let target = Int(yun_rt_ring_available(ring))
+        var discarded = 0
+        while discarded < target {
+            let wanted = min(capacity, target - discarded)
+            let taken = Int(yun_rt_ring_read(ring, scratch, UInt32(wanted)))
+            guard taken > 0 else { break }
+            discarded += taken
+        }
+        return discarded
+    }
+
     /// Frames the tap produced that the canceller never collected. Non-zero
     /// means the two threads are running at genuinely different rates, not that
     /// one of them stuttered — the ring holds a quarter of a second.

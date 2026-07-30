@@ -242,6 +242,11 @@ public final class EchoCancellationBridge: @unchecked Sendable {
         // Success is two callbacks, not the return code; retry the unchanged
         // unit once, as CoreAudio commonly recovers on the second start.
         for _ in 0..<2 {
+            if let reference = handles.farEnd {
+                _ = reference.discardBufferedFrames(
+                    into: handles.scratch,
+                    capacity: handles.scratchCapacity)
+            }
             let writtenBefore = producedFrames
             let started = capture.start(
                 capture: { samples, count, _ in
