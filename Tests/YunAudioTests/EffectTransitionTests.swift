@@ -105,6 +105,54 @@ struct EffectTransitionTests {
         #expect(residualRMS == 0)
     }
 
+    @Test(
+        "latency-alignment tap fades retain short-window energy",
+        arguments: [440.0, 445.3125])
+    func latencyAlignmentEnergy(frequency: Double) {
+        let latency = 1_024
+        let transition = EffectTransition(
+            sampleRate: sampleRate, oldLatencyFrames: 0,
+            newLatencyFrames: latency)
+        let count = latency + transition.fadeFrames + 256
+        let old = (0..<count).map {
+            0.4
+                * Float(
+                    sin(
+                        2 * Double.pi * frequency * Double($0) / sampleRate
+                            + 0.37))
+        }
+        let new = (0..<count).map {
+            $0 < latency
+                ? 0
+                : 0.4
+                    * Float(
+                        sin(
+                            2 * Double.pi * frequency * Double($0 - latency)
+                                / sampleRate + 0.37))
+        }
+        let output = render(transition: transition, old: old, new: new)
+        let fadeStart = transition.warmupFrames
+        let fadeEnd = fadeStart + transition.fadeFrames
+        let fade = output[fadeStart..<fadeEnd]
+        let minimum = minimumWindowRMS(Array(fade), frames: 96)
+        let reference = 0.4 / sqrt(2.0)
+        let attenuationDB = 20 * log10(minimum / reference)
+
+        print(
+            "\(frequency) Hz, 1024-frame tap fade: "
+                + "minimum 96-frame RMS \(attenuationDB) dB relative")
+        // Every continuous dual-tap fade passes through equal gains. A
+        // half-cycle offset therefore cancels exactly; fixing it requires a
+        // fixed latency reference or time stretching, not another gain curve.
+        withKnownIssue(
+            "dual-tap latency fades inevitably cancel correlated half-cycle offsets"
+        ) {
+            #expect(
+                attenuationDB >= -3,
+                "alignment window lost \(attenuationDB) dB at \(frequency) Hz")
+        }
+    }
+
     private struct Paths {
         let old: [Float]
         let new: [Float]
@@ -207,6 +255,22 @@ struct EffectTransitionTests {
         sqrt(
             samples.reduce(0) { $0 + Double($1 * $1) }
                 / Double(samples.count))
+    }
+
+    private func minimumWindowRMS(_ samples: [Float], frames: Int) -> Double {
+        guard frames > 0, frames <= samples.count else { return 0 }
+        var energy = samples.prefix(frames).reduce(0.0) {
+            $0 + Double($1 * $1)
+        }
+        var minimum = energy
+        if samples.count > frames {
+            for end in frames..<samples.count {
+                energy += Double(samples[end] * samples[end])
+                energy -= Double(samples[end - frames] * samples[end - frames])
+                minimum = min(minimum, energy)
+            }
+        }
+        return sqrt(max(0, minimum) / Double(frames))
     }
 }
 
