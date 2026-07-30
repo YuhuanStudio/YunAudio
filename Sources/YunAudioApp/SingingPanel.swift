@@ -590,7 +590,19 @@ struct SongArtwork: View {
     /// arrived", which is exactly the question. Counts can.
     nonisolated(unsafe) static var taskOutcomes: [String: Int] = [:]
 
+    /// True only while a capture harness is driving the application.
+    ///
+    /// The probes below exist because a stage that is drawn but never appears,
+    /// and a cover that is requested but never arrives, are both invisible in a
+    /// photograph. They are worth their cost inside the gate and worth nothing
+    /// outside it: a string built and compared on every layout, and a write to
+    /// stderr on every fetch, are not things an application should do while
+    /// somebody is singing.
+    nonisolated static let isProbing =
+        ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT"] != nil
+
     nonisolated static func record(_ outcome: String) {
+        guard isProbing else { return }
         taskOutcomes[outcome, default: 0] += 1
         // Written where it cannot be lost. Read back from a process variable
         // and printed later, a probe can be overwritten, or missed entirely

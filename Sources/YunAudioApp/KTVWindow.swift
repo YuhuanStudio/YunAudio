@@ -143,6 +143,7 @@ struct KTVStage: View {
         GeometryReader { proxy in
             let _ = {
                 Self.lastMeasuredStageSize = proxy.size
+                guard SongArtwork.isProbing else { return }
                 // What the reader itself was proposed, on every layout. The
                 // ZStack inside it reports 1036 in a 720-point window, and a
                 // stack cannot exceed its proposal unless a child demands more
@@ -315,6 +316,7 @@ struct KTVStage: View {
                         // closure in the reader's body runs whenever the
                         // geometry is recomputed, which is the question.
                         let _ = {
+                            guard SongArtwork.isProbing else { return }
                             let frame = column.frame(in: .named("ktv-stage"))
                             let now = "\(Int(column.size.height))@\(Int(frame.minY))"
                             if now != Self.lastColumnPlacement {
@@ -374,6 +376,7 @@ struct KTVStage: View {
                     // columns, and if this one grows once the words arrive it
                     // is what pushes the other down.
                     let _ = {
+                        guard SongArtwork.isProbing else { return }
                         let frame = words.frame(in: .named("ktv-stage"))
                         let now = "\(Int(words.size.height))@\(Int(frame.minY))"
                         if now != Self.lastWordsPlacement {
