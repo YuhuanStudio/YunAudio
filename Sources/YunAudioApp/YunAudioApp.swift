@@ -38,6 +38,7 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         // never saved.
         YunTheme.shared.applyAppearance()
         InterfaceOptions.apply()
+        flowCheckModel?.beginMIDI()
         flowCheckModel?.beginInitialDeviceDiscovery()
 
         if environment["YUNAUDIO_SETTINGS_CHECK"] != nil {

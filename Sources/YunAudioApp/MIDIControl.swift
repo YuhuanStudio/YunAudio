@@ -394,18 +394,200 @@ extension MIDIAction {
 /// that later discover only one of them had work to do.
 final class MIDISourceRefreshGate: @unchecked Sendable {
     private let lock = NSLock()
-    private var isScheduled = false
+    private var isActive = false
+    private var hasLatest = false
 
     func request() -> Bool {
         lock.withLock {
-            guard !isScheduled else { return false }
-            isScheduled = true
+            guard !isActive else {
+                hasLatest = true
+                return false
+            }
+            isActive = true
             return true
         }
     }
 
-    func finish() {
-        lock.withLock { isScheduled = false }
+    /// - Returns: True when notifications received during the active refresh
+    ///   require exactly one latest rerun.
+    @discardableResult
+    func finish() -> Bool {
+        lock.withLock {
+            guard isActive else { return false }
+            if hasLatest {
+                hasLatest = false
+                return true
+            }
+            isActive = false
+            return false
+        }
+    }
+}
+
+/// Owns every CoreMIDI object on one serial queue.
+///
+/// `MIDIClientCreateWithBlock`, port creation and source enumeration are all
+/// synchronous system calls. Keeping their references here makes production
+/// demand submission a constant-time queue handoff; MainActor receives only
+/// decoded messages and immutable names or errors.
+private final class MIDIClientWorker: @unchecked Sendable {
+    enum Update: Sendable {
+        case ready([String?])
+        case clientFailed(OSStatus)
+        case portFailed(OSStatus)
+        case stopped
+    }
+
+    struct Publication: Sendable {
+        let generation: UInt64
+        let update: Update
+    }
+
+    private let queue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.midi", qos: .userInitiated)
+    private let onUpdate: @Sendable (Publication) -> Void
+    private let onMessages: @Sendable (UInt64, [MIDIMessage]) -> Void
+    private let sourceRefreshGate = MIDISourceRefreshGate()
+    /// Accessed only on `queue`.
+    private var client = MIDIClientRef()
+    /// Accessed only on `queue`.
+    private var port = MIDIPortRef()
+    /// Accessed only on `queue`.
+    private var connected: Set<MIDIEndpointRef> = []
+    /// Accessed only on `queue`.
+    private var activeGeneration: UInt64 = 0
+
+    init(
+        onUpdate: @escaping @Sendable (Publication) -> Void,
+        onMessages: @escaping @Sendable (UInt64, [MIDIMessage]) -> Void
+    ) {
+        self.onUpdate = onUpdate
+        self.onMessages = onMessages
+    }
+
+    func start(generation: UInt64, waitUntilReady: Bool) {
+        if waitUntilReady {
+            // Called only through the MainActor controller. The worker never
+            // synchronously calls MainActor, so this verification-only wait
+            // cannot form the other half of a queue cycle.
+            queue.sync { startOnQueue(generation: generation) }
+        } else {
+            queue.async { [weak self] in self?.startOnQueue(generation: generation) }
+        }
+    }
+
+    func stop(generation: UInt64, waitUntilFinished: Bool) {
+        if waitUntilFinished {
+            queue.sync { stopOnQueue(generation: generation) }
+        } else {
+            queue.async { [weak self] in self?.stopOnQueue(generation: generation) }
+        }
+    }
+
+    private func startOnQueue(generation: UInt64) {
+        guard client == 0 else { return }
+        activeGeneration = generation
+        var newClient = MIDIClientRef()
+        let sourceRefreshGate = sourceRefreshGate
+        let clientStatus = MIDIClientCreateWithBlock(
+            "YunAudio" as CFString, &newClient
+        ) { @Sendable [weak self] notification in
+            guard notification.pointee.messageID == .msgSetupChanged else { return }
+            guard sourceRefreshGate.request() else { return }
+            self?.queue.asyncAfter(deadline: .now() + .milliseconds(100)) {
+                [weak self] in
+                self?.refreshSourcesOnQueue(generation: generation)
+            }
+        }
+        guard clientStatus == noErr else {
+            onUpdate(
+                Publication(generation: generation, update: .clientFailed(clientStatus)))
+            return
+        }
+        client = newClient
+
+        var newPort = MIDIPortRef()
+        let portStatus = MIDIInputPortCreateWithProtocol(
+            client, "YunAudio in" as CFString, ._1_0, &newPort
+        ) { @Sendable [weak self] eventList, _ in
+            var decoded: [MIDIMessage] = []
+            for packet in eventList.unsafeSequence() {
+                let count = Int(packet.pointee.wordCount)
+                withUnsafePointer(to: packet.pointee.words) { tuple in
+                    tuple.withMemoryRebound(to: UInt32.self, capacity: 64) { words in
+                        for index in 0..<count {
+                            if let message = MIDIMessage.decode(words[index]) {
+                                decoded.append(message)
+                            }
+                        }
+                    }
+                }
+            }
+            if !decoded.isEmpty { self?.onMessages(generation, decoded) }
+        }
+        guard portStatus == noErr else {
+            MIDIClientDispose(client)
+            client = 0
+            onUpdate(Publication(generation: generation, update: .portFailed(portStatus)))
+            return
+        }
+        port = newPort
+        connectSourcesOnQueue(generation: generation)
+    }
+
+    private func refreshSourcesOnQueue(generation: UInt64) {
+        guard client != 0, generation == activeGeneration else {
+            _ = sourceRefreshGate.finish()
+            return
+        }
+        connectSourcesOnQueue(generation: generation)
+        if sourceRefreshGate.finish() {
+            // One latest answer, immediately: the 100 ms window has already
+            // collapsed the physical event's notification burst.
+            refreshSourcesOnQueue(generation: generation)
+        }
+    }
+
+    private func connectSourcesOnQueue(generation: UInt64) {
+        guard port != 0, generation == activeGeneration else { return }
+        var names: [String?] = []
+        var seen: Set<MIDIEndpointRef> = []
+        for index in 0..<MIDIGetNumberOfSources() {
+            let source = MIDIGetSource(index)
+            seen.insert(source)
+            names.append(Self.name(of: source))
+            guard !connected.contains(source) else { continue }
+            if MIDIPortConnectSource(port, source, nil) == noErr {
+                connected.insert(source)
+            }
+        }
+        for gone in connected.subtracting(seen) {
+            MIDIPortDisconnectSource(port, gone)
+            connected.remove(gone)
+        }
+        onUpdate(Publication(generation: generation, update: .ready(names)))
+    }
+
+    private func stopOnQueue(generation: UInt64) {
+        activeGeneration = generation
+        if port != 0 {
+            for source in connected { MIDIPortDisconnectSource(port, source) }
+            MIDIPortDispose(port)
+        }
+        if client != 0 { MIDIClientDispose(client) }
+        client = 0
+        port = 0
+        connected.removeAll()
+        while sourceRefreshGate.finish() {}
+        onUpdate(Publication(generation: generation, update: .stopped))
+    }
+
+    private static func name(of endpoint: MIDIEndpointRef) -> String? {
+        var value: Unmanaged<CFString>?
+        guard
+            MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &value) == noErr
+        else { return nil }
+        return value?.takeRetainedValue() as String?
     }
 }
 
@@ -482,11 +664,18 @@ final class MIDIController {
     /// by target, but incoming messages arrive by address; keeping both indices
     /// avoids scanning every bound fader for every MIDI word.
     @ObservationIgnored private var targetsByAddress: [MIDIAddress: MIDITarget] = [:]
-    @ObservationIgnored private var client = MIDIClientRef()
-    @ObservationIgnored private var port = MIDIPortRef()
-    @ObservationIgnored private var connected: Set<MIDIEndpointRef> = []
-    @ObservationIgnored private let sourceRefreshGate = MIDISourceRefreshGate()
-    @ObservationIgnored private var sourceRefreshTask: Task<Void, Never>?
+    @ObservationIgnored private lazy var clientWorker = MIDIClientWorker(
+        onUpdate: { [weak self] publication in
+            Task { @MainActor in self?.applyClientUpdate(publication) }
+        },
+        onMessages: { [weak self] generation, messages in
+            Task { @MainActor in
+                guard self?.clientDemandGeneration == generation else { return }
+                for message in messages { self?.receive(message) }
+            }
+        })
+    @ObservationIgnored private var clientDemandGeneration: UInt64 = 0
+    @ObservationIgnored private var clientIsDemanded = false
 
     // MARK: Bindings
 
@@ -640,134 +829,50 @@ final class MIDIController {
                 isLearning: learningTarget != nil))
     }
 
-    func start() {
-        guard client == 0 else { return }
-        var newClient = MIDIClientRef()
-        // Both blocks below are explicitly `@Sendable`. Without it a closure
-        // written inside a main-actor type inherits that isolation, and
-        // CoreMIDI calls these from its own thread — which is not an
-        // observation, it is a `dispatch_assert_queue` trap on the first
-        // message that arrives. The whole body has to be safe off the main
-        // actor, which is why nothing here touches state directly.
-        let sourceRefreshGate = sourceRefreshGate
-        let clientStatus = MIDIClientCreateWithBlock("YunAudio" as CFString, &newClient) {
-            @Sendable [weak self] notification in
-            // Hardware comes and goes. Without this, a controller plugged in
-            // after launch is invisible until the application is restarted —
-            // and plugging it in is exactly what somebody does just before
-            // pressing learn.
-            guard notification.pointee.messageID == .msgSetupChanged else { return }
-            guard sourceRefreshGate.request() else { return }
-            Task { @MainActor in self?.scheduleSourceRefresh() }
-        }
-        guard clientStatus == noErr else {
-            startupError = String(
-                format: loc("Could not reach CoreMIDI (%d)."), Int(clientStatus))
-            return
-        }
-        client = newClient
-
-        var newPort = MIDIPortRef()
-        let portStatus = MIDIInputPortCreateWithProtocol(
-            client, "YunAudio in" as CFString, ._1_0, &newPort
-        ) { @Sendable [weak self] eventList, _ in
-            // Decoded here and handed over as values. This runs on CoreMIDI's
-            // own thread, and the packet memory is valid for the length of this
-            // call and no longer.
-            var decoded: [MIDIMessage] = []
-            for packet in eventList.unsafeSequence() {
-                let count = Int(packet.pointee.wordCount)
-                withUnsafePointer(to: packet.pointee.words) { tuple in
-                    tuple.withMemoryRebound(to: UInt32.self, capacity: 64) { words in
-                        for index in 0..<count {
-                            if let message = MIDIMessage.decode(words[index]) {
-                                decoded.append(message)
-                            }
-                        }
-                    }
-                }
-            }
-            guard !decoded.isEmpty else { return }
-            Task { @MainActor in
-                for message in decoded { self?.receive(message) }
-            }
-        }
-        guard portStatus == noErr else {
-            startupError = String(
-                format: loc("Could not open a MIDI input (%d)."), Int(portStatus))
-            MIDIClientDispose(client)
-            client = 0
-            return
-        }
-        port = newPort
-        startupError = nil
-        connectSources()
+    func start(waitUntilReady: Bool = false) {
+        guard !clientIsDemanded else { return }
+        clientIsDemanded = true
+        clientDemandGeneration &+= 1
+        clientWorker.start(
+            generation: clientDemandGeneration,
+            waitUntilReady: waitUntilReady)
     }
 
-    private func scheduleSourceRefresh() {
-        guard client != 0 else {
-            sourceRefreshGate.finish()
-            return
-        }
-        sourceRefreshTask = Task { [weak self] in
-            // CoreMIDI publishes several setup changes for one physical event.
-            // A tenth of a second is imperceptible beside plugging something
-            // in and replaces the whole burst with one endpoint inventory.
-            try? await Task.sleep(for: .milliseconds(100))
-            guard !Task.isCancelled else { return }
-            self?.finishSourceRefresh()
-        }
-    }
-
-    private func finishSourceRefresh() {
-        sourceRefreshTask = nil
-        sourceRefreshGate.finish()
-        connectSources()
-    }
-
-    /// Connects anything not already connected, and refreshes the names.
-    ///
-    /// Additive rather than a teardown and rebuild: a source that was already
-    /// connected must not be disconnected and reconnected every time some
-    /// unrelated device appears, or a knob being turned during the change
-    /// would drop messages.
-    private func connectSources() {
-        guard port != 0 else { return }
-        var names: [String] = []
-        var seen: Set<MIDIEndpointRef> = []
-        for index in 0..<MIDIGetNumberOfSources() {
-            let source = MIDIGetSource(index)
-            seen.insert(source)
-            names.append(Self.name(of: source))
-            guard !connected.contains(source) else { continue }
-            if MIDIPortConnectSource(port, source, nil) == noErr {
-                connected.insert(source)
-            }
-        }
-        for gone in connected.subtracting(seen) {
-            MIDIPortDisconnectSource(port, gone)
-            connected.remove(gone)
-        }
-        if sourceNames != names { sourceNames = names }
-    }
-
-    static func name(of endpoint: MIDIEndpointRef) -> String {
-        var value: Unmanaged<CFString>?
+    private func applyClientUpdate(_ publication: MIDIClientWorker.Publication) {
         guard
-            MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &value) == noErr,
-            let name = value?.takeRetainedValue() as String?
-        else { return loc("Unnamed") }
-        return name
+            Self.publicationIsCurrent(
+                publication.generation, current: clientDemandGeneration
+            )
+        else { return }
+        switch publication.update {
+        case .ready(let names):
+            let resolved = names.map { $0 ?? loc("Unnamed") }
+            if sourceNames != resolved { sourceNames = resolved }
+            startupError = nil
+        case .clientFailed(let status):
+            startupError = String(
+                format: loc("Could not reach CoreMIDI (%d)."), Int(status))
+        case .portFailed(let status):
+            startupError = String(
+                format: loc("Could not open a MIDI input (%d)."), Int(status))
+        case .stopped:
+            sourceNames = []
+        }
     }
 
-    func tearDown() {
-        sourceRefreshTask?.cancel()
-        sourceRefreshTask = nil
-        sourceRefreshGate.finish()
-        if client != 0 { MIDIClientDispose(client) }
-        client = 0
-        port = 0
-        connected.removeAll()
+    func tearDown(waitUntilFinished: Bool = false) {
+        guard clientIsDemanded else { return }
+        clientIsDemanded = false
+        clientDemandGeneration &+= 1
+        clientWorker.stop(
+            generation: clientDemandGeneration,
+            waitUntilFinished: waitUntilFinished)
+    }
+
+    nonisolated static func publicationIsCurrent(
+        _ publication: UInt64, current: UInt64
+    ) -> Bool {
+        publication == current
     }
 }
 
@@ -775,7 +880,7 @@ final class MIDIController {
 
 extension RouterModel {
     /// Wires the controller to this model and opens CoreMIDI only on demand.
-    func installMIDI() {
+    func installMIDI(startsClientImmediately: Bool) {
         let midi = midiControl
         midi.softwarePosition = { [weak self] target in
             self?.midiPosition(of: target) ?? 0
@@ -786,12 +891,17 @@ extension RouterModel {
         midi.onBindingsChanged = { [weak self] in self?.persistMIDIBindings() }
         midi.onClientDemandChanged = { [weak midi] isNeeded in
             if isNeeded {
-                midi?.start()
+                midi?.start(waitUntilReady: startsClientImmediately)
             } else {
                 midi?.tearDown()
             }
         }
-        midi.publishClientDemand()
+        if startsClientImmediately { midi.publishClientDemand() }
+    }
+
+    /// Honours restored bindings once AppKit's first run-loop turn is live.
+    func beginMIDI() {
+        midiControl.publishClientDemand()
     }
 
     /// Where a continuous target currently sits, 0…1.

@@ -5523,7 +5523,7 @@ final class RouterModel: ScriptTarget {
         }
 
         installHotkeys()
-        installMIDI()
+        installMIDI(startsClientImmediately: Self.isVerificationProcess)
 
         if Self.isVerificationProcess { requestAutomaticStartIfConfigured() }
     }
@@ -7741,7 +7741,7 @@ final class RouterModel: ScriptTarget {
     /// reconfigured.
     func shutDown() {
         hotkeys.tearDown()
-        midiControl.tearDown()
+        midiControl.tearDown(waitUntilFinished: true)
         stopPolling()
         stopAnalysis()
         routeUpdatesAreAccepted = false

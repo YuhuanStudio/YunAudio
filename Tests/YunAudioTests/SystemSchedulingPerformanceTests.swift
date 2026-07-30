@@ -249,7 +249,7 @@ struct SystemSchedulingPerformanceTests {
         #expect(apply.ranges(of: "AudioUnitPlugins.installed()").isEmpty)
     }
 
-    @Test("default launch creates no CoreMIDI client")
+    @Test("restored bindings wait until the first live run-loop turn")
     func midiClientIsLazy() throws {
         #expect(
             !MIDIController.requiresClient(
@@ -268,19 +268,52 @@ struct SystemSchedulingPerformanceTests {
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/MIDIControl.swift",
             encoding: .utf8)
-        let installStart = try #require(source.range(of: "func installMIDI()"))
+        let installStart = try #require(
+            source.range(of: "func installMIDI(startsClientImmediately: Bool)"))
         let installEnd = try #require(
             source.range(
                 of: "/// Where a continuous target currently sits",
                 range: installStart.upperBound..<source.endIndex))
         let install = source[installStart.lowerBound..<installEnd.lowerBound]
-        #expect(install.ranges(of: "midiControl.start()").isEmpty)
-        #expect(install.ranges(of: "midi?.start()").count == 1)
+        #expect(install.ranges(of: "MIDIClientCreate").isEmpty)
+        #expect(install.ranges(of: "MIDIGetNumberOfSources").isEmpty)
+        #expect(install.ranges(of: "midi?.start(").count == 1)
         #expect(install.ranges(of: "midi.publishClientDemand()").count == 1)
+        #expect(install.contains("if startsClientImmediately"))
         #expect(install.ranges(of: "PreferencesStore.load()").isEmpty)
+
+        let router = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        #expect(
+            router.contains(
+                "installMIDI(startsClientImmediately: Self.isVerificationProcess)"))
+
+        let app = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
+            encoding: .utf8)
+        let launchStart = try #require(
+            app.range(of: "func applicationDidFinishLaunching("))
+        let launchEnd = try #require(
+            app.range(
+                of: "var flowCheckModel:",
+                range: launchStart.upperBound..<app.endIndex))
+        let launch = app[launchStart.lowerBound..<launchEnd.lowerBound]
+        #expect(launch.ranges(of: "beginMIDI()").count == 1)
+
+        let controllerStart = try #require(
+            source.range(of: "func start(waitUntilReady: Bool = false)"))
+        let controllerEnd = try #require(
+            source.range(
+                of: "private func applyClientUpdate(",
+                range: controllerStart.upperBound..<source.endIndex))
+        let submission = source[controllerStart.lowerBound..<controllerEnd.lowerBound]
+        #expect(submission.ranges(of: "MIDIClientCreate").isEmpty)
+        #expect(submission.ranges(of: "MIDIGetNumberOfSources").isEmpty)
+        #expect(submission.contains("clientWorker.start"))
     }
 
-    @Test("one thousand CoreMIDI setup notifications schedule one MainActor task")
+    @Test("one thousand CoreMIDI setup notifications run first and latest only")
     func midiSetupChangesAreCoalesced() {
         let gate = MIDISourceRefreshGate()
         var inventories = 0
@@ -289,10 +322,14 @@ struct SystemSchedulingPerformanceTests {
         }
         #expect(inventories == 1)
 
-        gate.finish()
-        #expect(gate.request())
+        #expect(gate.finish())
         inventories += 1
+        #expect(!gate.finish())
         #expect(inventories == 2)
+
+        #expect(MIDIController.publicationIsCurrent(2, current: 2))
+        #expect(!MIDIController.publicationIsCurrent(1, current: 2))
+        #expect(!MIDIController.publicationIsCurrent(2, current: 3))
     }
 
     @Test("status panel hosting is allocated only on first open")
