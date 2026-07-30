@@ -97,12 +97,21 @@ struct SingingUIPerformanceTests {
             contentsOf: repository.appendingPathComponent(
                 "Sources/YunAudioApp/SingingPanel.swift"),
             encoding: .utf8)
+        let resourceSource = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/YunAudioApp/SongArtworkStore.swift"),
+            encoding: .utf8)
 
         #expect(!source.contains("NSImage(data:"))
-        #expect(source.ranges(of: "Task.detached(priority: .utility)").count == 2)
-        #expect(source.contains("cache.totalCostLimit = 8 * 1_024 * 1_024"))
+        #expect(!source.contains("Data(contentsOf:"))
+        #expect(!source.contains("URLSession.shared"))
+        #expect(resourceSource.contains("Task.detached(priority: .utility)"))
+        #expect(resourceSource.contains("totalCostLimit: 8 * 1_024 * 1_024"))
+        #expect(resourceSource.contains("maximumInputBytes = 8 * 1_024 * 1_024"))
         #expect(!source.contains("Array(model.singers.enumerated())"))
-        #expect(source.ranges(of: "GeometryReader").count == 1)
+        // One reader sizes the track progress and one positions the pitch dot.
+        // A third would mean the moving lyric rows had regained layout readers.
+        #expect(source.ranges(of: "GeometryReader").count == 2)
     }
 
     private static func lines(count: Int) -> [KaraokeScore.Line] {

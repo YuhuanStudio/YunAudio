@@ -1,5 +1,4 @@
 import AppKit
-import ImageIO
 import SwiftUI
 import YunAudioEngine
 import YunAudioHAL
@@ -830,34 +829,6 @@ private struct HorizontalCapsuleFill: Shape {
     }
 }
 
-/// A decoded, display-sized cover that can safely cross from a utility task.
-struct DecodedSongArtwork: @unchecked Sendable {
-    let image: CGImage
-    let cost: Int
-}
-
-/// ImageIO decoding kept off the main actor and bounded to what the view draws.
-enum SongArtworkDecoder {
-    static func decode(_ data: Data, maxPixelSize: Int) -> DecodedSongArtwork? {
-        guard maxPixelSize > 0,
-            let source = CGImageSourceCreateWithData(data as CFData, nil)
-        else { return nil }
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-            kCGImageSourceShouldCacheImmediately: true,
-        ]
-        guard
-            let image = CGImageSourceCreateThumbnailAtIndex(
-                source, 0, options as CFDictionary)
-        else { return nil }
-        return DecodedSongArtwork(
-            image: image,
-            cost: image.bytesPerRow * image.height)
-    }
-}
-
 /// Loads one cover per song and keeps the decoded image out of the moving lyric
 /// body. `AsyncImage` does not load file URLs, which made local artwork look
 /// complete in the model and remain a placeholder on screen.
@@ -867,16 +838,6 @@ struct SongArtwork: View {
     var contentMode: ContentMode = .fit
 
     @State private var image: NSImage?
-    private static let maxPixelSize = 256
-    @MainActor private static let cache: NSCache<NSURL, NSImage> = {
-        let cache = NSCache<NSURL, NSImage>()
-        // Covers are song-scoped and decoded images are much larger than their
-        // compressed downloads. Keep recent switches instant without turning a
-        // long karaoke session into an unbounded image store.
-        cache.countLimit = 32
-        cache.totalCostLimit = 8 * 1_024 * 1_024
-        return cache
-    }()
 
     var body: some View {
         Group {
@@ -902,32 +863,14 @@ struct SongArtwork: View {
         .task(id: url) {
             image = nil
             guard let url else { return }
-            if let cached = Self.cache.object(forKey: url as NSURL) {
-                image = cached
-                return
-            }
-            let data: Data?
-            if url.isFileURL {
-                data = try? await Task.detached(priority: .utility) {
-                    try Data(contentsOf: url, options: .mappedIfSafe)
-                }.value
-            } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
-                data = (try? await URLSession.shared.data(from: url))?.0
-            } else {
-                data = nil
-            }
-            guard !Task.isCancelled, let data else { return }
-            let maxPixelSize = Self.maxPixelSize
-            let decoded = await Task.detached(priority: .utility) {
-                SongArtworkDecoder.decode(data, maxPixelSize: maxPixelSize)
-            }.value
-            guard !Task.isCancelled, let decoded else {
-                return
-            }
+            guard
+                let decoded = await SongArtworkResources.shared.value(for: url),
+                !Task.isCancelled
+            else { return }
             let loaded = NSImage(
                 cgImage: decoded.image,
                 size: NSSize(width: decoded.image.width, height: decoded.image.height))
-            Self.cache.setObject(loaded, forKey: url as NSURL, cost: decoded.cost)
+            guard !Task.isCancelled else { return }
             image = loaded
         }
     }
