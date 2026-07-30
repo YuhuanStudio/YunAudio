@@ -186,7 +186,16 @@ final class RouterModel: ScriptTarget {
             || environment["YUNAUDIO_SCREENSHOT"] != nil
             || environment["YUNAUDIO_RENDER"] != nil
             || environment["YUNAUDIO_ICON"] != nil
+            || environment["YUNAUDIO_UI_BENCHMARK"] != nil
     }()
+
+    /// The UI benchmark is deliberately more constrained than other verification.
+    ///
+    /// Render and flow verification need a real inventory. This one exists to
+    /// separate SwiftUI work from the router, so even enumerating HAL or starting
+    /// MIDI would put an unknown system cost back into the number it reports.
+    private static let isUIBenchmarkProcess =
+        ProcessInfo.processInfo.environment["YUNAUDIO_UI_BENCHMARK"] != nil
 
     /// The user's real input choices while a verification route is temporary.
     @ObservationIgnored private var verificationSourceUID: String?
@@ -4027,8 +4036,8 @@ final class RouterModel: ScriptTarget {
 
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
-    func prepareForRendering() {
-        refreshAppsForVerification()
+    func prepareForRendering(refreshesApplications: Bool = true) {
+        if refreshesApplications { refreshAppsForVerification() }
         // A finite live reading alongside a stopped route is not a state the
         // application can reach. This fixture is used only by the two design
         // harnesses, so make the synthetic signal and its transport state agree.
@@ -5552,7 +5561,7 @@ final class RouterModel: ScriptTarget {
         // explicitly owns the hardware. Production construction must instead
         // reach its first live run-loop turn without a HAL read or even a
         // queued HAL job; applicationDidFinishLaunching starts discovery.
-        if Self.isVerificationProcess { refreshDevices() }
+        if Self.isVerificationProcess, !Self.isUIBenchmarkProcess { refreshDevices() }
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
         restore()
@@ -5578,9 +5587,13 @@ final class RouterModel: ScriptTarget {
         }
 
         installHotkeys()
-        installMIDI(startsClientImmediately: Self.isVerificationProcess)
+        installMIDI(
+            startsClientImmediately:
+                Self.isVerificationProcess && !Self.isUIBenchmarkProcess)
 
-        if Self.isVerificationProcess { requestAutomaticStartIfConfigured() }
+        if Self.isVerificationProcess, !Self.isUIBenchmarkProcess {
+            requestAutomaticStartIfConfigured()
+        }
     }
 
     /// Starts HAL discovery only once the application has a live run loop.

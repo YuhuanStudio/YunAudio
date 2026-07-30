@@ -38,6 +38,30 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         // never saved.
         YunTheme.shared.applyAppearance()
         InterfaceOptions.apply()
+
+        // This path exists to put symbols behind the application's UI cost,
+        // without mixing in a route, HAL inventory or MIDI. The benchmark
+        // launcher also supplies the ordinary no-audio screenshot guard, so it
+        // cannot accidentally become a normal launch with restored hardware.
+        if environment["YUNAUDIO_UI_BENCHMARK"] != nil {
+            guard
+                environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil,
+                let model = flowCheckModel
+            else {
+                exit(1)
+            }
+            NSApp.activate(ignoringOtherApps: true)
+            Task { @MainActor in
+                let passed = await UIResourceBenchmark.run(model: model)
+                if passed {
+                    NSApp.terminate(nil)
+                } else {
+                    exit(1)
+                }
+            }
+            return
+        }
+
         flowCheckModel?.beginMIDI()
         flowCheckModel?.beginInitialDeviceDiscovery()
 
