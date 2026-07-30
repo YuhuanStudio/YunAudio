@@ -165,15 +165,25 @@ enum WindowCapture {
             let appKitShouldChoose =
                 delegate.applicationShouldHandleReopen(
                     NSApp, hasVisibleWindows: true)
+            try? await Task.sleep(for: .milliseconds(400))
             settle(turns: 12)
-            let routerIsKey = mainWindow()?.isKeyWindow == true
-            if appKitShouldChoose || !routerIsKey {
+            // Ordering, not key status. A window is key only while its
+            // application is active, and a capture launched from a terminal
+            // behind whatever the user is working in need not be — so the old
+            // assertion could not hold here whatever the router did, and it was
+            // written off as intermittent twice and called a product defect
+            // once. Which window is in front is the thing the reopen actually
+            // controls, and it holds whether or not anybody is looking.
+            let routerIsInFront =
+                (mainWindow()?.orderedIndex ?? .max) < settings.orderedIndex
+            if appKitShouldChoose || !routerIsInFront {
                 FileHandle.standardError.write(
                     Data(
                         "Dock reopen left Settings in front"
                             .appending(
                                 " — AppKit fallback \(appKitShouldChoose),"
-                                    + " router key \(routerIsKey)\n"
+                                    + " router at \(mainWindow()?.orderedIndex ?? -1),"
+                                    + " Settings at \(settings.orderedIndex)\n"
                             ).utf8))
                 wroteEverything = false
             }
