@@ -116,7 +116,6 @@ struct FinalOutputLimiterGraphTests {
         graph.pointee.mainOutputBuffer = 1
         graph.pointee.masterExemptBuffer = 0
         graph.pointee.outputGain = 1.5
-        graph.pointee.analysisEnabled = 1
         #expect(
             RTGraph.installCorrection(
                 [1, 0, 0, 0, 0], preampGain: 2,
@@ -129,21 +128,38 @@ struct FinalOutputLimiterGraphTests {
         let cell = try #require(yun_rt_cell_create(UnsafeMutableRawPointer(graph)))
         defer { yun_rt_cell_free(cell) }
 
-        finalLimiterCycle(cell: cell, input: input, output: output)
+        // A cold interpolation filter correctly sees the zero-to-signal edge
+        // as a larger peak. Let both it and the 50 ms gain release settle
+        // before measuring whether constant programme is over-attenuated.
+        for cycle in 0..<128 {
+            finalLimiterCycle(
+                cell: cell, input: input, output: output,
+                sampleTime: Float64(cycle * frames))
+        }
+        graph.pointee.analysisEnabled = 1
+        finalLimiterCycle(
+            cell: cell, input: input, output: output,
+            sampleTime: Float64(128 * frames))
 
         for bus in 0..<2 {
             var peak: Float = 0
+            var truePeak: Float = 0
+            var detector = TruePeakDetector()
             var ratioError: Float = 0
-            for frame in limiter.latencyFrames..<frames {
+            for frame in 0..<frames {
                 let left = output.sample(buffer: bus, channel: 0, frame: frame)
                 let right = output.sample(buffer: bus, channel: 1, frame: frame)
                 peak = max(peak, abs(left))
+                let detected = detector.push(left)
+                if frame >= 12 { truePeak = max(truePeak, detected) }
                 if abs(left) > 0.01 {
                     ratioError = max(ratioError, abs(right / left - 0.25))
                 }
             }
+            let truePeakDecibels = 20 * log10(truePeak / limiter.ceiling)
             #expect(peak <= limiter.ceiling + 0.000_001)
-            #expect(peak >= limiter.ceiling - 0.001)
+            #expect(truePeakDecibels <= 0.05)
+            #expect(truePeakDecibels >= -0.05)
             #expect(ratioError < 0.000_001)
         }
         #expect(graph.pointee.outputPeak <= limiter.ceiling + 0.000_001)

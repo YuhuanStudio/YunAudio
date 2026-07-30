@@ -1,10 +1,109 @@
 import Foundation
 import Testing
-import YunAudioEngine
+@testable import YunAudioEngine
 import YunAudioRT
 
 @Suite("Final output limiter bank")
 struct OutputLimiterBankTests {
+    @Test("four-times interpolation finds an inter-sample peak")
+    func detectsInterSamplePeak() {
+        var detector = TruePeakDetector()
+        let frames = 4_800
+        var samplePeak: Float = 0
+        var truePeak: Float = 0
+        let quarterPhase = Float(1 / sqrt(2.0))
+
+        for frame in 0..<frames {
+            let sample =
+                frame % 4 < 2
+                ? quarterPhase : -quarterPhase
+            samplePeak = max(samplePeak, abs(sample))
+            let detected = detector.push(sample)
+            if frame >= 12 { truePeak = max(truePeak, detected) }
+        }
+
+        let decibelsAboveSamples = 20 * log10(truePeak / samplePeak)
+        #expect(abs(samplePeak - Float(1 / sqrt(2.0))) < 0.000_01)
+        #expect(truePeak > 0.98)
+        #expect(truePeak < 1.02)
+        #expect(decibelsAboveSamples >= 2.8)
+    }
+
+    @Test("true-peak limiting catches a sine whose samples sit at the ceiling")
+    func catchesInterSampleOverload() throws {
+        let limiter = try #require(
+            OutputLimiterBank(
+                channelCounts: [1], sampleRate: 48_000,
+                ceilingDecibels: -0.3))
+        let frames = 4_800
+        let sampleAmplitude = limiter.ceiling * Float(sqrt(2.0))
+        let quarterPhase = Float(1 / sqrt(2.0))
+        var input = [Float](repeating: 0, count: frames)
+        for frame in input.indices {
+            input[frame] =
+                sampleAmplitude * (frame % 4 < 2 ? quarterPhase : -quarterPhase)
+        }
+
+        var inputDetector = TruePeakDetector()
+        var inputTruePeak: Float = 0
+        for sample in input {
+            inputTruePeak = max(inputTruePeak, inputDetector.push(sample))
+        }
+
+        var output = input
+        output.withUnsafeMutableBufferPointer {
+            #expect(
+                limiter.processInterleaved(
+                    bus: 0, samples: $0.baseAddress!, frames: frames, channels: 1))
+        }
+
+        var outputDetector = TruePeakDetector()
+        var outputTruePeak: Float = 0
+        for sample in output {
+            outputTruePeak = max(outputTruePeak, outputDetector.push(sample))
+        }
+
+        let inputOvershoot = 20 * log10(inputTruePeak / limiter.ceiling)
+        let outputOvershoot = 20 * log10(outputTruePeak / limiter.ceiling)
+        #expect(inputOvershoot > 2.6)
+        #expect(outputOvershoot <= 0.05)
+        #expect(limiter.latencyFrames == 48)
+    }
+
+    @Test("detector state is independent of block boundaries and reset is exact")
+    func detectorStateCrossesBlockBoundaries() {
+        let samples = (0..<1_024).map { frame in
+            0.71 * sin(Float(frame) * 2 * .pi * 11_731 / 48_000)
+        }
+        var continuous = TruePeakDetector()
+        var chunked = TruePeakDetector()
+        var greatestDifference: Float = 0
+        var cursor = 0
+        let chunks = [1, 127, 3, 256, 11, 89, 2, 193, 342]
+
+        for chunk in chunks {
+            for sample in samples[cursor..<(cursor + chunk)] {
+                let expected = continuous.push(sample)
+                let actual = chunked.push(sample)
+                greatestDifference = max(greatestDifference, abs(actual - expected))
+            }
+            cursor += chunk
+        }
+
+        chunked.reset()
+        var fresh = TruePeakDetector()
+        var greatestResetDifference: Float = 0
+        for sample in samples.prefix(64) {
+            greatestResetDifference = max(
+                greatestResetDifference,
+                abs(chunked.push(sample) - fresh.push(sample)))
+        }
+
+        #expect(cursor == samples.count)
+        #expect(greatestDifference < 0.000_001)
+        #expect(greatestResetDifference == 0)
+    }
+
     @Test("mixed sources cannot leave above the output ceiling")
     func catchesSummedSources() throws {
         let limiter = try #require(

@@ -1,6 +1,6 @@
 import Foundation
 
-/// A final, linked peak limiter for each output bus.
+/// A final, linked true-peak limiter for each output bus.
 ///
 /// Constructed on the control thread and then owned by one realtime thread.
 /// Every delay line and detector queue is allocated up front; `processInterleaved`
@@ -8,7 +8,7 @@ import Foundation
 public final class OutputLimiterBank: @unchecked Sendable {
     /// Sample rate all buses were prepared for.
     public let sampleRate: Double
-    /// The sample ceiling as a linear full-scale magnitude.
+    /// The true-peak ceiling as a linear full-scale magnitude.
     public let ceiling: Float
     /// Fixed look-ahead delay introduced on every bus.
     public let latencyFrames: Int
@@ -22,7 +22,7 @@ public final class OutputLimiterBank: @unchecked Sendable {
     /// - Parameters:
     ///   - channelCounts: Interleaved channel count of every output bus.
     ///   - sampleRate: Sample rate shared by those buses.
-    ///   - ceilingDecibels: Sample peak ceiling in dBFS, no greater than zero.
+    ///   - ceilingDecibels: Estimated true-peak ceiling in dBTP, no greater than zero.
     ///   - lookAheadSeconds: Fixed delay used to see a peak before it leaves.
     ///   - releaseSeconds: Time taken for attenuation to recover towards unity.
     public init?(
@@ -112,6 +112,10 @@ private struct BusState {
     let delay: UnsafeMutablePointer<Float>
     var delayPosition = 0
 
+    /// One FIR history per channel. These are pointer-backed because a bus can
+    /// carry up to 64 channels and the realtime path may not resize storage.
+    let truePeakDetectors: UnsafeMutablePointer<TruePeakDetector>
+
     /// A monotonic queue gives the linked maximum of the whole look-ahead
     /// window in amortised constant time. Re-scanning the window would make a
     /// 1 ms safety stage cost 49 comparisons per output frame at 48 kHz.
@@ -140,6 +144,9 @@ private struct BusState {
         delay = .allocate(capacity: delayCapacity * channels)
         delay.initialize(repeating: 0, count: delayCapacity * channels)
 
+        truePeakDetectors = .allocate(capacity: channels)
+        truePeakDetectors.initialize(repeating: TruePeakDetector(), count: channels)
+
         // One spare slot keeps front and back unambiguous at the maximum
         // look-ahead occupancy.
         peakCapacity = lookAheadFrames + 2
@@ -152,6 +159,8 @@ private struct BusState {
     func releaseStorage() {
         delay.deinitialize(count: delayCapacity * channels)
         delay.deallocate()
+        truePeakDetectors.deinitialize(count: channels)
+        truePeakDetectors.deallocate()
         peakValues.deinitialize(count: peakCapacity)
         peakValues.deallocate()
         peakIndices.deinitialize(count: peakCapacity)
@@ -160,6 +169,9 @@ private struct BusState {
 
     mutating func reset() {
         delay.update(repeating: 0, count: delayCapacity * channels)
+        for channel in 0..<channels {
+            truePeakDetectors[channel].reset()
+        }
         peakValues.update(repeating: 0, count: peakCapacity)
         peakIndices.update(repeating: 0, count: peakCapacity)
         delayPosition = 0
@@ -185,6 +197,9 @@ private struct BusState {
                 delay[delayOffset + channel] = sample
                 let magnitude = abs(sample)
                 if magnitude > linkedPeak { linkedPeak = magnitude }
+                let truePeak = truePeakDetectors[channel].push(
+                    sample, measuring: limiting)
+                if truePeak > linkedPeak { linkedPeak = truePeak }
             }
 
             let oldest = sampleIndex - Int64(lookAheadFrames)
