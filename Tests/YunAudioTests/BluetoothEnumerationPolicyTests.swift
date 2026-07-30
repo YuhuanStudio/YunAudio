@@ -36,53 +36,36 @@ struct BluetoothEnumerationPolicyTests {
                 transport: .usb, uid: "interface", selectedUIDs: []))
     }
 
-    @Test("an unrelated Bluetooth endpoint reads role metadata and zero topology")
-    func unrelatedBluetoothReadsNoStreamConfiguration() {
-        var roleScopes: [AudioObjectPropertyScope] = []
+    @Test("an unrelated Bluetooth endpoint reads zero scoped properties")
+    func unrelatedBluetoothReadsNoScopedProperties() {
         var topologyScopes: [AudioObjectPropertyScope] = []
 
         let snapshot = AudioDevice.topologySnapshot(
             loadsDetails: false,
-            readsPickerRole: { scope in
-                roleScopes.append(scope)
-                return scope == kAudioObjectPropertyScopeOutput
-            },
             readsChannelCount: { scope in
                 topologyScopes.append(scope)
                 return 99
             })
 
-        #expect(
-            roleScopes == [
-                kAudioObjectPropertyScopeInput,
-                kAudioObjectPropertyScopeOutput,
-            ])
         #expect(topologyScopes.isEmpty)
         #expect(!snapshot.isComplete)
         #expect(snapshot.inputChannels == 0)
         #expect(snapshot.outputChannels == 0)
-        #expect(snapshot.pickerRoleIsCertain)
-        #expect(!snapshot.pickerRole.contains(.input))
-        #expect(snapshot.pickerRole.contains(.output))
+        #expect(!snapshot.pickerRoleIsCertain)
+        #expect(snapshot.pickerRole == [.input, .output])
     }
 
     @Test("a selected endpoint reads exact topology and no picker guesses")
     func selectedBluetoothReadsExactTopology() {
-        var roleScopes: [AudioObjectPropertyScope] = []
         var topologyScopes: [AudioObjectPropertyScope] = []
 
         let snapshot = AudioDevice.topologySnapshot(
             loadsDetails: true,
-            readsPickerRole: { scope in
-                roleScopes.append(scope)
-                return false
-            },
             readsChannelCount: { scope in
                 topologyScopes.append(scope)
                 return scope == kAudioObjectPropertyScopeInput ? 1 : 2
             })
 
-        #expect(roleScopes.isEmpty)
         #expect(
             topologyScopes == [
                 kAudioObjectPropertyScopeInput,
@@ -164,15 +147,14 @@ struct BluetoothEnumerationPolicyTests {
         #expect(RouterModel.canProbeRestoredDeviceControls(transport: .builtIn))
     }
 
-    @Test("missing Bluetooth role metadata remains visible on the safe side")
-    func missingRoleMetadataFallsBackToUnresolvedOutput() {
+    @Test("metadata-only Bluetooth remains selectable on either side")
+    func metadataOnlyBluetoothRemainsSelectableOnEitherSide() {
         let snapshot = AudioDevice.topologySnapshot(
             loadsDetails: false,
-            readsPickerRole: { _ in false },
             readsChannelCount: { _ in 99 })
 
         #expect(!snapshot.pickerRoleIsCertain)
-        #expect(snapshot.pickerRole == [.output])
+        #expect(snapshot.pickerRole == [.input, .output])
         #expect(snapshot.inputChannels == 0)
         #expect(snapshot.outputChannels == 0)
     }
@@ -196,7 +178,7 @@ struct BluetoothEnumerationPolicyTests {
         #expect(!initialiser.contains("inputChannels = Self.channelCount"))
         #expect(!initialiser.contains("outputChannels = Self.channelCount"))
         #expect(initialiser.contains("topologySnapshot("))
-        #expect(initialiser.contains(".canBeDefaultDevice.scoped(to: scope)"))
+        #expect(!initialiser.contains(".canBeDefaultDevice.scoped(to: scope)"))
     }
 
     @Test("deferred selection keeps the old route and exposes progress or failure")

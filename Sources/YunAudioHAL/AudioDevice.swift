@@ -195,12 +195,11 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public let inputChannels: Int
     public let outputChannels: Int
     /// Direction metadata used by pickers. For a fully loaded device it agrees
-    /// with the exact channel counts; for an unused Bluetooth endpoint it is
-    /// available without reading either stream configuration.
+    /// with the exact channel counts; an unused Bluetooth endpoint remains on
+    /// both sides until an explicit selection resolves its real topology.
     public let pickerRole: AudioDevicePickerRole
-    /// False only when a Bluetooth plug-in published neither fixed direction
-    /// flag. Such an endpoint remains visible as an unresolved output rather
-    /// than disappearing; selecting it verifies the live topology.
+    /// False for a metadata-only Bluetooth endpoint. Selecting it verifies the
+    /// live topology before it can enter a route.
     public let pickerRoleIsCertain: Bool
     /// Whether `inputChannels` and `outputChannels` are exact rather than the
     /// deliberately empty values of a metadata-only Bluetooth snapshot.
@@ -225,11 +224,12 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// Builds an enumeration snapshot without waking an unrelated Bluetooth
     /// plug-in for live topology or timing capabilities.
     ///
-    /// Fixed direction metadata is enough for device pickers to name an endpoint
-    /// and put it on the correct side. A Bluetooth plug-in can perform real
-    /// endpoint work while answering stream topology, nominal rate, available
-    /// rates or clock domain. Merely opening YunAudio must not do that to a
-    /// headset the application is not using.
+    /// A Bluetooth plug-in can perform real endpoint work while answering even
+    /// a scoped direction property. In particular, asking the input scope is
+    /// still an input-profile question even when the value is only a Boolean.
+    /// Merely opening YunAudio therefore reads identity only and leaves the
+    /// endpoint unresolved on both picker sides. An explicit selection performs
+    /// the direct UID lookup and removes it from the wrong side if necessary.
     ///
     /// A nil set means an explicit `AudioDevice(id:)` lookup and preserves that
     /// public initialiser's complete snapshot. A non-nil set comes only from
@@ -254,9 +254,6 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         }
         let topology = Self.topologySnapshot(
             loadsDetails: loadsDetails,
-            readsPickerRole: { scope in
-                (id.optionalValue(of: .canBeDefaultDevice.scoped(to: scope)) ?? 0) != 0
-            },
             readsChannelCount: { scope in Self.channelCount(of: id, scope: scope) })
         inputChannels = topology.inputChannels
         outputChannels = topology.outputChannels
@@ -287,14 +284,14 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         let isComplete: Bool
     }
 
-    /// Chooses between fixed picker metadata and exact stream topology.
+    /// Chooses between unresolved picker metadata and exact stream topology.
     ///
     /// The closures make the HAL boundary countable in a unit test. In
     /// particular, a metadata-only answer must make zero calls to
-    /// `readsChannelCount`; that number is the Bluetooth no-wake contract.
+    /// `readsChannelCount`; that number is the Bluetooth no-wake contract. No
+    /// other scoped property closure exists here on purpose.
     static func topologySnapshot(
         loadsDetails: Bool,
-        readsPickerRole: (AudioObjectPropertyScope) -> Bool,
         readsChannelCount: (AudioObjectPropertyScope) -> Int
     ) -> TopologySnapshot {
         if loadsDetails {
@@ -308,17 +305,12 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
                 pickerRole: role, pickerRoleIsCertain: true, isComplete: true)
         }
 
-        var role: AudioDevicePickerRole = []
-        if readsPickerRole(kAudioObjectPropertyScopeInput) { role.insert(.input) }
-        if readsPickerRole(kAudioObjectPropertyScopeOutput) { role.insert(.output) }
-        let roleIsCertain = !role.isEmpty
-        // No public direction answer exists without a scoped property. An
-        // uncooperative Bluetooth plug-in must not make usable headphones
-        // disappear, and output is the side that cannot wake its microphone.
-        if role.isEmpty { role.insert(.output) }
+        // Direction itself is a scoped device question. Keep the endpoint
+        // available on both sides instead of asking the input profile at idle;
+        // the selection boundary already resolves topology before committing.
         return TopologySnapshot(
             inputChannels: 0, outputChannels: 0,
-            pickerRole: role, pickerRoleIsCertain: roleIsCertain, isComplete: false)
+            pickerRole: [.input, .output], pickerRoleIsCertain: false, isComplete: false)
     }
 
     /// Sums the channels across every buffer in the stream configuration for a
