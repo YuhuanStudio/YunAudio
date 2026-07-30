@@ -186,6 +186,11 @@ struct KTVStage: View {
                 .padding([.horizontal, .bottom], Yun.Space.lg)
             }
         }
+        // Does anything on this stage get a task at all? `SongArtwork` never
+        // reaches the first line of its own, and a view that draws but is not
+        // considered to have appeared would explain that without any of it
+        // being about artwork.
+        .task { SongArtwork.record("stage task ran") }
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))
         .focusEffectDisabled()
