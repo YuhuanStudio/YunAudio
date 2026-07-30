@@ -2656,8 +2656,14 @@ enum UIFlowCheck {
         // happens, so the only question is who resamples.
         if let awkward = model.outputDevices.first(where: { candidate in
             guard let source = model.selectedSource else { return false }
-            return Set(candidate.availableSampleRates)
-                .intersection(source.availableSampleRates).isEmpty
+            // An empty list is "not asked yet", not "shares nothing": an
+            // unselected Bluetooth endpoint enumerates without its rates, so
+            // this picked one, selecting it hydrated the real list, the two
+            // turned out to share 48 kHz, and the check failed for having
+            // chosen a device that was never awkward.
+            return !candidate.availableSampleRates.isEmpty
+                && Set(candidate.availableSampleRates)
+                    .intersection(source.availableSampleRates).isEmpty
                 && candidate.uid != model.selectedDestinationUID
         }) {
             let previous = model.selectedDestinationUID
@@ -6831,8 +6837,13 @@ enum UIFlowCheck {
 
         // Nobody has refreshed since the route started. This is the call the
         // list itself makes when it appears, and it has to be enough.
+        // Waited for, not read back on the next line: enumerating moved off the
+        // main actor, so the stamp cannot have changed by the time the call
+        // returns. Read immediately, this asserted that the work was
+        // synchronous rather than that it happened.
         let before = model.appsRefreshedAt
         model.refreshAppsIfStale(olderThan: 0)
+        await pause(upTo: 4.0, until: { model.appsRefreshedAt != before })
         check("appearing is enough to enumerate", model.appsRefreshedAt != before)
         check("the list is not empty while audio is running", !model.availableApps.isEmpty)
         note("\(model.availableApps.count) application(s)")
