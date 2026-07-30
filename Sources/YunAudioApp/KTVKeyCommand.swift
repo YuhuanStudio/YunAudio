@@ -13,6 +13,9 @@ enum KTVKeyCommand: Equatable, Sendable {
     case playPause
     /// Move through the song, in seconds; negative goes back.
     case skip(Double)
+    /// Larger or smaller words, in steps; zero means back to what the window
+    /// implies.
+    case resizeLyrics(Double)
     /// Look up or down the words without moving the music.
     case browse(Int)
     /// Shift the words against the music, in seconds.
@@ -26,6 +29,10 @@ enum KTVKeyCommand: Equatable, Sendable {
 
     /// Half a second, the same step the two arrows beside the words take.
     static let nudgeStep: Double = 0.5
+
+    /// A tenth, which is two presses to a noticeable change and eight from one
+    /// end of the range to the other.
+    static let sizeStep: Double = 0.1
 
     /// The mapping. Nil means the stage does not want the key, and returning
     /// that rather than swallowing it is what leaves ⌘Q, ⌘W and the rest alone.
@@ -43,6 +50,10 @@ enum KTVKeyCommand: Equatable, Sendable {
         case KeyEquivalent.rightArrow.character: return .skip(skipStep)
         case KeyEquivalent.upArrow.character: return .browse(-1)
         case KeyEquivalent.downArrow.character: return .browse(1)
+        // Where every application that has a text size puts them.
+        case "-", "_": return .resizeLyrics(-sizeStep)
+        case "=", "+": return .resizeLyrics(sizeStep)
+        case "0": return .resizeLyrics(0)
         case "[": return .nudgeLyrics(-nudgeStep)
         case "]": return .nudgeLyrics(nudgeStep)
         case "f", "F": return .toggleFullScreen

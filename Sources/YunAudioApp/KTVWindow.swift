@@ -133,6 +133,26 @@ struct KTVStage: View {
     /// running application never assigns it.
     nonisolated(unsafe) static var browsedLineForRendering: Int?
 
+    /// Seeds the word size for a capture, for the same reason and with the
+    /// same rule: set by the renderer only. Writing the real setting would
+    /// change what somebody had chosen for themselves, which a capture has no
+    /// business doing.
+    nonisolated(unsafe) static var lyricScaleForRendering: Double?
+
+    /// What the words are drawn at.
+    private var lyricScale: Double { Self.lyricScaleForRendering ?? model.lyricScale }
+
+    /// Rows a line carries besides the words: pronunciation, and a
+    /// translation where the index supplied one. Both are drawn, so both cost
+    /// height, and the column has to be budgeted for what it draws.
+    private var extraLyricRows: CGFloat {
+        var rows: CGFloat = model.showsRomanisation ? 0.68 : 0
+        if model.lyrics?.lines.contains(where: { $0.translation != nil }) == true {
+            rows += 0.78
+        }
+        return rows
+    }
+
     /// Where the column is looking, when that is not where the song is.
     @State private var browse = KTVLyricBrowse(line: KTVStage.browsedLineForRendering)
     @State private var returnToTheSong: Task<Void, Never>?
@@ -286,6 +306,8 @@ struct KTVStage: View {
         case .skip(let seconds): model.skipNowPlaying(by: seconds)
         case .nudgeLyrics(let seconds): model.nudgeLyricOffset(by: seconds)
         case .toggleFullScreen: KTVWindow.toggleFullScreen()
+        case .resizeLyrics(let step):
+            if step == 0 { model.resetLyricScale() } else { model.nudgeLyricScale(by: step) }
         case .browse(let lines):
             guard let lyrics = model.lyrics, lyrics.lines.count > 1 else { return }
             browse.step(by: lines, playing: model.lyricLine, lineCount: lyrics.lines.count)
@@ -438,7 +460,8 @@ struct KTVStage: View {
                 size.width - columnWidth - max(36, size.width * 0.055)
                     - 2 * max(32, size.width * 0.055))
             lyricsColumn(
-                KTVLyricMetrics.resolve(width: available, height: stageHeight)
+                KTVLyricMetrics.resolve(
+                    width: available, height: stageHeight, scale: lyricScale, extraRowsPerLine: extraLyricRows)
             )
             .frame(maxWidth: .infinity)
             .frame(height: stageHeight)
@@ -481,7 +504,7 @@ struct KTVStage: View {
             lyricsColumn(
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
-                    height: band)
+                    height: band, scale: lyricScale, extraRowsPerLine: extraLyricRows)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
@@ -510,7 +533,7 @@ struct KTVStage: View {
             lyricsColumn(
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
-                    height: band)
+                    height: band, scale: lyricScale, extraRowsPerLine: extraLyricRows)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)

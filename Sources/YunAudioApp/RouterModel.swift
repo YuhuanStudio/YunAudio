@@ -2408,6 +2408,39 @@ final class RouterModel: ScriptTarget {
         applyLyricOffset()
     }
 
+    /// How much larger or smaller the stage's words are than the window implies.
+    ///
+    /// A KTV stage is read from across a room as often as from a desk, and the
+    /// two want different type. The window's own size can only serve one of
+    /// them, so this is the person's say over it — remembered, because
+    /// somebody who sings at a distance sings at a distance every time.
+    var lyricScale: Double {
+        get {
+            let stored = UserDefaults.standard.double(forKey: Self.lyricScaleKey)
+            return stored == 0 ? 1 : Self.boundedLyricScale(stored)
+        }
+        set {
+            UserDefaults.standard.set(
+                Self.boundedLyricScale(newValue), forKey: Self.lyricScaleKey)
+        }
+    }
+
+    private static let lyricScaleKey = "YunAudioLyricScale"
+
+    /// Small enough to fit a verse on a short stage, large enough to be read
+    /// from the back of a room, and never zero or a NaN however it got in.
+    nonisolated static func boundedLyricScale(_ value: Double) -> Double {
+        guard value.isFinite else { return 1 }
+        return min(1.8, max(0.7, (value * 20).rounded() / 20))
+    }
+
+    /// Steps the size, and says nothing when it is already at the end.
+    func nudgeLyricScale(by step: Double) {
+        lyricScale = Self.boundedLyricScale(lyricScale + step)
+    }
+
+    func resetLyricScale() { lyricScale = 1 }
+
     /// Whether the floating desktop lyric is showing.
     var showsDesktopLyrics: Bool {
         get { UserDefaults.standard.bool(forKey: "YunAudioShowsDesktopLyrics") }

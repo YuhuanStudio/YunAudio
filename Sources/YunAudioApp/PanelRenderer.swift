@@ -200,6 +200,16 @@ enum PanelRenderer {
             directory: directory,
             size: CGSize(width: 1080, height: 720))
         model.prepareForRendering()
+        // The words at the size somebody watching from across a room asks
+        // for. The window is the same 1080×720, so this image says what the
+        // setting does and nothing else.
+        KTVStage.lyricScaleForRendering = 1.6
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-large-words\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        KTVStage.lyricScaleForRendering = nil
 
         for section in PreferencesWindow.Section.allCases {
             render(

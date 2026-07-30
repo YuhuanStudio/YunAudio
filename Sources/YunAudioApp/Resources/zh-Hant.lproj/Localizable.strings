@@ -658,6 +658,10 @@
 "Try another lyric source" = "換一個歌詞來源";
 "Play from this line" = "從這句開始播放";
 "Back to the line being sung" = "回到正在唱的那句";
+"Word size" = "歌詞字級";
+"Larger" = "放大";
+"Smaller" = "縮小";
+"The size the window implies" = "跟著視窗大小";
 "The singing starts in a moment" = "馬上就要開始唱了";
 "Desktop lyrics" = "桌面歌詞";
 "Nothing is playing" = "目前沒有播放";

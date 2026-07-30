@@ -132,6 +132,25 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
             withTitle: loc("Desktop lyrics"), action: #selector(toggleDesktopLyrics),
             keyEquivalent: "")
         desktopLyricsItem?.target = self
+        // Discoverable, because the stage's own `-` and `=` are not. A KTV
+        // stage is read from across a room as often as from a desk and the
+        // window's size cannot know which; somebody who wants larger words
+        // should not have to find a key nobody told them about.
+        wordSizeItem = menu.addItem(
+            withTitle: loc("Word size"), action: nil, keyEquivalent: "")
+        let sizes = NSMenu()
+        let larger = sizes.addItem(
+            withTitle: loc("Larger"), action: #selector(enlargeWords), keyEquivalent: "+")
+        larger.target = self
+        let smaller = sizes.addItem(
+            withTitle: loc("Smaller"), action: #selector(shrinkWords), keyEquivalent: "-")
+        smaller.target = self
+        sizes.addItem(.separator())
+        let reset = sizes.addItem(
+            withTitle: loc("The size the window implies"),
+            action: #selector(resetWordSize), keyEquivalent: "0")
+        reset.target = self
+        wordSizeItem?.submenu = sizes
         menu.addItem(.separator())
         menu.addItem(
             withTitle: loc("Open YunAudio"), action: #selector(openWindow), keyEquivalent: ""
@@ -657,6 +676,19 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     private var desktopLyricsItem: NSMenuItem?
+    private var wordSizeItem: NSMenuItem?
+
+    @objc private func enlargeWords() {
+        model.nudgeLyricScale(by: KTVKeyCommand.sizeStep)
+    }
+
+    @objc private func shrinkWords() {
+        model.nudgeLyricScale(by: -KTVKeyCommand.sizeStep)
+    }
+
+    @objc private func resetWordSize() {
+        model.resetLyricScale()
+    }
 
     @objc private func toggleDesktopLyrics() {
         DesktopLyricsWindow.toggle(model: model)
