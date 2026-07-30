@@ -1067,6 +1067,13 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var musicRecognition: MusicRecognition?
     @ObservationIgnored private var recognisedApplication: AudioApplication?
     @ObservationIgnored private var recognitionSourceUID: String?
+    /// A verification-only override, fixed for the lifetime of the process.
+    ///
+    /// `recognitionApplication(for:)` runs once per source at the 20 Hz singing
+    /// poll. Asking `ProcessInfo` there rebuilt the environment dictionary for
+    /// a value that cannot change after launch.
+    private static let recognisesScriptedPlayers =
+        ProcessInfo.processInfo.environment["YUNAUDIO_RECOGNISE_PLAYERS"] == "1"
     /// Lyrics for it, when a file was found.
     private(set) var lyrics: Lyrics?
     /// Words with no reliable timeline, used only when no timed copy exists.
@@ -8747,8 +8754,7 @@ final class RouterModel: ScriptTarget {
             let application = representative(of: group).flatMap(application(of:))
         else { return nil }
         let scripted = ["com.apple.Music", "com.spotify.client"]
-        let checksScriptedPlayers =
-            ProcessInfo.processInfo.environment["YUNAUDIO_RECOGNISE_PLAYERS"] == "1"
+        let checksScriptedPlayers = Self.recognisesScriptedPlayers
         guard checksScriptedPlayers || !scripted.contains(application.bundleID) else {
             return nil
         }
