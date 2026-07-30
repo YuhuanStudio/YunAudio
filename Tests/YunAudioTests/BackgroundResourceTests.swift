@@ -245,6 +245,15 @@ struct BackgroundResourceTests {
         #expect(correction.ranges(of: "currentSampleRate").count == 0)
         #expect(correction.ranges(of: "graphSampleRate").count == 1)
 
+        let needsStart = try #require(model.range(of: "private func refreshAnalysisNeeds()"))
+        let needsEnd = try #require(
+            model.range(
+                of: "private var analysisNeeds",
+                range: needsStart.upperBound..<model.endIndex))
+        let needs = model[needsStart.lowerBound..<needsEnd.lowerBound]
+        #expect(needs.ranges(of: "applyLiveControl").count == 1)
+        #expect(needs.ranges(of: "engine.setAnalysisEnabled").count == 0)
+
         let effectsStart = try #require(engine.range(of: "public func updateEffects("))
         let effectsEnd = try #require(
             engine.range(

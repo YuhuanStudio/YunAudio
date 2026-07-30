@@ -239,8 +239,23 @@ render_wrote_everything() {
 	# that wrote nothing at all also exits zero, so the count is checked too.
 	local count
 	count=$(find "${WORK}/render" -name '*.png' | wc -l | tr -d ' ')
-	[[ "${count}" -ge 20 ]] || {
-		echo "only ${count} panels rendered"
+	[[ "${count}" -eq 35 ]] || {
+		echo "expected exactly 35 rendered panels, got ${count}"
+		return 1
+	}
+	# Every inspector gets its own filename. `window-light.png` used to be
+	# claimed as Sound after the shared model had already been moved to Hardware,
+	# so Hardware was rendered twice and Sound not at all.
+	local tab appearance missing=()
+	while read -r tab; do
+		for appearance in light dark; do
+			[[ -f "${WORK}/render/window-${tab}-${appearance}.png" ]] ||
+				missing+=("window-${tab}-${appearance}.png")
+		done
+	done < <(sed -n '/enum Inspector: String/,/^    }/p' Sources/YunAudioApp/MainWindow.swift |
+		grep -oE '^        case [a-z]+' | awk '{print $2}')
+	[[ ${#missing[@]} -eq 0 ]] || {
+		echo "missing rendered inspector(s): ${missing[*]}"
 		return 1
 	}
 }
@@ -264,6 +279,7 @@ photographed_the_real_window() {
 	fi
 	local capture=$!
 	local waited=0
+	local capture_status=0
 	while kill -0 "${capture}" 2>/dev/null && [[ ${waited} -lt 90 ]]; do
 		sleep 1
 		waited=$((waited + 1))
@@ -273,14 +289,22 @@ photographed_the_real_window() {
 		wait "${capture}" 2>/dev/null
 		echo "  (the capture had to be stopped after ${waited}s — checking what it wrote)"
 	else
-		wait "${capture}" 2>/dev/null
+		wait "${capture}" 2>/dev/null || capture_status=$?
+	fi
+	# The ordinary capture never touches CoreAudio and therefore has no reason
+	# to be killed or ignored. Its exit status includes appearance, missing-file
+	# and visible-spectrum assertions from the app itself.
+	if [[ "${FULL}" != "1" && "${capture_status}" -ne 0 ]]; then
+		echo "the non-hardware window capture rejected its own output (${capture_status})"
+		return 1
 	fi
 	local count
 	count=$(find "${WORK}/shot" -name '*.png' | wc -l | tr -d ' ')
 	# Both appearances at both sizes and every tab. A full run also adds the
 	# running state; the ordinary gate never reserves an input just for a photo.
-	[[ "${count}" -ge 6 ]] || {
-		echo "only ${count} photographs taken"
+	local expected=14
+	[[ "${count}" -ge "${expected}" ]] || {
+		echo "expected at least ${expected} photographs, got ${count}"
 		return 1
 	}
 	# One photograph per inspector tab, checked against the tabs the source

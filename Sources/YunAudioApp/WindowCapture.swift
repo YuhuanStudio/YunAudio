@@ -28,19 +28,31 @@ enum WindowCapture {
         ("tall", CGSize(width: 1180, height: 900)),
     ]
 
-    static func write(to directory: String, model: RouterModel? = nil) async {
+    static func write(to directory: String, model: RouterModel? = nil) async -> Bool {
         guard let window = mainWindow() else {
             FileHandle.standardError.write(Data("no window to photograph\n".utf8))
-            return
+            return false
+        }
+        var wroteEverything = true
+
+        // A non-hardware photograph still needs a signal-shaped fixture. The
+        // previous gate photographed twenty-four one-point silence bars, so the
+        // spectrum could disappear in both appearances and every image still
+        // existed. This is the same representative state as the offscreen
+        // renderer, applied to the real scene and real window chrome.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil {
+            model?.prepareForRendering()
+            settle(turns: 12)
         }
 
         // Both looks. Glass can only be judged here — an offscreen rasteriser
         // gives a material no backdrop, so every glass card renders as nothing.
         for style in YunStyle.allCases {
             YunTheme.shared.style = style
-            photograph(
-                window, sizes: sizes, into: directory,
-                suffix: style == .flat ? "" : "-glass")
+            wroteEverything =
+                photograph(
+                    window, sizes: sizes, into: directory,
+                    suffix: style == .flat ? "" : "-glass") && wroteEverything
         }
         YunTheme.shared.style = .flat
 
@@ -61,9 +73,11 @@ enum WindowCapture {
                 let began = Date()
                 model.inspectorTab = tab
                 settle(turns: 12)
-                photograph(
-                    window, sizes: [("tab-\(tab.rawValue)", CGSize(width: 980, height: 600))],
-                    into: directory, appearances: [.darkAqua])
+                wroteEverything =
+                    photograph(
+                        window,
+                        sizes: [("tab-\(tab.rawValue)", CGSize(width: 980, height: 600))],
+                        into: directory, appearances: [.darkAqua]) && wroteEverything
                 // Timed per tab, because the whole capture went from thirty
                 // seconds to four minutes when these were added and "it got
                 // slower" is not something anybody can act on.
@@ -80,7 +94,7 @@ enum WindowCapture {
         // window must not reserve a microphone or wake a Continuity device.
         // `--full` omits this flag and owns the hardware checks that follow.
         if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil {
-            return
+            return wroteEverything
         }
 
         // The state that matters most is the one nothing else can show: meters
@@ -89,7 +103,7 @@ enum WindowCapture {
         // state a user spends the least time looking at.
         guard let model, model.selectedDestination != nil, !model.isRunning,
             model.prepareForAutomatedAudioUse()
-        else { return }
+        else { return wroteEverything }
         model.start()
         for _ in 0..<80 where !model.isRunning {
             try? await Task.sleep(for: .milliseconds(100))
@@ -97,26 +111,29 @@ enum WindowCapture {
         guard model.isRunning else {
             FileHandle.standardError.write(
                 Data("could not start routing — no running capture\n".utf8))
-            return
+            return wroteEverything
         }
         // Long enough for the meters to have something in them.
         try? await Task.sleep(for: .seconds(2))
         model.toggleRecording()
         try? await Task.sleep(for: .seconds(2))
 
-        photograph(
-            window, sizes: [("running", CGSize(width: 1180, height: 900))],
-            into: directory)
+        wroteEverything =
+            photograph(
+                window, sizes: [("running", CGSize(width: 1180, height: 900))],
+                into: directory) && wroteEverything
 
         model.toggleRecording()
         if let url = model.recordingURL { try? FileManager.default.removeItem(at: url) }
         model.stop()
+        return wroteEverything
     }
 
     private static func photograph(
         _ window: NSWindow, sizes: [(name: String, size: CGSize)], into directory: String,
         suffix: String = "", appearances: [NSAppearance.Name] = [.aqua, .darkAqua]
-    ) {
+    ) -> Bool {
+        var wroteEverything = true
         for (label, size) in sizes {
             window.setContentSize(size)
             for scheme in appearances {
@@ -143,7 +160,15 @@ enum WindowCapture {
                         "\(name) never came out in the \(appearance) appearance"
                         + " — not written\n"
                     FileHandle.standardError.write(Data(message.utf8))
+                    wroteEverything = false
                     continue
+                }
+                if name == "live-min-light.png", !spectrumHasVisibleShape(png) {
+                    FileHandle.standardError.write(
+                        Data(
+                            "live-min-light.png has a finite output reading but no visible spectrum"
+                                .appending(" — not accepted\n").utf8))
+                    wroteEverything = false
                 }
                 // Through the renderer's writer, which creates the directory and
                 // reports a failure rather than announcing a file it did not
@@ -154,6 +179,25 @@ enum WindowCapture {
             }
         }
         NSApp.appearance = nil
+        return wroteEverything
+    }
+
+    /// The synthetic non-hardware fixture has a voice-shaped spectrum. Assert
+    /// that the real window actually drew it, closing the exact hole where a
+    /// finite −52.6 dBFS reading sat above twenty-four one-point bars and the
+    /// screenshot gate still passed.
+    private static func spectrumHasVisibleShape(_ png: Data) -> Bool {
+        guard
+            let coloured = PixelProbe.count(
+                png,
+                where: { red, green, blue in
+                    blue > 175 && Int(blue) - Int(red) > 10 && Int(green) - Int(red) > 5
+                })
+        else { return false }
+        // A silent spectrum plus the small application mark cannot approach
+        // this. The fixture's curve covers tens of thousands of pixels at the
+        // minimum window size.
+        return coloured > 4_000
     }
 
     /// Whether a capture is actually in the appearance it claims.

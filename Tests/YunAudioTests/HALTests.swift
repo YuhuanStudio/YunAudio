@@ -4168,7 +4168,7 @@ struct AdditionalDeviceFallbackTests {
             additionalSourceUIDs: sources, additionalDestinationUIDs: destinations,
             monitorDeviceUID: monitor, effects: [], plugins: [], preferredSampleRate: nil,
             bufferFrames: 128, voiceIsolation: nil, echoCancellation: nil,
-            outputLatencyTrim: [:], selftest: false)
+            outputLatencyTrim: [:], analysisEnabled: false, selftest: false)
     }
 
     @Test("with nothing extra there is nothing to give up")

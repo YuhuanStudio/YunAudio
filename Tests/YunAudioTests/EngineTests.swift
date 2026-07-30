@@ -1700,6 +1700,7 @@ struct LiveRecoveryConfigurationTests {
             voiceIsolation: VoiceIsolationSettings(mixPercent: 20, isHighQuality: false),
             echoCancellation: EchoCancellationSettings(speakerUID: "Out"),
             outputLatencyTrim: ["Out": 12],
+            analysisEnabled: false,
             selftest: true)
     }
 
@@ -1777,6 +1778,36 @@ struct LiveRecoveryConfigurationTests {
         #expect(effectPublish.lowerBound < effectSnapshot.lowerBound)
         #expect(effectUpdate.ranges(of: "rememberLiveEffects").count == 1)
     }
+
+    @Test("clock recovery retains an analyser that was enabled after start")
+    func analysisSurvivesRecoverySnapshot() throws {
+        var snapshot = configuration()
+        #expect(!snapshot.analysisEnabled)
+
+        snapshot.rememberAnalysisEnabled(true)
+
+        #expect(snapshot.analysisEnabled)
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let setterStart = try #require(source.range(of: "public func setAnalysisEnabled("))
+        let setterEnd = try #require(
+            source.range(
+                of: "public struct AnalysisStatistics",
+                range: setterStart.upperBound..<source.endIndex))
+        let setter = source[setterStart.lowerBound..<setterEnd.lowerBound]
+        #expect(setter.ranges(of: "lastConfiguration?.rememberAnalysisEnabled").count == 1)
+
+        let attemptStart = try #require(source.range(of: "private func startAttempt("))
+        let attemptEnd = try #require(
+            source.range(
+                of: "public func stop()",
+                range: attemptStart.upperBound..<source.endIndex))
+        let attempt = source[attemptStart.lowerBound..<attemptEnd.lowerBound]
+        #expect(
+            attempt.ranges(of: "graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0").count
+                == 1)
+    }
 }
 
 // MARK: - Giving up on a monitor
@@ -1813,6 +1844,7 @@ struct MonitorDropTests {
             voiceIsolation: nil,
             echoCancellation: nil,
             outputLatencyTrim: [:],
+            analysisEnabled: false,
             selftest: false)
     }
 

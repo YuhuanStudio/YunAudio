@@ -3186,6 +3186,10 @@ final class RouterModel: ScriptTarget {
     /// captures. Not called by the running app.
     func prepareForRendering() {
         refreshAppsForVerification()
+        // A finite live reading alongside a stopped route is not a state the
+        // application can reach. This fixture is used only by the two design
+        // harnesses, so make the synthetic signal and its transport state agree.
+        isRunning = true
         // Everything that does not depend on a device comes first.
         //
         // It used to sit after the guard below, so on any machine where no
@@ -7602,7 +7606,8 @@ final class RouterModel: ScriptTarget {
         guard wanted != analysisNeeds else { return }
         analysisNeeds = wanted
         analyser?.require(wanted)
-        engine.setAnalysisEnabled(!wanted.isEmpty)
+        let analysisIsEnabled = !wanted.isEmpty
+        applyLiveControl { $0.setAnalysisEnabled(analysisIsEnabled) }
         if wanted.isEmpty { analysis = .silent }
     }
 

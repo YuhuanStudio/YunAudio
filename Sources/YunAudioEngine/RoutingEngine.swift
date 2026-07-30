@@ -229,6 +229,7 @@ public final class RoutingEngine: @unchecked Sendable {
         var voiceIsolation: VoiceIsolationSettings?
         var echoCancellation: EchoCancellationSettings?
         var outputLatencyTrim: [String: Int]
+        var analysisEnabled: Bool
         var selftest: Bool
 
         /// Keeps recovery pointed at the graph that is now live.
@@ -254,6 +255,11 @@ public final class RoutingEngine: @unchecked Sendable {
             self.effects = effects
             self.plugins = plugins
             self.voiceIsolation = voiceIsolation
+        }
+
+        /// Keeps recovery from silently turning every analyser back off.
+        mutating func rememberAnalysisEnabled(_ enabled: Bool) {
+            analysisEnabled = enabled
         }
 
         /// The same start with the monitor given up on: the second mix and
@@ -600,6 +606,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 voiceIsolation: voiceIsolation,
                 echoCancellation: echoCancellation,
                 outputLatencyTrim: outputLatencyTrim,
+                analysisEnabled: false,
                 selftest: selftest))
     }
 
@@ -701,6 +708,7 @@ public final class RoutingEngine: @unchecked Sendable {
         let voiceIsolation = configuration.voiceIsolation
         let echoCancellation = configuration.echoCancellation
         let outputLatencyTrim = configuration.outputLatencyTrim
+        let analysisEnabled = configuration.analysisEnabled
         let selftest = configuration.selftest
 
         stopLocked()
@@ -975,6 +983,7 @@ public final class RoutingEngine: @unchecked Sendable {
             sharedClock: clock)
         self.graph = graph
         activeRoutes = routes
+        graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0
 
         // When the canceller owns the microphone the reference has no entry in
         // the input map, so an absent point is expected rather than fatal.
@@ -1439,6 +1448,7 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         defer { stateLock.unlock() }
         graph?.pointee.analysisEnabled = enabled ? 1 : 0
+        lastConfiguration?.rememberAnalysisEnabled(enabled)
     }
 
     /// A snapshot of the analyser hand-off, for diagnostics and acceptance checks.
@@ -1477,7 +1487,11 @@ public final class RoutingEngine: @unchecked Sendable {
     public func drainAnalysis(
         into destination: UnsafeMutablePointer<Float>, capacity: Int
     ) -> Int {
-        stateLock.lock()
+        // The ring keeps the unread samples. If a graph swap or clock recovery
+        // owns the state lock, skipping one UI poll loses nothing and prevents
+        // the twenty-hertz MainActor timer from waiting behind up to seconds of
+        // CoreAudio work.
+        guard stateLock.try() else { return 0 }
         defer { stateLock.unlock() }
         guard let ring = graph?.pointee.analysisRing, capacity > 0 else { return 0 }
         return Int(yun_rt_ring_read(ring, destination, UInt32(capacity)))

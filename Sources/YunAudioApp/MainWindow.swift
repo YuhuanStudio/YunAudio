@@ -1389,16 +1389,37 @@ struct MainWindow: View {
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textSecondary)
 
-                    // A plain editor rather than anything clever. Syntax
-                    // colouring is somebody's week and this is a text field
-                    // that has to accept a paste.
-                    TextEditor(text: $model.residentScript)
-                        .font(.system(size: 12, design: .monospaced))
-                        .scrollContentBackground(.hidden)
+                    // ImageRenderer cannot host AppKit's NSTextView. It draws
+                    // the system's giant yellow prohibition placeholder and a
+                    // capture full of that used to pass the design gate. The
+                    // running window still gets the real editor; the offscreen
+                    // path gets the same text, type and surface without an
+                    // AppKit-backed control.
+                    if isRendering {
+                        ScrollView {
+                            Text(verbatim: model.residentScript)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(Yun.Palette.textPrimary)
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .topLeading)
+                        }
                         .frame(minHeight: 120)
                         .padding(Yun.Space.xs)
                         .background(
                             Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.control))
+                    } else {
+                        // A plain editor rather than anything clever. Syntax
+                        // colouring is somebody's week and this is a text field
+                        // that has to accept a paste.
+                        TextEditor(text: $model.residentScript)
+                            .font(.system(size: 12, design: .monospaced))
+                            .scrollContentBackground(.hidden)
+                            .frame(minHeight: 120)
+                            .padding(Yun.Space.xs)
+                            .background(
+                                Yun.Palette.elevated,
+                                in: .rect(cornerRadius: Yun.Radius.control))
+                    }
 
                     // Running one once had no control at all: the tab installs
                     // a script that reacts to events, and the other half of the

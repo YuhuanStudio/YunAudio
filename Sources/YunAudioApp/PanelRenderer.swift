@@ -8,6 +8,7 @@ import YunDesign
 @MainActor
 enum PanelRenderer {
     static func write(to directory: String, model: RouterModel) {
+        failed = false
         verifyPipeline()
         model.prepareForRendering()
         // Flat only. A material has nothing to be a material over in an
@@ -131,34 +132,20 @@ enum PanelRenderer {
         // a tabbed inspector is that most of it is off screen most of the
         // time, which is exactly the condition under which a layout defect
         // survives.
-        for tab in MainWindow.Inspector.allCases where tab != .sound {
+        for tab in MainWindow.Inspector.allCases {
             render(
                 MainWindow(model: model, initialInspector: tab, isRendering: true),
                 basename: "window-\(tab.rawValue)\(suffix)", directory: directory,
-                size: CGSize(width: 1060, height: 1480))
+                // Sound can contain every processing stage and is substantially
+                // taller than the other inspectors. Each view gets its own
+                // explicit tab and size: constructing all the non-sound views
+                // first used to leave the shared model on Hardware, so the file
+                // named `window-light.png` photographed Hardware a second time
+                // and Sound was never rendered.
+                size: CGSize(
+                    width: 1060,
+                    height: tab == .sound ? 1900 : 1480))
         }
-        render(
-            MainWindow(model: model, isRendering: true),
-            basename: "window\(suffix)", directory: directory,
-            // Taller than the window's minimum so the whole layout is visible
-            // at once. The columns scroll in the running app; here they do not,
-            // and a clipped capture hides exactly the defects this exists to
-            // find.
-            // Tall enough for the whole layout. It was 860, and the content
-            // outgrew that some time ago: the capture clipped its own top, so
-            // the window header and the inspector's tab bar were missing from
-            // every design check without anything saying so. A capture that
-            // silently crops is worse than no capture.
-            // It outgrew 1180 the same way when the Sound tab became three
-            // labelled regions: the header went at the top and the reverb row
-            // off the bottom. An over-tall capture costs white space; a short
-            // one costs the check.
-            // Sized for the Sound tab with every stage switched on, because
-            // that is the tallest this window gets and it is a state a scene
-            // preset can put it in with one click — each enabled stage adds its
-            // knobs. The capture inherits whatever was last persisted, so the
-            // height cannot be chosen for the empty case.
-            size: CGSize(width: 1060, height: 1900))
 
         for section in PreferencesWindow.Section.allCases {
             render(
@@ -211,10 +198,34 @@ enum PanelRenderer {
 
             guard let png = pngData(from: renderer) else {
                 FileHandle.standardError.write(Data("failed to render \(name)\n".utf8))
+                failed = true
                 continue
+            }
+            if basename.contains("scripting"), containsSystemPlaceholder(png) {
+                FileHandle.standardError.write(
+                    Data(
+                        "\(name) contains AppKit's prohibition placeholder"
+                            .appending(" — the editor was not rendered\n").utf8))
+                failed = true
             }
             print(write(png, named: name, to: directory))
         }
+    }
+
+    /// ImageRenderer substitutes a saturated yellow sheet and red prohibition
+    /// mark for AppKit controls it cannot host. It is unmistakable to a person
+    /// and used to be completely invisible to the gate.
+    private static func containsSystemPlaceholder(_ png: Data) -> Bool {
+        guard
+            let yellow = PixelProbe.count(
+                png,
+                where: { red, green, blue in
+                    red > 220 && green > 140 && green < 230 && blue < 80
+                }),
+            let source = CGImageSourceCreateWithData(png as CFData, nil),
+            let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+        else { return true }
+        return yellow > image.width * image.height / 20
     }
 
     private static let scale: CGFloat = 2
@@ -274,6 +285,7 @@ enum PanelRenderer {
             let sampled = PixelProbe.sample(image, at: CGPoint(x: 2, y: 2))
         else {
             FileHandle.standardError.write(Data("the capture pipeline failed\n".utf8))
+            failed = true
             return
         }
 
@@ -288,6 +300,7 @@ enum PanelRenderer {
                         "⚠︎ the capture pipeline is altering colour: #3B82F6 came back as #%02X%02X%02X. Every capture below is unreliable.\n",
                     sampled.r, sampled.g, sampled.b
                 ).utf8))
+        failed = true
     }
 
     /// Rasterises into a context this code owns, in sRGB, at eight bits.

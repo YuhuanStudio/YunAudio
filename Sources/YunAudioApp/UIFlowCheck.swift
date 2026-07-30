@@ -934,6 +934,12 @@ enum UIFlowCheck {
         check(
             "every band is inside the display range",
             model.analysis.bands.allSatisfy { $0 >= 0 && $0 <= 1 })
+        check(
+            "a measured output cannot leave the spectrum completely flat",
+            model.outputPeak <= 0.001 || (model.analysis.bands.max() ?? 0) > 0.001)
+        let analysisStatistics = model.analysisStatistics
+        check("the realtime graph has analysis enabled", analysisStatistics.isEnabled)
+        check("the realtime graph wrote analyser samples", analysisStatistics.written > 0)
 
         // Measured time has to track wall-clock time. If it lags, the ring is
         // dropping — which would silently bias the integrated figure towards
