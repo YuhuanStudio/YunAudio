@@ -1806,6 +1806,56 @@ struct LiveRecoveryConfigurationTests {
             selftest: true)
     }
 
+    @Test("a fresh graph carries the stored mix before its first callback")
+    func freshGraphStartsWithStoredMix() {
+        let graph = RTGraph.allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0,
+                    appliesInputTrim: true)
+            ], bufferFrames: 64)
+        defer { RTGraph.deallocate(graph) }
+
+        RoutingEngine.initialisePersistedMixState(
+            inputGain: 0.25, inputMuted: true,
+            outputGain: 0.4, outputMuted: false,
+            on: graph)
+
+        #expect(graph.pointee.inputGain == 0.25)
+        #expect(graph.pointee.inputMuted == 1)
+        #expect(graph.pointee.outputGain == 0.4)
+        #expect(graph.pointee.outputMuted == 0)
+    }
+
+    @Test("the stored mix is installed before a fresh graph is exposed")
+    func freshGraphOrdering() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let attemptStart = try #require(source.range(of: "private func startAttempt("))
+        let attemptEnd = try #require(
+            source.range(
+                of: "public func stop()",
+                range: attemptStart.upperBound..<source.endIndex))
+        let attempt = source[attemptStart.lowerBound..<attemptEnd.lowerBound]
+
+        let allocation = try #require(attempt.range(of: "let graph = RTGraph.allocate("))
+        let initialise = try #require(
+            attempt.range(of: "Self.initialisePersistedMixState("))
+        let exposed = try #require(attempt.range(of: "self.graph = graph"))
+        let cell = try #require(attempt.range(of: "yun_rt_cell_create"))
+        let started = try #require(attempt.range(of: "AudioDeviceStart"))
+
+        #expect(allocation.lowerBound < initialise.lowerBound)
+        #expect(initialise.lowerBound < exposed.lowerBound)
+        #expect(initialise.lowerBound < cell.lowerBound)
+        #expect(initialise.lowerBound < started.lowerBound)
+        #expect(attempt.ranges(of: "Self.initialisePersistedMixState(").count == 1)
+        #expect(attempt.ranges(of: "graph.pointee.inputGain = inputGain").isEmpty)
+        #expect(attempt.ranges(of: "graph.pointee.outputGain = outputGain").isEmpty)
+    }
+
     @Test("a live route edit replaces only the recovery patchbay")
     func routesReplaceOnlyRoutes() {
         var snapshot = configuration()

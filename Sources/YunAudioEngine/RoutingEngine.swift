@@ -1113,6 +1113,10 @@ public final class RoutingEngine: @unchecked Sendable {
         let graph = RTGraph.allocate(
             routes: rtRoutes, bufferFrames: cycleFrames, sampleRate: rate,
             sharedClock: clock)
+        Self.initialisePersistedMixState(
+            inputGain: inputGain, inputMuted: isInputMuted,
+            outputGain: outputGain, outputMuted: isOutputMuted,
+            on: graph)
         self.graph = graph
         activeRoutes = routes
         graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0
@@ -1248,13 +1252,6 @@ public final class RoutingEngine: @unchecked Sendable {
         guard yun_rt_cell_wait_for_swap(cell, 750) else {
             throw RoutingError.noIOCycles
         }
-
-        // A restart builds a fresh graph, which starts at unity. Without this
-        // every reconfiguration would quietly undo the trim and the master.
-        graph.pointee.inputGain = inputGain
-        graph.pointee.inputMuted = isInputMuted ? 1 : 0
-        graph.pointee.outputGain = outputGain
-        graph.pointee.outputMuted = isOutputMuted ? 1 : 0
 
         // When the destination is our own driver, hand it the master's clock so
         // it can lock to the microphone. Any other destination — BlackHole, a
@@ -2517,6 +2514,23 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     // MARK: Live control
+
+    /// Installs the stored mix before a fresh graph is made visible.
+    ///
+    /// `AudioDeviceStart` can call the IOProc before it returns. Restoring these
+    /// values afterwards left at least the first two callbacks at unity and
+    /// unmuted — most seriously, a muted microphone could leak during every
+    /// restart or clock recovery.
+    static func initialisePersistedMixState(
+        inputGain: Float, inputMuted: Bool,
+        outputGain: Float, outputMuted: Bool,
+        on graph: UnsafeMutablePointer<RTGraph>
+    ) {
+        graph.pointee.inputGain = inputGain
+        graph.pointee.inputMuted = inputMuted ? 1 : 0
+        graph.pointee.outputGain = outputGain
+        graph.pointee.outputMuted = outputMuted ? 1 : 0
+    }
 
     /// Sets a route's gain without interrupting audio.
     ///
