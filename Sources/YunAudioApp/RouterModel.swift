@@ -2343,6 +2343,33 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Jumps the music to a line somebody pointed at.
+    ///
+    /// The one interaction a synchronised lyric sheet owes back: the words are
+    /// already an index of the song, and until now they were a read-only one —
+    /// finding the second chorus meant dragging a bar and guessing.
+    ///
+    /// The shift applied to the words is undone rather than ignored. A song
+    /// held back by two seconds is showing line *n* at the moment the music
+    /// reaches it, so seeking to the line's raw timestamp would land two
+    /// seconds off — the correction would fight the seek exactly as far as
+    /// somebody had corrected it.
+    func seekToLyricLine(_ index: Int) {
+        guard let lyrics, lyrics.lines.indices.contains(index),
+            let track = nowPlaying, track.duration > 0
+        else { return }
+        let seconds = max(0, lyrics.lines[index].time - lyrics.offset - lyricNudge)
+        seekNowPlaying(toFraction: seconds / track.duration)
+    }
+
+    /// Moves the music by a few seconds, keeping it inside the song.
+    func skipNowPlaying(by seconds: Double) {
+        guard let track = nowPlaying, track.duration > 0 else { return }
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        let target = trackClock.position(at: now) + seconds
+        seekNowPlaying(toFraction: max(0, min(track.duration, target)) / track.duration)
+    }
+
     /// Every index's answer for the song playing now.
     ///
     /// Held here rather than read back from `OnlineLyrics.lastAnswers` at the

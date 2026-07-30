@@ -234,8 +234,29 @@ struct KTVStage: View {
         .coordinateSpace(name: "ktv-stage")
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))
+        // The stage takes the keys a player is expected to take. Focusable
+        // because a view that is not focusable is never offered one, and the
+        // effect is off because a focus ring around the whole window is not
+        // what anybody wanted from being able to press space.
+        .focusable(!isRendering)
+        .onKeyPress { press in
+            guard let command = KTVKeyCommand.resolve(press.key, modifiers: press.modifiers)
+            else { return .ignored }
+            perform(command)
+            return .handled
+        }
         .focusEffectDisabled()
         .accessibilityIdentifier("YunAudioKTVWindow")
+    }
+
+    /// Carries out what a key asked for.
+    private func perform(_ command: KTVKeyCommand) {
+        switch command {
+        case .playPause: model.sendTransport(.playPause)
+        case .skip(let seconds): model.skipNowPlaying(by: seconds)
+        case .nudgeLyrics(let seconds): model.nudgeLyricOffset(by: seconds)
+        case .toggleFullScreen: KTVWindow.toggleFullScreen()
+        }
     }
 
     @ViewBuilder
@@ -575,6 +596,27 @@ struct KTVStage: View {
         }
     }
 
+    /// One candidate for the row under the progress bar.
+    ///
+    /// A `Spacer` must not appear in here: it is flexible down to nothing, so
+    /// every candidate containing one fits every proposal and `ViewThatFits`
+    /// would always take the first.
+    private func playerRow(
+        _ track: NowPlaying.Track, showsName: Bool, showsAlignment: Bool
+    ) -> some View {
+        HStack(spacing: Yun.Space.sm) {
+            transportControls(track)
+            if showsAlignment { lyricAlignment }
+            if showsName {
+                Text(track.application)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.66))
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+        }
+    }
+
     /// Previous, play or pause, next — driving the player the stage is showing.
     ///
     /// The glyph here was a picture of the state and nothing else: a stage that
@@ -662,12 +704,20 @@ struct KTVStage: View {
             progress(track)
 
             HStack(spacing: Yun.Space.sm) {
-                transportControls(track)
-                lyricAlignment
-                Text(track.application)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.66))
-                Spacer()
+                // The row drops what it cannot hold rather than wrapping it.
+                // At 760×900 the column is narrow enough that 「Spotify」 broke
+                // across three lines — 「Sp / oti / fy」 — and grew the column
+                // while it did it. `ViewThatFits` picks the first candidate
+                // whose ideal width fits, so the order here is the order the
+                // parts are worth: the transport always, then the alignment
+                // controls, then the player's name. No constants to keep in
+                // step with the button sizes.
+                ViewThatFits(in: .horizontal) {
+                    playerRow(track, showsName: true, showsAlignment: true)
+                    playerRow(track, showsName: false, showsAlignment: true)
+                    playerRow(track, showsName: false, showsAlignment: false)
+                }
+                Spacer(minLength: 0)
                 if let appleMusicURL = track.appleMusicURL {
                     Button {
                         NSWorkspace.shared.open(appleMusicURL)
@@ -878,6 +928,14 @@ struct KTVStage: View {
                         }
                     }
                     .id(index)
+                    // The words are an index of the song; this is what makes
+                    // it one you can use. `contentShape` because the row is
+                    // mostly the space between the glyphs, and a hit test
+                    // against the glyphs alone means most of a line is not a
+                    // target.
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.seekToLyricLine(index) }
+                    .help(loc("Play from this line"))
                 }
             }
         }
