@@ -254,7 +254,7 @@ struct ExtraDeviceList: View {
                     }
                 } label: {
                     Text(
-                        "\(device.name)  ·  \(isInput ? device.inputChannels : device.outputChannels)ch"
+                        "\(device.name)  ·  \(isInput ? device.inputChannelDetail : device.outputChannelDetail)"
                     )
                 }
             }

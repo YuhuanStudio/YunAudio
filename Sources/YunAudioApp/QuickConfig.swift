@@ -98,8 +98,13 @@ extension RouterModel {
                     continue
                 }
                 _ = device
-                if isInput { selectedSourceUID = uid } else { selectedDestinationUID = uid }
-                restored += 1
+                if isInput {
+                    selectedSourceUID = uid
+                    if selectedSourceUID == uid { restored += 1 }
+                } else {
+                    selectedDestinationUID = uid
+                    if selectedDestinationUID == uid { restored += 1 }
+                }
             }
 
             // The monitor is allowed to be absent without complaint: it is the

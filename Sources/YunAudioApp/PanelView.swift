@@ -158,10 +158,15 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
                 picker(
                     loc("Input"), selection: $model.selectedSourceUID,
-                    devices: model.inputDevices, channelLabel: { "\($0.inputChannels)ch" })
+                    devices: model.inputDevices, channelLabel: \.inputChannelDetail)
                 picker(
                     loc("Output"), selection: $model.selectedDestinationUID,
-                    devices: model.outputDevices, channelLabel: { "\($0.outputChannels)ch" })
+                    devices: model.outputDevices, channelLabel: \.outputChannelDetail)
+                if let status = model.deviceSelectionStatus {
+                    Text(status)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                }
 
                 if !model.monitorOptions.isEmpty {
                     YunDivider()
@@ -195,7 +200,7 @@ struct PanelView: View {
                     + model.monitorOptions.map {
                         .init(
                             value: $0.uid as String?, title: $0.name,
-                            detail: "\($0.outputChannels)ch")
+                            detail: $0.outputChannelDetail)
                     })
         }
         if model.monitorDeviceUID != nil {

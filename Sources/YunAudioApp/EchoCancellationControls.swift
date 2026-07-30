@@ -41,7 +41,7 @@ struct EchoCancellationControls: View {
                         options: model.echoSpeakerOptions.map {
                             .init(
                                 value: $0.uid as String?, title: $0.name,
-                                detail: "\($0.outputChannels)ch")
+                                detail: $0.outputChannelDetail)
                         })
                 }
 

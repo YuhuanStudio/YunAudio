@@ -33,13 +33,49 @@ final class RouterModel: ScriptTarget {
 
     private(set) var inputDevices: [AudioDevice] = []
     private(set) var outputDevices: [AudioDevice] = []
-    /// Inputs automation may open without waking another personal device.
+
+    private enum DeviceSelectionTarget: Hashable, Sendable {
+        case primarySource
+        case primaryDestination
+        case additionalSource(String)
+        case additionalDestination(String)
+        case monitor
+    }
+
+    private struct PendingDeviceSelection: Sendable {
+        let uid: String
+        let token: UInt64
+    }
+
+    private struct DeviceSelectionWork: Sendable {
+        var active: PendingDeviceSelection
+        var latest: PendingDeviceSelection? = nil
+    }
+
+    /// A metadata-only Bluetooth row is not a route yet. The old selection stays
+    /// live until a direct UID lookup has supplied exact channel counts.
+    @ObservationIgnored private var deviceSelectionWork:
+        [DeviceSelectionTarget: DeviceSelectionWork] = [:]
+    @ObservationIgnored private var deviceSelectionSerial: UInt64 = 0
+    @ObservationIgnored private var isCommittingHydratedDeviceSelection = false
+    private(set) var deviceSelectionStatus: String?
+    /// Inputs automation may open without waking another personal device or
+    /// dropping a headset out of high-quality playback.
     ///
     /// Continuity Capture remains in `inputDevices` so a person can choose it
     /// deliberately. It is absent here so launch defaults, recovery and
     /// verification cannot turn a nearby phone into a microphone.
     var automaticallySelectableInputDevices: [AudioDevice] {
-        inputDevices.filter { !$0.transport.requiresExplicitInputSelection }
+        inputDevices.filter {
+            Self.canSelectInputAutomatically(transport: $0.transport)
+        }
+    }
+
+    nonisolated static func canSelectInputAutomatically(
+        transport: AudioTransport
+    ) -> Bool {
+        !transport.requiresExplicitInputSelection
+            && !transport.losesOutputQualityToItsMicrophone
     }
 
     /// Whether the remembered route contains an input that must not auto-start.
@@ -90,6 +126,14 @@ final class RouterModel: ScriptTarget {
     var selectedSourceUID: String? {
         didSet {
             guard oldValue != selectedSourceUID else { return }
+            if !isRestoring, let uid = selectedSourceUID,
+                inputDevices.first(where: { $0.uid == uid })?.hasCompleteTopology == false
+            {
+                selectedSourceUID = oldValue
+                requestHydratedSelection(uid, for: .primarySource)
+                return
+            }
+            cancelHydratedSelection(for: .primarySource)
             recentSourceUIDs = Self.remember(selectedSourceUID, in: recentSourceUIDs)
             // Choosing a microphone by hand ends any claim on the one that was
             // unplugged. Putting somebody back on a device they have since
@@ -107,8 +151,12 @@ final class RouterModel: ScriptTarget {
             // the new device's name until the next poll.
             pendingHardwareGain = nil
             pendingHardwareMonitor = nil
+            publish(nil, to: \.hardwareGainReading)
+            publish(nil, to: \.hardwareMonitorReading)
             refreshDeviceControls()
-            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
+            if !isRestoring, !isCommittingHydratedDeviceSelection {
+                hydrateConfiguredDevicesAsynchronously()
+            }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -116,15 +164,26 @@ final class RouterModel: ScriptTarget {
     var selectedDestinationUID: String? {
         didSet {
             guard oldValue != selectedDestinationUID else { return }
+            if !isRestoring, let uid = selectedDestinationUID,
+                outputDevices.first(where: { $0.uid == uid })?.hasCompleteTopology == false
+            {
+                selectedDestinationUID = oldValue
+                requestHydratedSelection(uid, for: .primaryDestination)
+                return
+            }
+            cancelHydratedSelection(for: .primaryDestination)
             recentDestinationUIDs = Self.remember(
                 selectedDestinationUID, in: recentDestinationUIDs)
             if !isSubstitutingDevice {
                 displacedDestinationUID = nil
                 displacedDestinationName = nil
             }
+            publish(true, to: \.destinationHasVolumeControl)
             refreshDeviceControls()
             refreshHeadsetQualityAsynchronously()
-            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
+            if !isRestoring, !isCommittingHydratedDeviceSelection {
+                hydrateConfiguredDevicesAsynchronously()
+            }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -177,7 +236,7 @@ final class RouterModel: ScriptTarget {
     /// start is worse than not offering it.
     var addableSourceDevices: [AudioDevice] {
         inputDevices.filter { device in
-            device.inputChannels > 0
+            device.hasInput
                 && !activeSourceUIDs.contains(device.uid)
                 && !activeDestinationUIDs.contains { isSamePhysicalDevice($0, device.uid) }
                 && !(monitorDeviceUID.map { isSamePhysicalDevice($0, device.uid) } ?? false)
@@ -187,7 +246,7 @@ final class RouterModel: ScriptTarget {
     /// And outputs, on the same terms.
     var addableDestinationDevices: [AudioDevice] {
         outputDevices.filter { device in
-            device.outputChannels > 0
+            device.hasOutput
                 && !activeDestinationUIDs.contains(device.uid)
                 && device.uid != monitorDeviceUID
                 && !activeSourceUIDs.contains { isSamePhysicalDevice($0, device.uid) }
@@ -219,6 +278,10 @@ final class RouterModel: ScriptTarget {
 
     func addSource(_ uid: String) {
         guard !activeSourceUIDs.contains(uid) else { return }
+        if inputDevices.first(where: { $0.uid == uid })?.hasCompleteTopology == false {
+            requestHydratedSelection(uid, for: .additionalSource(uid))
+            return
+        }
         // A new choice is a new question, so the last refusal stops being an
         // answer to it — the same rule the monitor picker follows.
         droppedExtraInputNames = []
@@ -231,7 +294,9 @@ final class RouterModel: ScriptTarget {
             return
         }
         additionalSourceUIDs.append(uid)
-        hydrateConfiguredDevicesAsynchronously()
+        if !isCommittingHydratedDeviceSelection {
+            hydrateConfiguredDevicesAsynchronously()
+        }
         persist()
         rerouteAfterDeviceChange()
     }
@@ -251,13 +316,19 @@ final class RouterModel: ScriptTarget {
         }
         guard let index = additionalSourceUIDs.firstIndex(of: uid) else { return }
         additionalSourceUIDs.remove(at: index)
-        hydrateConfiguredDevicesAsynchronously()
+        if !isCommittingHydratedDeviceSelection {
+            hydrateConfiguredDevicesAsynchronously()
+        }
         persist()
         rerouteAfterDeviceChange()
     }
 
     func addDestination(_ uid: String) {
         guard !activeDestinationUIDs.contains(uid) else { return }
+        if outputDevices.first(where: { $0.uid == uid })?.hasCompleteTopology == false {
+            requestHydratedSelection(uid, for: .additionalDestination(uid))
+            return
+        }
         droppedExtraInputNames = []
         droppedExtraOutputNames = []
         guard selectedDestinationUID != nil else {
@@ -265,7 +336,9 @@ final class RouterModel: ScriptTarget {
             return
         }
         additionalDestinationUIDs.append(uid)
-        hydrateConfiguredDevicesAsynchronously()
+        if !isCommittingHydratedDeviceSelection {
+            hydrateConfiguredDevicesAsynchronously()
+        }
         persist()
         rerouteAfterDeviceChange()
     }
@@ -706,6 +779,15 @@ final class RouterModel: ScriptTarget {
     /// True until something says otherwise, so a window drawn before the first
     /// read does not accuse the volume keys of being dead.
     private(set) var destinationHasVolumeControl = true
+    @ObservationIgnored private var deviceControlRefreshGate = LatestRefreshGate()
+
+    struct DeviceControlSnapshot: Sendable {
+        let sourceUID: String?
+        let destinationUID: String?
+        let hardwareGain: AudioDevice.HardwareGain?
+        let hardwareMonitor: AudioDevice.HardwareGain?
+        let destinationHasVolumeControl: Bool
+    }
 
     /// True when a window that draws any of them is on screen.
     ///
@@ -719,15 +801,81 @@ final class RouterModel: ScriptTarget {
         NSApp?.windows.contains { $0.isVisible && $0.title == "YunAudio" } ?? false
     }
 
+    nonisolated static func readDeviceControlSnapshot(
+        sourceUID: String?,
+        destinationUID: String?,
+        readsHardwareGain: (String) -> AudioDevice.HardwareGain?,
+        readsHardwareMonitor: (String) -> AudioDevice.HardwareGain?,
+        readsDestinationVolumeControl: (String) -> Bool
+    ) -> DeviceControlSnapshot {
+        DeviceControlSnapshot(
+            sourceUID: sourceUID,
+            destinationUID: destinationUID,
+            hardwareGain: sourceUID.flatMap(readsHardwareGain),
+            hardwareMonitor: sourceUID.flatMap(readsHardwareMonitor),
+            destinationHasVolumeControl:
+                destinationUID.map(readsDestinationVolumeControl) ?? true)
+    }
+
+    /// Schedules the HAL reads; this method itself is safe to call from a view
+    /// lifecycle or a selection observer on MainActor.
     func refreshDeviceControls() {
-        publish(
-            selectedSource?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
-            to: \.hardwareGainReading)
-        publish(selectedSource?.playThrough(), to: \.hardwareMonitorReading)
-        publish(
-            selectedDestination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
-                ?? true,
-            to: \.destinationHasVolumeControl)
+        guard let token = deviceControlRefreshGate.request() else { return }
+        runDeviceControlRefresh(token)
+    }
+
+    private func runDeviceControlRefresh(_ token: LatestRefreshGate.Token) {
+        let source = selectedSource
+        let destination = selectedDestination
+        let queue = engineQueue
+        queue.async { [weak self] in
+            let snapshot = Self.readDeviceControlSnapshot(
+                sourceUID: source?.uid,
+                destinationUID: destination?.uid,
+                readsHardwareGain: { _ in
+                    source?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
+                },
+                readsHardwareMonitor: { _ in source?.playThrough() },
+                readsDestinationVolumeControl: { _ in
+                    destination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
+                        ?? true
+                })
+            Task { @MainActor in
+                self?.finishDeviceControlRefresh(snapshot, token: token)
+            }
+        }
+    }
+
+    private func finishDeviceControlRefresh(
+        _ snapshot: DeviceControlSnapshot,
+        token: LatestRefreshGate.Token
+    ) {
+        guard deviceControlRefreshGate.accepts(token) else { return }
+        if Self.deviceControlSnapshotIsCurrent(
+            snapshotSourceUID: snapshot.sourceUID,
+            snapshotDestinationUID: snapshot.destinationUID,
+            selectedSourceUID: selectedSourceUID,
+            selectedDestinationUID: selectedDestinationUID)
+        {
+            publish(snapshot.hardwareGain, to: \.hardwareGainReading)
+            publish(snapshot.hardwareMonitor, to: \.hardwareMonitorReading)
+            publish(
+                snapshot.destinationHasVolumeControl,
+                to: \.destinationHasVolumeControl)
+        }
+        if case .start(let next) = deviceControlRefreshGate.finish(token) {
+            runDeviceControlRefresh(next)
+        }
+    }
+
+    nonisolated static func deviceControlSnapshotIsCurrent(
+        snapshotSourceUID: String?,
+        snapshotDestinationUID: String?,
+        selectedSourceUID: String?,
+        selectedDestinationUID: String?
+    ) -> Bool {
+        snapshotSourceUID == selectedSourceUID
+            && snapshotDestinationUID == selectedDestinationUID
     }
 
     /// True when two device UIDs are two faces of one piece of hardware.
@@ -3247,9 +3395,19 @@ final class RouterModel: ScriptTarget {
     var monitorDeviceUID: String? {
         didSet {
             guard oldValue != monitorDeviceUID else { return }
+            if !isRestoring, let uid = monitorDeviceUID,
+                outputDevices.first(where: { $0.uid == uid })?.hasCompleteTopology == false
+            {
+                monitorDeviceUID = oldValue
+                requestHydratedSelection(uid, for: .monitor)
+                return
+            }
+            cancelHydratedSelection(for: .monitor)
             persist()
             refreshHeadsetQualityAsynchronously()
-            if !isRestoring { hydrateConfiguredDevicesAsynchronously() }
+            if !isRestoring, !isCommittingHydratedDeviceSelection {
+                hydrateConfiguredDevicesAsynchronously()
+            }
             // A monitor the engine itself gave up on is already out of a route
             // that is running. Restarting would take a working mix down to
             // arrive exactly where it already is — and the start it would run
@@ -5323,20 +5481,41 @@ final class RouterModel: ScriptTarget {
         installHotkeys()
         installMIDI()
 
-        if !Self.isVerificationProcess, autoStart,
+        requestAutomaticStartIfConfigured()
+    }
+
+    @ObservationIgnored private var automaticStartAwaitsDeviceHydration = false
+    @ObservationIgnored private var requestedStartAwaitsDeviceHydration: Bool?
+
+    /// A restored Bluetooth route starts only after its metadata rows have been
+    /// upgraded to exact topology. Starting sooner would build an empty route
+    /// from the intentional zero channel counts.
+    private func requestAutomaticStartIfConfigured() {
+        guard !Self.isVerificationProcess, autoStart,
             selectedSource != nil, selectedDestination != nil,
             !routeRequiresExplicitInputSelection
+        else { return }
+        guard configuredDevicesHaveCompleteTopology else {
+            automaticStartAwaitsDeviceHydration = true
+            return
+        }
+        automaticStartAwaitsDeviceHydration = false
+        if FirstLaunchPermissions.canAutoStartWithoutRequest(
+            microphoneIsAllowed: PermissionCentre.shared.microphone == .allowed,
+            capturesApplications: !capturedAppBundleIDs.isEmpty,
+            cancelsEcho: cancelsEcho)
         {
-            if FirstLaunchPermissions.canAutoStartWithoutRequest(
-                microphoneIsAllowed: PermissionCentre.shared.microphone == .allowed,
-                capturesApplications: !capturedAppBundleIDs.isEmpty,
-                cancelsEcho: cancelsEcho)
-            {
-                start()
-            } else {
-                autoStartNeedsPermissionReview = true
-                lastError = loc("Automatic routing is waiting for permission review.")
-            }
+            start()
+        } else {
+            autoStartNeedsPermissionReview = true
+            lastError = loc("Automatic routing is waiting for permission review.")
+        }
+    }
+
+    private var configuredDevicesHaveCompleteTopology: Bool {
+        let devices = inputDevices + outputDevices
+        return deviceDetailUIDs.allSatisfy { uid in
+            devices.first(where: { $0.uid == uid })?.hasCompleteTopology == true
         }
     }
 
@@ -5705,6 +5884,173 @@ final class RouterModel: ScriptTarget {
 
     // MARK: Devices
 
+    /// Resolves one metadata-only Bluetooth row without enumerating any other
+    /// endpoint. Selection is committed only after exact topology arrives.
+    private func requestHydratedSelection(
+        _ uid: String,
+        for target: DeviceSelectionTarget
+    ) {
+        deviceSelectionSerial &+= 1
+        let pending = PendingDeviceSelection(uid: uid, token: deviceSelectionSerial)
+        if var work = deviceSelectionWork[target] {
+            if work.latest?.uid == uid || (work.latest == nil && work.active.uid == uid) {
+                return
+            }
+            work.latest = pending
+            deviceSelectionWork[target] = work
+            refreshDeviceSelectionStatus()
+            return
+        }
+        deviceSelectionWork[target] = DeviceSelectionWork(active: pending)
+        refreshDeviceSelectionStatus()
+        runHydratedSelection(pending, for: target)
+    }
+
+    private func runHydratedSelection(
+        _ pending: PendingDeviceSelection,
+        for target: DeviceSelectionTarget
+    ) {
+        let queue = engineQueue
+        queue.async { [weak self] in
+            let device = try? AudioDevices.device(uid: pending.uid)
+            Task { @MainActor in
+                self?.finishHydratedSelection(device, pending: pending, for: target)
+            }
+        }
+    }
+
+    private func finishHydratedSelection(
+        _ device: AudioDevice?,
+        pending: PendingDeviceSelection,
+        for target: DeviceSelectionTarget
+    ) {
+        guard var work = deviceSelectionWork[target],
+            work.active.token == pending.token,
+            work.active.uid == pending.uid
+        else { return }
+        if let latest = work.latest {
+            work.active = latest
+            work.latest = nil
+            deviceSelectionWork[target] = work
+            refreshDeviceSelectionStatus()
+            runHydratedSelection(latest, for: target)
+            return
+        }
+        deviceSelectionWork[target] = nil
+        refreshDeviceSelectionStatus()
+        guard let device, device.uid == pending.uid, device.hasCompleteTopology else {
+            reportHydratedSelectionFailure(uid: pending.uid)
+            return
+        }
+
+        publishHydratedDevice(device)
+        isCommittingHydratedDeviceSelection = true
+        defer { isCommittingHydratedDeviceSelection = false }
+        switch target {
+        case .primarySource:
+            guard device.inputChannels > 0 else {
+                reportHydratedSelectionFailure(uid: pending.uid)
+                return
+            }
+            selectedSourceUID = device.uid
+        case .primaryDestination:
+            guard device.outputChannels > 0 else {
+                reportHydratedSelectionFailure(uid: pending.uid)
+                return
+            }
+            selectedDestinationUID = device.uid
+        case .additionalSource(let uid):
+            guard uid == device.uid,
+                addableSourceDevices.contains(where: { $0.uid == device.uid })
+            else {
+                reportHydratedSelectionFailure(uid: pending.uid)
+                return
+            }
+            addSource(device.uid)
+        case .additionalDestination(let uid):
+            guard uid == device.uid,
+                addableDestinationDevices.contains(where: { $0.uid == device.uid })
+            else {
+                reportHydratedSelectionFailure(uid: pending.uid)
+                return
+            }
+            addDestination(device.uid)
+        case .monitor:
+            guard monitorOptions.contains(where: { $0.uid == device.uid }) else {
+                reportHydratedSelectionFailure(uid: pending.uid)
+                return
+            }
+            monitorDeviceUID = device.uid
+        }
+        if let selftest = requestedStartAwaitsDeviceHydration,
+            deviceSelectionWork.isEmpty, configuredDevicesHaveCompleteTopology
+        {
+            requestedStartAwaitsDeviceHydration = nil
+            start(selftest: selftest)
+        }
+    }
+
+    private func cancelHydratedSelection(for target: DeviceSelectionTarget) {
+        guard deviceSelectionWork.removeValue(forKey: target) != nil else { return }
+        refreshDeviceSelectionStatus()
+    }
+
+    private func refreshDeviceSelectionStatus() {
+        let pending = deviceSelectionWork.values
+            .map { $0.latest ?? $0.active }
+            .max { $0.token < $1.token }
+        guard let pending else {
+            deviceSelectionStatus = nil
+            return
+        }
+        let devices = inputDevices + outputDevices
+        let name =
+            devices.first(where: { $0.uid == pending.uid })?.name
+            ?? deviceNames[pending.uid] ?? pending.uid
+        deviceSelectionStatus = String(format: loc("Loading %@…"), name)
+    }
+
+    private func reportHydratedSelectionFailure(uid: String) {
+        // A Start requested by a Quick Config was waiting for this selection.
+        // Failure keeps the old route selected and must not start that old route
+        // later under the failed configuration's intent.
+        requestedStartAwaitsDeviceHydration = nil
+        let devices = inputDevices + outputDevices
+        let name =
+            devices.first(where: { $0.uid == uid })?.name
+            ?? deviceNames[uid] ?? uid
+        lastError = String(
+            format: loc("%@ could not be selected; the previous device is still in use."),
+            name)
+    }
+
+    /// Replaces a picker row with its exact snapshot, correcting its side too if
+    /// a plug-in's fixed role metadata disagreed with the live topology.
+    private func publishHydratedDevice(_ device: AudioDevice) {
+        func replacing(
+            _ devices: [AudioDevice],
+            includesDevice: Bool
+        ) -> [AudioDevice] {
+            var result = devices
+            if let index = result.firstIndex(where: { $0.uid == device.uid }) {
+                if includesDevice {
+                    result[index] = device
+                } else {
+                    result.remove(at: index)
+                }
+            } else if includesDevice {
+                result.append(device)
+            }
+            return result
+        }
+
+        let inputs = replacing(inputDevices, includesDevice: device.inputChannels > 0)
+        let outputs = replacing(outputDevices, includesDevice: device.outputChannels > 0)
+        if inputs != inputDevices { inputDevices = inputs }
+        if outputs != outputDevices { outputDevices = outputs }
+        deviceNames[device.uid] = device.name
+    }
+
     struct DeviceRefreshSnapshot: Sendable {
         let all: [AudioDevice]
         let selectedSourceUID: String?
@@ -5728,7 +6074,7 @@ final class RouterModel: ScriptTarget {
         // capability reads. RoutingEngine resolves its own full devices again
         // at Start; unrelated wireless outputs must stay asleep.
         let all =
-            (try? AudioDevices.all(loadingBluetoothCapabilitiesFor: detailUIDs)) ?? []
+            (try? AudioDevices.inventory(loadingBluetoothCapabilitiesFor: detailUIDs)) ?? []
         let source = selectedSourceUID.flatMap { uid in all.first { $0.uid == uid } }
         let destination = selectedDestinationUID.flatMap { uid in all.first { $0.uid == uid } }
         return DeviceRefreshSnapshot(
@@ -5828,16 +6174,26 @@ final class RouterModel: ScriptTarget {
     ) {
         guard deviceHydrationGate.accepts(token) else { return }
         if expectedUIDs == deviceDetailUIDs {
-            let detailed = Dictionary(uniqueKeysWithValues: devices.map { ($0.uid, $0) })
-            let inputs = inputDevices.map { detailed[$0.uid] ?? $0 }
-            let outputs = outputDevices.map { detailed[$0.uid] ?? $0 }
-            if inputs != inputDevices { inputDevices = inputs }
-            if outputs != outputDevices { outputDevices = outputs }
+            for device in devices { publishHydratedDevice(device) }
+            if let source = selectedSource, source.hasCompleteTopology,
+                !restoreChannelChoice()
+            {
+                applyChannelDefaults()
+            }
         } else {
             _ = deviceHydrationGate.request()
         }
         if case .start(let next) = deviceHydrationGate.finish(token) {
             runConfiguredDeviceHydration(next)
+        }
+        if automaticStartAwaitsDeviceHydration, configuredDevicesHaveCompleteTopology {
+            requestAutomaticStartIfConfigured()
+        }
+        if let selftest = requestedStartAwaitsDeviceHydration,
+            configuredDevicesHaveCompleteTopology
+        {
+            requestedStartAwaitsDeviceHydration = nil
+            start(selftest: selftest)
         }
     }
 
@@ -5853,10 +6209,13 @@ final class RouterModel: ScriptTarget {
             // destination as its source and refused to start with "the input
             // and the output cannot be the same device" — on a first run, with
             // nothing to suggest what to change.
-            let systemInput = try? AudioDevices.defaultInput()
-            let realInput = systemInput.flatMap { device in
-                device.transport.isVirtual || device.transport.requiresExplicitInputSelection
-                    ? nil : device
+            let systemInputUID = try? AudioDevices.defaultInputUID()
+            let realInput = systemInputUID.flatMap { uid in
+                inputDevices.first(where: { $0.uid == uid })
+            }.flatMap { device in
+                Self.canSelectInputAutomatically(transport: device.transport)
+                    && !device.transport.isVirtual
+                    ? device : nil
             }
             let automatic = automaticallySelectableInputDevices
             selectedSourceUID =
@@ -6530,6 +6889,12 @@ final class RouterModel: ScriptTarget {
     ///   sequence, so it is never on for ordinary routing.
     func start(selftest: Bool) {
         guard !isBusy else { return }
+        guard deviceSelectionWork.isEmpty, configuredDevicesHaveCompleteTopology else {
+            requestedStartAwaitsDeviceHydration = selftest
+            if deviceSelectionWork.isEmpty { hydrateConfiguredDevicesAsynchronously() }
+            return
+        }
+        requestedStartAwaitsDeviceHydration = nil
         autoStartNeedsPermissionReview = false
         // `prepareForAutomatedAudioUse()` chooses a local input before either
         // harness starts. This guard is the last line of defence for a future
@@ -6872,6 +7237,8 @@ final class RouterModel: ScriptTarget {
     ///   the completion exists to chain a rebuild behind a teardown, and a
     ///   rebuild is the one thing a stop request rules out.
     func stop(then completion: (@MainActor () -> Void)? = nil) {
+        requestedStartAwaitsDeviceHydration = nil
+        automaticStartAwaitsDeviceHydration = false
         // Invalidate before the busy guard. The engine may still be rendering,
         // but no route result from this lifetime may reach the interface or
         // trigger a fallback restart after Stop has been asked for.

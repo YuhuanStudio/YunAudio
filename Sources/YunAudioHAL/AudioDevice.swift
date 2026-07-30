@@ -29,6 +29,9 @@ extension AudioProperty {
     public static var transportType: AudioProperty<UInt32> {
         .init(kAudioDevicePropertyTransportType)
     }
+    public static var canBeDefaultDevice: AudioProperty<UInt32> {
+        .init(kAudioDevicePropertyDeviceCanBeDefaultDevice)
+    }
 
     // Clocking and timing
     public static var nominalSampleRate: AudioProperty<Float64> {
@@ -163,6 +166,24 @@ public enum AudioTransport: Sendable, Hashable {
 
 // MARK: - Device
 
+/// Which side of a route may offer a device before its exact stream topology is
+/// loaded.
+///
+/// CoreAudio publishes this as fixed metadata through
+/// `kAudioDevicePropertyDeviceCanBeDefaultDevice`. Keeping it apart from the
+/// channel counts matters for Bluetooth: asking an unused headset for its
+/// stream configuration can make the plug-in negotiate with the endpoint.
+public struct AudioDevicePickerRole: OptionSet, Sendable, Hashable {
+    public let rawValue: UInt8
+
+    public init(rawValue: UInt8) {
+        self.rawValue = rawValue
+    }
+
+    public static let input = Self(rawValue: 1 << 0)
+    public static let output = Self(rawValue: 1 << 1)
+}
+
 public struct AudioDevice: Sendable, Identifiable, Hashable {
     public let id: AudioObjectID
     /// Stable across replug and reboot, unlike `id`. Everything persisted must
@@ -173,6 +194,17 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public let transport: AudioTransport
     public let inputChannels: Int
     public let outputChannels: Int
+    /// Direction metadata used by pickers. For a fully loaded device it agrees
+    /// with the exact channel counts; for an unused Bluetooth endpoint it is
+    /// available without reading either stream configuration.
+    public let pickerRole: AudioDevicePickerRole
+    /// False only when a Bluetooth plug-in published neither fixed direction
+    /// flag. Such an endpoint remains visible as an unresolved output rather
+    /// than disappearing; selecting it verifies the live topology.
+    public let pickerRoleIsCertain: Bool
+    /// Whether `inputChannels` and `outputChannels` are exact rather than the
+    /// deliberately empty values of a metadata-only Bluetooth snapshot.
+    public let hasCompleteTopology: Bool
     public let nominalSampleRate: Double
     public let availableSampleRates: [Double]
     /// Stable across units of the same product, unlike `uid`. What device-
@@ -183,21 +215,21 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// which is not the same as "shared" — see `ClockRelationship`.
     public let clockDomain: UInt32?
 
-    public var hasInput: Bool { inputChannels > 0 }
-    public var hasOutput: Bool { outputChannels > 0 }
+    public var hasInput: Bool { pickerRole.contains(.input) }
+    public var hasOutput: Bool { pickerRole.contains(.output) }
 
     public init(id: AudioObjectID) throws {
         try self.init(id: id, loadingBluetoothCapabilitiesFor: nil)
     }
 
     /// Builds an enumeration snapshot without waking an unrelated Bluetooth
-    /// plug-in for live timing capabilities.
+    /// plug-in for live topology or timing capabilities.
     ///
-    /// Identity and topology are still loaded for every endpoint so device
-    /// pickers can name it and put it on the correct side. Timing is different:
-    /// a Bluetooth plug-in can perform real endpoint work while answering its
-    /// nominal rate, available rates or clock domain. Merely opening YunAudio
-    /// must not do that to a headset the application is not using.
+    /// Fixed direction metadata is enough for device pickers to name an endpoint
+    /// and put it on the correct side. A Bluetooth plug-in can perform real
+    /// endpoint work while answering stream topology, nominal rate, available
+    /// rates or clock domain. Merely opening YunAudio must not do that to a
+    /// headset the application is not using.
     ///
     /// A nil set means an explicit `AudioDevice(id:)` lookup and preserves that
     /// public initialiser's complete snapshot. A non-nil set comes only from
@@ -213,16 +245,25 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         manufacturer = id.optionalString(of: .manufacturer)
         modelUID = id.optionalString(of: .modelUID)
         transport = AudioTransport(rawValue: id.optionalValue(of: .transportType))
-        inputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeInput)
-        outputChannels = Self.channelCount(of: id, scope: kAudioObjectPropertyScopeOutput)
-        let loadsTiming: Bool
+        let loadsDetails: Bool
         if let selectedUIDs {
-            loadsTiming = AudioDevices.shouldLoadTimingCapabilities(
+            loadsDetails = AudioDevices.shouldLoadDetailedCapabilities(
                 transport: transport, uid: uid, selectedUIDs: selectedUIDs)
         } else {
-            loadsTiming = true
+            loadsDetails = true
         }
-        if loadsTiming {
+        let topology = Self.topologySnapshot(
+            loadsDetails: loadsDetails,
+            readsPickerRole: { scope in
+                (id.optionalValue(of: .canBeDefaultDevice.scoped(to: scope)) ?? 0) != 0
+            },
+            readsChannelCount: { scope in Self.channelCount(of: id, scope: scope) })
+        inputChannels = topology.inputChannels
+        outputChannels = topology.outputChannels
+        pickerRole = topology.pickerRole
+        pickerRoleIsCertain = topology.pickerRoleIsCertain
+        hasCompleteTopology = topology.isComplete
+        if loadsDetails {
             nominalSampleRate = id.optionalValue(of: .nominalSampleRate) ?? 0
             let ranges = (try? id.array(of: .availableNominalSampleRates)) ?? []
             availableSampleRates = Self.expand(ranges)
@@ -236,6 +277,48 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
             availableSampleRates = []
             clockDomain = nil
         }
+    }
+
+    struct TopologySnapshot: Sendable, Equatable {
+        let inputChannels: Int
+        let outputChannels: Int
+        let pickerRole: AudioDevicePickerRole
+        let pickerRoleIsCertain: Bool
+        let isComplete: Bool
+    }
+
+    /// Chooses between fixed picker metadata and exact stream topology.
+    ///
+    /// The closures make the HAL boundary countable in a unit test. In
+    /// particular, a metadata-only answer must make zero calls to
+    /// `readsChannelCount`; that number is the Bluetooth no-wake contract.
+    static func topologySnapshot(
+        loadsDetails: Bool,
+        readsPickerRole: (AudioObjectPropertyScope) -> Bool,
+        readsChannelCount: (AudioObjectPropertyScope) -> Int
+    ) -> TopologySnapshot {
+        if loadsDetails {
+            let input = readsChannelCount(kAudioObjectPropertyScopeInput)
+            let output = readsChannelCount(kAudioObjectPropertyScopeOutput)
+            var role: AudioDevicePickerRole = []
+            if input > 0 { role.insert(.input) }
+            if output > 0 { role.insert(.output) }
+            return TopologySnapshot(
+                inputChannels: input, outputChannels: output,
+                pickerRole: role, pickerRoleIsCertain: true, isComplete: true)
+        }
+
+        var role: AudioDevicePickerRole = []
+        if readsPickerRole(kAudioObjectPropertyScopeInput) { role.insert(.input) }
+        if readsPickerRole(kAudioObjectPropertyScopeOutput) { role.insert(.output) }
+        let roleIsCertain = !role.isEmpty
+        // No public direction answer exists without a scoped property. An
+        // uncooperative Bluetooth plug-in must not make usable headphones
+        // disappear, and output is the side that cannot wake its microphone.
+        if role.isEmpty { role.insert(.output) }
+        return TopologySnapshot(
+            inputChannels: 0, outputChannels: 0,
+            pickerRole: role, pickerRoleIsCertain: roleIsCertain, isComplete: false)
     }
 
     /// Sums the channels across every buffer in the stream configuration for a
@@ -620,8 +703,20 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 // MARK: - Enumeration
 
 public enum AudioDevices {
-    public static func all(
-        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String> = []
+    /// A complete snapshot for callers that asked for every device.
+    ///
+    /// CLI diagnostics and engine verification depend on `hasInput` agreeing
+    /// with an exact non-zero channel count. Only the application's picker
+    /// inventory uses the deliberately partial API below.
+    public static func all() throws -> [AudioDevice] {
+        try AudioObjectID.system.array(of: .devices).compactMap {
+            try? AudioDevice(id: $0)
+        }
+    }
+
+    /// Picker inventory that leaves unrelated Bluetooth topology asleep.
+    public static func inventory(
+        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String>
     ) throws -> [AudioDevice] {
         try AudioObjectID.system.array(of: .devices).compactMap {
             try? AudioDevice(
@@ -629,12 +724,13 @@ public enum AudioDevices {
         }
     }
 
-    /// Whether a whole-system enumeration should inspect live timing.
+    /// Whether a whole-system enumeration should inspect live topology and
+    /// timing.
     ///
     /// Non-Bluetooth devices keep the complete historical snapshot. Bluetooth
-    /// timing is loaded only for an endpoint the caller named; everything else
-    /// still carries identity and topology but causes no rate/profile query.
-    static func shouldLoadTimingCapabilities(
+    /// details are loaded only for an endpoint the caller named; everything
+    /// else carries identity and fixed picker-role metadata only.
+    static func shouldLoadDetailedCapabilities(
         transport: AudioTransport, uid: String, selectedUIDs: Set<String>
     ) -> Bool {
         !transport.isBluetooth || selectedUIDs.contains(uid)
@@ -679,6 +775,28 @@ public enum AudioDevices {
     public static func defaultInput() throws -> AudioDevice? {
         let id = try AudioObjectID.system.value(of: .defaultInputDevice)
         return id == kAudioObjectUnknown ? nil : try AudioDevice(id: id)
+    }
+
+    /// The system input's identity without asking it for topology or timing.
+    ///
+    /// Picker defaulting needs only enough information to find the row already
+    /// present in its inventory. Constructing a complete `AudioDevice` here can
+    /// negotiate with a Bluetooth endpoint merely because the app opened.
+    public static func defaultInputUID() throws -> String? {
+        try readDefaultDeviceUID(
+            readsDefaultID: {
+                try AudioObjectID.system.value(of: .defaultInputDevice)
+            },
+            readsUID: { try $0.string(of: .deviceUID) })
+    }
+
+    /// Injectable boundary for the two fixed metadata reads above.
+    static func readDefaultDeviceUID(
+        readsDefaultID: () throws -> AudioObjectID,
+        readsUID: (AudioObjectID) throws -> String
+    ) throws -> String? {
+        let id = try readsDefaultID()
+        return id == kAudioObjectUnknown ? nil : try readsUID(id)
     }
 
     public static func defaultOutput() throws -> AudioDevice? {

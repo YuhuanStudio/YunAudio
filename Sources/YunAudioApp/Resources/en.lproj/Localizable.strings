@@ -678,3 +678,6 @@
 "YunAudio does not currently post system notifications, so it does not request notification access." = "YunAudio does not currently post system notifications, so it does not request notification access.";
 "Automatic routing is waiting for permission review." = "Automatic routing is waiting for permission review.";
 "Open %@ before requesting Automation access." = "Open %@ before requesting Automation access.";
+"Bluetooth · loads after selection" = "Bluetooth · loads after selection";
+"%@ could not be selected; the previous device is still in use." = "%@ could not be selected; the previous device is still in use.";
+"Loading %@…" = "Loading %@…";

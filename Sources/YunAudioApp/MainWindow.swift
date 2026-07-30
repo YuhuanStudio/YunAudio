@@ -362,7 +362,7 @@ struct MainWindow: View {
                                 options: model.inputDevices.map {
                                     .init(
                                         value: $0.uid as String?, title: $0.name,
-                                        detail: "\($0.inputChannels)ch")
+                                        detail: $0.inputChannelDetail)
                                 })
                         }
                         if let waiting = model.displacedSourceName {
@@ -440,11 +440,16 @@ struct MainWindow: View {
                                 options: model.outputDevices.map {
                                     .init(
                                         value: $0.uid as String?, title: $0.name,
-                                        detail: "\($0.outputChannels)ch")
+                                        detail: $0.outputChannelDetail)
                                 })
                         }
                         if let waiting = model.displacedDestinationName {
                             fallbackNotice(waiting)
+                        }
+                        if let status = model.deviceSelectionStatus {
+                            Text(status)
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
                         }
                         if model.volumeKeysAreDead {
                             HStack(spacing: Yun.Space.sm) {
@@ -900,7 +905,7 @@ struct MainWindow: View {
                     + model.monitorOptions.map {
                         .init(
                             value: $0.uid as String?, title: $0.name,
-                            detail: "\($0.outputChannels)ch")
+                            detail: $0.outputChannelDetail)
                     })
         }
         // The picker has gone back to "Off" on its own, which is a change the

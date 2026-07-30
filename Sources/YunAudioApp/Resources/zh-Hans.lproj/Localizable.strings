@@ -677,3 +677,6 @@
 "YunAudio does not currently post system notifications, so it does not request notification access." = "YunAudio 目前不会发送系统通知，因此不会请求通知权限。";
 "Automatic routing is waiting for permission review." = "自动路由正在等待权限检查。";
 "Open %@ before requesting Automation access." = "请先打开 %@，再请求自动化权限。";
+"Bluetooth · loads after selection" = "蓝牙 · 选择后加载";
+"%@ could not be selected; the previous device is still in use." = "无法选择 %@；当前仍使用原来的设备。";
+"Loading %@…" = "正在加载 %@…";
