@@ -22,10 +22,71 @@ public struct Lyrics: Sendable, Hashable {
         /// words as though they were something to sing.
         public let singer: String?
 
-        public init(time: Double, text: String, singer: String? = nil) {
+        public init(
+            time: Double, text: String, singer: String? = nil,
+            syllables: [Syllable] = []
+        ) {
             self.time = time
             self.text = text
             self.singer = singer
+            self.syllables = syllables
+        }
+
+        /// How far through the line a moment is, using the word times when the
+        /// file carried them and interpolating linearly within the word.
+        ///
+        /// Returns nil when there are none, so the caller can fall back rather
+        /// than be handed a fabricated number that looks like a measurement.
+        public func progress(at seconds: Double, lineEnd: Double) -> Double? {
+            guard !syllables.isEmpty else { return nil }
+            let total = max(0, text.count)
+            guard total > 0 else { return nil }
+            if seconds <= syllables[0].time { return 0 }
+
+            var sung = 0
+            for (index, syllable) in syllables.enumerated() {
+                let start = syllable.time
+                let end =
+                    index + 1 < syllables.count
+                    ? syllables[index + 1].time : max(lineEnd, start)
+                if seconds >= end {
+                    sung += syllable.text.count
+                    continue
+                }
+                // Inside this word: its own characters fill across its own
+                // span, so a long syllable fills slowly and a short one snaps.
+                let span = end - start
+                let within = span > 0 ? (seconds - start) / span : 1
+                let filled = Double(syllable.text.count) * max(0, min(1, within))
+                return max(0, min(1, (Double(sung) + filled) / Double(total)))
+            }
+            return 1
+        }
+
+        /// When each word starts, for files that say.
+        ///
+        /// Enhanced `.lrc` writes the timing inside the line —
+        /// `[00:12.50]<00:12.50>These <00:12.90>are <00:13.20>words` — and the
+        /// karaoke formats the Chinese services use carry the same information
+        /// in their own syntax. Without it a sweep across a line can only be
+        /// linear, which is a guess that is wrong for every line that does not
+        /// hold its syllables evenly: the highlight arrives late on a long
+        /// word and early on a short one, and a singer following it is pulled
+        /// off the beat by the display.
+        ///
+        /// Empty when the file gave only a line time, in which case the linear
+        /// sweep remains the honest approximation.
+        public let syllables: [Syllable]
+
+        public struct Syllable: Sendable, Hashable {
+            /// Seconds from the start of the track.
+            public let time: Double
+            public let text: String
+
+            public init(time: Double, text: String) {
+                self.time = time
+                self.text = text
+            }
         }
 
         /// A rest: the file marked time here and gave no words.
@@ -121,8 +182,11 @@ public struct Lyrics: Sendable, Hashable {
             }
 
             guard !stamps.isEmpty else { continue }
-            let words = String(line[index...]).trimmingCharacters(in: .whitespaces)
-            for stamp in stamps { lines.append(Line(time: stamp, text: words)) }
+            let body = String(line[index...])
+            let (words, syllables) = wordTimings(in: body)
+            for stamp in stamps {
+                lines.append(Line(time: stamp, text: words, syllables: syllables))
+            }
         }
 
         guard !lines.isEmpty else { return nil }
@@ -181,7 +245,16 @@ public struct Lyrics: Sendable, Hashable {
                 }
             }
             guard !body.isEmpty else { continue }
-            kept.append(Line(time: line.time, text: body, singer: singer))
+            // Word times ride through the attribution pass. Rebuilt without
+            // them, every enhanced file lost its timings here and the sweep
+            // fell back to linear on exactly the files that had the data to do
+            // better. Dropped when the text was rewritten — a singer prefix
+            // lifted off the front — because the times then no longer describe
+            // the characters that remain.
+            kept.append(
+                Line(
+                    time: line.time, text: body, singer: singer,
+                    syllables: body == text ? line.syllables : []))
         }
         // A trailing rest has nothing after it to wait for.
         while let last = kept.last, last.isInterlude { kept.removeLast() }
@@ -236,6 +309,57 @@ public struct Lyrics: Sendable, Hashable {
         if singerMarkers.contains(trimmed) { return trimmed }
         return names.contains(trimmed) ? trimmed : nil
     }
+
+    /// Splits an enhanced line into its words and their times.
+    ///
+    /// `<00:12.50>These <00:12.90>are <00:13.20>words` — the angle brackets are
+    /// the enhanced `.lrc` convention, and a file that has none simply comes
+    /// back as the whole line with no timings, which is the ordinary case.
+    ///
+    /// The text returned is the line without its markers, so everything
+    /// downstream — the credit rule, the singer markers, the width the stage
+    /// lays out — sees the words a person would read.
+    static func wordTimings(in body: String) -> (text: String, syllables: [Syllable]) {
+        guard body.contains("<") else {
+            return (body.trimmingCharacters(in: .whitespaces), [])
+        }
+        var text = ""
+        var syllables: [Syllable] = []
+        var pending: Double?
+        var index = body.startIndex
+
+        while index < body.endIndex {
+            if body[index] == "<", let close = body[index...].firstIndex(of: ">") {
+                let inside = String(body[body.index(after: index)..<close])
+                if let seconds = timestamp(inside) {
+                    // A marker closes the word before it and opens the next.
+                    pending = seconds
+                    index = body.index(after: close)
+                    continue
+                }
+            }
+            let character = body[index]
+            text.append(character)
+            if let start = pending {
+                syllables.append(Syllable(time: start, text: String(character)))
+                pending = nil
+            } else if var last = syllables.last {
+                syllables.removeLast()
+                last = Syllable(time: last.time, text: last.text + String(character))
+                syllables.append(last)
+            }
+            index = body.index(after: index)
+        }
+
+        // Leading and trailing space is presentation, not a syllable.
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard trimmed.count == text.count else {
+            return (trimmed, syllables.isEmpty ? [] : syllables)
+        }
+        return (trimmed, syllables)
+    }
+
+    public typealias Syllable = Line.Syllable
 
     /// `mm:ss.xx`, `mm:ss.xxx` or `mm:ss`, or nil when it is not a time at all.
     static func timestamp(_ body: String) -> Double? {
