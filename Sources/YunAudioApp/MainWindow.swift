@@ -287,15 +287,11 @@ struct MainWindow: View {
                     .help(error)
             }
 
-            // Settings had no way in from this window at all: they were on the
-            // menu bar item's right-click menu and nowhere else, so somebody who
-            // opened the application and never right-clicked a menu bar icon had
-            // no route to the language, the buffer size, the shortcuts or the
-            // MIDI map. ⌘, is the shortcut macOS trains everybody to try, and it
-            // did nothing here.
-            Button {
-                SettingsWindow.open()
-            } label: {
+            // Use the scene's own link here. Sending `showSettingsWindow:` can
+            // return true without presenting anything, so the old gear looked
+            // connected while doing nothing. The framework link owns the
+            // presentation lifetime as well as the visible control.
+            SettingsLink {
                 Image(systemName: "gearshape")
                     .font(.system(size: 11))
                     .frame(width: 14)

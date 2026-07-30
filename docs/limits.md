@@ -2,6 +2,8 @@
 
 ← [README](../README.md)
 
+English · [繁體中文](zh-Hant/limits.md) · [简体中文](zh-Hans/limits.md)
+
 ## What was tried and does not work
 
 **`AUAudioMix`.** macOS 26 ships a graded speech/ambience separator — the

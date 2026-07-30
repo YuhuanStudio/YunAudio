@@ -247,6 +247,8 @@ App/                bundle 組裝、圖示，以及 verify.sh
 
 ## 文件
 
+三種語言的索引都在 **[docs/](docs/zh-Hant/README.md)**。
+
 | | |
 |---|---|
 | [MEASUREMENT.md](MEASUREMENT.md) | 位元精確那個數字是怎麼量的，以及它不能證明什麼 |

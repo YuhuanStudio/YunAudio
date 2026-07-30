@@ -3636,42 +3636,70 @@ final class RouterModel: ScriptTarget {
     /// Adds a cable. Silent when the route is already up, because the graph is
     /// swapped rather than rebuilt.
     func connect(source: ChannelRef, destination: ChannelRef) {
+        let current = desiredTopologyRoutes
         guard
-            !activeRoutes.contains(where: {
+            !current.contains(where: {
                 $0.source == source && $0.destination == destination
             })
         else { return }
-        applyPatch(activeRoutes + [Route(source: source, destination: destination)])
+        applyPatch(current + [Route(source: source, destination: destination)])
     }
 
     /// Pulls one cable, leaving everything else where it is.
     func disconnectRoute(source: ChannelRef, destination: ChannelRef) {
-        let remaining = activeRoutes.filter {
+        let current = desiredTopologyRoutes
+        let remaining = current.filter {
             !($0.source == source && $0.destination == destination)
         }
-        guard remaining.count != activeRoutes.count else { return }
+        guard remaining.count != current.count else { return }
         applyPatch(remaining)
     }
 
     /// Pulls every cable reaching a destination.
     func disconnect(destination: ChannelRef) {
-        let remaining = activeRoutes.filter { $0.destination != destination }
-        guard remaining.count != activeRoutes.count else { return }
+        let current = desiredTopologyRoutes
+        let remaining = current.filter { $0.destination != destination }
+        guard remaining.count != current.count else { return }
         applyPatch(remaining)
+    }
+
+    /// The newest topology requested while the engine is still publishing an
+    /// earlier one. Every subsequent edit must build on this, not on the graph
+    /// the UI happened to last observe, or two quick cable additions collapse
+    /// into whichever one completed last.
+    @ObservationIgnored private var pendingTopologyRoutes: [Route]?
+
+    private var desiredTopologyRoutes: [Route] {
+        pendingTopologyRoutes ?? activeRoutes
     }
 
     private func applyPatch(_ routes: [Route]) {
         guard isRunning else {
             // Nothing to swap into; the patch takes effect when routing starts.
+            pendingTopologyRoutes = nil
             activeRoutes = routes
             return
         }
-        if engine.updateRoutes(routes) {
-            activeRoutes = engine.currentRoutes
-            routeGains = activeRoutes.map(\.gain)
-            routeMutes = activeRoutes.map(\.isMuted)
-            rebuiltRoutes()
+        pendingTopologyRoutes = routes
+        routeApplier.submit(routes)
+    }
+
+    private struct RouteUpdateResult: Sendable {
+        let requested: [Route]
+        let installed: [Route]?
+    }
+
+    private func finishRouteUpdate(_ result: RouteUpdateResult) {
+        if pendingTopologyRoutes == result.requested { pendingTopologyRoutes = nil }
+        guard isRunning else { return }
+        guard let installed = result.installed else {
+            restartIfRunning()
+            return
         }
+        activeRoutes = installed
+        routeGains = installed.map(\.gain)
+        routeMutes = installed.map(\.isMuted)
+        rebuiltRoutes()
     }
 
     /// Called after the engine has published a graph built by `updateRoutes`.
@@ -4449,6 +4477,21 @@ final class RouterModel: ScriptTarget {
         },
         publish: { [weak self] reached in
             self?.publishCorrectionCount(reached)
+        })
+    /// Keeps cable and channel edits off MainActor and collapses a burst to its
+    /// newest complete topology.
+    @ObservationIgnored private lazy var routeApplier = LatestValueApplier<
+        [Route], RouteUpdateResult
+    >(
+        queue: engineQueue,
+        apply: { [engine] requested in
+            let didUpdate = engine.updateRoutes(requested)
+            return RouteUpdateResult(
+                requested: requested,
+                installed: didUpdate ? engine.currentRoutes : nil)
+        },
+        publish: { [weak self] result in
+            self?.finishRouteUpdate(result)
         })
 
     /// Applies a control immediately unless an engine rebuild already owns the
@@ -5976,6 +6019,7 @@ final class RouterModel: ScriptTarget {
         routeMutes = []
         pathQuality = nil
         isClockLocked = false
+        pendingTopologyRoutes = nil
         // There is no graph to have been told anything, and no routes for the
         // monitor map to be pointing at. A restart waiting for the queue is
         // also moot: the route it wanted to rebuild is down.
@@ -6486,11 +6530,8 @@ final class RouterModel: ScriptTarget {
             return false
         }
         let updated = routes
-        guard !updated.isEmpty, engine.updateRoutes(updated) else { return false }
-        activeRoutes = engine.currentRoutes
-        routeGains = activeRoutes.map(\.gain)
-        routeMutes = activeRoutes.map(\.isMuted)
-        rebuiltRoutes()
+        guard !updated.isEmpty else { return false }
+        applyPatch(updated)
         return true
     }
 

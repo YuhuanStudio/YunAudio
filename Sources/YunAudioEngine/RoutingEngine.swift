@@ -1763,8 +1763,8 @@ public final class RoutingEngine: @unchecked Sendable {
 
         let next = RTGraph.allocate(
             routes: rtRoutes,
-            bufferFrames: Int(aggregate?.device?.currentBufferFrameSize ?? 128),
-            sampleRate: aggregate?.device?.currentSampleRate ?? 48000,
+            bufferFrames: graphBufferFrames,
+            sampleRate: graphSampleRate,
             sharedClock: sharedClock)
         // Everything that belongs to the route rather than to this particular
         // graph has to come across, or moving one cable silently turns it off.

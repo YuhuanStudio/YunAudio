@@ -247,6 +247,8 @@ App/                bundle 组装、图标，以及 verify.sh
 
 ## 文档
 
+三种语言的索引都在 **[docs/](docs/zh-Hans/README.md)**。
+
 | | |
 |---|---|
 | [MEASUREMENT.md](MEASUREMENT.md) | 比特精确那个数字是怎么测的，以及它不能证明什么 |

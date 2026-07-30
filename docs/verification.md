@@ -5,6 +5,8 @@ this is what each rung actually does and what it cannot tell you.
 
 ← [README](../README.md) · [MEASUREMENT.md](../MEASUREMENT.md)
 
+English · [繁體中文](zh-Hant/verification.md) · [简体中文](zh-Hans/verification.md)
+
 ## Verifying
 
 One command runs everything, and says what it did **not** run:

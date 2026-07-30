@@ -6,17 +6,10 @@ import YunDesign
 
 /// Opening the settings window, from wherever asks.
 ///
-/// It lives here rather than at each call site because there were two callers
-/// and the interesting one did not exist: settings could be reached *only* from
-/// the menu bar item's right-click menu, so anybody already working in the
-/// window had to go back to a menu they may never have known was there. The
-/// window has a button now, and this is what both of them send.
-///
-/// SwiftUI's `SettingsLink` is the tidy way to do this inside a view, and it is
-/// what the menu bar panel's footer uses — but nothing can press it from a
-/// check, and this project's recurring defect is exactly the control that looks
-/// right and reaches nothing. A selector both a button and a check can send is
-/// the price of being able to assert it.
+/// AppKit menu items cannot hold a SwiftUI `SettingsLink`, so the status item's
+/// menu still needs a responder action. SwiftUI views use `SettingsLink`
+/// directly: the responder can accept this selector without presenting a
+/// window, which makes it unsuitable for a visible SwiftUI control.
 @MainActor
 enum SettingsWindow {
     /// True when a responder took the action, which is the part worth knowing:

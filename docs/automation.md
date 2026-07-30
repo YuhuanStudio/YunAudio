@@ -6,6 +6,8 @@ line, the MCP server and a script are four front ends onto it.
 
 ← [README](../README.md)
 
+English · [繁體中文](zh-Hant/automation.md) · [简体中文](zh-Hans/automation.md)
+
 ## Remote control
 
 Anything that can open a URL can drive this: Shortcuts, Stream Deck, Keyboard

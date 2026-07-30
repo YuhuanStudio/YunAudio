@@ -253,6 +253,50 @@ struct BackgroundResourceTests {
         #expect(replay.lowerBound < staleResult.lowerBound)
     }
 
+    /// `updateRoutes` allocates and clears a graph, publishes it, then can wait
+    /// 200 ms for the IO thread to retire the old pointer. A cable handler must
+    /// enqueue that work and return; rapid edits must also build on the pending
+    /// topology rather than the last graph that happened to finish.
+    @Test("route graph publication stays off MainActor and keeps the latest topology")
+    func routeUpdatesAreAsynchronous() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let patchStart = try #require(model.range(of: "private func applyPatch("))
+        let patchEnd = try #require(
+            model.range(
+                of: "private func rebuiltRoutes",
+                range: patchStart.upperBound..<model.endIndex))
+        let patch = model[patchStart.lowerBound..<patchEnd.lowerBound]
+        #expect(patch.ranges(of: "routeApplier.submit(routes)").count == 1)
+        #expect(patch.ranges(of: "engine.updateRoutes").count == 0)
+
+        let connectStart = try #require(model.range(of: "func connect(source:"))
+        let connectEnd = try #require(
+            model.range(
+                of: "private func applyPatch(",
+                range: connectStart.upperBound..<model.endIndex))
+        let edits = model[connectStart.lowerBound..<connectEnd.lowerBound]
+        #expect(edits.ranges(of: "desiredTopologyRoutes").count == 4)
+        #expect(edits.ranges(of: "activeRoutes +").count == 0)
+
+        let engine = try String(
+            contentsOfFile: root + "Sources/YunAudioEngine/RoutingEngine.swift",
+            encoding: .utf8)
+        let updateStart = try #require(engine.range(of: "public func updateRoutes("))
+        let updateEnd = try #require(
+            engine.range(
+                of: "public func updateEffects(",
+                range: updateStart.upperBound..<engine.endIndex))
+        let update = engine[updateStart.lowerBound..<updateEnd.lowerBound]
+        #expect(update.ranges(of: "currentSampleRate").count == 0)
+        #expect(update.ranges(of: "currentBufferFrameSize").count == 0)
+        #expect(update.ranges(of: "graphSampleRate").count == 1)
+        #expect(update.ranges(of: "graphBufferFrames").count == 1)
+        #expect(update.ranges(of: "yun_rt_cell_wait_for_swap(cell, 200)").count == 1)
+    }
+
     @Test("a deferred snapshot keeps the state from the user event")
     func preferenceSnapshotHasValueSemantics() {
         var preferences = Preferences.default

@@ -293,6 +293,8 @@ More, including everything that was tried and does not work, in
 
 ## Documentation
 
+An index in all three languages is at **[docs/](docs/README.md)**.
+
 | | |
 |---|---|
 | [MEASUREMENT.md](MEASUREMENT.md) | How the bit-exactness figure is obtained, and what it does not prove |

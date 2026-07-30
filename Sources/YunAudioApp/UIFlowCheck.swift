@@ -314,14 +314,11 @@ enum UIFlowCheck {
             "the in-window shortcuts are listed too",
             model.hotkeyDescriptions.contains { !$0.isGlobal })
 
-        // Settings existed only on the menu bar item's right-click menu, so the
-        // whole of the preferences window — language, buffer size, shortcuts,
-        // the MIDI map — was unreachable from the application's own window.
-        // The header's gear sends this; so does the menu item, through the same
-        // function. What is asserted is that a responder takes the action: with
-        // no `Settings` scene installed the send is a silent no-op and the
-        // button would look exactly the same.
-        check("the window's settings button reaches a handler", SettingsWindow.open())
+        // The status item's AppKit menu cannot contain a SwiftUI SettingsLink,
+        // so it still sends the responder action. The main-window gear uses the
+        // scene link directly; a source-level regression check keeps it from
+        // being replaced with this weaker path again.
+        check("the menu's settings action reaches a handler", SettingsWindow.open())
         // The negative control, and it is what makes the line above mean
         // anything. `sendAction` returns true for a selector somebody handles
         // and false for one nobody does — measured here rather than assumed,

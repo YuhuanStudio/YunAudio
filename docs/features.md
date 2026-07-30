@@ -6,6 +6,8 @@ original feature section, kept whole rather than summarised away.
 
 ← [README](../README.md)
 
+English · [繁體中文](zh-Hant/features.md) · [简体中文](zh-Hans/features.md)
+
 ## What is different about it
 
 **The signal path is provably bit-exact.** Not "we don't think anything
