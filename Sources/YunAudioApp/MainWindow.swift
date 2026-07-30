@@ -74,18 +74,11 @@ struct MainWindow: View {
         }
     }
 
-    /// Room for the traffic lights, which float over the content now that the
-    /// system title bar is hidden.
-    ///
-    /// Vertical rather than horizontal: indenting the header past them left the
-    /// wordmark hanging seventy points to the right of every column heading
-    /// beneath it, and that shared left edge is doing more work than the few
-    /// points of height it costs to keep.
-    /// A hidden title bar still reserves its height, so the header only has to
-    /// clear the traffic lights inside that reserved band — not start below it.
-    /// Forty points on top of the reservation put the wordmark seventy-five
-    /// points down an eight-hundred-point window.
-    private var trafficLightInset: CGFloat { isRendering ? Yun.Space.lg : Yun.Space.xs }
+    /// Offscreen renders have no traffic lights. The live header shares their
+    /// surface, but its controls still need an internal top margin.
+    private var trafficLightInset: CGFloat {
+        isRendering ? Yun.Space.lg : WindowChrome.controlClearance
+    }
 
     var body: some View {
         let _ = BodyCount.tick("MainWindow")
@@ -124,8 +117,12 @@ struct MainWindow: View {
             StatusPills(model: model)
         }
         .frame(minWidth: 980, minHeight: 600)
+        // `fullSizeContentView` gives SwiftUI the title-bar row, but SwiftUI
+        // still treats it as a safe-area inset unless the root accepts it.
+        .ignoresSafeArea(.container, edges: .top)
         .yunWindowBackground()
         .focusEffectDisabled()
+        .background(WindowChromeInstaller().frame(width: 0, height: 0))
         .background(shortcuts)
         .background(RemembersFrame(name: "YunAudioMainWindow").frame(width: 0, height: 0))
         // The analysers keep running either way — the ring has to be drained or
@@ -219,7 +216,29 @@ struct MainWindow: View {
 
     // MARK: Header
 
+    /// The header is one row, and it sits below the window buttons rather than
+    /// beside them.
+    ///
+    /// It used to dodge sideways by 56 points, which put the wordmark and the
+    /// scenes in the same band as the buttons — reading as shoved out of the
+    /// way — and broke the left edge the column headings below share. Splitting
+    /// it into two bands fixed the edge and cost a row of height for one gap.
+    /// Clearing the buttons vertically does both: everything stays on one
+    /// horizontal line, at the window's own margin.
     private var header: some View {
+        HStack(spacing: Yun.Space.md) {
+            identityRow
+            headerActions
+        }
+        .padding(.horizontal, Yun.Space.xl)
+        .padding(.top, trafficLightInset)
+        .padding(.bottom, Yun.Space.md)
+    }
+
+    /// The wordmark and the scenes, at the window's own left margin — the same
+    /// edge the column headings below start from.
+    @ViewBuilder
+    private var identityRow: some View {
         HStack(spacing: Yun.Space.md) {
             // Trimmed, not the raw file: the mark is a portrait shape stored in
             // a square PNG, so fitting the file to a 22-point square left the
@@ -278,8 +297,15 @@ struct MainWindow: View {
                 savePreset
             }
 
-            Spacer()
+            Spacer(minLength: 0)
+        }
+    }
 
+    /// Everything that belongs in the corner: what went wrong, what needs
+    /// granting, the settings door, and the one action the window exists for.
+    @ViewBuilder
+    private var headerActions: some View {
+        Group {
             if let error = model.lastError {
                 Text(error)
                     .font(Yun.Text.caption)
@@ -326,9 +352,6 @@ struct MainWindow: View {
             .keyboardShortcut(.return, modifiers: [.command])
             .help(loc(model.isRunning ? "Stop routing (⌘↩)" : "Start routing (⌘↩)"))
         }
-        .padding(.horizontal, Yun.Space.xl)
-        .padding(.top, trafficLightInset)
-        .padding(.bottom, Yun.Space.md)
     }
 
     /// A labelled device picker. The glyph carries the direction so the label
