@@ -5162,15 +5162,17 @@ final class RouterModel: ScriptTarget {
     /// Latency every enabled stage adds together, in milliseconds.
     var addedLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
-        guard rate > 0 else { return 0 }
-        return Double(engine.effectLatencyFrames) / rate * 1000
+        return engine.processingLatency.totalMilliseconds(sampleRate: rate)
     }
 
     /// What the chain costs, and what the paths that skipped it are held back
     /// by to meet it. The two are the same number or something is adrift.
     var chainAlignment: (chain: Int, applied: Int) {
-        (engine.effectLatencyFrames, engine.alignmentFrames)
+        (engine.sourceProcessingLatencyFrames, engine.alignmentFrames)
     }
+
+    /// Source and final-output processing together, in graph frames.
+    var totalProcessingLatencyFrames: Int { engine.totalProcessingLatencyFrames }
 
     /// What the whole path costs, in milliseconds.
     ///
@@ -5641,19 +5643,19 @@ final class RouterModel: ScriptTarget {
     /// The sync offset OBS would need, in milliseconds, for its own captures to
     /// line up with what this application produces.
     ///
-    /// Negative, and the magnitude is the effect chain's latency. Computable
-    /// with nothing connected, which is why it is here rather than inside
-    /// `OBSLink`: it is a fact about this application, and the interface should
-    /// show it whether or not anybody is streaming.
+    /// Negative, and the magnitude is the complete processing path's latency.
+    /// Computable with nothing connected, which is why it is here rather than
+    /// inside `OBSLink`: it is a fact about this application, and the interface
+    /// should show it whether or not anybody is streaming.
     var obsSyncOffsetMilliseconds: Double {
         OBSSyncOffset.forProcessingLatency(
-            frames: engine.effectLatencyFrames,
+            frames: engine.totalProcessingLatencyFrames,
             sampleRate: pathQuality?.sampleRate ?? preferredSampleRate)
     }
 
-    /// Tells OBS what the chain costs now. Does nothing when nothing is linked.
+    /// Tells OBS what the complete processing path costs now.
     func pushOBSSyncOffset() {
-        let frames = engine.effectLatencyFrames
+        let frames = engine.totalProcessingLatencyFrames
         let rate = pathQuality?.sampleRate ?? preferredSampleRate
         Task { await obsLink.pushSyncOffset(latencyFrames: frames, sampleRate: rate) }
     }

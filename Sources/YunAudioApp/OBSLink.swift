@@ -168,7 +168,7 @@ final class OBSLink {
     /// treated, in milliseconds.
     ///
     /// - Parameters:
-    ///   - latencyFrames: What the effect chain adds, from `RoutingEngine`.
+    ///   - latencyFrames: What the complete processing path adds, from `RoutingEngine`.
     ///   - sampleRate: The rate those frames are counted at.
     func pushSyncOffset(latencyFrames: Int, sampleRate: Double) async {
         guard let client, !inputName.isEmpty else { return }

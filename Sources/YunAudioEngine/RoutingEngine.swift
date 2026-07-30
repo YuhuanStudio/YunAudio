@@ -159,15 +159,36 @@ public final class RoutingEngine: @unchecked Sendable {
 
     /// Latency the isolation model adds, in frames. Zero when it is off.
     public private(set) var voiceIsolationLatencyFrames = 0
-    /// Latency every enabled processing stage adds together, in frames.
-    public private(set) var effectLatencyFrames = 0
+    /// Latency introduced before route summing, in frames.
+    ///
+    /// Paths that skip the source chain are held back by this number. A final
+    /// output stage is intentionally not part of it: every route meets that
+    /// stage and delaying the bypass path by it would count the same latency
+    /// twice.
+    public private(set) var sourceProcessingLatencyFrames = 0
+    /// Latency introduced after the complete mix, in frames.
+    ///
+    /// Kept separate before a final output stage exists so no consumer can
+    /// quietly reuse the source-alignment number when that stage arrives.
+    public private(set) var outputProcessingLatencyFrames = 0
+    /// The latency facts consumers should choose between explicitly.
+    public var processingLatency: ProcessingLatency {
+        ProcessingLatency(
+            sourceFrames: sourceProcessingLatencyFrames,
+            outputFrames: outputProcessingLatencyFrames)
+    }
+    /// Total DSP latency in the path, before the device's own latency.
+    public var totalProcessingLatencyFrames: Int { processingLatency.totalFrames }
+    /// The old ambiguous answer, retained while external callers migrate.
+    @available(*, deprecated, renamed: "totalProcessingLatencyFrames")
+    public var effectLatencyFrames: Int { totalProcessingLatencyFrames }
 
     /// Frames the graph is actually holding back the paths that skipped the
     /// chain, read off the graph rather than off the number above.
     ///
     /// The defect this exists to catch is precisely a latency that is measured,
     /// stored, shown in the interface and never handed to anything that moves a
-    /// sample — which is what `effectLatencyFrames` was for the life of the
+    /// sample — which is what the old latency value was for the life of the
     /// effect chain.
     public var alignmentFrames: Int {
         // Non-blocking, like the other reads the interface makes: this took the
@@ -991,7 +1012,6 @@ public final class RoutingEngine: @unchecked Sendable {
                 // Named rather than silently dropped: a chain that quietly
                 // lost a stage sounds different and says nothing about why.
                 failedPlugins = chain.pluginFailures
-                effectLatencyFrames = chain.latencyFrames
                 voiceIsolationLatencyFrames =
                     effects.contains(.voiceIsolation) ? chain.latencyFrames : 0
             } else {
@@ -1013,6 +1033,9 @@ public final class RoutingEngine: @unchecked Sendable {
                 lastIsolationError = IsolationFailure.unitNotInstantiated
             }
         }
+        sourceProcessingLatencyFrames = ProcessingLatency.sourceStageFrames(
+            chainFrames: effectChain?.latencyFrames,
+            isolationFrames: isolationUnit?.latencyFrames)
 
         let rtRoutes = try routes.map { route -> RTRoute in
             // With the canceller in front, the microphone's channels are not in
@@ -1120,7 +1143,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // frame. Set here rather than where the latency is first read, because
         // the graph does not exist until the routes are known.
         graph.pointee.alignmentFrames = Int32(
-            min(effectLatencyFrames, RTGraph.maximumAlignmentFrames))
+            min(sourceProcessingLatencyFrames, RTGraph.maximumAlignmentFrames))
 
         graph.pointee.mainOutputBuffer =
             outputMap[ChannelRef(deviceUID: destinationDeviceUID, channel: 0)]?.buffer ?? 0
@@ -1307,7 +1330,8 @@ public final class RoutingEngine: @unchecked Sendable {
         isolationUnit = nil
         effectChain = nil
         voiceIsolationLatencyFrames = 0
-        effectLatencyFrames = 0
+        sourceProcessingLatencyFrames = 0
+        outputProcessingLatencyFrames = 0
         graphSampleRate = 48000
         graphBufferFrames = 128
         graphMaximumFrames = 4096
@@ -2297,7 +2321,9 @@ public final class RoutingEngine: @unchecked Sendable {
         // Named rather than silently dropped, as at start: a chain that quietly
         // lost a stage sounds different and says nothing about why.
         failedPlugins = chain?.pluginFailures ?? []
-        effectLatencyFrames = chain?.latencyFrames ?? 0
+        sourceProcessingLatencyFrames = ProcessingLatency.sourceStageFrames(
+            chainFrames: chain?.latencyFrames,
+            isolationFrames: unit?.latencyFrames)
         if let chain {
             voiceIsolationLatencyFrames =
                 kinds.contains(.voiceIsolation) ? chain.latencyFrames : 0
