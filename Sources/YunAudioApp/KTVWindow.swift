@@ -132,34 +132,16 @@ struct KTVStage: View {
                 if let track = model.nowPlaying {
                     let inset = max(34, proxy.size.height * 0.07)
                     let stageHeight = max(0, proxy.size.height - inset * 2)
-                    HStack(alignment: .center, spacing: max(36, proxy.size.width * 0.055)) {
-                        trackColumn(
-                            track,
-                            width: min(360, max(220, proxy.size.width * 0.31)),
-                            artwork: Self.artworkSide(
-                                columnWidth: min(360, max(220, proxy.size.width * 0.31)),
-                                stageHeight: stageHeight))
-                        // A fixed height, not a maximum. A stack whose own
-                        // minimum exceeds the proposal is laid out at that
-                        // minimum and overflows, and `maxHeight` does not stop
-                        // it: six lyric lines, of which the wrapped ones are two
-                        // rows each — Chinese production credits routinely wrap
-                        // — grew the row past the window, and the track column
-                        // went down with it until its progress bar and the score
-                        // strip were outside the frame. Reported from a 984×670
-                        // stage. Clipping belongs inside this column, where the
-                        // current line stays centred, rather than at the bottom
-                        // edge of the window.
-                        lyricsColumn
-                            .frame(maxWidth: .infinity)
-                            .frame(height: stageHeight)
-                            // After the height, not before it: the `clipped()`
-                            // inside the column cuts to the column's own bounds,
-                            // which are the oversized ones.
-                            .clipped()
+                    let arrangement = KTVStageLayout.resolve(
+                        width: proxy.size.width, stageHeight: stageHeight)
+                    switch arrangement {
+                    case .sideBySide:
+                        sideBySide(track, in: proxy.size, stageHeight: stageHeight)
+                    case .stacked:
+                        stacked(track, in: proxy.size, stageHeight: stageHeight)
+                    case .wordsOnly:
+                        wordsOnly(track, in: proxy.size, stageHeight: stageHeight)
                     }
-                    .padding(.horizontal, max(32, proxy.size.width * 0.055))
-                    .padding(.vertical, inset)
                 } else {
                     emptyStage
                 }
@@ -233,6 +215,108 @@ struct KTVStage: View {
             ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing)
+    }
+
+    // MARK: Arrangements
+
+    /// The stage as it has been: the tile and its metadata beside the words.
+    @ViewBuilder
+    private func sideBySide(
+        _ track: NowPlaying.Track, in size: CGSize, stageHeight: CGFloat
+    ) -> some View {
+        let columnWidth = min(360, max(220, size.width * 0.31))
+        HStack(alignment: .center, spacing: max(36, size.width * 0.055)) {
+            trackColumn(
+                track, width: columnWidth,
+                artwork: Self.artworkSide(
+                    columnWidth: columnWidth, stageHeight: stageHeight))
+            // A fixed height, not a maximum. A stack whose own minimum exceeds
+            // the proposal is laid out at that minimum and overflows, and
+            // `maxHeight` does not stop it: six lyric lines, of which the
+            // wrapped ones are two rows each, grew the row past the window and
+            // the track column went down with it until its progress bar and the
+            // score strip were outside the frame. Clipping belongs inside the
+            // column, where the current line stays centred, rather than at the
+            // bottom edge of the window.
+            lyricsColumn
+                .frame(maxWidth: .infinity)
+                .frame(height: stageHeight)
+                .clipped()
+        }
+        .padding(.horizontal, max(32, size.width * 0.055))
+        .padding(.vertical, max(34, size.height * 0.07))
+    }
+
+    /// Narrow: the song across the top, the words underneath, both full width.
+    ///
+    /// A square tile beside the words leaves nothing for the words — at 700
+    /// points the lyric column comes out 364 wide, which wraps every line of a
+    /// Chinese lyric into three. The tile lies down instead.
+    @ViewBuilder
+    private func stacked(
+        _ track: NowPlaying.Track, in size: CGSize, stageHeight: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Yun.Space.xl) {
+            nowPlayingStrip(track, tile: 128, showsProgress: true)
+            lyricsColumn
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: max(0, stageHeight - 128 - Yun.Space.xl))
+                .clipped()
+        }
+        .padding(.horizontal, max(32, size.width * 0.055))
+        .padding(.vertical, max(34, size.height * 0.07))
+    }
+
+    /// Short: the words, and the least the song can be said in.
+    ///
+    /// Below about 360 points of stage there is no height for a tile worth
+    /// looking at *and* the block beneath it. Rather than shrink the artwork to
+    /// a stamp and keep an arrangement built around it, the words take the
+    /// stage and the song becomes one line along the bottom.
+    @ViewBuilder
+    private func wordsOnly(
+        _ track: NowPlaying.Track, in size: CGSize, stageHeight: CGFloat
+    ) -> some View {
+        VStack(alignment: .leading, spacing: Yun.Space.md) {
+            lyricsColumn
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: max(0, stageHeight - 62))
+                .clipped()
+            nowPlayingStrip(track, tile: 44, showsProgress: false)
+        }
+        .padding(.horizontal, max(32, size.width * 0.055))
+        .padding(.vertical, max(24, size.height * 0.05))
+    }
+
+    /// The song on one line: tile, title, artist, and optionally its progress.
+    private func nowPlayingStrip(
+        _ track: NowPlaying.Track, tile: CGFloat, showsProgress: Bool
+    ) -> some View {
+        HStack(alignment: .center, spacing: Yun.Space.lg) {
+            SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fit)
+                .frame(width: tile, height: tile)
+                .background(.black.opacity(0.32))
+                .clipShape(.rect(cornerRadius: tile > 80 ? 12 : 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: tile > 80 ? 12 : 8)
+                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
+
+            VStack(alignment: .leading, spacing: showsProgress ? 6 : 2) {
+                Text(track.title)
+                    .font(.system(size: tile > 80 ? 20 : 15, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                Text(track.artist)
+                    .font(.system(size: tile > 80 ? 15 : 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.62))
+                    .lineLimit(1)
+                if showsProgress { progress(track) }
+            }
+            Spacer(minLength: 0)
+        }
+        .frame(height: tile)
     }
 
     /// Side of the artwork tile, bounded by the stage's height as well as by its

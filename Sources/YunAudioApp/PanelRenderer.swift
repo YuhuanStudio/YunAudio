@@ -162,16 +162,22 @@ enum PanelRenderer {
             basename: "ktv-content\(suffix)",
             directory: directory,
             size: CGSize(width: 1080, height: 1280))
-        // Wide and short, which is the shape that broke. Both sizes above are
-        // tall enough to absorb a lyric column that has outgrown them, so the
-        // stage was only ever rendered where the overflow does not show: a
-        // 984×670 window carried the track column's progress bar and the score
-        // strip outside the frame, and every image here was green.
+        // One image per arrangement, because the stage now has three and only
+        // the first was ever rendered. Both sizes above are wide and tall, so
+        // the stage was photographed exclusively in the shape where nothing it
+        // gets wrong can show: a 984×670 window carried the track column's
+        // progress bar and the score strip outside the frame while every image
+        // here was green. See `KTVStageLayout`.
         render(
             KTVStage(model: model, isRendering: true),
             basename: "ktv-short\(suffix)",
             directory: directory,
-            size: CGSize(width: 1180, height: 560))
+            size: CGSize(width: 1180, height: 420))
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-narrow\(suffix)",
+            directory: directory,
+            size: CGSize(width: 720, height: 900))
 
         for section in PreferencesWindow.Section.allCases {
             render(
