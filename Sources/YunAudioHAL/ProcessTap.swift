@@ -85,6 +85,26 @@ public struct ProcessTapCreationSnapshot: Sendable, Equatable {
         public let id: AudioObjectID
         public let processIDs: [AudioObjectID]?
         public let bundleIDs: [String]?
+        /// The identity from the description held by the HAL.
+        ///
+        /// Object-list differences alone are not ownership: another process
+        /// may create a tap in the same interval. The UUID is the one value
+        /// copied from the exact description we handed CoreAudio, so it lets a
+        /// successful creation whose out parameter stayed empty be recovered
+        /// without adopting somebody else's tap.
+        public let uuid: UUID?
+
+        public init(
+            id: AudioObjectID,
+            processIDs: [AudioObjectID]?,
+            bundleIDs: [String]?,
+            uuid: UUID? = nil
+        ) {
+            self.id = id
+            self.processIDs = processIDs
+            self.bundleIDs = bundleIDs
+            self.uuid = uuid
+        }
     }
 
     public let requestedProcessIDs: [AudioObjectID]
@@ -151,6 +171,9 @@ public final class ProcessTap {
     public let format: AudioStreamBasicDescription?
     /// The process and tap object lists immediately around creation.
     public let creationSnapshot: ProcessTapCreationSnapshot
+    /// One normally; two when CoreAudio accepted a live process yet returned
+    /// neither an object ID nor a matching object in the system tap list.
+    public let creationAttempts: Int
 
     private var isDestroyed = false
 
@@ -263,17 +286,48 @@ public final class ProcessTap {
         restoresProcesses = restoring
         self.bundleIDs = realBundleIDs
 
-        let processIDsBefore = try? AudioObjectID.system.array(of: .processList)
-        let tapIDsBefore = try? AudioObjectID.system.array(of: .tapList)
-        var tapID = AudioObjectID(kAudioObjectUnknown)
-        let status = AudioHardwareCreateProcessTap(description, &tapID)
-        let snapshot = Self.snapshot(
+        var attempt = Self.create(
+            description: description,
             requestedProcessIDs: processIDs,
             requestedBundleIDs: realBundleIDs,
-            ignoredBundleIDs: ignoredBundleIDs,
-            processIDsBefore: processIDsBefore,
-            tapIDsBefore: tapIDsBefore)
-        guard status == noErr else { throw ProcessTapError.creationFailed(status) }
+            ignoredBundleIDs: ignoredBundleIDs)
+        var attempts = 1
+
+        // Measured on a live `afplay`: all requested process objects remained
+        // present, the HAL returned success, and both the returned ID and the
+        // tap-list difference were empty. Retrying the entire route from the
+        // interface works, but costs a teardown and leaves an intermittent
+        // hole in application capture. One bounded retry at the narrow API
+        // boundary is the same recovery without rebuilding unrelated audio.
+        if attempt.status == noErr,
+            Self.resolvedTapID(
+                returned: attempt.tapID,
+                descriptionUUID: description.uuid,
+                snapshot: attempt.snapshot) == nil,
+            Self.shouldRetryMissingTap(attempt.snapshot)
+        {
+            Thread.sleep(forTimeInterval: 0.02)
+            attempt = Self.create(
+                description: description,
+                requestedProcessIDs: processIDs,
+                requestedBundleIDs: realBundleIDs,
+                ignoredBundleIDs: ignoredBundleIDs)
+            attempts += 1
+        }
+
+        guard attempt.status == noErr else {
+            // A failed API is not allowed to leave a private tap duplicating
+            // audio for the rest of this process. Prefer the returned object,
+            // otherwise destroy only the object carrying our exact UUID.
+            if let leaked = Self.resolvedTapID(
+                returned: attempt.tapID,
+                descriptionUUID: description.uuid,
+                snapshot: attempt.snapshot)
+            {
+                AudioHardwareDestroyProcessTap(leaked)
+            }
+            throw ProcessTapError.creationFailed(attempt.status)
+        }
         // Succeeded, and handed back nothing.
         //
         // Reported until now as `creationFailed(0)`, which prints as "failed
@@ -287,10 +341,16 @@ public final class ProcessTap {
         // about three seconds in. What the two arguments were is recorded
         // instead, because that is what the next person needs and it is a fact
         // rather than a theory.
-        guard tapID != kAudioObjectUnknown else {
-            throw ProcessTapError.noTapReturned(snapshot)
+        guard
+            let tapID = Self.resolvedTapID(
+                returned: attempt.tapID,
+                descriptionUUID: description.uuid,
+                snapshot: attempt.snapshot)
+        else {
+            throw ProcessTapError.noTapReturned(attempt.snapshot)
         }
-        creationSnapshot = snapshot
+        creationSnapshot = attempt.snapshot
+        creationAttempts = attempts
         id = tapID
         uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
         format = tapID.optionalValue(of: .tapFormat)
@@ -325,6 +385,59 @@ public final class ProcessTap {
         return unmanaged.takeRetainedValue()
     }
 
+    private struct CreationAttempt {
+        let status: OSStatus
+        let tapID: AudioObjectID
+        let snapshot: ProcessTapCreationSnapshot
+    }
+
+    private static func create(
+        description: CATapDescription,
+        requestedProcessIDs: [AudioObjectID],
+        requestedBundleIDs: [String],
+        ignoredBundleIDs: [String]
+    ) -> CreationAttempt {
+        let processIDsBefore = try? AudioObjectID.system.array(of: .processList)
+        let tapIDsBefore = try? AudioObjectID.system.array(of: .tapList)
+        var tapID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateProcessTap(description, &tapID)
+        let snapshot = snapshot(
+            requestedProcessIDs: requestedProcessIDs,
+            requestedBundleIDs: requestedBundleIDs,
+            ignoredBundleIDs: ignoredBundleIDs,
+            processIDsBefore: processIDsBefore,
+            tapIDsBefore: tapIDsBefore)
+        return CreationAttempt(status: status, tapID: tapID, snapshot: snapshot)
+    }
+
+    /// Recovers a tap the HAL created but did not put in its out parameter.
+    ///
+    /// Internal for the branch tests. Matching process or bundle identifiers is
+    /// insufficient because two applications may tap the same player.
+    static func resolvedTapID(
+        returned: AudioObjectID,
+        descriptionUUID: UUID,
+        snapshot: ProcessTapCreationSnapshot
+    ) -> AudioObjectID? {
+        if returned != kAudioObjectUnknown { return returned }
+        return snapshot.newTaps.first { $0.uuid == descriptionUUID }?.id
+    }
+
+    /// A retry is useful only when its subject still exists and the first call
+    /// did not create an object that needs adopting or destroying.
+    static func shouldRetryMissingTap(_ snapshot: ProcessTapCreationSnapshot) -> Bool {
+        // An unavailable list is not an empty list. If either read failed, the
+        // first call may have left an object that cannot safely be distinguished
+        // from a concurrent tap, so a second creation could duplicate audio.
+        guard snapshot.tapIDsBefore != nil, snapshot.tapIDsAfter != nil else { return false }
+        guard snapshot.newTaps.isEmpty else { return false }
+        if snapshot.requestedProcessIDs.isEmpty {
+            return !snapshot.requestedBundleIDs.isEmpty
+        }
+        guard let after = snapshot.processIDsAfter else { return false }
+        return Set(snapshot.requestedProcessIDs).isSubset(of: after)
+    }
+
     private static func snapshot(
         requestedProcessIDs: [AudioObjectID],
         requestedBundleIDs: [String],
@@ -338,7 +451,8 @@ public final class ProcessTap {
         let newTaps = (tapIDsAfter ?? []).filter { !oldTaps.contains($0) }.map { id in
             let held = description(of: id)
             return ProcessTapCreationSnapshot.ObservedTap(
-                id: id, processIDs: held?.processes, bundleIDs: held?.bundleIDs)
+                id: id, processIDs: held?.processes, bundleIDs: held?.bundleIDs,
+                uuid: held?.uuid)
         }
         return ProcessTapCreationSnapshot(
             requestedProcessIDs: requestedProcessIDs,

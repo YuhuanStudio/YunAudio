@@ -3760,6 +3760,7 @@ struct ProcessTapCreationSnapshotTests {
     /// leaked object rather than as another unexplained empty answer.
     @Test("a newly appeared tap carries the description read back from the HAL")
     func newTapDescription() {
+        let uuid = UUID()
         let snapshot = ProcessTapCreationSnapshot(
             requestedProcessIDs: [803],
             requestedBundleIDs: ["com.example.player"],
@@ -3771,12 +3772,70 @@ struct ProcessTapCreationSnapshotTests {
             newTaps: [
                 .init(
                     id: 21, processIDs: [803],
-                    bundleIDs: ["com.example.player"])
+                    bundleIDs: ["com.example.player"], uuid: uuid)
             ])
 
         #expect(
             snapshot.diagnostic.contains(
                 "new tap object(s) 21 [processes 803; bundles com.example.player]"))
+        #expect(
+            ProcessTap.resolvedTapID(
+                returned: kAudioObjectUnknown,
+                descriptionUUID: uuid,
+                snapshot: snapshot) == 21)
+        #expect(
+            ProcessTap.resolvedTapID(
+                returned: kAudioObjectUnknown,
+                descriptionUUID: UUID(),
+                snapshot: snapshot) == nil)
+        #expect(!ProcessTap.shouldRetryMissingTap(snapshot))
+    }
+
+    @Test("a live process with no returned or leaked tap is retried once")
+    func retryOnlyWhileTheSubjectStillExists() {
+        let live = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [803],
+            requestedBundleIDs: [],
+            ignoredBundleIDs: ["pid:64291"],
+            processIDsBefore: [803],
+            processIDsAfter: [803],
+            tapIDsBefore: [20],
+            tapIDsAfter: [20],
+            newTaps: [])
+        #expect(ProcessTap.shouldRetryMissingTap(live))
+
+        let gone = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [803],
+            requestedBundleIDs: [],
+            ignoredBundleIDs: ["pid:64291"],
+            processIDsBefore: [803],
+            processIDsAfter: [],
+            tapIDsBefore: [20],
+            tapIDsAfter: [20],
+            newTaps: [])
+        #expect(!ProcessTap.shouldRetryMissingTap(gone))
+
+        let waitingForBundle = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [],
+            requestedBundleIDs: ["com.example.player"],
+            ignoredBundleIDs: [],
+            processIDsBefore: [],
+            processIDsAfter: [],
+            tapIDsBefore: [20],
+            tapIDsAfter: [20],
+            newTaps: [])
+        #expect(ProcessTap.shouldRetryMissingTap(waitingForBundle))
+
+        let unknownTapList = ProcessTapCreationSnapshot(
+            requestedProcessIDs: [803],
+            requestedBundleIDs: [],
+            ignoredBundleIDs: [],
+            processIDsBefore: [803],
+            processIDsAfter: [803],
+            tapIDsBefore: nil,
+            tapIDsAfter: nil,
+            newTaps: [])
+        #expect(!ProcessTap.shouldRetryMissingTap(unknownTapList))
     }
 }
 
