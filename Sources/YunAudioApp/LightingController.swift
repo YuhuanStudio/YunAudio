@@ -323,6 +323,22 @@ final class LightingController {
         renderState.update(level: level, isMuted: isMuted)
     }
 
+    /// Whether the router's meter poll has a consumer for level and mute.
+    ///
+    /// Spectrum is animated but does not read either value. Letting every other
+    /// mode through acquired the render-state lock twenty times a second to
+    /// overwrite values no worker could use.
+    var needsSignalUpdate: Bool {
+        Self.needsSignalUpdate(mode: mode, isSignalActive: isSignalActive)
+    }
+
+    /// Pure scheduling decision behind the poll gate.
+    nonisolated static func needsSignalUpdate(
+        mode: LightingMode, isSignalActive: Bool
+    ) -> Bool {
+        mode == .level && isSignalActive
+    }
+
     /// Starts or withdraws the live signal that animated modes represent.
     ///
     /// Level has no honest frame without a route, and spectrum has no audio to

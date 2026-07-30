@@ -44,6 +44,56 @@ struct LightingResourceTests {
                 mode: .solid, isSignalActive: false))
     }
 
+    @Test("only an active level display consumes meter updates")
+    func signalUpdateSchedulingMatchesFrameInputs() {
+        let pollsPerHour = 20 * 60 * 60
+
+        for mode in LightingMode.allCases {
+            var updates = 0
+            for _ in 0..<pollsPerHour {
+                if LightingController.needsSignalUpdate(
+                    mode: mode, isSignalActive: true)
+                {
+                    updates += 1
+                }
+            }
+            #expect(updates == (mode == .level ? pollsPerHour : 0))
+        }
+
+        #expect(
+            !LightingController.needsSignalUpdate(
+                mode: .level, isSignalActive: false))
+    }
+
+    @Test("the router gates the render-state write before reading its meters")
+    func routerUsesSignalUpdateGate() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let router = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let lightingLap = try #require(router.range(of: "lap(\"lighting\")"))
+        let pollEnd = try #require(
+            router.range(
+                of: "// MARK: Transcription",
+                range: lightingLap.upperBound..<router.endIndex))
+        let polling = router[lightingLap.lowerBound..<pollEnd.lowerBound]
+        let gate = try #require(polling.range(of: "lighting.needsSignalUpdate"))
+        let meter = try #require(polling.range(of: "levels.max()"))
+        #expect(gate.lowerBound < meter.lowerBound)
+
+        let controller = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/LightingController.swift",
+            encoding: .utf8)
+        let updateComment = try #require(
+            controller.range(of: "/// Called from the router's poll"))
+        let gateComment = try #require(
+            controller.range(
+                of: "/// Whether the router's meter poll",
+                range: updateComment.upperBound..<controller.endIndex))
+        let update = controller[updateComment.lowerBound..<gateComment.lowerBound]
+        #expect(update.ranges(of: "renderState.update(level:").count == 1)
+    }
+
     @Test("launch discovery never scans HID on the MainActor first frame")
     func discoveryIsDeferred() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests

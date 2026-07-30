@@ -8484,7 +8484,11 @@ final class RouterModel: ScriptTarget {
         if isAutoLevelling { stepAutoLevel() }
         // The ring follows the loudest route, which is what a single ring can
         // honestly represent when several are running.
-        lap("lighting") { lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted) }
+        lap("lighting") {
+            if lighting.needsSignalUpdate {
+                lighting.update(level: levels.max() ?? 0, isMuted: isInputMuted)
+            }
+        }
     }
 
     // MARK: Transcription
