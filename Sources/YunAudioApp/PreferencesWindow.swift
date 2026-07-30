@@ -806,7 +806,7 @@ struct PreferencesWindow: View {
 
             Text(
                 loc(
-                    "Opening YunAudio never requests microphone, system-audio or Automation access. Protected access is requested only from the buttons above or when you explicitly start the audio feature that needs it."
+                    "On the first ordinary launch, YunAudio requests microphone, system-audio and installed music-player Automation access in sequence. It asks for microphone consent without opening an input device."
                 )
             )
             .font(Yun.Text.caption)

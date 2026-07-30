@@ -49,8 +49,8 @@ struct PermissionCentreTests {
         #expect(loginItems.contains("LoginItems-Settings.extension"))
     }
 
-    @Test("normal launch source contains no audio permission API")
-    func launchPathStaysAudioFree() throws {
+    @Test("first launch delegates to the central sequence without opening a device")
+    func launchPathUsesOnlyThePermissionCentre() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
         let launch = try String(
             contentsOfFile: root + "Sources/YunAudioApp/FirstLaunchPermissions.swift",
@@ -60,13 +60,15 @@ struct PermissionCentreTests {
             "AVCaptureDevice", "requestAccess(for: .audio)",
             "requestCaptureAccess()", "AudioHardwareCreateProcessTap",
             "requestAutomationPermission", "AEDeterminePermission",
+            "AudioDeviceStart", "AVCaptureDevice.default",
         ] {
             #expect(!launch.contains(forbidden), "launch contains \(forbidden)")
         }
+        #expect(launch.ranges(of: "PermissionCentre.shared.requestAll").count == 1)
         let app = try String(
             contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
             encoding: .utf8)
-        #expect(!app.contains("FirstLaunchPermissions.request"))
+        #expect(!app.contains("PermissionCentre.shared.requestAll()"))
     }
 
     @Test("login item approval maps into the same settings surface")
@@ -111,11 +113,13 @@ struct PermissionCentreTests {
         #expect(status.lowerBound < guide.lowerBound)
     }
 
-    @Test("the first-launch guide records only a visible window, exactly once")
+    @MainActor
+    @Test("the first-launch guide records only after every request completes")
     func guideRecordsSuccessfulPresentation() {
         var storedVersion = 0
         var events: [String] = []
         var canOpen = false
+        var finishRequest: (@MainActor () -> Void)?
 
         func present() -> Bool {
             FirstLaunchPermissions.completeGuidePresentationIfNeeded(
@@ -124,6 +128,10 @@ struct PermissionCentreTests {
                 open: {
                     events.append("open")
                     return canOpen
+                },
+                request: { completion in
+                    events.append("request")
+                    finishRequest = completion
                 },
                 markPresented: {
                     events.append("mark")
@@ -137,11 +145,15 @@ struct PermissionCentreTests {
 
         canOpen = true
         #expect(present())
+        #expect(storedVersion == 0)
+        #expect(events == ["open", "open", "request"])
+
+        finishRequest?()
         #expect(storedVersion == FirstLaunchPermissions.currentGuideVersion)
-        #expect(events == ["open", "open", "mark"])
+        #expect(events == ["open", "open", "request", "mark"])
 
         #expect(!present())
-        #expect(events == ["open", "open", "mark"])
+        #expect(events == ["open", "open", "request", "mark"])
     }
 
     @MainActor
@@ -203,7 +215,10 @@ struct PermissionCentreTests {
         #expect(permissions.contains("AVCaptureDevice.requestAccess(for: .audio)"))
         #expect(permissions.contains("ProcessTap.requestCaptureAccess()"))
         #expect(permissions.contains("NowPlaying.requestAutomationPermission(for: bundleID)"))
-        #expect(!launch.contains("requestAll()"))
+        #expect(
+            FirstLaunchPermissions.automaticallyRequested
+                == Set(FirstLaunchPermissions.Capability.allCases))
+        #expect(launch.ranges(of: "PermissionCentre.shared.requestAll").count == 1)
         #expect(!launch.contains("requestMicrophone()"))
         #expect(!launch.contains("requestSystemAudio()"))
     }

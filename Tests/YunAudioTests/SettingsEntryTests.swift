@@ -27,7 +27,9 @@ struct SettingsEntryTests {
 
     @Test("the settings-window check never requests first-launch permissions")
     func settingsCheckSkipsPermissions() {
-        #expect(FirstLaunchPermissions.automaticallyRequested.isEmpty)
+        #expect(
+            FirstLaunchPermissions.automaticallyRequested
+                == Set(FirstLaunchPermissions.Capability.allCases))
         #expect(
             !FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 0,

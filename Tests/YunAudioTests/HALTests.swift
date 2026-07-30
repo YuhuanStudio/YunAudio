@@ -4503,19 +4503,21 @@ struct PermissionRequestTests {
                 == .failed(application: "Spotify", code: -50))
     }
 
-    @Test("normal launch requests no protected capability")
+    @Test("normal first launch requests every protected capability once")
     func firstLaunchOnly() {
         #expect(FirstLaunchPermissions.Capability.allCases.count == 3)
-        #expect(FirstLaunchPermissions.automaticallyRequested.isEmpty)
+        #expect(
+            FirstLaunchPermissions.automaticallyRequested
+                == Set(FirstLaunchPermissions.Capability.allCases))
         #expect(
             FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 0, environment: [:]))
         #expect(
             FirstLaunchPermissions.shouldPresentGuide(
-                storedVersion: 1, environment: [:]))
+                storedVersion: 2, environment: [:]))
         #expect(
             !FirstLaunchPermissions.shouldPresentGuide(
-                storedVersion: 2, environment: [:]))
+                storedVersion: 3, environment: [:]))
         #expect(
             !FirstLaunchPermissions.shouldPresentGuide(
                 storedVersion: 0,
@@ -4526,7 +4528,7 @@ struct PermissionRequestTests {
                 environment: ["YUNAUDIO_SCREENSHOT": "out"]))
     }
 
-    @Test("the first launch never touches an audio capture API")
+    @Test("the first launch only reaches capture through the central request sequence")
     func firstLaunchSequence() throws {
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
@@ -4536,10 +4538,11 @@ struct PermissionRequestTests {
         #expect(!source.contains("AudioHardwareCreateProcessTap"))
         #expect(!source.contains("AVCaptureDevice"))
         #expect(!source.contains("requestAccess(for: .audio)"))
+        #expect(source.contains("PermissionCentre.shared.requestAll"))
         let app = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/YunAudioApp.swift", encoding: .utf8)
-        #expect(!app.contains("FirstLaunchPermissions.request"))
+        #expect(!app.contains("PermissionCentre.shared.requestAll()"))
         #expect(app.contains("FirstLaunchPermissions.presentGuideIfNeeded(model: model)"))
     }
 

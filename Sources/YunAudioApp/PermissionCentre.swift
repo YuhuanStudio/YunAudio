@@ -10,9 +10,10 @@ import YunDesign
 /// One permission surface for every protected capability the application uses.
 ///
 /// Reading these values never opens a device or changes CoreAudio's topology.
-/// The two audio request APIs live behind methods called only by buttons in the
-/// permissions pane; normal launch must not manufacture consent by touching
-/// capture hardware.
+/// The first-launch guide and the buttons in the permissions pane are the only
+/// callers of the request APIs. Asking for microphone access does not open a
+/// device; system-audio consent has no standalone API, so that step creates and
+/// immediately destroys a private process tap without starting IO.
 @MainActor
 @Observable
 final class PermissionCentre {
@@ -151,16 +152,22 @@ final class PermissionCentre {
         }
     }
 
-    /// Requests every first-run capability serially after one explicit action.
+    /// Requests every first-run capability serially.
     ///
     /// System-audio consent has no passive request API: asking for it creates
-    /// and destroys a CoreAudio process tap. Keeping the sequence behind this
-    /// button avoids changing audio topology merely because the app launched.
-    func requestAll() {
-        guard requestInFlight.isEmpty else { return }
+    /// and destroys a CoreAudio process tap. No request in this sequence opens
+    /// an input device or starts IO.
+    @discardableResult
+    func requestAll(
+        onComplete: @escaping @MainActor () -> Void = {}
+    ) -> Bool {
+        guard requestInFlight.isEmpty else { return false }
         let key = "all"
         let steps = pendingRequestPlan
-        guard !steps.isEmpty else { return }
+        guard !steps.isEmpty else {
+            onComplete()
+            return false
+        }
         requestInFlight.insert(key)
         Task {
             await Self.executeRequestPlan(steps) { step in
@@ -174,7 +181,9 @@ final class PermissionCentre {
                 }
             }
             requestInFlight.remove(key)
+            onComplete()
         }
+        return true
     }
 
     /// Requests one player's Automation grant after a direct button press.

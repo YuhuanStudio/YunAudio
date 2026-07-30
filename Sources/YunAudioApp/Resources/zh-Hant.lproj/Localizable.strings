@@ -669,7 +669,7 @@
 "System approval" = "系統核准";
 "macOS may require approval in Login Items after this is enabled. YunAudio cannot approve itself." = "啟用後，macOS 可能要求你在「登入項目」中核准；YunAudio 無法自行核准。";
 "Open System Settings" = "開啟系統設定";
-"Opening YunAudio never requests microphone, system-audio or Automation access. Protected access is requested only from the buttons above or when you explicitly start the audio feature that needs it." = "開啟 YunAudio 時不會請求麥克風、系統音訊或自動化權限。只有按下上方按鈕，或由你明確啟動需要權限的音訊功能時才會提出請求。";
+"On the first ordinary launch, YunAudio requests microphone, system-audio and installed music-player Automation access in sequence. It asks for microphone consent without opening an input device." = "第一次正常啟動時，YunAudio 會依序請求麥克風、系統音訊與已安裝音樂播放器的自動化權限。麥克風步驟只請求授權，不會開啟任何輸入裝置。";
 "Enabled" = "已啟用";
 "Approval required" = "需要核准";
 "Not enabled" = "未啟用";

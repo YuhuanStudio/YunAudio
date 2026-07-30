@@ -3,15 +3,14 @@ import Foundation
 /// The first-launch guide to protected capabilities.
 ///
 /// Kept as a pure list because a future protected feature must make an explicit
-/// decision here. An empty list is the contract: opening YunAudio never asks
-/// TCC for microphone, system audio, Automation or anything else. The first
-/// ordinary launch opens Settings → Permissions once. One explicit action there
-/// serialises every missing grant; each grant also remains individually
-/// requestable.
+/// decision here. The first ordinary launch opens Settings → Permissions, then
+/// serialises every missing grant. Verification modes never enter this path.
+/// The microphone step asks TCC only; it does not enumerate or open a capture
+/// device, so a Continuity microphone cannot be woken by the guide.
 enum FirstLaunchPermissions {
-    // Version 1 could mark itself complete before a settings window existed.
-    // Advance once so affected installations receive the repaired guide.
-    static let currentGuideVersion = 2
+    // Version 2 only presented the page, despite the feature's name. Advance so
+    // existing installations receive the actual first-run request sequence.
+    static let currentGuideVersion = 3
     private static let guideVersionKey = "permissionGuideVersion"
 
     enum Capability: CaseIterable {
@@ -20,7 +19,7 @@ enum FirstLaunchPermissions {
         case musicAutomation
     }
 
-    static let automaticallyRequested: Set<Capability> = []
+    static let automaticallyRequested = Set(Capability.allCases)
 
     static func canAutoStartWithoutRequest(
         microphoneIsAllowed: Bool, capturesApplications: Bool,
@@ -49,14 +48,18 @@ enum FirstLaunchPermissions {
     @discardableResult
     static func completeGuidePresentationIfNeeded(
         storedVersion: Int, environment: [String: String],
-        open: () -> Bool, markPresented: () -> Void
+        open: () -> Bool,
+        request: (@escaping @MainActor () -> Void) -> Void,
+        markPresented: @escaping @MainActor () -> Void
     ) -> Bool {
         guard
             shouldPresentGuide(
                 storedVersion: storedVersion, environment: environment)
         else { return false }
         guard open() else { return false }
-        markPresented()
+        // Completion, not task creation, advances the version. Quitting while a
+        // prompt is still pending must let the next launch resume the sequence.
+        request(markPresented)
         return true
     }
 
@@ -70,6 +73,9 @@ enum FirstLaunchPermissions {
             environment: environment,
             open: {
                 SettingsWindow.open(model: model, initialSection: .permissions)
+            },
+            request: { completion in
+                PermissionCentre.shared.requestAll(onComplete: completion)
             },
             markPresented: {
                 defaults.set(currentGuideVersion, forKey: guideVersionKey)
