@@ -8191,6 +8191,16 @@ final class RouterModel: ScriptTarget {
 
     @ObservationIgnored private(set) var pollCost = PollCost()
 
+    /// Alternating storage for route meters.
+    ///
+    /// A published Swift array shares its allocation with Observation. Filling
+    /// that same array on the next poll would therefore trigger copy-on-write.
+    /// Fill the other buffer instead; once it is published, the previous one is
+    /// uniquely owned here again and can be reused on the following frame.
+    @ObservationIgnored private var telemetryRoutePeaksA: [Float] = []
+    @ObservationIgnored private var telemetryRoutePeaksB: [Float] = []
+    @ObservationIgnored private var telemetryUsesFirstBuffer = true
+
     /// Seconds spent in each part of the poll, while somebody is asking.
     ///
     /// Off by default and switched on by the flow check around its own
@@ -8346,15 +8356,28 @@ final class RouterModel: ScriptTarget {
             pollBreakdown[name, default: 0] +=
                 Double(DispatchTime.now().uptimeNanoseconds - entered) / 1e9
         }
-        var telemetry: RoutingEngine.TelemetrySnapshot?
-        lap("telemetry") { telemetry = engine.telemetrySnapshotIfAvailable }
+        var telemetry: RoutingEngine.TelemetryValues?
+        lap("telemetry") {
+            if telemetryUsesFirstBuffer {
+                telemetry = engine.readTelemetry(into: &telemetryRoutePeaksA)
+            } else {
+                telemetry = engine.readTelemetry(into: &telemetryRoutePeaksB)
+            }
+        }
         if let telemetry {
+            let routePeaks =
+                telemetryUsesFirstBuffer ? telemetryRoutePeaksA : telemetryRoutePeaksB
             // One coherent read and one lock acquisition. A busy graph means
             // "hold the last frame", not "publish silence": the latter made
             // every meter blink during an effect or device swap and read two
             // mutable diagnostic arrays outside their protecting lock.
-            lap("routePeaks") { publish(telemetry.routePeaks, to: \.levels) }
-            lap("refreshPeaks") { refreshPeaks(telemetry.routePeaks) }
+            let routePeaksChanged = routePeaks != levels
+            lap("routePeaks") { publish(routePeaks, to: \.levels) }
+            lap("refreshPeaks") { refreshPeaks(routePeaks) }
+            // An unchanged scratch buffer is still uniquely owned, so keep
+            // filling it. A published one is shared with `levels`; switch to
+            // the buffer that became unique when `levels` released it.
+            if routePeaksChanged { telemetryUsesFirstBuffer.toggle() }
             lap("outputPeak") { publish(telemetry.outputPeak, to: \.outputPeak) }
             lap("outputVerdict") {
                 publish(
