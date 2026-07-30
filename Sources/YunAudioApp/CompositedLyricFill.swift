@@ -3,6 +3,7 @@ import CoreText
 import QuartzCore
 import SwiftUI
 import YunDesign
+import YunAudioEngine
 
 /// The two lyric presentations share one compositor boundary.
 ///
@@ -531,5 +532,65 @@ private final class CoreTextBackingLayer: CALayer {
         context.scaleBy(x: 1, y: -1)
         CTFrameDraw(textFrame, context)
         context.restoreGState()
+    }
+}
+
+/// Key frames that make a row's fill follow the words rather than the clock.
+///
+/// A row is filled by animating `transform.scale.x` from where it starts to
+/// one. With a single linear animation that fill crosses the row evenly, which
+/// is right only if every syllable in it lasts the same time — so the highlight
+/// runs late through a held note and early through a quick one, and a singer
+/// reading it is pulled off the beat.
+///
+/// Core Animation can be handed the shape instead: the same start and end, with
+/// the sung fraction at each syllable boundary in between. The render server
+/// still does all the work per frame; the difference is which curve it walks.
+enum CompositedLyricKeyFrames {
+
+    /// - Parameters:
+    ///   - row: Where this row sits in the line, from 0 to 1.
+    ///   - syllables: Word times for the whole line, in order.
+    ///   - line: When the line begins and ends, in the track's own seconds.
+    /// - Returns: Times from 0 to 1 across the animation, with the row's scale
+    ///   at each, or nil when the line carries no word times and the caller
+    ///   should keep its linear animation.
+    static func fill(
+        row: (start: Double, end: Double),
+        syllables: [Lyrics.Line.Syllable],
+        line: (start: Double, end: Double),
+        text: String
+    ) -> (keyTimes: [Double], values: [Double])? {
+        guard !syllables.isEmpty, line.end > line.start, !text.isEmpty else {
+            return nil
+        }
+        let span = row.end - row.start
+        guard span > 0 else { return nil }
+
+        let sample = Lyrics.Line(
+            time: line.start, text: text, syllables: syllables)
+        var keyTimes: [Double] = []
+        var values: [Double] = []
+
+        func add(_ seconds: Double) {
+            let time = (seconds - line.start) / (line.end - line.start)
+            guard time >= 0, time <= 1 else { return }
+            let progress = sample.progress(at: seconds, lineEnd: line.end) ?? 0
+            let scale = max(0, min(1, (progress - row.start) / span))
+            // Core Animation requires key times to increase. Two syllables
+            // stamped at the same moment — which files do — would otherwise
+            // produce an animation it rejects outright, and the row would not
+            // fill at all.
+            if let last = keyTimes.last, time <= last { return }
+            keyTimes.append(time)
+            values.append(scale)
+        }
+
+        add(line.start)
+        for syllable in syllables { add(syllable.time) }
+        add(line.end)
+
+        guard keyTimes.count >= 2 else { return nil }
+        return (keyTimes, values)
     }
 }
