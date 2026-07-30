@@ -47,8 +47,14 @@ struct KTVStageLayoutTests {
         // Wide and short: the tile and its block cannot both fit however much
         // width there is, and shrinking the tile to a stamp keeps a layout
         // built around something no longer worth looking at.
+        // 420 now keeps the tile: with the metadata block measured at 162
+        // rather than estimated at 216, a 352-point stage has exactly the
+        // smallest useful tile left in it. Below that it does not.
         #expect(
             KTVStageLayout.resolve(width: 1400, stageHeight: stageHeight(420))
+                == .sideBySide)
+        #expect(
+            KTVStageLayout.resolve(width: 1400, stageHeight: stageHeight(380))
                 == .wordsOnly)
         #expect(
             KTVStageLayout.resolve(width: 1920, stageHeight: stageHeight(400))

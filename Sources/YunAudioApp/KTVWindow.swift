@@ -261,6 +261,20 @@ struct KTVStage: View {
                 track, width: columnWidth,
                 artwork: Self.artworkSide(
                     columnWidth: columnWidth, stageHeight: stageHeight))
+                // What the column actually comes out as, against the stage it
+                // has. Adjusting the metadata constant by eye is what put the
+                // transport row outside the window twice; this reports the
+                // number instead.
+                .background {
+                    GeometryReader { column in
+                        Color.clear.onAppear {
+                            SongArtwork.record(
+                                "column \(Int(column.size.height)) in stage"
+                                    + " \(Int(stageHeight)), tile"
+                                    + " \(Int(Self.artworkSide(columnWidth: columnWidth, stageHeight: stageHeight)))")
+                        }
+                    }
+                }
                 // `maxHeight`, not a fixed height with an alignment. Given an
                 // exact height the column was placed 302 points down a
                 // 619-point stage where centring predicts 92 — the fixed frame
