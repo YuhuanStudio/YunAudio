@@ -137,10 +137,23 @@ struct KTVStage: View {
     nonisolated(unsafe) static var lastColumnPlacement = ""
     nonisolated(unsafe) static var lastWordsPlacement = ""
     nonisolated(unsafe) static var lastControlsPlacement = ""
+    nonisolated(unsafe) static var lastReaderSize = ""
 
     var body: some View {
         GeometryReader { proxy in
-            let _ = { Self.lastMeasuredStageSize = proxy.size }()
+            let _ = {
+                Self.lastMeasuredStageSize = proxy.size
+                // What the reader itself was proposed, on every layout. The
+                // ZStack inside it reports 1036 in a 720-point window, and a
+                // stack cannot exceed its proposal unless a child demands more
+                // — so the first thing to establish is whether the proposal
+                // was 720 at that moment or something else entirely.
+                let now = "\(Int(proxy.size.width))x\(Int(proxy.size.height))"
+                if now != Self.lastReaderSize {
+                    Self.lastReaderSize = now
+                    SongArtwork.record("reader \(now)")
+                }
+            }()
             ZStack {
                 // Sized by the ZStack rather than by `proxy.size`, which would
                 // pin it to whatever the reader was proposed at the time.
