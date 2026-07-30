@@ -132,6 +132,10 @@ struct KTVStage: View {
     /// the bottom of the frame and the top half empty.
     nonisolated(unsafe) static var lastMeasuredStageSize: CGSize = .zero
 
+    /// The column's last reported size and position, so a layout that has not
+    /// moved does not report itself again on every pass.
+    nonisolated(unsafe) static var lastColumnPlacement = ""
+
     var body: some View {
         GeometryReader { proxy in
             let _ = { Self.lastMeasuredStageSize = proxy.size }()
@@ -268,6 +272,21 @@ struct KTVStage: View {
                 // number instead.
                 .background {
                     GeometryReader { column in
+                        // Every layout, not the first one. `onAppear` fires
+                        // once, so six rounds of measurement described a stage
+                        // whose lyrics and cover had not arrived and never
+                        // reported it again — a stage laid out correctly once,
+                        // read as a stage laid out correctly. Evaluating a
+                        // closure in the reader's body runs whenever the
+                        // geometry is recomputed, which is the question.
+                        let _ = {
+                            let frame = column.frame(in: .named("ktv-stage"))
+                            let now = "\(Int(column.size.height))@\(Int(frame.minY))"
+                            if now != Self.lastColumnPlacement {
+                                Self.lastColumnPlacement = now
+                                SongArtwork.record("column \(now) in stage \(Int(stageHeight))")
+                            }
+                        }()
                         Color.clear.onAppear {
                             // Where, as well as how big. Four rounds measured
                             // the column's size — 496 in a 619-point stage,
