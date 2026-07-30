@@ -114,6 +114,25 @@ struct SingingUIPerformanceTests {
         #expect(source.ranges(of: "GeometryReader").count == 2)
     }
 
+    @Test("fast song readings stop at dedicated observation leaves")
+    func fastSongReadingsAreIsolated() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let source = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/YunAudioApp/SingingPanel.swift"),
+            encoding: .utf8)
+
+        #expect(source.contains("SingingNote(model: model)"))
+        #expect(source.contains("SongClock(model: model, track: track)"))
+        #expect(source.contains("SongProgress(model: model, duration: track.duration)"))
+        #expect(source.ranges(of: "BodyCount.tick(\"SingingNote\")").count == 1)
+        #expect(source.ranges(of: "BodyCount.tick(\"SongClock\")").count == 1)
+        #expect(source.ranges(of: "BodyCount.tick(\"SongProgress\")").count == 1)
+    }
+
     private static func lines(count: Int) -> [KaraokeScore.Line] {
         (0..<count).map { index in
             KaraokeScore.Line(

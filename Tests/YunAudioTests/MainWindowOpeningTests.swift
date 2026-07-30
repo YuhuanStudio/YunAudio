@@ -29,7 +29,8 @@ struct MainWindowOpeningTests {
         #expect(sceneContent.contains(".frame(width: 0, height: 0)"))
 
         let installStart = try #require(
-            app.range(of: "private func injectMainWindowOpener(_ openWindow: OpenWindowAction)"))
+            app.range(of: "private func injectMainWindowOpener(_ openWindow: OpenWindowAction)")
+        )
         let installEnd = try #require(
             app.range(
                 of: "var body: some Scene",

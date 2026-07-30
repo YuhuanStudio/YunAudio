@@ -122,18 +122,7 @@ struct SingingPanel: View {
 
             // Whether you are on the note. The tracker was already here; what
             // it lacked was a reason to be looked at.
-            HStack(spacing: Yun.Space.sm) {
-                Text(loc("You are singing"))
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                Spacer()
-                Text(model.heardNote ?? "—")
-                    .font(Yun.Text.title)
-                    .foregroundStyle(
-                        model.heardNote == nil ? Yun.Palette.textMuted : Yun.Palette.accent
-                    )
-                    .monospacedDigit()
-            }
+            SingingNote(model: model)
 
             YunDivider()
             scoring
@@ -188,15 +177,7 @@ struct SingingPanel: View {
 
             trackProgress(track)
 
-            HStack(spacing: Yun.Space.sm) {
-                Text(Self.clock(Double(model.songSecond)))
-                Spacer(minLength: Yun.Space.sm)
-                YunBadge(track.application)
-                Text(track.duration > 0 ? Self.clock(track.duration) : "--:--")
-            }
-            .font(Yun.Text.mono)
-            .foregroundStyle(Yun.Palette.textTertiary)
-            .monospacedDigit()
+            SongClock(model: model, track: track)
 
             if let appleMusicURL = track.appleMusicURL {
                 Button(loc("Open in Apple Music")) {
@@ -208,20 +189,7 @@ struct SingingPanel: View {
     }
 
     private func trackProgress(_ track: NowPlaying.Track) -> some View {
-        let fraction =
-            track.duration > 0
-            ? max(0, min(1, Double(model.songSecond) / track.duration))
-            : 0
-        return GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Yun.Palette.border)
-                Capsule()
-                    .fill(Yun.Palette.accent)
-                    .frame(width: geometry.size.width * fraction)
-            }
-        }
-        .frame(height: 4)
-        .accessibilityHidden(true)
+        SongProgress(model: model, duration: track.duration)
     }
 
     @ViewBuilder
@@ -806,7 +774,7 @@ struct SingingPanel: View {
         .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
     }
 
-    private static func clock(_ seconds: Double) -> String {
+    static func clock(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "--:--" }
         return String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
     }
@@ -873,5 +841,82 @@ struct SongArtwork: View {
             guard !Task.isCancelled else { return }
             image = loaded
         }
+    }
+}
+
+// MARK: - The parts that move
+
+/// The observation leaves of the singing panel.
+///
+/// `SingingPanel` is eight hundred lines, and every one of its sub-views is a
+/// computed property of the same struct — so a value read anywhere inside it is
+/// a dependency of the whole body. Measured before this split: 54 body
+/// evaluations in four idle seconds, 13.5 a second, re-deriving the track
+/// header, the permission prose, the lyric source row and every button for a
+/// note readout that had changed by a semitone.
+///
+/// The same shape as `LiveSpectrum`, and for the same reason: put the
+/// invalidation where the moving picture is.
+private struct SingingNote: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("SingingNote")
+        HStack(spacing: Yun.Space.sm) {
+            Text(loc("You are singing"))
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+            Spacer()
+            Text(model.heardNote ?? "—")
+                .font(Yun.Text.title)
+                .foregroundStyle(
+                    model.heardNote == nil ? Yun.Palette.textMuted : Yun.Palette.accent
+                )
+                .monospacedDigit()
+        }
+    }
+}
+
+/// Elapsed and total, which is the only thing on that row that moves.
+///
+/// The track's own name and application arrive as values: they change when the
+/// song does, which is not twenty times a second.
+private struct SongClock: View {
+    let model: RouterModel
+    let track: NowPlaying.Track
+
+    var body: some View {
+        let _ = BodyCount.tick("SongClock")
+        HStack(spacing: Yun.Space.sm) {
+            Text(SingingPanel.clock(Double(model.songSecond)))
+            Spacer(minLength: Yun.Space.sm)
+            YunBadge(track.application)
+            Text(track.duration > 0 ? SingingPanel.clock(track.duration) : "--:--")
+        }
+        .font(Yun.Text.mono)
+        .foregroundStyle(Yun.Palette.textTertiary)
+        .monospacedDigit()
+    }
+}
+
+/// The bar under the title. The duration is a value; only the position moves.
+private struct SongProgress: View {
+    let model: RouterModel
+    let duration: Double
+
+    var body: some View {
+        let _ = BodyCount.tick("SongProgress")
+        let fraction =
+            duration > 0 ? max(0, min(1, Double(model.songSecond) / duration)) : 0
+        return GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Yun.Palette.border)
+                Capsule()
+                    .fill(Yun.Palette.accent)
+                    .frame(width: geometry.size.width * fraction)
+            }
+        }
+        .frame(height: 4)
+        .accessibilityHidden(true)
     }
 }
