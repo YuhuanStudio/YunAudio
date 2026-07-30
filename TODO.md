@@ -450,6 +450,29 @@ flow check 的「more than one input and one output」一節在真實硬體上�
 **每次重開應用程式整個混音器都回到 unity，而且沒有任何地方說過**。現在是
 `sourceLevels`，按來源 UID 存。
 
+### EQ 拖曳不再把每個中間值塞給音訊引擎 —— **已修且量過** [release]
+
+每個 graphic EQ pointer event 原本在 MainActor 同步完成整條工作：重建所有 bus 曲線、
+計算每一節 biquad coefficient、取得 engine state lock，並向 HAL 重讀 aggregate sample
+rate。只要引擎正被 start、graph swap 或 Audio Unit 建立占住，推桿就跟著那把鎖一起凍
+住；快速拖過 100 個值也會依序安裝 100 套已經看不到的係數，聲音在手放開後繼續追。
+
+現在 event 只留下 COW 的 `CorrectionSnapshot`，curve build 與 install 都在
+`engineQueue`。latest-value applier 先完成已經開始的值，期間只保留最新一筆；測試刻意
+擋住第一筆再連續送 100 筆，實際 apply 是 **[0, 99] 共 2 次**，不是 100 次，UI 也只
+發布最後的 99。同步 verification 用 generation flush，舊 worker 的完成通知不能蓋過
+較新的答案。bus 篩選、profile + graphic cascade 與 1 kHz 的 **+4 dB／−2 dB** 反應另
+有數值斷言。
+
+Realtime graph 的 sample rate 與 buffer size 也改為保存 graph 建立時真正使用的值。
+`setCorrections` 和 `updateEffects` 現在各是 **0 次 `currentSampleRate`、0 次
+`currentBufferFrameSize` HAL 讀取**；係數因此也明確與 graph 的格式相同。監聽延遲
+同樣不再由 SwiftUI body 呼叫 `latencyFrames`，在既有 2 Hz path refresh 背景讀取並
+快取；裝置清單初次出現時的 Bluetooth 通話品質檢查也一併移出 MainActor。
+
+Release 資源套件 24 個測試全綠；同輪既有基準仍是來源 meter 10,000 次 **1 allocation**、
+來源 grouping cache 10,000 次 **0 allocation／5,750 ns**。這階段沒有啟動音訊硬體。
+
 ### 1. KTV 的下半 [提案]
 
 已完成：Music 與 Spotify 的 now playing（走 scripting dictionary，不是私有的

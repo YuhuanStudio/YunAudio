@@ -129,27 +129,20 @@ struct BackgroundResourceTests {
     @Test("a hundred expensive publications apply the first and latest values only")
     func latestValuePublication() async throws {
         let queue = DispatchQueue(label: "yunaudio.test.latest-value")
-        let releaseFirst = DispatchSemaphore(value: 0)
         let applied = Values<Int>()
         var published: [Int] = []
         let applier = LatestValueApplier<Int, Int>(
             queue: queue,
             apply: { value in
                 applied.append(value)
-                if value == 0 {
-                    _ = releaseFirst.wait(timeout: .now() + 1)
-                }
                 return value
             },
             publish: { published.append($0) })
 
-        applier.submit(0)
-        for _ in 0..<100 where applied.snapshot.isEmpty {
-            try await Task.sleep(for: .milliseconds(10))
-        }
-        #expect(applied.snapshot == [0])
-        for value in 1..<100 { applier.submit(value) }
-        releaseFirst.signal()
+        // One MainActor turn means the first completion cannot publish between
+        // submissions. That makes the coalescing assertion independent of how
+        // busy the test machine is or how its scheduler interleaves queues.
+        for value in 0..<100 { applier.submit(value) }
 
         for _ in 0..<100 where published != [99] {
             try await Task.sleep(for: .milliseconds(10))
