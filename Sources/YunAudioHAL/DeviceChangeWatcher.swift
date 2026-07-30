@@ -128,62 +128,131 @@ final class DeviceChangeCoalescer: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             let now = clock()
-            guard let deadline = schedule.signal(at: now) else { return }
+            guard let probe = schedule.signal(at: now) else { return }
             queue.asyncAfter(
-                deadline: DispatchTime(uptimeNanoseconds: deadline)
+                deadline: DispatchTime(uptimeNanoseconds: probe.deadline)
             ) { [weak self] in
                 guard let self else { return }
-                schedule.complete(inventoryChanged: handler())
+                // A quiet, later notification can replace a long storm
+                // deadline. The old closure is still in Dispatch's queue; the
+                // token is what keeps it from reading HAL or completing the new
+                // generation when it eventually arrives.
+                guard schedule.beginProbe(probe) else { return }
+                schedule.complete(inventoryChanged: handler(), at: clock())
             }
         }
     }
+}
+
+/// One scheduled inventory read.
+///
+/// Dispatch cannot cancel an `asyncAfter` closure already submitted to a queue.
+/// Its generation therefore travels with the deadline so the closure can prove
+/// it still owns the pending read before asking HAL anything.
+struct DeviceChangeProbe: Sendable, Equatable {
+    let deadline: UInt64
+    fileprivate let generation: UInt64
 }
 
 /// Schedules device-list probes without allowing a noisy endpoint to poll HAL.
 ///
 /// The first notification in a quiet period is delivered after 50 ms so one
 /// physical plug event can publish all of its properties. Repeated unchanged
-/// answers back off to 250 ms. That cap keeps a real device change responsive
-/// even when an unrelated plug-in is continuously publishing false changes.
+/// answers use a short 50/100/200/400 ms burst, then back off through
+/// 1/2/4/8 seconds. A property read that causes its own notification can
+/// otherwise keep coreaudiod and every device plug-in awake four times a second
+/// for the lifetime of the application.
 struct DeviceChangeSchedule: Sendable {
     private let initialDelay: UInt64
+    private let burstMaximumDelay: UInt64
+    private let stormInitialDelay: UInt64
     private let maximumDelay: UInt64
     private let quietReset: UInt64
     private var delay: UInt64
+    private var lastCompletion: UInt64?
     private var lastSignal: UInt64?
-    private var isPending = false
+    private var generation: UInt64 = 0
+    private var pendingGeneration: UInt64?
 
     init(
         initialDelay: UInt64 = 50_000_000,
-        maximumDelay: UInt64 = 250_000_000,
+        burstMaximumDelay: UInt64 = 400_000_000,
+        stormInitialDelay: UInt64 = 1_000_000_000,
+        maximumDelay: UInt64 = 8_000_000_000,
         quietReset: UInt64 = 500_000_000
     ) {
         precondition(initialDelay > 0)
-        precondition(maximumDelay >= initialDelay)
+        precondition(burstMaximumDelay >= initialDelay)
+        precondition(stormInitialDelay > burstMaximumDelay)
+        precondition(maximumDelay >= stormInitialDelay)
         precondition(quietReset >= initialDelay)
         self.initialDelay = initialDelay
+        self.burstMaximumDelay = burstMaximumDelay
+        self.stormInitialDelay = stormInitialDelay
         self.maximumDelay = maximumDelay
         self.quietReset = quietReset
         delay = initialDelay
     }
 
-    mutating func signal(at now: UInt64) -> UInt64? {
-        if let lastSignal, now &- lastSignal >= quietReset {
+    mutating func signal(at now: UInt64) -> DeviceChangeProbe? {
+        let followsQuiet =
+            lastSignal.map { now &- $0 >= quietReset }
+            ?? false
+        lastSignal = now
+
+        if pendingGeneration != nil {
+            // Continuous notifications merely coalesce into the existing read.
+            // A notification after a quiet period is different: it may be a
+            // real plug event that arrived while an unchanged storm probe was
+            // waiting eight seconds. Replace that deadline with a 50 ms probe.
+            guard followsQuiet else { return nil }
+            delay = initialDelay
+            return makeProbe(at: now)
+        }
+
+        // A self-notification follows the read that produced it, however long
+        // that read was delayed. Measuring quiet from the previous signal made
+        // every delay above 500 ms look like a new physical event and collapsed
+        // the storm back to 50 ms. Completion is the causal boundary: an event
+        // arriving long after the probe is new; one arriving immediately after
+        // it is allowed to continue the backoff.
+        if let lastCompletion, now &- lastCompletion >= quietReset {
             delay = initialDelay
         }
-        lastSignal = now
-        guard !isPending else { return nil }
-        isPending = true
-        return now.addingReportingOverflow(delay).partialValue
+        return makeProbe(at: now)
     }
 
-    mutating func complete(inventoryChanged: Bool) {
-        isPending = false
+    /// Claims a deadline before its closure performs the HAL read.
+    ///
+    /// False means a quiet-period notification superseded this generation.
+    /// The caller must return without invoking its handler or `complete`.
+    mutating func beginProbe(_ probe: DeviceChangeProbe) -> Bool {
+        guard pendingGeneration == probe.generation else { return false }
+        pendingGeneration = nil
+        return true
+    }
+
+    mutating func complete(inventoryChanged: Bool, at now: UInt64) {
+        lastCompletion = now
         if inventoryChanged {
             delay = initialDelay
+        } else if delay < burstMaximumDelay {
+            delay = min(
+                delay.multipliedReportingOverflow(by: 2).partialValue,
+                burstMaximumDelay)
+        } else if delay < stormInitialDelay {
+            delay = stormInitialDelay
         } else {
             delay = min(delay.multipliedReportingOverflow(by: 2).partialValue, maximumDelay)
         }
+    }
+
+    private mutating func makeProbe(at now: UInt64) -> DeviceChangeProbe {
+        generation &+= 1
+        pendingGeneration = generation
+        return DeviceChangeProbe(
+            deadline: now.addingReportingOverflow(delay).partialValue,
+            generation: generation)
     }
 }
 

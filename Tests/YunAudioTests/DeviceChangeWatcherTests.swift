@@ -53,33 +53,57 @@ struct DeviceChangeWatcherTests {
         #expect(inventory.reads == 2)
     }
 
-    @Test("one thousand identical notifications perform six inventory reads")
+    @Test("sixty seconds of self-notifications perform thirteen inventory reads")
     func identicalNotificationStormBacksOff() {
         let inventory = Inventory([12, 34])
         let probe = DeviceInventoryProbe(initial: [12, 34], read: inventory.read)
         var schedule = DeviceChangeSchedule()
-        var deadline: UInt64?
         var deliveries = 0
 
-        for elapsedMilliseconds in 0..<1_000 {
-            let now = UInt64(elapsedMilliseconds) * millisecond
-            if let due = deadline, due <= now {
-                let changed = probe.readChanged()
-                if changed { deliveries += 1 }
-                schedule.complete(inventoryChanged: changed)
-                deadline = nil
-            }
-            deadline = schedule.signal(at: now) ?? deadline
+        guard var scheduled = schedule.signal(at: 0) else {
+            Issue.record("the first notification did not schedule a probe")
+            return
         }
-
-        if deadline != nil {
+        while scheduled.deadline <= 60_000 * millisecond {
+            let began = schedule.beginProbe(scheduled)
+            #expect(began)
             let changed = probe.readChanged()
             if changed { deliveries += 1 }
-            schedule.complete(inventoryChanged: changed)
+            schedule.complete(inventoryChanged: changed, at: scheduled.deadline)
+            guard let next = schedule.signal(at: scheduled.deadline) else {
+                Issue.record("the self-notification did not schedule another probe")
+                return
+            }
+            scheduled = next
         }
 
-        #expect(inventory.reads == 6)
+        #expect(inventory.reads == 13)
+        #expect(scheduled.deadline == 63_750 * millisecond)
         #expect(deliveries == 0)
+    }
+
+    @Test("unchanged self-notifications follow the bounded backoff ladder")
+    func unchangedBackoffLadderIsBounded() {
+        var schedule = DeviceChangeSchedule()
+        var now: UInt64 = 0
+        var delays: [UInt64] = []
+
+        for _ in 0..<10 {
+            guard let scheduled = schedule.signal(at: now) else {
+                Issue.record("a completed probe left the schedule pending")
+                return
+            }
+            delays.append(scheduled.deadline - now)
+            now = scheduled.deadline
+            let began = schedule.beginProbe(scheduled)
+            #expect(began)
+            schedule.complete(inventoryChanged: false, at: now)
+        }
+
+        #expect(
+            delays
+                == [50, 100, 200, 400, 1_000, 2_000, 4_000, 8_000, 8_000, 8_000]
+                .map { UInt64($0) * millisecond })
     }
 
     @Test("a physical change after quiet is read in fifty milliseconds")
@@ -88,34 +112,42 @@ struct DeviceChangeWatcherTests {
         let probe = DeviceInventoryProbe(initial: [12, 34], read: inventory.read)
         var schedule = DeviceChangeSchedule()
 
-        guard var deadline = schedule.signal(at: 0) else {
+        guard var scheduled = schedule.signal(at: 0) else {
             Issue.record("the first notification did not schedule a probe")
             return
         }
-        schedule.complete(inventoryChanged: probe.readChanged())
-        guard let secondDeadline = schedule.signal(at: deadline) else {
+        var began = schedule.beginProbe(scheduled)
+        #expect(began)
+        schedule.complete(inventoryChanged: probe.readChanged(), at: scheduled.deadline)
+        guard let second = schedule.signal(at: scheduled.deadline) else {
             Issue.record("the second notification did not schedule a probe")
             return
         }
-        deadline = secondDeadline
-        schedule.complete(inventoryChanged: probe.readChanged())
-        guard let thirdDeadline = schedule.signal(at: deadline) else {
+        scheduled = second
+        began = schedule.beginProbe(scheduled)
+        #expect(began)
+        schedule.complete(inventoryChanged: probe.readChanged(), at: scheduled.deadline)
+        guard let third = schedule.signal(at: scheduled.deadline) else {
             Issue.record("the third notification did not schedule a probe")
             return
         }
-        deadline = thirdDeadline
-        schedule.complete(inventoryChanged: probe.readChanged())
+        scheduled = third
+        began = schedule.beginProbe(scheduled)
+        #expect(began)
+        schedule.complete(inventoryChanged: probe.readChanged(), at: scheduled.deadline)
 
         inventory.set([12, 34, 56])
-        let quietSignal = deadline + 500 * millisecond
-        guard let changeDeadline = schedule.signal(at: quietSignal) else {
+        let quietSignal = scheduled.deadline + 500 * millisecond
+        guard let change = schedule.signal(at: quietSignal) else {
             Issue.record("the physical change did not schedule a probe")
             return
         }
 
-        #expect(changeDeadline - quietSignal == 50 * millisecond)
+        #expect(change.deadline - quietSignal == 50 * millisecond)
+        began = schedule.beginProbe(change)
+        #expect(began)
         #expect(probe.readChanged())
-        schedule.complete(inventoryChanged: true)
+        schedule.complete(inventoryChanged: true, at: change.deadline)
         #expect(inventory.reads == 4)
     }
 
@@ -125,7 +157,7 @@ struct DeviceChangeWatcherTests {
         let probe = DeviceInventoryProbe(initial: [1], read: inventory.read)
         var schedule = DeviceChangeSchedule()
 
-        guard let deadline = schedule.signal(at: 0) else {
+        guard let scheduled = schedule.signal(at: 0) else {
             Issue.record("the first notification did not schedule a probe")
             return
         }
@@ -134,30 +166,63 @@ struct DeviceChangeWatcherTests {
         inventory.set([2, 3])
         #expect(schedule.signal(at: 20 * millisecond) == nil)
 
-        #expect(deadline == 50 * millisecond)
+        #expect(scheduled.deadline == 50 * millisecond)
+        let began = schedule.beginProbe(scheduled)
+        #expect(began)
         #expect(probe.readChanged())
-        schedule.complete(inventoryChanged: true)
+        schedule.complete(inventoryChanged: true, at: scheduled.deadline)
         #expect(inventory.observations == [[2, 3]])
     }
 
-    @Test("a storm bounds physical-change latency to two hundred fifty milliseconds")
-    func stormChangeLatencyIsBounded() {
+    @Test("a quiet real change supersedes an eight-second storm probe")
+    func quietChangeSupersedesStormProbe() {
+        let inventory = Inventory([1])
+        let probe = DeviceInventoryProbe(initial: [1], read: inventory.read)
         var schedule = DeviceChangeSchedule()
         var now: UInt64 = 0
 
-        for _ in 0..<4 {
-            guard let deadline = schedule.signal(at: now) else {
+        for _ in 0..<7 {
+            guard let scheduled = schedule.signal(at: now) else {
                 Issue.record("a completed probe left the schedule pending")
                 return
             }
-            now = deadline
-            schedule.complete(inventoryChanged: false)
+            now = scheduled.deadline
+            let began = schedule.beginProbe(scheduled)
+            #expect(began)
+            #expect(!probe.readChanged())
+            schedule.complete(inventoryChanged: false, at: now)
         }
 
-        guard let deadline = schedule.signal(at: now) else {
+        guard let stale = schedule.signal(at: now) else {
             Issue.record("the capped probe did not schedule")
             return
         }
-        #expect(deadline - now == 250 * millisecond)
+        #expect(stale.deadline - now == 8_000 * millisecond)
+
+        inventory.set([1, 2])
+        let physicalSignal = now + 1_000 * millisecond
+        guard let replacement = schedule.signal(at: physicalSignal) else {
+            Issue.record("the quiet physical notification did not replace the storm probe")
+            return
+        }
+        #expect(replacement != stale)
+        #expect(replacement.deadline - physicalSignal == 50 * millisecond)
+
+        let replacementBegan = schedule.beginProbe(replacement)
+        #expect(replacementBegan)
+        #expect(probe.readChanged())
+        schedule.complete(inventoryChanged: true, at: replacement.deadline)
+        let readsAfterReplacement = inventory.reads
+
+        guard let reset = schedule.signal(at: replacement.deadline) else {
+            Issue.record("a real inventory change did not reset the schedule")
+            return
+        }
+        #expect(reset.deadline - replacement.deadline == 50 * millisecond)
+        let staleBegan = schedule.beginProbe(stale)
+        #expect(!staleBegan)
+        #expect(inventory.reads == readsAfterReplacement)
+        #expect(readsAfterReplacement == 8)
+        #expect(inventory.observations.last == [1, 2])
     }
 }
