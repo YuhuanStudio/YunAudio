@@ -61,6 +61,28 @@ enum UIResourceBenchmark {
         [00:21.00]eighth moving line
         """
 
+    /// The same eight lines as the song a person actually puts on.
+    ///
+    /// Everything measured before this was measured on short Latin lines with
+    /// no word times: one row per line, one linear animation, no wrapping. A
+    /// real line is twenty-odd characters of Chinese that wraps to two rows,
+    /// each row needing its own share of the line's fill, and enhanced word
+    /// markers that turn each of those into a key-frame path instead. That is
+    /// the case the compositor exists for and the case nothing had ever
+    /// pointed a stopwatch at.
+    private static let longLyricFixture = """
+        [ti:UI resource benchmark, long lines]
+        [ar:YunAudio]
+        [00:00.00]<00:00.00>原来<00:00.80>年少<00:01.60>心动<00:02.00>是逆行在<00:02.60>一场雨季
+        [00:03.00]<00:03.00>注定了<00:03.90>无法<00:04.50>走进<00:05.10>同一个<00:05.70>晴天里
+        [00:06.00]<00:06.00>可<00:06.30>偏偏<00:06.90>时光的<00:07.50>橡皮<00:08.10>擦去很多
+        [00:09.00]<00:09.00>却<00:09.40>放过<00:10.00>你<00:10.40>姓名<00:11.00>而我还在原地
+        [00:12.00]<00:12.00>原来<00:12.60>有些<00:13.20>相遇<00:13.80>明明<00:14.40>知道会分离
+        [00:15.00]<00:15.00>再<00:15.40>重来<00:16.00>我<00:16.40>依然有<00:17.00>选择你的勇气
+        [00:18.00]<00:18.00>只可惜<00:18.90>青春的<00:19.50>诗句<00:20.10>总有挥散不去
+        [00:21.00]<00:21.00>的<00:21.30>叹息<00:21.90>还有<00:22.50>那年夏天的<00:23.40>雨季
+        """
+
     static func run(model: RouterModel) async -> Bool {
         guard ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil else {
             report("UI benchmark refused: YUNAUDIO_SCREENSHOT_NO_AUDIO is required")
@@ -106,8 +128,14 @@ enum UIResourceBenchmark {
 
         let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(
             "YunAudio-ui-benchmark-\(getpid()).lrc")
+        // Off by default, so every figure recorded before this still means
+        // what it meant.
+        let usesLongLines =
+            ProcessInfo.processInfo.environment["YUNAUDIO_UI_BENCHMARK_LYRICS"] == "long"
+        report("UI benchmark lyric lines \(usesLongLines ? "long, word-timed" : "short")")
         do {
-            try lyricFixture.write(to: fixture, atomically: true, encoding: .utf8)
+            try (usesLongLines ? longLyricFixture : lyricFixture)
+                .write(to: fixture, atomically: true, encoding: .utf8)
         } catch {
             report("UI benchmark could not write its lyric fixture: \(error)")
             return false
