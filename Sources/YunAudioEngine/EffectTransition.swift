@@ -4,12 +4,14 @@ import Foundation
 ///
 /// Building and owning the two paths remains a control-thread job. This object
 /// only schedules their already-rendered mono buffers: the old path remains
-/// audible while the new path fills its latency, then a twenty-millisecond
-/// equal-power fade hands one to the other. Raw audio is simply a path whose
-/// latency is zero, so raw-to-stage and stage-to-raw use the same machinery.
+/// audible while the new path fills its latency. Equal-latency paths use a
+/// twenty-millisecond linear handover; a latency change uses a bounded splice
+/// because mixing two different points in correlated audio can cancel them.
+/// Raw audio is simply a path whose latency is zero, so raw-to-stage and
+/// stage-to-raw use the same machinery.
 ///
-/// Gain curves are calculated at construction. `process` performs only loads,
-/// multiplies and stores, and is therefore suitable for the IO thread.
+/// Gain curves and storage are prepared at construction. `process` allocates
+/// nothing and is therefore suitable for the IO thread.
 final class EffectTransition {
     static let fadeSeconds = 0.020
 
@@ -19,10 +21,21 @@ final class EffectTransition {
     let fadeFrames: Int
 
     private let progress: UnsafeMutablePointer<Float>
+    private let changesLatency: Bool
+    private let searchFrames: Int
+    private let fallbackFrames: Int
     private var warmupPosition = 0
     private var fadePosition = 0
+    private var previousOld: Float = 0
+    private var previousNew: Float = 0
+    private var hasPrevious = false
+    private var fallbackStartFrame: Int?
+    private var mismatchComplete = false
 
-    var isComplete: Bool { fadePosition == fadeFrames }
+    private(set) var spliceFrame: Int?
+    var isComplete: Bool {
+        changesLatency ? mismatchComplete : fadePosition == fadeFrames
+    }
     private(set) var processedFrames = 0
 
     init(
@@ -36,6 +49,11 @@ final class EffectTransition {
         // the newcomer can produce a real sample.
         warmupFrames = self.newLatencyFrames
         fadeFrames = max(1, Int((sampleRate * Self.fadeSeconds).rounded()))
+        changesLatency = self.oldLatencyFrames != self.newLatencyFrames
+        fallbackFrames = min(
+            fadeFrames,
+            max(1, Int((sampleRate * 0.005).rounded())))
+        searchFrames = fadeFrames - fallbackFrames
 
         progress = .allocate(capacity: fadeFrames)
         for frame in 0..<fadeFrames {
@@ -70,10 +88,22 @@ final class EffectTransition {
         if warmupPosition < warmupFrames {
             let count = min(frames, warmupFrames - warmupPosition)
             for frame in 0..<count {
-                output[frame] = sanitisedAudioSample(old[frame])
+                let oldSample = sanitisedAudioSample(old[frame])
+                let newSample = sanitisedAudioSample(new[frame])
+                output[frame] = oldSample
+                previousOld = oldSample
+                previousNew = newSample
+                hasPrevious = true
             }
             warmupPosition += count
             offset = count
+        }
+
+        if changesLatency {
+            processLatencyChange(
+                old: old, new: new, output: output,
+                offset: offset, frames: frames)
+            return
         }
 
         if offset < frames, fadePosition < fadeFrames {
@@ -97,6 +127,102 @@ final class EffectTransition {
         }
     }
 
+    /// Finds a low-error sample boundary before falling back to a de-click.
+    ///
+    /// A continuous fade between two versions of a correlated signal whose
+    /// latencies differ must pass through equal gains. At a half-cycle offset
+    /// that point is silence, whatever gain curve is used. A splice does not
+    /// pretend the time shift disappeared: it moves that unavoidable boundary
+    /// to a sample where the output step is no larger than either path's local
+    /// step. If no such boundary arrives in fifteen milliseconds, the remaining
+    /// five milliseconds lower the old path to zero before raising the new one,
+    /// so unlike a crossfade the two phases are never added together.
+    @inline(__always)
+    private func processLatencyChange(
+        old: UnsafePointer<Float>, new: UnsafePointer<Float>,
+        output: UnsafeMutablePointer<Float>, offset: Int, frames: Int
+    ) {
+        var cursor = offset
+
+        if spliceFrame != nil {
+            while cursor < frames {
+                output[cursor] = sanitisedAudioSample(new[cursor])
+                cursor += 1
+            }
+            return
+        }
+
+        if fallbackStartFrame == nil {
+            while cursor < frames {
+                let absoluteFrame = processedFrames + cursor
+                let searchPosition = absoluteFrame - warmupFrames
+                if searchPosition >= searchFrames {
+                    fallbackStartFrame = absoluteFrame
+                    break
+                }
+
+                let oldSample = sanitisedAudioSample(old[cursor])
+                let newSample = sanitisedAudioSample(new[cursor])
+                if hasPrevious {
+                    let localStep = max(
+                        abs(oldSample - previousOld),
+                        abs(newSample - previousNew))
+                    let seam = abs(newSample - previousOld)
+                    if seam <= localStep * 1.1 + 1e-6 {
+                        spliceFrame = absoluteFrame
+                        mismatchComplete = true
+                        output[cursor] = newSample
+                        cursor += 1
+                        while cursor < frames {
+                            output[cursor] = sanitisedAudioSample(new[cursor])
+                            cursor += 1
+                        }
+                        return
+                    }
+                }
+                output[cursor] = oldSample
+                previousOld = oldSample
+                previousNew = newSample
+                hasPrevious = true
+                cursor += 1
+            }
+        }
+
+        guard let fallbackStartFrame else { return }
+        while cursor < frames {
+            let absoluteFrame = processedFrames + cursor
+            let fallbackPosition = absoluteFrame - fallbackStartFrame
+            let oldSample = sanitisedAudioSample(old[cursor])
+            let newSample = sanitisedAudioSample(new[cursor])
+            output[cursor] = fallbackSample(
+                old: oldSample, new: newSample,
+                at: fallbackPosition)
+            if fallbackPosition >= fallbackFrames - 1 {
+                mismatchComplete = true
+            }
+            cursor += 1
+        }
+    }
+
+    @inline(__always)
+    private func fallbackSample(old: Float, new: Float, at frame: Int) -> Float {
+        if frame < 0 { return old }
+        if frame >= fallbackFrames { return new }
+        if fallbackFrames == 1 { return new }
+
+        let fadeOutFrames = max(1, fallbackFrames / 2)
+        if frame < fadeOutFrames {
+            guard fadeOutFrames > 1 else { return old }
+            let amount = Float(frame) / Float(fadeOutFrames - 1)
+            return old * (1 - amount)
+        }
+
+        let fadeInFrames = fallbackFrames - fadeOutFrames
+        guard fadeInFrames > 1 else { return new }
+        let amount = Float(frame - fadeOutFrames) / Float(fadeInFrames - 1)
+        return new * amount
+    }
+
     /// Mixes one pair at an absolute frame on this handover's timeline.
     ///
     /// The graph uses this for paths that bypassed the effect chain. Calling
@@ -108,6 +234,17 @@ final class EffectTransition {
         let safeOld = sanitisedAudioSample(old)
         let safeNew = sanitisedAudioSample(new)
         if frame < warmupFrames { return safeOld }
+        if changesLatency {
+            if let spliceFrame {
+                return frame < spliceFrame ? safeOld : safeNew
+            }
+            if let fallbackStartFrame {
+                return fallbackSample(
+                    old: safeOld, new: safeNew,
+                    at: frame - fallbackStartFrame)
+            }
+            return safeOld
+        }
         let fade = frame - warmupFrames
         if fade >= fadeFrames { return safeNew }
         return safeOld + (safeNew - safeOld) * progress[fade]
