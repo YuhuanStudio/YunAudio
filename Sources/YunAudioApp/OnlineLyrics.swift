@@ -18,6 +18,10 @@ struct OnlineLyrics: Sendable {
         let artist: String
         let album: String
         let duration: Double
+        /// Everyone on the track, for reading a duet file's singer markers. A
+        /// name is only taken for a marker when the track names that performer,
+        /// so a short list leaves the second singer's name drawn as a lyric.
+        var performers: [String] = []
     }
 
     enum Source: String, CaseIterable, Codable, Sendable, Equatable {
@@ -95,7 +99,7 @@ struct OnlineLyrics: Sendable {
             providerMetadata: ProviderMetadata? = nil
         ) {
             let synchronised = synchronised?.nonEmpty
-            let parsed = validatedParsed ?? synchronised.flatMap(Lyrics.parse)
+            let parsed = validatedParsed ?? synchronised.flatMap { Lyrics.parse($0) }
             let acceptedSynchronised =
                 parsed != nil && synchronised.map(OnlineLyrics.isInstrumentalLyrics) != true
                 ? synchronised : nil
@@ -232,6 +236,9 @@ struct OnlineLyrics: Sendable {
         let artist: String
         let latinArtist: String
         let duration: Double
+        /// Carried through so the chosen answer can be attributed before it is
+        /// returned. See `strongest(in:wanted:)`.
+        let performers: [String]
 
         init(_ query: Query) {
             title = OnlineLyrics.canonicalTitle(query.title)
@@ -242,6 +249,7 @@ struct OnlineLyrics: Sendable {
             artist = OnlineLyrics.normalised(query.artist)
             latinArtist = OnlineLyrics.transliterated(query.artist)
             duration = query.duration
+            performers = query.performers
         }
     }
 
@@ -408,9 +416,33 @@ struct OnlineLyrics: Sendable {
     }
 
     private func strongest(in answers: [Match], wanted: WantedMatch) -> Match? {
-        answers.max {
-            quality(of: $0, wanted: wanted) < quality(of: $1, wanted: wanted)
-        }
+        guard
+            let best = answers.max(by: {
+                quality(of: $0, wanted: wanted) < quality(of: $1, wanted: wanted)
+            })
+        else { return nil }
+        return attributed(best, performers: wanted.performers)
+    }
+
+    /// Re-reads the winner's own `.lrc` now that the cast is known.
+    ///
+    /// Each provider parses as it decodes, before there is anything to compare
+    /// answers against, and none of them is given the performer list. Doing it
+    /// here instead means one re-read of one file rather than threading the list
+    /// through five decoders — and the text is the same text, so a duet marker
+    /// the first pass left as a lyric becomes an attribution rather than a line
+    /// of its own. Without it 「黃霄雲」 was sung.
+    private func attributed(_ match: Match, performers: [String]) -> Match? {
+        guard !performers.isEmpty, let raw = match.synchronised,
+            let reparsed = Lyrics.parse(raw, performers: performers),
+            reparsed != match.parsed
+        else { return match }
+        return Match(
+            source: match.source, trackName: match.trackName,
+            artistName: match.artistName, albumName: match.albumName,
+            duration: match.duration, synchronised: raw, plain: match.plain,
+            parsed: reparsed, providerMetadata: match.providerMetadata)
+            ?? match
     }
 
     private func quality(of match: Match, wanted: WantedMatch) -> MatchQuality {
@@ -703,7 +735,7 @@ struct OnlineLyrics: Sendable {
                     duration: candidate.duration, wanted: wanted)
             else { continue }
             let synchronised = candidate.syncedLyrics?.nonEmpty
-            let parsed = synchronised.flatMap(Lyrics.parse)
+            let parsed = synchronised.flatMap { Lyrics.parse($0) }
             let acceptedSynchronised =
                 parsed != nil
                     && synchronised.map(Self.isInstrumentalLyrics) != true
@@ -742,6 +774,8 @@ struct OnlineLyrics: Sendable {
         let candidateTitle = Self.canonicalTitle(title)
         let candidateFullTitle = Self.normalised(title)
         let candidateIsBacking = Self.isBackingTitle(title)
+        let durationIsExact =
+            wanted.duration > 0 && abs(duration - wanted.duration) <= 3
         let titleFits =
             candidateTitle == wanted.title
             || Self.transliterated(candidateTitle) == wanted.latinTitle
@@ -750,6 +784,17 @@ struct OnlineLyrics: Sendable {
             || (min(candidateTitle.count, wanted.title.count) >= 4
                 && (candidateTitle.contains(wanted.title)
                     || wanted.title.contains(candidateTitle)))
+            // A character or two apart, with the running time already agreeing
+            // to within three seconds. 「來不及愛妳」 and 「来不及爱你」 are one
+            // song: neither the characters nor the pinyin fallback matched it,
+            // because Foundation reads 妳 as "nai" against 你 as "ni", and ICU's
+            // Hant-Hans leaves 妳 alone — it is a character in its own right,
+            // not a traditional form of 你. A variant table would have to be
+            // extended for whichever character came next; a distance does not.
+            || Self.simplified(candidateTitle) == Self.simplified(wanted.title)
+            || (durationIsExact
+                && Self.isNearly(
+                    Self.simplified(candidateTitle), Self.simplified(wanted.title)))
         let candidateArtist = Self.normalised(artist)
         let candidateArtistLatin = Self.transliterated(artist)
         let artistFits =
@@ -761,6 +806,59 @@ struct OnlineLyrics: Sendable {
         let durationFits = wanted.duration <= 0 || abs(duration - wanted.duration) <= 12
         return titleFits && artistFits && durationFits
             && (wanted.isBacking || !candidateIsBacking)
+    }
+
+    /// One script, so that a traditional title and a simplified one compare.
+    ///
+    /// ICU owns the systematic half of this: 來→来, 愛→爱, and every other pair
+    /// nobody should be maintaining by hand. What it does not own is 妳, which
+    /// is a character in its own right rather than a traditional form of 你, so
+    /// it survives the transform — that residue is what `isNearly` is for.
+    static func simplified(_ value: String) -> String {
+        value.applyingTransform(StringTransform("Hant-Hans"), reverse: false) ?? value
+    }
+
+    /// Whether two titles differ by little enough to be the same song.
+    ///
+    /// Only ever consulted once the running time already agrees to the second,
+    /// so this decides between "the same song written differently" and "a
+    /// different song of the same length by the same artist" — and one edit in
+    /// five characters is the former. Four characters minimum, because at three
+    /// a single edit is a third of the title and 「慢冷」 would reach 「慢熱」.
+    static func isNearly(_ lhs: String, _ rhs: String) -> Bool {
+        let a = Array(lhs)
+        let b = Array(rhs)
+        guard a.count >= 4, b.count >= 4 else { return lhs == rhs }
+        let longest = max(a.count, b.count)
+        // A quarter of the longer title, so five characters tolerate one edit
+        // and eight tolerate two.
+        let budget = max(1, longest / 4)
+        guard abs(a.count - b.count) <= budget else { return false }
+        return editDistance(a, b, upTo: budget) <= budget
+    }
+
+    /// Levenshtein, abandoned as soon as it passes `upTo`.
+    ///
+    /// Two rows rather than a matrix, because this runs against every candidate
+    /// of every provider and the titles are short enough that allocating a
+    /// square of them would be the expensive part.
+    private static func editDistance(
+        _ a: [Character], _ b: [Character], upTo limit: Int
+    ) -> Int {
+        var previous = Array(0...b.count)
+        var current = [Int](repeating: 0, count: b.count + 1)
+        for i in 1...a.count {
+            current[0] = i
+            var rowBest = current[0]
+            for j in 1...b.count {
+                let substitution = previous[j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, substitution)
+                rowBest = min(rowBest, current[j])
+            }
+            if rowBest > limit { return limit + 1 }
+            swap(&previous, &current)
+        }
+        return previous[b.count]
     }
 
     static func canonicalTitle(_ value: String) -> String {

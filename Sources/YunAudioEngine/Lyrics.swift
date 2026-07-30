@@ -13,11 +13,28 @@ public struct Lyrics: Sendable, Hashable {
         /// Seconds from the start of the track.
         public let time: Double
         public let text: String
+        /// Who sings this line, when the file says so — a performer's name, or
+        /// 「合」 for both together. Never part of `text`.
+        ///
+        /// Duet files write this as a line of its own carrying nothing but the
+        /// name, or as a prefix before a colon. Drawn as lyrics, as they were,
+        /// the stage showed 「合」, 「王赫野」 and 「黃霄雲」 sitting between the
+        /// words as though they were something to sing.
+        public let singer: String?
 
-        public init(time: Double, text: String) {
+        public init(time: Double, text: String, singer: String? = nil) {
             self.time = time
             self.text = text
+            self.singer = singer
         }
+
+        /// A rest: the file marked time here and gave no words.
+        ///
+        /// Kept rather than dropped. An intro, an interlude and an outro are
+        /// things a singer needs to see — how long until the next entry is the
+        /// question a lyric sheet cannot answer and a stage can. Drawn as an
+        /// empty line, as it was, it read as a gap in the layout instead.
+        public var isInterlude: Bool { text.isEmpty }
     }
 
     /// Metadata from the `[ti:]`, `[ar:]` and `[al:]` tags, when present.
@@ -60,7 +77,12 @@ public struct Lyrics: Sendable, Hashable {
     ///
     /// - Returns: Nil when nothing in the text carried a timestamp, which is
     ///   the honest answer for a plain text file of words with no timing.
-    public static func parse(_ text: String) -> Lyrics? {
+    /// - Parameter performers: Names from the track being played. A duet file
+    ///   marks who sings by putting a performer's name on a line of its own, and
+    ///   nothing but the track's own credits distinguishes that from a lyric
+    ///   that happens to be a name. Empty is safe: only the fixed markers and
+    ///   the credit vocabulary are then recognised.
+    public static func parse(_ text: String, performers: [String] = []) -> Lyrics? {
         var title: String?
         var artist: String?
         var album: String?
@@ -104,8 +126,109 @@ public struct Lyrics: Sendable, Hashable {
         }
 
         guard !lines.isEmpty else { return nil }
+        let sung = words(in: lines.sorted { $0.time < $1.time }, performers: performers)
+        guard !sung.isEmpty else { return nil }
         return Lyrics(
-            title: title, artist: artist, album: album, offset: offset, lines: lines)
+            title: title, artist: artist, album: album, offset: offset, lines: sung)
+    }
+
+    /// Keeps what is sung and attributes the rest.
+    ///
+    /// Public indexes carry three things under the same timestamps: the words,
+    /// the production credits, and who sings which part. Only the first is a
+    /// lyric. Drawn without this, 「離開我的依賴」 put 「合」, 「王赫野」 and
+    /// 「黃霄雲」 on the stage as lines of their own, and 「慢冷」 opened on two
+    /// lines of marketing credits.
+    static func words(in lines: [Line], performers: [String]) -> [Line] {
+        let names = Set(
+            performers
+                .flatMap { $0.split(whereSeparator: { "/&,、，".contains($0) }) }
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty })
+        var kept: [Line] = []
+        var pending: String?
+
+        for line in lines {
+            let text = line.text.trimmingCharacters(in: .whitespaces)
+            // A rest, not a line to drop — but only one, and never before the
+            // first word or after the last. Files pad with blank lines for the
+            // look of the file as much as for the music, and a run of six of
+            // them is not six rests.
+            if text.isEmpty {
+                if let last = kept.last, !last.isInterlude {
+                    kept.append(Line(time: line.time, text: "", singer: nil))
+                }
+                continue
+            }
+            if isCredit(text) { continue }
+
+            // A line that is nothing but a name marks who sings what follows.
+            if let marker = singerMarker(text, names: names) {
+                pending = marker
+                continue
+            }
+
+            // The same thing written inline, which is the other convention.
+            var body = text
+            var singer = pending
+            if let colon = body.firstIndex(where: { $0 == "：" || $0 == ":" }) {
+                let head = String(body[body.startIndex..<colon])
+                    .trimmingCharacters(in: .whitespaces)
+                if let marker = singerMarker(head, names: names) {
+                    singer = marker
+                    body = String(body[body.index(after: colon)...])
+                        .trimmingCharacters(in: .whitespaces)
+                }
+            }
+            guard !body.isEmpty else { continue }
+            kept.append(Line(time: line.time, text: body, singer: singer))
+        }
+        // A trailing rest has nothing after it to wait for.
+        while let last = kept.last, last.isInterlude { kept.removeLast() }
+        return kept
+    }
+
+    /// Roles that introduce a credit rather than a lyric.
+    ///
+    /// Matched as a prefix before a colon, not as whole lines: the files write
+    /// 「作詞：某某」 and 「營銷推廣：什麼洋 / 榮兒 @ 網益文化」 alike. Requiring a
+    /// short head keeps a lyric that happens to contain a colon out of it.
+    private static let creditRoles: Set<String> = [
+        "作词", "作詞", "词", "詞", "作曲", "曲", "编曲", "編曲", "改编", "改編",
+        "制作人", "製作人", "制作", "製作", "监制", "監製", "出品", "出品人",
+        "联合出品", "聯合出品", "发行", "發行", "营销推广", "營銷推廣",
+        "企划", "企劃", "统筹", "統籌", "音乐统筹", "音樂統籌", "乐队统筹", "樂隊統籌",
+        "混音", "母带", "母帶", "录音", "錄音", "后期", "後期", "和声", "和聲",
+        "吉他", "贝斯", "貝斯", "鼓", "键盘", "鍵盤", "弦乐", "弦樂", "配唱",
+        "封面", "特别鸣谢", "特別鳴謝", "鸣谢", "鳴謝", "歌词", "歌詞",
+        "op", "sp", "producer", "composer", "lyricist", "arranger",
+        "mixing", "mixed by", "mastering", "mastered by", "produced by",
+        "written by", "composed by", "arranged by", "lyrics by", "recorded by",
+    ]
+
+    static func isCredit(_ text: String) -> Bool {
+        guard let colon = text.firstIndex(where: { $0 == "：" || $0 == ":" }) else {
+            return false
+        }
+        let head = String(text[text.startIndex..<colon])
+            .trimmingCharacters(in: .whitespaces)
+        // Long heads are sentences. The longest role above is four characters
+        // in Chinese and "mastered by" in English.
+        guard head.count <= 12, !head.isEmpty else { return false }
+        return creditRoles.contains(head.lowercased())
+    }
+
+    /// Fixed duet markers, in both scripts. A performer's name is recognised
+    /// only when the track itself names them.
+    private static let singerMarkers: Set<String> = [
+        "合", "男", "女", "齐", "齊", "对唱", "對唱", "合唱",
+    ]
+
+    static func singerMarker(_ text: String, names: Set<String>) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return nil }
+        if singerMarkers.contains(trimmed) { return trimmed }
+        return names.contains(trimmed) ? trimmed : nil
     }
 
     /// `mm:ss.xx`, `mm:ss.xxx` or `mm:ss`, or nil when it is not a time at all.

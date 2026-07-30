@@ -2340,9 +2340,6 @@ final class RouterModel: ScriptTarget {
     /// times a second. `adopt` only runs when the player's track identity
     /// changes, so one song is one request and one cache file.
     private func startLyricsLookup(for track: NowPlaying.Track) {
-        let query = OnlineLyrics.Query(
-            title: track.title, artist: track.artist, album: track.album,
-            duration: track.duration)
         let identity = Self.lyricsIdentity(for: track)
         let client = OnlineLyrics(
             musixmatch: OnlineLyrics.musixmatchAdapter(
@@ -2350,6 +2347,24 @@ final class RouterModel: ScriptTarget {
         if plainLyrics == nil { lyricsLookupStatus = .loading }
         lyricsLookupTask = Task { [weak self] in
             do {
+                // The cast, before the words are asked for. A duet file marks
+                // who sings by putting a performer's name on a line of its own,
+                // and a name is only taken for a marker when the track names
+                // that performer — so with Spotify's one-name Apple Event
+                // answer, 「黃霄雲」 was drawn on the stage as a line to sing.
+                var query = OnlineLyrics.Query(
+                    title: track.title, artist: track.artist, album: track.album,
+                    duration: track.duration, performers: [track.artist])
+                if let cast = await SpotifyCatalogue.performers(
+                    forIdentity: track.identity), cast.count > 1
+                {
+                    query.performers = cast
+                    if let self, self.nowPlaying?.identity == track.identity {
+                        self.nowPlaying?.performers = cast
+                        self.nowPlaying?.artist = cast.joined(separator: " / ")
+                    }
+                }
+                try Task.checkCancellation()
                 // OnlineLyrics is nonisolated, so its network and decoding work
                 // runs on the generic executor. Keeping it as this task's child
                 // also means changing songs cancels every configured provider;
@@ -3952,12 +3967,43 @@ final class RouterModel: ScriptTarget {
 
     /// Split out for the reason `isolationMessage` is: the failure cannot be
     /// produced on demand, and the mapping is the testable part of it.
+    /// Each sentence names the thing the user could change. "It could not be
+    /// built" was true of six unrelated refusals and actionable for none of
+    /// them: the one that actually happens here is a Bluetooth headset chosen
+    /// as the speaker, and the answer to that is to pick another speaker —
+    /// which nobody could work out from the old wording.
     static func echoMessage(_ reason: String) -> String {
         switch reason {
         case RoutingEngine.EchoFailure.notBuilt:
             loc("The echo canceller could not be built.")
         case RoutingEngine.EchoFailure.wouldNotStart:
             loc("The echo canceller would not start.")
+        case RoutingEngine.EchoFailure.microphoneMissing:
+            loc("The microphone the canceller needs is no longer there.")
+        case RoutingEngine.EchoFailure.speakerMissing:
+            loc("The speaker to cancel against is no longer there.")
+        case RoutingEngine.EchoFailure.microphoneCannotPresentRouterRate:
+            loc(
+                "This microphone cannot run at the route's sample rate, so it cannot be echo-cancelled."
+            )
+        case RoutingEngine.EchoFailure.noSharedSampleRate:
+            loc("The microphone and the speaker share no sample rate.")
+        case RoutingEngine.EchoFailure.sampleRateNotApplied:
+            loc("The devices would not take the sample rate the canceller needs.")
+        case RoutingEngine.EchoFailure.aggregateNotCreated:
+            loc(
+                "macOS refused to hold this microphone and speaker together. Try another speaker."
+            )
+        case RoutingEngine.EchoFailure.unitNotInstantiated:
+            loc("macOS did not supply its echo canceller.")
+        case RoutingEngine.EchoFailure.unitRefusedSetup:
+            loc(
+                "macOS's echo canceller refused this microphone and speaker. Try another speaker."
+            )
+        case RoutingEngine.EchoFailure.clockDiffersFromRouter:
+            loc("The canceller and the route ended up on different sample rates.")
+        case RoutingEngine.EchoFailure.ringNotAllocated:
+            loc("There was not enough memory to carry the cancelled audio.")
         default: reason
         }
     }
@@ -4135,13 +4181,29 @@ final class RouterModel: ScriptTarget {
         nowPlaying = NowPlaying.Track(
             application: "Spotify", title: "年少心動雨季", artist: "黃霄雲",
             album: "天賜的聲音", position: 82, duration: 265, isPlaying: true)
+        // Eight lines, not three, and two of them long enough to wrap. The
+        // stage draws six — two behind the current line and three ahead — so a
+        // fixture of three with the current line second could only ever fill
+        // three of those slots. Every screenshot of the KTV stage was therefore
+        // of a stage a third full, and the case that overflows it went out: a
+        // wrapped line is two rows, six of them passed the window's height, and
+        // the track column was carried down until its progress bar and the
+        // score strip were outside the frame. Reported from a 984×670 stage.
         lyrics = Lyrics(
             title: "年少心動雨季", artist: "黃霄雲", album: "天賜的聲音",
             lines: [
                 Lyrics.Line(
-                    time: 76,
+                    time: 64,
+                    text: loc("The stage keeps two lines behind the one being sung.")),
+                Lyrics.Line(
+                    time: 70,
                     text: loc(
                         "A long Chinese lyric wraps naturally instead of disappearing at the edge."
+                    )),
+                Lyrics.Line(
+                    time: 76,
+                    text: loc(
+                        "Production credits arrive as one very long line, and that is the case which used to push the track column off the bottom of the window."
                     )),
                 Lyrics.Line(
                     time: 82,
@@ -4149,6 +4211,15 @@ final class RouterModel: ScriptTarget {
                 Lyrics.Line(
                     time: 88,
                     text: loc("The next line stays legible so the singer can prepare.")),
+                Lyrics.Line(
+                    time: 94,
+                    text: loc("Lines further ahead are dimmed, and the furthest is blurred.")),
+                Lyrics.Line(
+                    time: 100,
+                    text: loc("Beyond the third line ahead, nothing is drawn at all.")),
+                Lyrics.Line(
+                    time: 106,
+                    text: loc("The song ends here.")),
             ])
         lyricsSourceName = loc("NetEase Cloud Music")
         lyricsLookupStatus = .online
@@ -5746,10 +5817,22 @@ final class RouterModel: ScriptTarget {
         if deviceInventoryIsReady {
             // Verification constructs synchronously, but restored Bluetooth
             // endpoints still need their exact topology before a route starts.
+            //
+            // The baseline goes with it. `finishInitialDeviceRefresh` was the
+            // only place that ever supplied one, and this branch returns before
+            // reaching it — so in exactly the process that runs the flow check
+            // the watcher was handed a listener and never a baseline, and every
+            // device appearing or disappearing for the next four minutes was
+            // dropped on the floor. The decoy aggregate was never seen, and
+            // neither was a destination being destroyed underneath a route.
+            deviceWatcher?.establishBaseline(lastInventoryIDs)
             hydrateConfiguredDevicesAsynchronously()
             requestAutomaticStartIfConfigured()
             return
         }
+        // Nothing baselines the watcher on the refused-token path, and nothing
+        // needs to: with no inventory read yet there is no snapshot to hand
+        // over, and the probe baselines itself from its first read.
         guard let token = deviceRefreshGate.request() else { return }
         runInitialDeviceRefresh(token)
     }
@@ -6353,7 +6436,14 @@ final class RouterModel: ScriptTarget {
     }
 
     /// Applies an immutable device answer without asking HAL another question.
+    /// The HAL object IDs behind the published lists, for the device watcher to
+    /// compare its own reads against. Kept here rather than derived from
+    /// `inputDevices + outputDevices`, which drops any endpoint that presents
+    /// neither side.
+    @ObservationIgnored private var lastInventoryIDs: Set<AudioObjectID> = []
+
     private func applyDeviceInventory(_ snapshot: DeviceRefreshSnapshot) {
+        lastInventoryIDs = snapshot.inventoryIDs
         // This snapshot already contains full details for every configured UID.
         // A direct hydration queued from an older picker state must not replace
         // any member of it after publication.

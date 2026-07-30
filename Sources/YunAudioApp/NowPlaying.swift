@@ -23,6 +23,13 @@ enum NowPlaying {
         var title: String
         var artist: String
         var album: String
+        /// Everyone credited, when a fuller list than `artist` was obtained.
+        ///
+        /// Spotify's scripting dictionary answers `artist of current track` with
+        /// one name however many performed, so `artist` alone is not the cast.
+        /// This also decides which names a duet lyric's markers are matched
+        /// against — see `SpotifyCatalogue`.
+        var performers: [String] = []
         /// Seconds into the track, at the moment it was read.
         var position: Double
         var duration: Double
