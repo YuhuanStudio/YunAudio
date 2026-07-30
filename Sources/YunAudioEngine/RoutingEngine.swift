@@ -1810,18 +1810,17 @@ public final class RoutingEngine: @unchecked Sendable {
     ) throws -> [URL] {
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard isRunning, let graph, let device = aggregate?.device else {
+        guard isRunning, let graph, aggregate?.device != nil else {
             throw RecorderError.couldNotAllocate
         }
         stopStemRecordingLocked()
 
-        let rate = device.currentSampleRate ?? 48000
         var urls: [URL] = []
         for (stem, routes) in groups.enumerated() {
             let channels = min(RTGraph.maxStemChannels, max(1, routes.count))
             let recorder = try Recorder(
                 directory: directory, format: format, channels: channels,
-                sampleRate: rate, timestamp: now,
+                sampleRate: graphSampleRate, timestamp: now,
                 name: stem < names.count ? names[stem] : "Source \(stem + 1)")
             stemRecorders.append(recorder)
             urls.append(recorder.url)
