@@ -262,6 +262,7 @@ struct PreferencesWindow: View {
                             })
                     )
                     .toggleStyle(YunToggleStyle())
+                    .disabled(model.isDebugBuild)
                     Text(
                         loc(
                             "Off, this is a menu bar accessory: no Dock icon and no application menu. On, it is an ordinary application and ⌘-tab reaches it."
@@ -965,7 +966,16 @@ struct PreferencesWindow: View {
                     .foregroundStyle(Yun.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                    if model.watchesIOAllocations {
+                    if model.isDebugBuild {
+                        Text(
+                            loc(
+                                "This measurement is available only in an optimised build; debug checks allocate on every audio cycle."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    } else if model.watchesIOAllocations {
                         YunDivider()
                         YunDetailRow(
                             loc("IO thread allocations"),
@@ -979,17 +989,6 @@ struct PreferencesWindow: View {
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                        if model.isDebugBuild {
-                            Text(
-                                loc(
-                                    "This is an unoptimised build, so the count is Swift's own bounds and exclusivity checking and says nothing about the code that ships."
-                                )
-                            )
-                            .font(Yun.Text.caption)
-                            .foregroundStyle(Yun.Palette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
-                        }
                     }
                 }
             }

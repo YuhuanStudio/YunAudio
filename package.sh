@@ -71,6 +71,15 @@ cp -R build/YunAudio.app "${APP}"
 
 codesign --force "${SIGN_ARGS[@]}" \
 	--entitlements build/yunaudio.entitlements "${APP}"
+codesign --verify --deep --strict "${APP}"
+
+if [[ -n "${IDENTITY}" ]]; then
+	echo "Shazam catalogue: unverified."
+	echo "A Developer ID signature is not proof that the bundle's App ID has the"
+	echo "ShazamKit App Service enabled; run the recognition flow before release."
+else
+	echo "Shazam catalogue: unavailable in this ad-hoc package."
+fi
 
 # The driver travels alongside rather than inside the app: it has to be copied
 # into /Library/Audio/Plug-Ins/HAL by an administrator, so burying it in the
@@ -149,6 +158,26 @@ administrator password and restarts coreaudiod, so all audio on the
 machine stops for a moment.
 
 To remove it, run "Uninstall Audio Device.command". The same applies.
+
+---
+
+QQ Music and NetEase song identification
+
+YunAudio can capture these applications with its existing System Audio
+Recording permission, without Accessibility or a private API. Captured audio
+alone does not contain the song title, though. The public Shazam catalogue
+rejects an ad-hoc build, so one cannot automatically identify the current
+QQ Music or NetEase recording.
+
+ShazamKit is an App ID service on macOS, not an entitlement that can be added
+to an unsigned build. A release signed with Developer ID must use the same
+explicit App ID with ShazamKit enabled in Certificates, Identifiers & Profiles,
+and its catalogue lookup must still be verified at runtime. A signature by
+itself is not evidence that recognition works.
+
+Without that service, Music and Spotify metadata, hand-selected .lrc files and
+the independent lyric databases still work. The application says when the
+catalogue is unavailable rather than silently retrying.
 NOTE
 
 ln -s /Applications "${STAGING}/Applications"

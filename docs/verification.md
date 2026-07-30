@@ -1,13 +1,13 @@
-# Verifying
+# Verification
 
-The gate and every probe underneath it, at length. The README has the ladder;
-this is what each rung actually does and what it cannot tell you.
+The acceptance gate and every probe beneath it. The README lists the steps; this
+page documents what each one establishes, and what it cannot.
 
 ← [README](../README.md) · [MEASUREMENT.md](../MEASUREMENT.md)
 
 English · [繁體中文](zh-Hant/verification.md) · [简体中文](zh-Hans/verification.md)
 
-## Verifying
+## The gate
 
 One command runs everything, and says what it did **not** run:
 
@@ -27,7 +27,7 @@ the only check touching real hardware is worse than a red one.
 Then look at `build/screenshots`. The gate can tell you a photograph was taken;
 it cannot tell you the layout in it is wrong.
 
-The individual tools, when you want one of them on its own:
+### Individual probes
 
 ```bash
 swift run -c release yunaudio-cli                     # probe every device
@@ -92,8 +92,9 @@ its own. There is nothing to tap.
 Run the audio tests against a release build. Debug builds report hundreds of
 allocations per IO cycle that come from Swift's own checking machinery.
 
-The interface is verified four ways, because each is blind to what the others
-catch:
+## Interface verification
+
+Four independent checks, each blind to what the others detect.
 
 ```bash
 ./App/build-app.sh

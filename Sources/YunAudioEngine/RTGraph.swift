@@ -157,6 +157,12 @@ struct RTGraph {
     /// Non-zero when the isolation slot holds a multi-stage chain rather than
     /// the single isolation unit. They render through different types.
     var isolationIsChain: Int32
+    /// Old and new processing paths during a live effect handover.
+    ///
+    /// The block remains installed after its fade completes, cheaply forwarding
+    /// the new path, until the next control-thread graph swap retires it. That
+    /// keeps every allocation and release off the IO thread.
+    var effectTransition: UnsafeMutablePointer<RTEffectTransition>?
 
     /// Ring the recorder drains, or null when nothing is recording. Fed with
     /// the destination bus after all processing, so what lands on disk is what
@@ -604,6 +610,7 @@ struct RTGraph {
                 ownsClockStorage: sharedClock == nil ? 1 : 0,
                 voiceIsolation: nil,
                 isolationIsChain: 0,
+                effectTransition: nil,
                 recordRing: nil,
                 recordChannels: 0,
                 recordPaused: 0,
@@ -800,17 +807,11 @@ struct RTGraph {
 
     /// Carries one route's alignment delay line across a graph rebuild.
     ///
-    /// Only when the delay is the same length, and that is the decision worth
-    /// recording. A line is a ring whose modulus *is* the delay, so reading it
-    /// back at a different length hands the mix its own recent past in the
-    /// wrong order — a burst of scrambled audio, which is worse than a gap.
-    ///
-    /// So: the length is unchanged (a cable moved, a fader touched, a plugin
-    /// swapped) and the contents come across, and nothing is heard. The length
-    /// changed, which only happens when somebody switches a processing stage on
-    /// or off, and the new line starts empty — a gap of at most the new delay,
-    /// at the one moment when the chain is being rebuilt underneath and the
-    /// signal is already discontinuous.
+    /// The line always uses `maximumAlignmentFrames` as its modulus, even while
+    /// today's delay is zero. Its history therefore remains ordered when a new
+    /// effect asks for a different delay. Refusing to carry it on that exact
+    /// rebuild would fill a backing track with silence while the new line
+    /// warmed up — the same discontinuity the effect handover exists to avoid.
     ///
     /// - Returns: True when the line was carried.
     @discardableResult
@@ -818,8 +819,7 @@ struct RTGraph {
         from previous: UnsafeMutablePointer<RTGraph>, slot old: Int,
         to next: UnsafeMutablePointer<RTGraph>, slot new: Int
     ) -> Bool {
-        guard previous.pointee.alignmentFrames == next.pointee.alignmentFrames,
-            old >= 0, old < Int(previous.pointee.routeCount),
+        guard old >= 0, old < Int(previous.pointee.routeCount),
             new >= 0, new < Int(next.pointee.routeCount)
         else { return false }
         let from = previous.pointee.alignmentLines + old * maximumAlignmentFrames
@@ -897,13 +897,17 @@ func yunAudioIOProc(
             // they do not carry one.
             switch command.kind {
             case Int32(kYunRTCommandSetInputGain.rawValue):
-                graph.pointee.inputGain = command.value
+                if command.value.isFinite {
+                    graph.pointee.inputGain = command.value
+                }
                 continue
             case Int32(kYunRTCommandSetInputMute.rawValue):
                 graph.pointee.inputMuted = command.value != 0 ? 1 : 0
                 continue
             case Int32(kYunRTCommandSetOutputGain.rawValue):
-                graph.pointee.outputGain = command.value
+                if command.value.isFinite {
+                    graph.pointee.outputGain = command.value
+                }
                 continue
             case Int32(kYunRTCommandSetOutputMute.rawValue):
                 graph.pointee.outputMuted = command.value != 0 ? 1 : 0
@@ -915,7 +919,9 @@ func yunAudioIOProc(
             guard index >= 0, index < Int(graph.pointee.routeCount) else { continue }
             switch command.kind {
             case Int32(kYunRTCommandSetGain.rawValue):
-                graph.pointee.routes[index].gain = command.value
+                if command.value.isFinite {
+                    graph.pointee.routes[index].gain = command.value
+                }
             case Int32(kYunRTCommandSetMute.rawValue):
                 graph.pointee.routes[index].muted = command.value != 0 ? 1 : 0
             default:
@@ -964,14 +970,103 @@ func yunAudioIOProc(
     }
     let cancelledFrames = Int(graph.pointee.cancelledFrames)
 
-    // Voice isolation runs once per cycle, ahead of routing, so several routes
-    // can share one pass over the model rather than each paying for it.
+    // Processing runs once per cycle, ahead of routing, so several routes can
+    // share one pass rather than each paying for it.
     var isolatedFrames = 0
-    if let isolation = graph.pointee.voiceIsolation, isolation.pointee.enabled != 0 {
+    if let handover = graph.pointee.effectTransition {
+        // Both paths see one gathered input. Apart from halving the de-striding
+        // work, that makes a crossfade compare the same source frame on both
+        // sides rather than two reads that could move independently.
+        let fromCancelled =
+            handover.pointee.sourceIsCancelled != 0 && cancelledFrames > 0
+        let sourceIndex = Int(handover.pointee.sourceBuffer)
+        if fromCancelled || (sourceIndex < input.count && input[sourceIndex].mData != nil) {
+            let stride = fromCancelled ? 1 : Int(input[sourceIndex].mNumberChannels)
+            let channel = fromCancelled ? 0 : Int(handover.pointee.sourceChannel)
+            if stride > 0, channel < stride {
+                let available =
+                    fromCancelled
+                    ? cancelledFrames
+                    : Int(input[sourceIndex].mDataByteSize)
+                        / (MemoryLayout<Float>.size * stride)
+                let frames = min(available, Int(handover.pointee.maximumFrames))
+                let source =
+                    fromCancelled
+                    ? UnsafePointer(graph.pointee.cancelledBuffer)
+                    : UnsafePointer(
+                        input[sourceIndex].mData!.assumingMemoryBound(to: Float.self))
+                let raw = handover.pointee.rawBuffer
+                for frame in 0..<frames {
+                    raw[frame] =
+                        sanitisedAudioSample(source[frame * stride + channel])
+                }
+
+                let controller = Unmanaged<EffectTransition>
+                    .fromOpaque(handover.pointee.controller).takeUnretainedValue()
+                var oldSource = UnsafePointer(raw)
+                if !controller.isComplete, let old = handover.pointee.oldStage,
+                    old.pointee.enabled != 0
+                {
+                    old.pointee.inputBuffer.update(from: raw, count: frames)
+                    let rendered =
+                        handover.pointee.oldIsChain != 0
+                        ? Unmanaged<EffectChain>
+                            .fromOpaque(old.pointee.unit).takeUnretainedValue()
+                            .render(
+                                frames: frames,
+                                sampleTime: inputTime.pointee.mSampleTime)
+                        : Unmanaged<VoiceIsolationUnit>
+                            .fromOpaque(old.pointee.unit).takeUnretainedValue()
+                            .render(
+                                frames: frames,
+                                sampleTime: inputTime.pointee.mSampleTime)
+                    if rendered {
+                        oldSource = UnsafePointer(old.pointee.outputBuffer)
+                    } else {
+                        old.pointee.renderFailures.pointee &+= 1
+                    }
+                }
+
+                var newSource = UnsafePointer(raw)
+                if let new = handover.pointee.newStage, new.pointee.enabled != 0 {
+                    new.pointee.inputBuffer.update(from: raw, count: frames)
+                    let rendered =
+                        handover.pointee.newIsChain != 0
+                        ? Unmanaged<EffectChain>
+                            .fromOpaque(new.pointee.unit).takeUnretainedValue()
+                            .render(
+                                frames: frames,
+                                sampleTime: inputTime.pointee.mSampleTime)
+                        : Unmanaged<VoiceIsolationUnit>
+                            .fromOpaque(new.pointee.unit).takeUnretainedValue()
+                            .render(
+                                frames: frames,
+                                sampleTime: inputTime.pointee.mSampleTime)
+                    if rendered {
+                        newSource = UnsafePointer(new.pointee.outputBuffer)
+                    } else {
+                        new.pointee.renderFailures.pointee &+= 1
+                    }
+                }
+
+                if frames > 0 {
+                    handover.pointee.cycleTimelineStart =
+                        Int64(controller.processedFrames)
+                    controller.process(
+                        old: oldSource, new: newSource,
+                        output: handover.pointee.outputBuffer, frames: frames)
+                    isolatedFrames = frames
+                }
+            }
+        }
+    } else if let isolation = graph.pointee.voiceIsolation,
+        isolation.pointee.enabled != 0
+    {
         // With the canceller in front, the model has to see what it produced;
-        // reading the aggregate's input would process the uncancelled signal and
-        // then throw it away.
-        let fromCancelled = isolation.pointee.sourceIsCancelled != 0 && cancelledFrames > 0
+        // reading the aggregate's input would process the uncancelled signal
+        // and then throw it away.
+        let fromCancelled =
+            isolation.pointee.sourceIsCancelled != 0 && cancelledFrames > 0
         let sourceIndex = Int(isolation.pointee.sourceBuffer)
         if fromCancelled || (sourceIndex < input.count && input[sourceIndex].mData != nil) {
             let stride = fromCancelled ? 1 : Int(input[sourceIndex].mNumberChannels)
@@ -990,18 +1085,21 @@ func yunAudioIOProc(
                         input[sourceIndex].mData!.assumingMemoryBound(to: Float.self))
                 let staging = isolation.pointee.inputBuffer
                 for frame in 0..<frames {
-                    staging[frame] = source[frame * stride + channel]
+                    staging[frame] =
+                        sanitisedAudioSample(source[frame * stride + channel])
                 }
-                let rendered: Bool
-                if graph.pointee.isolationIsChain != 0 {
-                    rendered = Unmanaged<EffectChain>
+                let rendered =
+                    graph.pointee.isolationIsChain != 0
+                    ? Unmanaged<EffectChain>
                         .fromOpaque(isolation.pointee.unit).takeUnretainedValue()
-                        .render(frames: frames, sampleTime: inputTime.pointee.mSampleTime)
-                } else {
-                    rendered = Unmanaged<VoiceIsolationUnit>
+                        .render(
+                            frames: frames,
+                            sampleTime: inputTime.pointee.mSampleTime)
+                    : Unmanaged<VoiceIsolationUnit>
                         .fromOpaque(isolation.pointee.unit).takeUnretainedValue()
-                        .render(frames: frames, sampleTime: inputTime.pointee.mSampleTime)
-                }
+                        .render(
+                            frames: frames,
+                            sampleTime: inputTime.pointee.mSampleTime)
                 if rendered {
                     isolatedFrames = frames
                 } else {
@@ -1093,7 +1191,11 @@ func yunAudioIOProc(
 
         var source: UnsafePointer<Float>
         if useIsolated {
-            source = UnsafePointer(graph.pointee.voiceIsolation!.pointee.outputBuffer)
+            if let handover = graph.pointee.effectTransition {
+                source = UnsafePointer(handover.pointee.outputBuffer)
+            } else {
+                source = UnsafePointer(graph.pointee.voiceIsolation!.pointee.outputBuffer)
+            }
         } else if useCancelled {
             source = UnsafePointer(graph.pointee.cancelledBuffer)
         } else {
@@ -1125,32 +1227,75 @@ func yunAudioIOProc(
         // The delay is taken before the fader, before the meters and before the
         // stems, so what a stem records and what a meter reads are both what
         // the mix will hear.
-        let alignment = Int(graph.pointee.alignmentFrames)
-        if alignment > 0, route.usesIsolatedSource == 0,
-            alignment <= RTGraph.maximumAlignmentFrames,
+        let alignment = max(
+            0,
+            min(
+                Int(graph.pointee.alignmentFrames),
+                RTGraph.maximumAlignmentFrames))
+        if route.usesIsolatedSource == 0,
             frames <= Int(graph.pointee.alignmentCapacity)
         {
-            // A ring exactly `alignment` long, read before it is written: the
-            // sample coming out is the one that went in `alignment` frames ago.
+            // A fixed-size history rather than a ring only as long as today's
+            // delay. Even at zero delay it keeps receiving the source, so a
+            // future effect toggle can read real samples from 1024 frames ago
+            // immediately instead of manufacturing 1024 frames of silence.
             let line = graph.pointee.alignmentLines + index * RTGraph.maximumAlignmentFrames
             let scratch = graph.pointee.alignmentScratch
             var position = Int(graph.pointee.alignmentPositions[index])
-            if position >= alignment { position = 0 }
+            if position >= RTGraph.maximumAlignmentFrames { position = 0 }
             var take = sourceChannel
-            for frame in 0..<frames {
-                scratch[frame] = line[position]
-                line[position] = source[take]
-                position += 1
-                if position == alignment { position = 0 }
-                take += sourceStride
+            if let handover = graph.pointee.effectTransition {
+                let controller = Unmanaged<EffectTransition>
+                    .fromOpaque(handover.pointee.controller).takeUnretainedValue()
+                let oldDelay = max(
+                    0,
+                    min(
+                        Int(handover.pointee.oldAlignmentFrames),
+                        RTGraph.maximumAlignmentFrames))
+                let newDelay = max(
+                    0,
+                    min(
+                        Int(handover.pointee.newAlignmentFrames),
+                        RTGraph.maximumAlignmentFrames))
+                let timeline = Int(handover.pointee.cycleTimelineStart)
+
+                for frame in 0..<frames {
+                    let current = sanitisedAudioSample(source[take])
+                    var oldIndex = position - oldDelay
+                    if oldIndex < 0 { oldIndex += RTGraph.maximumAlignmentFrames }
+                    var newIndex = position - newDelay
+                    if newIndex < 0 { newIndex += RTGraph.maximumAlignmentFrames }
+                    let oldSample = oldDelay == 0 ? current : line[oldIndex]
+                    let newSample = newDelay == 0 ? current : line[newIndex]
+                    scratch[frame] = controller.sample(
+                        old: oldSample, new: newSample,
+                        at: timeline + frame)
+                    line[position] = current
+                    position += 1
+                    if position == RTGraph.maximumAlignmentFrames { position = 0 }
+                    take += sourceStride
+                }
+                source = UnsafePointer(scratch)
+                sourceStride = 1
+                sourceChannel = 0
+            } else {
+                for frame in 0..<frames {
+                    let current = sanitisedAudioSample(source[take])
+                    var read = position - alignment
+                    if read < 0 { read += RTGraph.maximumAlignmentFrames }
+                    if alignment > 0 { scratch[frame] = line[read] }
+                    line[position] = current
+                    position += 1
+                    if position == RTGraph.maximumAlignmentFrames { position = 0 }
+                    take += sourceStride
+                }
+                if alignment > 0 {
+                    source = UnsafePointer(scratch)
+                    sourceStride = 1
+                    sourceChannel = 0
+                }
             }
             graph.pointee.alignmentPositions[index] = Int32(position)
-            // One scratch shared by every route, because it is consumed inside
-            // this iteration — the accumulate, the stem and the transcript all
-            // read it before the next route touches it.
-            source = UnsafePointer(scratch)
-            sourceStride = 1
-            sourceChannel = 0
         }
 
         let destination = destinationData.assumingMemoryBound(to: Float.self)
@@ -1160,7 +1305,8 @@ func yunAudioIOProc(
             route.appliesInputTrim != 0
             ? (graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain) : 1
         let duck = route.isDuckable != 0 ? duckGain : 1
-        let gain = route.muted != 0 ? 0 : route.gain * trim * duck
+        let gain = sanitisedAudioSample(
+            route.muted != 0 ? 0 : route.gain * trim * duck)
 
         var peak: Float = 0
         // Accumulated unconditionally rather than behind a branch on whether
@@ -1179,8 +1325,9 @@ func yunAudioIOProc(
         var readAt = sourceChannel
         var writeAt = destinationChannel
         for _ in 0..<frames {
-            let sample = source[readAt]
-            destination[writeAt] += sample * gain
+            let sample = sanitisedAudioSample(source[readAt])
+            let contribution = sanitisedAudioSample(sample * gain)
+            destination[writeAt] += contribution
             // Metered before gain: a meter should show what arrived, not what
             // the fader did to it. It also lets a gain-0 route act as a pure
             // probe, which is how the loopback verification works.
@@ -1207,7 +1354,8 @@ func yunAudioIOProc(
                     + stem * capacity * RTGraph.maxStemChannels
                 for frame in 0..<usable {
                     base[frame * channels + channel] =
-                        source[frame * sourceStride + sourceChannel]
+                        sanitisedAudioSample(
+                            source[frame * sourceStride + sourceChannel])
                 }
                 if Int32(usable) > graph.pointee.stemFrames {
                     graph.pointee.stemFrames = Int32(usable)
@@ -1227,7 +1375,9 @@ func yunAudioIOProc(
             let scratch = graph.pointee.transcriptScratch
             let usable = min(frames, Int(graph.pointee.transcriptCapacity))
             for frame in 0..<usable {
-                scratch[frame] = source[frame * sourceStride + sourceChannel]
+                scratch[frame] =
+                    sanitisedAudioSample(
+                        source[frame * sourceStride + sourceChannel])
             }
             _ = yun_rt_ring_write(ring, scratch, UInt32(usable))
         }
@@ -1264,7 +1414,8 @@ func yunAudioIOProc(
     // The master, over the whole output bus once everything has been mixed
     // into it. After the routes and before the recorder, so what lands on disk
     // is what the far end hears — which is the recorder's whole premise.
-    let master = graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain
+    let master = sanitisedAudioSample(
+        graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain)
     if master != 1 {
         let exempt = Int(graph.pointee.masterExemptBuffer)
         var scale = master

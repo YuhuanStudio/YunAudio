@@ -1,8 +1,8 @@
-# Razer 硬件
+# Razer 硬件控制
 
 ← [README](../../README.zh-Hans.md) · [English](../hardware.md)
 
-## Razer 硬件控制
+## 协议
 
 Seiren V3 Pro 的灯环已经实现。做到这一步靠的是在 Windows 上抓一份 Synapse 驱动设备的
 数据 —— 一边改灯光、一边每三毫秒轮询同一个 feature report —— 从里面得到的每一件事，

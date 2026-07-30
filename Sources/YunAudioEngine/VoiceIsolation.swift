@@ -200,3 +200,70 @@ struct RTVoiceIsolation {
     /// it instead of the stage silently passing audio through unprocessed.
     var renderFailures: UnsafeMutablePointer<UInt64>
 }
+
+/// Realtime-visible state for handing one processing path to another.
+///
+/// The Swift objects behind `oldStage`, `newStage` and `controller` are retained
+/// by `RoutingEngine`; this record contains only unmanaged pointers and
+/// preallocated mono buffers. It is moved between graphs using the same cycle
+/// fence as `RTVoiceIsolation`.
+struct RTEffectTransition {
+    var sourceBuffer: Int32
+    var sourceChannel: Int32
+    var sourceIsCancelled: Int32
+    var oldStage: UnsafeMutablePointer<RTVoiceIsolation>?
+    var oldIsChain: Int32
+    var newStage: UnsafeMutablePointer<RTVoiceIsolation>?
+    var newIsChain: Int32
+    var controller: UnsafeMutableRawPointer
+    var rawBuffer: UnsafeMutablePointer<Float>
+    var outputBuffer: UnsafeMutablePointer<Float>
+    var maximumFrames: Int32
+    var oldAlignmentFrames: Int32
+    var newAlignmentFrames: Int32
+    /// Timeline position at the start of this IO cycle. Published before the
+    /// route loop so every bypass path uses the same crossfade gains.
+    var cycleTimelineStart: Int64
+
+    static func allocate(
+        sourceBuffer: Int32, sourceChannel: Int32, sourceIsCancelled: Bool,
+        oldStage: UnsafeMutablePointer<RTVoiceIsolation>?, oldIsChain: Bool,
+        newStage: UnsafeMutablePointer<RTVoiceIsolation>?, newIsChain: Bool,
+        controller: EffectTransition, maximumFrames: Int,
+        oldAlignmentFrames: Int, newAlignmentFrames: Int
+    ) -> UnsafeMutablePointer<RTEffectTransition> {
+        let capacity = max(1, maximumFrames)
+        let raw = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+        raw.initialize(repeating: 0, count: capacity)
+        let output = UnsafeMutablePointer<Float>.allocate(capacity: capacity)
+        output.initialize(repeating: 0, count: capacity)
+        let block = UnsafeMutablePointer<RTEffectTransition>.allocate(capacity: 1)
+        block.initialize(
+            to: RTEffectTransition(
+                sourceBuffer: sourceBuffer,
+                sourceChannel: sourceChannel,
+                sourceIsCancelled: sourceIsCancelled ? 1 : 0,
+                oldStage: oldStage,
+                oldIsChain: oldIsChain ? 1 : 0,
+                newStage: newStage,
+                newIsChain: newIsChain ? 1 : 0,
+                controller: Unmanaged.passUnretained(controller).toOpaque(),
+                rawBuffer: raw,
+                outputBuffer: output,
+                maximumFrames: Int32(capacity),
+                oldAlignmentFrames: Int32(max(0, oldAlignmentFrames)),
+                newAlignmentFrames: Int32(max(0, newAlignmentFrames)),
+                cycleTimelineStart: 0))
+        return block
+    }
+
+    static func deallocate(_ block: UnsafeMutablePointer<RTEffectTransition>) {
+        let capacity = Int(block.pointee.maximumFrames)
+        block.pointee.rawBuffer.deinitialize(count: capacity)
+        block.pointee.rawBuffer.deallocate()
+        block.pointee.outputBuffer.deinitialize(count: capacity)
+        block.pointee.outputBuffer.deallocate()
+        block.deinitialize(count: 1)
+        block.deallocate()
+    }
+}

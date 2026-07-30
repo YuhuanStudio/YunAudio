@@ -112,10 +112,21 @@ struct MainWindow: View {
             HStack(alignment: .top, spacing: Yun.Space.lg) {
                 sources
                     .frame(width: 268)
-                mixer
-                    .frame(maxWidth: .infinity)
-                inspector
-                    .frame(width: 292)
+                if model.inspectorTab == .singing {
+                    // Singing is a workspace, not a property inspector. At
+                    // 292 points the cover, three lyric lines, pitch lane and
+                    // duet score all fought for the same narrow strip while
+                    // the patchbay kept most of the window. Give the activity
+                    // somebody selected the stage until they choose another
+                    // inspector tab.
+                    singingWorkspace
+                        .frame(maxWidth: .infinity)
+                } else {
+                    mixer
+                        .frame(maxWidth: .infinity)
+                    inspector
+                        .frame(width: 292)
+                }
             }
             .padding(.horizontal, Yun.Space.xl)
             .padding(.bottom, Yun.Space.lg)
@@ -1120,14 +1131,7 @@ struct MainWindow: View {
     private var inspector: some View {
         column {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
-                // Wrapping, because six of them do not fit across this column
-                // at the window's minimum width and the first two came out as
-                // "…" — two tabs nobody could tell apart, in a control whose
-                // whole job is telling them apart.
-                YunSegmented(
-                    selection: inspectorTab,
-                    options: Inspector.allCases.map { ($0, $0.title) },
-                    wraps: true)
+                inspectorPicker
 
                 switch model.inspectorTab {
                 case .sound: soundTab
@@ -1137,6 +1141,26 @@ struct MainWindow: View {
                 case .scripting: scriptingTab
                 case .hardware: hardwareTab
                 }
+            }
+        }
+    }
+
+    private var inspectorPicker: some View {
+        // Wrapping, because six of them do not fit across the ordinary
+        // inspector column at the window's minimum width. The expanded singing
+        // workspace uses the same control, so leaving the stage never depends
+        // on a hidden keyboard shortcut.
+        YunSegmented(
+            selection: inspectorTab,
+            options: Inspector.allCases.map { ($0, $0.title) },
+            wraps: true)
+    }
+
+    private var singingWorkspace: some View {
+        column {
+            VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                inspectorPicker
+                singingTab
             }
         }
     }

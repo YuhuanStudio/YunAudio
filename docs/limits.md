@@ -1,10 +1,10 @@
-# Limits, and what does not work
+# Limitations
 
 ← [README](../README.md)
 
 English · [繁體中文](zh-Hant/limits.md) · [简体中文](zh-Hans/limits.md)
 
-## What was tried and does not work
+## Rejected approaches
 
 **`AUAudioMix`.** macOS 26 ships a graded speech/ambience separator — the
 tunable successor to `AUSoundIsolation`'s on-or-off, with a Studio style that is
@@ -29,7 +29,7 @@ handful of frames is a size where launch and synchronisation cost more than the
 arithmetic. vDSP is what Apple wrote for it. MLX earns its place when there is a
 trained model to run, which is a different feature with a different build.
 
-## Known limits
+## Current limitations
 
 - The driver is ad-hoc signed. Distribution needs a Developer ID identity and
   notarisation.

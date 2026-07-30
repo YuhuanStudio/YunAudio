@@ -81,8 +81,8 @@ struct RoutingCanvas: View {
 
     /// Width of each port column. The cables are anchored against it, so it is
     /// a constant rather than a layout result.
-    private static let columnWidth: CGFloat = 132
-    private static let dotRadius: CGFloat = 4.5
+    fileprivate static let columnWidth: CGFloat = 132
+    fileprivate static let dotRadius: CGFloat = 4.5
 
     private var patchbay: some View {
         // A fixed row pitch is what lets the cables be drawn from arithmetic
@@ -200,71 +200,21 @@ struct RoutingCanvas: View {
     /// Draws the cables. Positions come from the same arithmetic the columns
     /// use, so the two cannot drift apart.
     private func cables(in size: CGSize, pitch: CGFloat) -> some View {
-        Canvas { context, _ in
-            for route in model.activeRoutes {
-                guard let start = position(of: route.source, in: sources, pitch: pitch),
-                    let end = position(of: route.destination, in: destinations, pitch: pitch)
-                else { continue }
-
-                let from = CGPoint(x: Self.columnWidth - Self.dotRadius, y: start)
-                let to = CGPoint(x: size.width - Self.columnWidth + Self.dotRadius, y: end)
-                var path = Path()
-                path.move(to: from)
-                // A flat S rather than a straight line: parallel diagonals of
-                // different lengths are hard to follow, curves are not.
-                path.addCurve(
-                    to: to,
-                    control1: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: from.y),
-                    control2: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: to.y))
-
-                // Red rather than merely brighter: hovering a destination is
-                // one click away from pulling these out, and the colour should
-                // say which way that click goes.
-                let isHighlighted =
-                    hoveredPort == route.source || hoveredPort == route.destination
-                let willBeRemoved = hoveredPort == route.destination
-
-                // The cable carries its own level. A patchbay whose cables all
-                // look the same cannot answer the question anybody actually has
-                // in front of it — which of these is carrying anything — and
-                // the meters that could are in a different card.
-                let level = model.level(of: route)
-                let lit = min(1, Double(level) * 4)
-
-                context.stroke(
-                    path,
-                    with: .color(
-                        willBeRemoved
-                            ? Yun.Palette.danger
-                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.35)),
-                    lineWidth: isHighlighted ? 2 : 1.5)
-
-                if lit > 0.02 && !willBeRemoved {
-                    // Drawn over the top rather than instead: the quiet line
-                    // stays as the route, and this is the signal on it.
-                    context.stroke(
-                        path,
-                        with: .color(Yun.Palette.success.opacity(0.35 + 0.65 * lit)),
-                        lineWidth: 1.5 + 2 * lit)
-                }
-            }
-        }
-    }
-
-    private func position(
-        of reference: ChannelRef, in groups: [PortGroup], pitch: CGFloat
-    ) -> CGFloat? {
-        var row = 0
-        for group in groups {
-            row += 1  // the device name
-            for channel in group.channels {
-                if group.uid == reference.deviceUID && channel == reference.channel {
-                    return CGFloat(row) * pitch + pitch / 2
-                }
-                row += 1
-            }
-        }
-        return nil
+        // The topology invalidates this parent, while the twenty-hertz levels
+        // invalidate only `LiveCables`. Building both maps here therefore pays
+        // once per topology change instead of scanning every visible port for
+        // every cable on every meter frame.
+        let routes = model.activeRoutes
+        let sourcePositions = RoutingCanvasLayout.positions(for: sources, pitch: pitch)
+        let destinationPositions = RoutingCanvasLayout.positions(
+            for: destinations, pitch: pitch)
+        return LiveCables(
+            model: model,
+            routes: routes,
+            sourcePositions: sourcePositions,
+            destinationPositions: destinationPositions,
+            hoveredPort: hoveredPort,
+            size: size)
     }
 
     private func tap(_ reference: ChannelRef, isSource: Bool) {
@@ -293,6 +243,104 @@ struct RoutingCanvas: View {
             model.connect(source: source, destination: reference)
         }
         pendingSource = nil
+    }
+}
+
+/// The observation leaf that moves at meter cadence.
+///
+/// Route topology and port geometry belong to the parent and arrive as value
+/// snapshots. Only levels and mute state are read here, so a peak update cannot
+/// re-evaluate every label, button and connection test in the patchbay.
+private struct LiveCables: View {
+    @Bindable var model: RouterModel
+    let routes: [Route]
+    let sourcePositions: [ChannelRef: CGFloat]
+    let destinationPositions: [ChannelRef: CGFloat]
+    let hoveredPort: ChannelRef?
+    let size: CGSize
+
+    var body: some View {
+        let _ = BodyCount.tick("LiveCables")
+        let routeLevels = model.routeLevels
+        Canvas { context, _ in
+            for (index, route) in routes.enumerated() {
+                guard let start = sourcePositions[route.source],
+                    let end = destinationPositions[route.destination]
+                else { continue }
+
+                let from = CGPoint(
+                    x: RoutingCanvas.columnWidth - RoutingCanvas.dotRadius,
+                    y: start)
+                let to = CGPoint(
+                    x: size.width - RoutingCanvas.columnWidth + RoutingCanvas.dotRadius,
+                    y: end)
+                var path = Path()
+                path.move(to: from)
+                // A flat S rather than a straight line: parallel diagonals of
+                // different lengths are hard to follow, curves are not.
+                path.addCurve(
+                    to: to,
+                    control1: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: from.y),
+                    control2: CGPoint(x: from.x + (to.x - from.x) * 0.5, y: to.y))
+
+                // Red rather than merely brighter: hovering a destination is
+                // one click away from pulling these out, and the colour should
+                // say which way that click goes.
+                let isHighlighted =
+                    hoveredPort == route.source || hoveredPort == route.destination
+                let willBeRemoved = hoveredPort == route.destination
+
+                // The cable carries its own level. A patchbay whose cables all
+                // look the same cannot answer the question anybody actually has
+                // in front of it — which of these is carrying anything — and
+                // the meters that could are in a different card.
+                let level = RoutingCanvasLayout.level(
+                    at: index,
+                    levels: routeLevels,
+                    isSilenced: model.isSilenced(index))
+                let lit = min(1, Double(level) * 4)
+
+                context.stroke(
+                    path,
+                    with: .color(
+                        willBeRemoved
+                            ? Yun.Palette.danger
+                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.35)),
+                    lineWidth: isHighlighted ? 2 : 1.5)
+
+                if lit > 0.02 && !willBeRemoved {
+                    // Drawn over the top rather than instead: the quiet line
+                    // stays as the route, and this is the signal on it.
+                    context.stroke(
+                        path,
+                        with: .color(Yun.Palette.success.opacity(0.35 + 0.65 * lit)),
+                        lineWidth: 1.5 + 2 * lit)
+                }
+            }
+        }
+    }
+}
+
+/// Pure indexing shared by the live canvas and its performance tests.
+enum RoutingCanvasLayout {
+    static func positions(for groups: [PortGroup], pitch: CGFloat) -> [ChannelRef: CGFloat] {
+        let channelCount = groups.reduce(0) { $0 + $1.channels.count }
+        var positions: [ChannelRef: CGFloat] = .init(minimumCapacity: channelCount)
+        var row = 0
+        for group in groups {
+            row += 1  // the device name
+            for channel in group.channels {
+                positions[ChannelRef(deviceUID: group.uid, channel: channel)] =
+                    CGFloat(row) * pitch + pitch / 2
+                row += 1
+            }
+        }
+        return positions
+    }
+
+    static func level(at index: Int, levels: [Float], isSilenced: Bool) -> Float {
+        guard !isSilenced, index < levels.count else { return 0 }
+        return levels[index]
     }
 }
 

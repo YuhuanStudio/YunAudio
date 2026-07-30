@@ -30,6 +30,8 @@ enum NowPlaying {
         /// Words exposed by the player itself. Music publishes this property;
         /// Spotify's scripting dictionary does not.
         var nativeLyrics: String? = nil
+        /// Album artwork exposed by the player or recognition catalogue.
+        var artworkURL: URL? = nil
         /// `id of current track`, so a change of song is noticed without asking
         /// what the song is. Empty when the player would not say.
         var identity: String = ""
@@ -175,7 +177,8 @@ enum NowPlaying {
             var track: Track?
             var failure = query.failure
             if let position,
-                identity == nil || (!position.identity.isEmpty && position.identity != identity)
+                needsTrackRead(
+                    knownIdentity: identity, receivedIdentity: position.identity)
             {
                 let query = readTrack(name: position.application)
                 track = query.track
@@ -184,6 +187,18 @@ enum NowPlaying {
             let carried = track
             Task { @MainActor in completion(position, carried, failure, middle) }
         }
+    }
+
+    /// Whether the cheap player reply proves that cached metadata is current.
+    ///
+    /// An empty identifier proves nothing. Treating empty as unchanged left
+    /// metadata frozen forever for a stream whose player omitted `id`, even
+    /// though `Track.identity` explicitly promises the metadata fallback.
+    nonisolated static func needsTrackRead(
+        knownIdentity: String?, receivedIdentity: String
+    ) -> Bool {
+        guard let knownIdentity, !receivedIdentity.isEmpty else { return true }
+        return receivedIdentity != knownIdentity
     }
 
     nonisolated static func position(preferring application: String?) -> Position? {
@@ -331,6 +346,17 @@ enum NowPlaying {
             : """
             set playerLyricsField to ""
             """
+        let artworkScript =
+            name == "Spotify"
+            ? """
+            set playerArtworkField to ""
+            try
+                set playerArtworkField to (artwork url of theTrack) as text
+            end try
+            """
+            : """
+            set playerArtworkField to ""
+            """
         let source = """
             tell application "\(name)"
                 if it is running then
@@ -338,10 +364,12 @@ enum NowPlaying {
                     if playerStatus is "playing" or playerStatus is "paused" then
                         set theTrack to current track
                         \(nativeLyricsScript)
+                        \(artworkScript)
                         return (name of theTrack) & "\u{1F}" & (artist of theTrack) \
             & "\u{1F}" & (album of theTrack) & "\u{1F}" & (player position as text) \
             & "\u{1F}" & ((duration of theTrack) as text) & "\u{1F}" & playerStatus \
-            & "\u{1F}" & ((id of theTrack) as text) & "\u{1F}" & playerLyricsField
+            & "\u{1F}" & ((id of theTrack) as text) & "\u{1F}" & playerLyricsField \
+            & "\u{1F}" & playerArtworkField
                     end if
                 end if
             end tell
@@ -351,31 +379,44 @@ enum NowPlaying {
         guard let text = reply.text else {
             return TrackQuery(track: nil, failure: reply.failure)
         }
-
-        let fields = text.components(separatedBy: "\u{1F}")
-        guard fields.count == 8 else {
+        guard let track = parseTrackReply(text, application: name) else {
             return TrackQuery(
                 track: nil, failure: .failed(application: name, code: 0))
         }
+        return TrackQuery(track: track, failure: nil)
+    }
+
+    /// Decodes the delimiter-safe reply independently of Apple Events.
+    ///
+    /// Keeping this pure is what lets a Spotify reply with artwork and a Music
+    /// reply with an empty final field be asserted without launching either
+    /// player or presenting an Automation prompt in the test process.
+    nonisolated static func parseTrackReply(
+        _ text: String, application: String
+    ) -> Track? {
+        let fields = text.components(separatedBy: "\u{1F}")
+        guard fields.count == 9 else { return nil }
         // Spotify reports duration in milliseconds and Music in seconds —
         // measured, not assumed: Spotify answered 242660 for a four-minute
-        // track. The tell is the magnitude, because no song is five hours long.
+        // track. Use the protocol we asked rather than guessing by magnitude:
+        // a three-second Spotify clip is 3000 and the old heuristic called it
+        // a fifty-minute song.
         var duration = Double(fields[4]) ?? 0
-        if duration > 3600 * 5 { duration /= 1000 }
+        if application == "Spotify" { duration /= 1000 }
         let nativeLyrics =
             fields[7].trimmingCharacters(in: .whitespacesAndNewlines)
-        return TrackQuery(
-            track: Track(
-                application: name,
-                title: fields[0],
-                artist: fields[1],
-                album: fields[2],
-                position: Double(fields[3]) ?? 0,
-                duration: duration,
-                isPlaying: fields[5] == "playing",
-                nativeLyrics: nativeLyrics.isEmpty ? nil : nativeLyrics,
-                identity: fields[6]),
-            failure: nil)
+        let artwork = fields[8].trimmingCharacters(in: .whitespacesAndNewlines)
+        return Track(
+            application: application,
+            title: fields[0],
+            artist: fields[1],
+            album: fields[2],
+            position: Double(fields[3]) ?? 0,
+            duration: duration,
+            isPlaying: fields[5] == "playing",
+            nativeLyrics: nativeLyrics.isEmpty ? nil : nativeLyrics,
+            artworkURL: artwork.isEmpty ? nil : URL(string: artwork),
+            identity: fields[6])
     }
 
     /// True when either player is installed at all, so the interface can say

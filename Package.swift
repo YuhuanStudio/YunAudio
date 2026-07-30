@@ -46,6 +46,10 @@ let package = Package(
         // exists to prevent.
         .target(name: "YunAudioControl"),
 
+        // Values shared by player adapters without pulling AppKit, networking
+        // or audio into the boundary that accepts untrusted page metadata.
+        .target(name: "YunAudioMedia"),
+
         // A client of somebody else's control protocol, which is why it is not
         // in `YunAudioControl`: that module is the vocabulary this application
         // answers to and has to keep answering to, and obs-websocket is a
@@ -59,7 +63,7 @@ let package = Package(
             name: "YunAudioApp",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
-                "YunAudioControl", "YunAudioOBS",
+                "YunAudioControl", "YunAudioMedia", "YunAudioOBS",
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.
@@ -83,7 +87,7 @@ let package = Package(
             name: "YunAudioTests",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer",
-                "YunAudioControl", "YunAudioOBS", "yunaudio-mcp",
+                "YunAudioControl", "YunAudioMedia", "YunAudioOBS", "yunaudio-mcp",
                 // The app is an executable target, and a test target can depend
                 // on one since Swift 5.5. It is here so the MIDI message
                 // decoding and soft-takeover arithmetic can be tested without a

@@ -1,10 +1,10 @@
-# Razer hardware
+# Razer hardware control
 
 ← [README](../README.md)
 
 English · [繁體中文](zh-Hant/hardware.md) · [简体中文](zh-Hans/hardware.md)
 
-## Razer hardware control
+## Protocol
 
 The Seiren V3 Pro's light ring is implemented. Getting there took a capture of
 Synapse driving the device on Windows — polling the same feature report every

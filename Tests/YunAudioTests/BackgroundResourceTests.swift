@@ -578,6 +578,38 @@ struct BackgroundResourceTests {
         #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
         #expect(singing.ranges(of: "model.lyricProgress").count >= 2)
         #expect(singing.ranges(of: "model.singers").count == 1)
+        #expect(window.contains("if model.inspectorTab == .singing"))
+        #expect(window.contains("singingWorkspace"))
+    }
+
+    @Test("an unoptimised app cannot arm a meaningless allocation tripwire")
+    func debugTripwireIsUnavailable() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let preferences = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+
+        #expect(model.contains("if watchesIOAllocations, isDebugBuild"))
+        let tripwireStart = try #require(
+            preferences.range(of: "loc(\"Watch the IO thread for allocations\")"))
+        let tripwireEnd = try #require(
+            preferences.range(
+                of: "if model.isDebugBuild",
+                range: tripwireStart.upperBound..<preferences.endIndex))
+        let tripwireControl =
+            preferences[tripwireStart.lowerBound..<tripwireEnd.lowerBound]
+        #expect(tripwireControl.contains(".disabled(model.isDebugBuild)"))
+
+        let loginStart = try #require(preferences.range(of: "loc(\"Open at login\")"))
+        let loginEnd = try #require(
+            preferences.range(
+                of: "YunDivider()",
+                range: loginStart.upperBound..<preferences.endIndex))
+        let loginControl = preferences[loginStart.lowerBound..<loginEnd.lowerBound]
+        #expect(!loginControl.contains(".disabled(model.isDebugBuild)"))
     }
 
     @Test("the remaining live readings have child observation boundaries")

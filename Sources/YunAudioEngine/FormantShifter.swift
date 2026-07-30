@@ -27,8 +27,9 @@ public final class FormantShifter {
     /// smear across the transition.
     public static let windowSize = 1024
     private static let log2n = vDSP_Length(10)
-    /// Quarter-window hop. Less overlap and the amplitude modulation from the
-    /// window becomes audible as a buzz at the frame rate.
+    /// Quarter-window hop. Smaller callbacks are gathered across calls rather
+    /// than increasing the transform rate: callback geometry must not change
+    /// either the sound or the cost of processing one second of audio.
     public static let hop = windowSize / 4
 
     /// How many cepstral coefficients count as "envelope".
@@ -56,7 +57,15 @@ public final class FormantShifter {
 
     private var input: [Float]
     private var output: [Float]
-    private var filled = 0
+    /// The IO callback is allowed to deliver fewer than one processing hop.
+    ///
+    /// One ready hop is kept in front of the gather. Besides making arbitrary
+    /// callback boundaries safe, that final quarter-window makes the actual
+    /// algorithmic delay agree with `latencyFrames`: overlap-add itself emits a
+    /// frame three hops behind the input and this queue supplies the fourth.
+    private var pendingInput: [Float]
+    private var readyOutput: [Float]
+    private var pendingFrames = 0
 
     private var real: [Float]
     private var imaginary: [Float]
@@ -83,14 +92,16 @@ public final class FormantShifter {
         // test that existed proved the bypass worked.
         //
         // A Hann window applied on the way in and again on the way out sums to
-        // 3/2 at a quarter-window hop — Σ w²[n − mH] = (3/8)(N/H) = 1.5 — and a
-        // forward-then-inverse pass of `vDSP_fft_zrip` scales by 2N. So the
+        // Σ w²[n − mH] = (3/8)(N/H) = 1.5 at a quarter-window hop. A
+        // forward-then-inverse pass of `vDSP_fft_zrip` also scales by 2N, so
         // reconstruction divides by both.
         overlapScale = 1 / (1.5 * 2 * Float(Self.windowSize))
 
         let half = Self.windowSize / 2
         input = [Float](repeating: 0, count: Self.windowSize)
         output = [Float](repeating: 0, count: Self.windowSize)
+        pendingInput = [Float](repeating: 0, count: Self.hop)
+        readyOutput = [Float](repeating: 0, count: Self.hop)
         real = [Float](repeating: 0, count: half)
         imaginary = [Float](repeating: 0, count: half)
         frame = [Float](repeating: 0, count: Self.windowSize)
@@ -108,19 +119,44 @@ public final class FormantShifter {
     public func reset() {
         for index in input.indices { input[index] = 0 }
         for index in output.indices { output[index] = 0 }
-        filled = 0
+        for index in pendingInput.indices { pendingInput[index] = 0 }
+        for index in readyOutput.indices { readyOutput[index] = 0 }
+        pendingFrames = 0
     }
 
-    /// Processes in place, a hop at a time.
+    /// Processes in place, retaining incomplete hops across calls.
     ///
     /// - Parameters:
     ///   - samples: The block to rewrite.
-    ///   - count: Whole hops only; a remainder is left for the next call.
+    ///   - count: Frames to process. It need not be a multiple of `hop`.
     public func process(_ samples: UnsafeMutablePointer<Float>, count: Int) {
+        guard count > 0 else { return }
         var offset = 0
-        while offset + Self.hop <= count {
-            processHop(samples + offset)
-            offset += Self.hop
+        while offset < count {
+            let frames = min(Self.hop - pendingFrames, count - offset)
+            pendingInput.withUnsafeMutableBufferPointer { pending in
+                readyOutput.withUnsafeBufferPointer { ready in
+                    (pending.baseAddress! + pendingFrames).update(
+                        from: samples + offset, count: frames)
+                    (samples + offset).update(
+                        from: ready.baseAddress! + pendingFrames, count: frames)
+                }
+            }
+            pendingFrames += frames
+            offset += frames
+
+            if pendingFrames == Self.hop {
+                pendingInput.withUnsafeMutableBufferPointer {
+                    processHop($0.baseAddress!)
+                }
+                readyOutput.withUnsafeMutableBufferPointer { ready in
+                    pendingInput.withUnsafeBufferPointer { pending in
+                        ready.baseAddress!.update(
+                            from: pending.baseAddress!, count: Self.hop)
+                    }
+                }
+                pendingFrames = 0
+            }
         }
     }
 
@@ -146,9 +182,10 @@ public final class FormantShifter {
         // and nothing else. Skipping the transform for it also keeps the cost
         // honest — an effect at zero has no business spending an FFT.
         if abs(ratio - 1) < 0.001 {
-            // Still delayed by a window, so switching the ratio around does not
-            // jump the signal in time.
-            for index in 0..<hop { samples[index] = input[size - hop - hop + index] }
+            // Still delayed by a window, so switching the ratio around does
+            // not jump the signal in time. Overlap-add supplies three hops of
+            // delay and the ready-output queue supplies the fourth.
+            for index in 0..<hop { samples[index] = input[index] }
             return
         }
 

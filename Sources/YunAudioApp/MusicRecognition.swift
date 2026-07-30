@@ -21,6 +21,8 @@ final class MusicRecognition: @unchecked Sendable {
         let position: Double
         let duration: Double
         let confidence: Float
+        let artworkURL: URL?
+        let appleMusicURL: URL?
     }
 
     enum Failure: Error, Sendable, Equatable {
@@ -136,14 +138,19 @@ final class MusicRecognition: @unchecked Sendable {
                     let title = item.title?.nonEmpty,
                     let artist = item.artist?.nonEmpty
                 else { return }
-                let duration = item.timeRanges.map(\.upperBound).max() ?? 0
                 let answer = Match(
                     title: title, artist: artist, album: item.subtitle ?? "",
                     identity: item.shazamID.map { "shazam:\($0)" }
                         ?? "shazam:\(artist):\(title)",
                     position: max(0, item.predictedCurrentMatchOffset),
-                    duration: max(duration, item.predictedCurrentMatchOffset),
-                    confidence: item.confidence)
+                    // `timeRanges` describe the reference-signature ranges
+                    // represented by the match, not the recording's total
+                    // duration. Using their upper bound (or the current match
+                    // offset) as an end time froze the lyric clock exactly
+                    // where QQ Music or NetEase was first recognised.
+                    duration: 0,
+                    confidence: item.confidence, artworkURL: item.artworkURL,
+                    appleMusicURL: item.appleMusicURL)
                 Task { @MainActor [handler] in handler(.success(answer)) }
             case .noMatch:
                 break

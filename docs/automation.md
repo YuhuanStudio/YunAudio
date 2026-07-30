@@ -1,14 +1,14 @@
 # Automation
 
-Every interface below drives the same running application through the same
-vocabulary. `Sources/YunAudioControl` defines it once; the window, the command
-line, the MCP server and a script are four front ends onto it.
+Each interface below drives the same running application through one command
+vocabulary, defined in `Sources/YunAudioControl`. The window, the command line,
+the MCP server and a resident script are four front ends onto it.
 
 ← [README](../README.md)
 
 English · [繁體中文](zh-Hant/automation.md) · [简体中文](zh-Hans/automation.md)
 
-## Remote control
+## URL scheme
 
 Anything that can open a URL can drive this: Shortcuts, Stream Deck, Keyboard
 Maestro, AppleScript, `open` from a terminal.
@@ -27,7 +27,7 @@ driven by a script should prefer the definite form, which is idempotent —
 than guessed at, since the failure mode being avoided is a mistyped mute that
 turns into a stop.
 
-### From a terminal
+## Command line
 
 The same verbs, with an answer coming back — which is the part a URL cannot do.
 `yunaudio-cli` talks to the copy of the application that is already running
@@ -70,7 +70,7 @@ application assembled by a shell script around a SwiftPM binary produces none.
 They would have compiled, run, and never appeared anywhere anybody could use
 them.
 
-## Driving it from an agent — MCP
+## MCP server
 
 `yunaudio-mcp` is a Model Context Protocol server: JSON-RPC 2.0 over stdio, no
 dependencies, spawned by whatever client you point at it.
@@ -112,7 +112,7 @@ whether anything was there to hear it. That is fine for a Stream Deck key, where
 a person is looking at the result, and useless for an agent, where nobody is —
 and reading the state back is half of what an agent is for.
 
-## Talking to OBS
+## OBS integration
 
 Settings → Streaming connects to `obs-websocket` v5, which has shipped inside
 OBS since version 28. Two things go across it, and the second is the reason the
@@ -147,7 +147,7 @@ and ABI), no browser-source overlay yet, and no six-track recording model —
 `MAX_AUDIO_MIXES` is a compile-time constant in libobs, which makes six somebody
 else's muxer limit rather than a shape worth copying.
 
-### A capture that survives the application restarting
+### Capture across an application restart
 
 OBS's issue #9144 — "Application Capture loses audio when application reopens on
 macOS" — has been open since June 2023, and OBS's answer to it is a button in the

@@ -1,8 +1,8 @@
-# Razer 硬體
+# Razer 硬體控制
 
 ← [README](../../README.zh-Hant.md) · [English](../hardware.md)
 
-## Razer 硬體控制
+## 協定
 
 Seiren V3 Pro 的燈環已經實作。做到這一步靠的是在 Windows 上抓一份 Synapse 驅動裝置的
 封包 —— 一邊改燈光、一邊每三毫秒輪詢同一個 feature report —— 從裡面得到的每一件事，

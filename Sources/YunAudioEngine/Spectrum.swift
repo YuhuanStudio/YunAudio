@@ -45,7 +45,18 @@ public final class SpectrumAnalyser {
     /// that changes 20 times a second is work for nothing.
     private let bandRanges: [(start: Int, end: Int)]
 
-    private var pending: [Float] = []
+    /// A fixed ring holding the newest window of input.
+    ///
+    /// After every transform the newest half-window remains valid and the next
+    /// half overwrites the discarded oldest samples. The old growable array
+    /// shifted 1,024 floats with `removeFirst` for every FFT — a memory move
+    /// whose result was only to put circular data back into linear storage.
+    private var pending: [Float]
+    /// Samples currently valid in `pending`, up to one complete window.
+    private var pendingCount = 0
+    /// Where the next input sample is written. At a full window this is also
+    /// the oldest sample, so it is the transform's chronological starting point.
+    private var pendingWriteIndex = 0
     private var real: [Float]
     private var imaginary: [Float]
     private var windowed: [Float]
@@ -83,10 +94,10 @@ public final class SpectrumAnalyser {
         let half = Self.windowSize / 2
         real = [Float](repeating: 0, count: half)
         imaginary = [Float](repeating: 0, count: half)
+        pending = [Float](repeating: 0, count: Self.windowSize)
         windowed = [Float](repeating: 0, count: Self.windowSize)
         magnitudes = [Float](repeating: 0, count: half)
         bands = [Float](repeating: 0, count: Self.bandCount)
-        pending.reserveCapacity(Self.windowSize)
 
         let binWidth = sampleRate / Double(Self.windowSize)
         let ratio = Self.highestFrequency / Self.lowestFrequency
@@ -118,21 +129,52 @@ public final class SpectrumAnalyser {
     public func add(_ samples: UnsafePointer<Float>, count: Int) {
         var offset = 0
         while offset < count {
-            let take = min(Self.windowSize - pending.count, count - offset)
-            pending.append(
-                contentsOf: UnsafeBufferPointer(start: samples + offset, count: take))
+            let take = min(
+                count - offset,
+                min(
+                    Self.windowSize - pendingCount,
+                    Self.windowSize - pendingWriteIndex))
+            pending.withUnsafeMutableBufferPointer { destination in
+                destination.baseAddress!.advanced(by: pendingWriteIndex).update(
+                    from: samples.advanced(by: offset), count: take)
+            }
+            pendingWriteIndex += take
+            if pendingWriteIndex == Self.windowSize { pendingWriteIndex = 0 }
+            pendingCount += take
             offset += take
-            if pending.count == Self.windowSize {
-                transform()
+            if pendingCount == Self.windowSize {
+                transform(startingAt: pendingWriteIndex)
                 // 50% overlap, so a transient landing at a window boundary is
                 // not halved by the window function twice running.
-                pending.removeFirst(Self.windowSize / 2)
+                pendingCount = Self.windowSize / 2
             }
         }
     }
 
-    private func transform() {
-        vDSP.multiply(pending, window, result: &windowed)
+    private func transform(startingAt firstSample: Int) {
+        // Multiply the two physical pieces of the ring into one chronological
+        // window. This is the only linear copy the FFT needs, and it fuses the
+        // Hann multiply that was already required rather than moving the
+        // overlap once here and once again on the next transform.
+        pending.withUnsafeBufferPointer { source in
+            window.withUnsafeBufferPointer { weights in
+                windowed.withUnsafeMutableBufferPointer { output in
+                    let firstCount = Self.windowSize - firstSample
+                    vDSP_vmul(
+                        source.baseAddress! + firstSample, 1,
+                        weights.baseAddress!, 1,
+                        output.baseAddress!, 1,
+                        vDSP_Length(firstCount))
+                    if firstSample > 0 {
+                        vDSP_vmul(
+                            source.baseAddress!, 1,
+                            weights.baseAddress! + firstCount, 1,
+                            output.baseAddress! + firstCount, 1,
+                            vDSP_Length(firstSample))
+                    }
+                }
+            }
+        }
 
         let half = Self.windowSize / 2
         real.withUnsafeMutableBufferPointer { realBuffer in
@@ -196,7 +238,8 @@ public final class SpectrumAnalyser {
     }
 
     public func reset() {
-        pending.removeAll(keepingCapacity: true)
+        pendingCount = 0
+        pendingWriteIndex = 0
         for index in bands.indices { bands[index] = 0 }
     }
 

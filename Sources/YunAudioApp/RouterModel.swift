@@ -896,10 +896,12 @@ final class RouterModel: ScriptTarget {
         guard let key = KeyDetector.key(from: chromaTotal, windows: chromaWindows) else {
             return
         }
-        songKey = key
-        suggestedShift = comfortableMidi.map {
-            KeyDetector.suggestedShift(songKey: key, comfortableMidi: $0)
-        }
+        publish(key, to: \.songKey)
+        publish(
+            comfortableMidi.map {
+                KeyDetector.suggestedShift(songKey: key, comfortableMidi: $0)
+            },
+            to: \.suggestedShift)
     }
 
     /// Applies the suggested shift to the pitch stage, which is what the
@@ -1003,6 +1005,36 @@ final class RouterModel: ScriptTarget {
     /// samples for a five-minute song and it does not change while it plays.
     @ObservationIgnored private var scoringReference: [PitchSample] = []
     @ObservationIgnored private var pollsSinceScore = 0
+    /// A few minutes of raw pitch is ample for a four-hertz incremental
+    /// consumer to catch up after a busy main actor. `SingerPitch` compacts at
+    /// twice this count, bounding each source below 128 KiB.
+    private static let scoringHistoryCapacity = 4_096
+
+    private struct KeyScoreConfiguration: Equatable {
+        let sungStep: Double
+        let key: KeyDetector.Key
+        let lines: [Lyrics.Line]
+    }
+
+    @ObservationIgnored private var keyScoreConfigurations: [String: KeyScoreConfiguration] =
+        [:]
+    @ObservationIgnored private var keyScorers: [String: KaraokeScore.IncrementalKeyScorer] =
+        [:]
+
+    private struct ExactScoreConfiguration: Equatable {
+        let sungStep: Double
+        let referenceCount: Int
+        let firstReference: PitchSample?
+        let lastReference: PitchSample?
+        let referenceStep: Double
+        let lines: [Lyrics.Line]
+    }
+
+    @ObservationIgnored private var exactScoreConfigurations:
+        [String: ExactScoreConfiguration] = [:]
+    @ObservationIgnored private var exactScorers:
+        [String: KaraokeScore.IncrementalExactScorer] = [:]
+
     private struct CapturedScoringReference {
         let samples: [PitchSample]
         let step: Double
@@ -1011,6 +1043,36 @@ final class RouterModel: ScriptTarget {
     /// True when the score is against an exact MIDI tune rather than the
     /// detected-key fallback used by ordinary streaming tracks.
     var hasExactScoringReference: Bool { !scoringReference.isEmpty }
+
+    /// The exact note under the playhead, when a MIDI reference supplies one.
+    ///
+    /// Nil across rests and for the key/captured-vocal fallbacks: drawing a
+    /// target bar when there is no exact written note would turn a useful guess
+    /// into a confident lie.
+    var scoringTargetMidi: Double? {
+        guard !scoringReference.isEmpty else { return nil }
+        let position = songPosition
+        var lower = 0
+        var upper = scoringReference.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if scoringReference[middle].time < position {
+                lower = middle + 1
+            } else {
+                upper = middle
+            }
+        }
+        let candidates = [lower - 1, lower].filter { scoringReference.indices.contains($0) }
+        guard
+            let index = candidates.min(by: {
+                abs(scoringReference[$0].time - position)
+                    < abs(scoringReference[$1].time - position)
+            }),
+            abs(scoringReference[index].time - position)
+                <= KaraokeScore.referenceInterval * 1.5
+        else { return nil }
+        return scoringReference[index].midi
+    }
 
     enum ScoringReferenceMode: Equatable {
         case waiting
@@ -1077,6 +1139,7 @@ final class RouterModel: ScriptTarget {
         singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
         for track in singerTracks {
             track.keepsHistory = isScoringSinging
+            track.historyCapacity = nil
             track.reset(at: songPosition)
         }
         return !singerTracks.isEmpty
@@ -1084,6 +1147,10 @@ final class RouterModel: ScriptTarget {
 
     private func releaseSingerTracks() {
         singerTracks = []
+        keyScoreConfigurations = [:]
+        keyScorers = [:]
+        exactScoreConfigurations = [:]
+        exactScorers = [:]
         scoringUIDs = []
         scoringNames = []
         scoringIsBackingTrack = []
@@ -1120,8 +1187,13 @@ final class RouterModel: ScriptTarget {
     func restartScore() {
         for track in singerTracks {
             track.keepsHistory = true
+            track.historyCapacity = nil
             track.reset(at: songPosition)
         }
+        keyScoreConfigurations = [:]
+        keyScorers = [:]
+        exactScoreConfigurations = [:]
+        exactScorers = [:]
         rebuildScoringReference()
         scoringReferenceMode = scoringReference.isEmpty ? .waiting : .midi
         singers = []
@@ -1137,8 +1209,13 @@ final class RouterModel: ScriptTarget {
         // is live whether or not anybody asked for a score.
         for track in singerTracks {
             track.keepsHistory = false
+            track.historyCapacity = nil
             track.reset(at: songPosition)
         }
+        keyScoreConfigurations = [:]
+        keyScorers = [:]
+        exactScoreConfigurations = [:]
+        exactScorers = [:]
         if !isSingingVisible { releaseSingerTracks() }
     }
 
@@ -1182,15 +1259,17 @@ final class RouterModel: ScriptTarget {
             ? automaticCapturedReference(lines: lines)
             : nil
         if rescore {
+            let mode: ScoringReferenceMode
             if !scoringReference.isEmpty {
-                scoringReferenceMode = .midi
+                mode = .midi
             } else if capturedReference != nil {
-                scoringReferenceMode = .capturedPlayer
+                mode = .capturedPlayer
             } else if songKey != nil {
-                scoringReferenceMode = .key
+                mode = .key
             } else {
-                scoringReferenceMode = .waiting
+                mode = .waiting
             }
+            publish(mode, to: \.scoringReferenceMode)
         }
         var updated: [Singer] = []
         for (index, track) in singerTracks.enumerated() {
@@ -1205,7 +1284,10 @@ final class RouterModel: ScriptTarget {
                 score = held.score
             } else {
                 score = scoreForTrack(
-                    track, lines: lines, capturedReference: capturedReference)
+                    track,
+                    uid: uid,
+                    lines: lines,
+                    capturedReference: capturedReference)
             }
             let hertz = Self.singerDisplayHertz(
                 measured: track.hertz,
@@ -1255,35 +1337,95 @@ final class RouterModel: ScriptTarget {
         let reference =
             scoringReference.isEmpty ? automaticCapturedReference(lines: lines) : nil
         let score = scoreForTrack(
-            singerTracks[index], lines: lines, capturedReference: reference)
+            singerTracks[index],
+            uid: uid,
+            lines: lines,
+            capturedReference: reference)
         return Singer(
             uid: uid, name: index < scoringNames.count ? scoringNames[index] : loc("Source"),
             hertz: singerTracks[index].hertz, score: score)
     }
 
     private func scoreForTrack(
-        _ track: SingerPitch, lines: [Lyrics.Line],
+        _ track: SingerPitch,
+        uid: String,
+        lines: [Lyrics.Line],
         capturedReference: CapturedScoringReference? = nil
     ) -> KaraokeScore {
+        // The player clock is the authority. A microphone ring keeps producing
+        // while Spotify, Music or hand-run words are paused; using the ring's
+        // elapsed time charged that pause as missed singing.
+        let through = songPosition
         if !scoringReference.isEmpty {
-            return KaraokeScore.scoreChronological(
-                sung: track.samples, sungStep: track.sampleInterval,
-                reference: scoringReference,
+            keyScoreConfigurations[uid] = nil
+            keyScorers[uid] = nil
+            let configuration = ExactScoreConfiguration(
+                sungStep: track.sampleInterval,
+                referenceCount: scoringReference.count,
+                firstReference: scoringReference.first,
+                lastReference: scoringReference.last,
                 referenceStep: KaraokeScore.referenceInterval,
-                lyrics: lines, through: track.elapsed)
+                lines: lines)
+            if exactScoreConfigurations[uid] != configuration {
+                exactScoreConfigurations[uid] = configuration
+                exactScorers[uid] = KaraokeScore.IncrementalExactScorer(
+                    sungStep: configuration.sungStep,
+                    reference: scoringReference,
+                    referenceStep: configuration.referenceStep,
+                    lyrics: configuration.lines)
+            }
+            track.historyCapacity = Self.scoringHistoryCapacity
+            guard var scorer = exactScorers[uid] else { return .none }
+            let score = scorer.update(
+                sung: track.samples,
+                historyStartIndex: track.historyStartIndex,
+                historyGeneration: track.historyGeneration,
+                through: through)
+            exactScorers[uid] = scorer
+            return score
         }
         if let capturedReference {
+            track.historyCapacity = nil
+            keyScoreConfigurations[uid] = nil
+            keyScorers[uid] = nil
+            exactScoreConfigurations[uid] = nil
+            exactScorers[uid] = nil
             return KaraokeScore.scoreChronological(
                 sung: track.samples, sungStep: track.sampleInterval,
                 reference: capturedReference.samples,
                 referenceStep: capturedReference.step,
-                lyrics: lines, through: track.elapsed)
+                lyrics: lines, through: through)
         }
-        guard let songKey else { return .none }
-        return KaraokeScore.keyScoreChronological(
-            sung: track.samples, sungStep: track.sampleInterval,
-            key: songKey, lyrics: lines,
-            through: track.elapsed)
+        guard let songKey else {
+            track.historyCapacity = nil
+            keyScoreConfigurations[uid] = nil
+            keyScorers[uid] = nil
+            exactScoreConfigurations[uid] = nil
+            exactScorers[uid] = nil
+            return .none
+        }
+        track.historyCapacity = Self.scoringHistoryCapacity
+        exactScoreConfigurations[uid] = nil
+        exactScorers[uid] = nil
+        let configuration = KeyScoreConfiguration(
+            sungStep: track.sampleInterval,
+            key: songKey,
+            lines: lines)
+        if keyScoreConfigurations[uid] != configuration {
+            keyScoreConfigurations[uid] = configuration
+            keyScorers[uid] = KaraokeScore.IncrementalKeyScorer(
+                sungStep: configuration.sungStep,
+                key: configuration.key,
+                lyrics: configuration.lines)
+        }
+        guard var scorer = keyScorers[uid] else { return .none }
+        let score = scorer.update(
+            sung: track.samples,
+            historyStartIndex: track.historyStartIndex,
+            historyGeneration: track.historyGeneration,
+            through: through)
+        keyScorers[uid] = scorer
+        return score
     }
 
     /// Uses the player already captured into the route as an automatic
@@ -1313,7 +1455,7 @@ final class RouterModel: ScriptTarget {
         else { return nil }
         let reference = KaraokeScore.capturedReference(
             singerTracks[index].samples, lyrics: lines,
-            through: singerTracks[index].elapsed)
+            through: songPosition)
         let step = singerTracks[index].sampleInterval
         guard Double(reference.count) * step >= KaraokeScore.leastSeconds
         else { return nil }
@@ -1383,6 +1525,61 @@ final class RouterModel: ScriptTarget {
     /// Whether hand-run words are moving.
     var isRunningWords: Bool { isHandRun && trackClock.isPlaying }
 
+    static let maximumHandLyricsFieldLength = 200
+
+    /// Builds the same bounded track whether it came from a text field, a
+    /// browser bridge or a future command-line entry point.
+    static func handRunTrack(title: String, artist: String) -> NowPlaying.Track? {
+        let title = boundedHandLyricsField(title)
+        guard !title.isEmpty else { return nil }
+        let artist = boundedHandLyricsField(artist)
+        return NowPlaying.Track(
+            application: loc("By hand"),
+            title: title,
+            artist: artist,
+            album: "",
+            position: 0,
+            duration: 0,
+            isPlaying: false,
+            identity: "hand:\(artist)\u{1F}\(title)")
+    }
+
+    /// Finds words for music YunAudio cannot identify from captured audio.
+    ///
+    /// This enters the existing hand-run path before adopting the track, so
+    /// the once-a-second Apple-event poll stays disabled. `adopt` checks local
+    /// and cached words first and only then starts the public-provider lookup.
+    /// No microphone, Accessibility or private metadata API is involved.
+    @discardableResult
+    func findWordsByTitle(_ title: String, artist: String) -> Bool {
+        guard let track = Self.handRunTrack(title: title, artist: artist) else {
+            return false
+        }
+        isHandRun = true
+        trackClock.stop()
+        lyricLine = nil
+        lyricProgress = 0
+        songSecond = 0
+        adopt(track)
+
+        let ends = max(
+            melody?.duration ?? 0,
+            lyrics.map { ($0.lines.last?.time ?? 0) - $0.offset + 4 } ?? 0)
+        trackClock.duration = ends
+        if ends > 0, var current = nowPlaying {
+            current.duration = ends
+            nowPlaying = current
+        }
+        followTheWords()
+        return true
+    }
+
+    private static func boundedHandLyricsField(_ rawValue: String) -> String {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(trimmed.prefix(maximumHandLyricsFieldLength))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Takes an `.lrc` chosen by hand, with the tune beside it if there is one.
     ///
     /// - Returns: False when nothing in the file carried a timestamp, which is
@@ -1415,7 +1612,8 @@ final class RouterModel: ScriptTarget {
             application: loc("By hand"),
             title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
             artist: parsed.artist ?? "", album: parsed.album ?? "",
-            position: 0, duration: ends, isPlaying: false)
+            position: 0, duration: ends, isPlaying: false,
+            artworkURL: Self.artworkBesideWords(at: url))
         trackClock.stop()
         trackClock.duration = ends
         lyricLine = nil
@@ -1595,10 +1793,12 @@ final class RouterModel: ScriptTarget {
         }
         switch result {
         case .failure(.catalogueAccessNotEnabled):
+            nowPlayingFailure = nil
             musicRecognitionProblem = loc(
                 "This build is not signed for the Shazam catalogue. Enable ShazamKit for the App ID to identify players without scripting support."
             )
         case let .failure(.failed(reason)):
+            nowPlayingFailure = nil
             musicRecognitionProblem = String(
                 format: loc("Music recognition is unavailable: %@"), reason)
         case let .success(match):
@@ -1608,7 +1808,7 @@ final class RouterModel: ScriptTarget {
                 application: application.name, title: match.title,
                 artist: match.artist, album: match.album,
                 position: match.position, duration: match.duration,
-                isPlaying: true, identity: match.identity)
+                isPlaying: true, artworkURL: match.artworkURL, identity: match.identity)
             if nowPlaying?.identity != match.identity {
                 adopt(track)
             } else {
@@ -1642,21 +1842,29 @@ final class RouterModel: ScriptTarget {
     /// Takes a new song, with the words and the tune that go with it.
     private func adopt(_ track: NowPlaying.Track?) {
         cancelLyricsLookup()
+        let track = track.map { incoming in
+            var resolved = incoming
+            if resolved.artworkURL == nil {
+                resolved.artworkURL = Self.findArtwork(for: incoming)
+            }
+            return resolved
+        }
         nowPlaying = track
-        lyrics = track.flatMap(Self.findLyrics)
-        let localPlain = track.flatMap(Self.findPlainLyrics)
+        let localLyrics = track.flatMap(Self.findLyricsMatch)
+        lyrics = localLyrics?.lyrics
+        let localPlain = track.flatMap(Self.findPlainLyricsMatch)
         plainLyrics =
             lyrics == nil
-            ? localPlain ?? track?.nativeLyrics
+            ? localPlain?.text ?? track?.nativeLyrics
             : nil
         lyricsSourceName =
-            lyrics != nil || localPlain != nil
-            ? loc("Local file")
-            : track?.nativeLyrics == nil ? nil : loc("Music")
+            localLyrics.map { Self.lyricsSourceName(forLocalURL: $0.url) }
+            ?? localPlain.map { Self.lyricsSourceName(forLocalURL: $0.url) }
+            ?? (track?.nativeLyrics == nil ? nil : loc("Music"))
         melody = track.flatMap(Self.findMelody)
         if let track {
-            if lyrics != nil {
-                lyricsLookupStatus = .local
+            if let localURL = localLyrics?.url ?? localPlain?.url {
+                lyricsLookupStatus = Self.lyricsStatus(forLocalURL: localURL)
             } else {
                 lyricsLookupStatus = plainLyrics == nil ? .loading : .native
                 startLyricsLookup(for: track)
@@ -1707,6 +1915,16 @@ final class RouterModel: ScriptTarget {
                 }
                 self.lyricsSourceName = Self.lyricsSourceName(for: match.source)
                 self.lyricsLookupStatus = .online
+                if var current = self.nowPlaying,
+                    current.duration <= 0,
+                    let duration = match.duration,
+                    duration.isFinite,
+                    duration > 0
+                {
+                    current.duration = duration
+                    self.nowPlaying = current
+                    self.trackClock.duration = duration
+                }
                 self.followTheWords()
                 if self.isScoringSinging { self.rebuildScoringReference() }
 
@@ -1752,6 +1970,7 @@ final class RouterModel: ScriptTarget {
         case .qqMusic: loc("QQ Music")
         case .netEase: loc("NetEase Cloud Music")
         case .lyricsOvh: source.rawValue
+        case .musixmatch: source.rawValue
         }
     }
 
@@ -1761,7 +1980,7 @@ final class RouterModel: ScriptTarget {
     }
 
     func retryLyricsLookup() {
-        guard let track = nowPlaying, lyrics == nil, !isHandRun else { return }
+        guard let track = nowPlaying, lyrics == nil else { return }
         cancelLyricsLookup()
         startLyricsLookup(for: track)
     }
@@ -1791,19 +2010,51 @@ final class RouterModel: ScriptTarget {
 
     /// Finds an `.lrc` for a track by name.
     static func findLyrics(for track: NowPlaying.Track) -> Lyrics? {
+        findLyricsMatch(for: track)?.lyrics
+    }
+
+    private struct LocalLyricsMatch {
+        let lyrics: Lyrics
+        let url: URL
+    }
+
+    private static func findLyricsMatch(for track: NowPlaying.Track) -> LocalLyricsMatch? {
         guard let url = bestFile(for: track, extensions: ["lrc"]),
             let text = try? String(contentsOf: url, encoding: .utf8)
         else { return nil }
-        return Lyrics.parse(text)
+        guard let lyrics = Lyrics.parse(text) else { return nil }
+        return LocalLyricsMatch(lyrics: lyrics, url: url)
     }
 
     /// Finds locally cached or user-supplied words with no timing.
     static func findPlainLyrics(for track: NowPlaying.Track) -> String? {
+        findPlainLyricsMatch(for: track)?.text
+    }
+
+    private struct LocalPlainLyricsMatch {
+        let text: String
+        let url: URL
+    }
+
+    private static func findPlainLyricsMatch(
+        for track: NowPlaying.Track
+    ) -> LocalPlainLyricsMatch? {
         guard let url = bestFile(for: track, extensions: ["txt"]),
             let text = try? String(contentsOf: url, encoding: .utf8)
         else { return nil }
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return words.isEmpty ? nil : words
+        return words.isEmpty ? nil : LocalPlainLyricsMatch(text: words, url: url)
+    }
+
+    /// A downloaded cache keeps its provider; only user files say local.
+    static func lyricsSourceName(forLocalURL url: URL) -> String {
+        OnlineLyrics.cachedSource(for: url).map { Self.lyricsSourceName(for: $0) }
+            ?? loc("Local file")
+    }
+
+    /// A provider cache is online evidence even though it is now read from disk.
+    static func lyricsStatus(forLocalURL url: URL) -> LyricsLookupStatus {
+        OnlineLyrics.cachedSource(for: url) == nil ? .local : .online
     }
 
     /// Finds the tune, which lives beside the words under the same name.
@@ -1817,6 +2068,27 @@ final class RouterModel: ScriptTarget {
             let data = try? Data(contentsOf: url)
         else { return nil }
         return MidiMelody.parse(data)
+    }
+
+    /// Finds cover artwork beside local words and melody files.
+    ///
+    /// This is the final source in the cover chain: the player and recognition
+    /// catalogue stay authoritative, while a user-supplied image makes local
+    /// and hand-curated Chinese karaoke libraries complete without a network
+    /// service or an embedded API key.
+    static func findArtwork(for track: NowPlaying.Track) -> URL? {
+        bestFile(
+            for: track,
+            extensions: ["jpg", "jpeg", "png", "heic", "webp"])
+    }
+
+    /// The exact-name cover beside a hand-selected `.lrc`.
+    static func artworkBesideWords(at words: URL) -> URL? {
+        let stem = words.deletingPathExtension()
+        return ["jpg", "jpeg", "png", "heic", "webp"]
+            .lazy
+            .map(stem.appendingPathExtension)
+            .first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     /// Picks the file in the lyrics folder that best matches a track.
@@ -1836,22 +2108,47 @@ final class RouterModel: ScriptTarget {
         guard let directory = lyricsDirectory,
             let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
         else { return nil }
+        return bestFileName(for: track, names: names, extensions: extensions).map {
+            directory.appendingPathComponent($0)
+        }
+    }
+
+    /// Pure half of local asset matching, shared by words, melody and artwork.
+    static func bestFileName(
+        for track: NowPlaying.Track, names: [String], extensions: [String]
+    ) -> String? {
         let wanted = normalised(track.searchKey)
         let title = normalised(track.title)
 
         let candidates = names.filter { name in
             extensions.contains { name.lowercased().hasSuffix("." + $0) }
         }
-        // Both names present is a better match than the title alone, so it is
-        // preferred rather than taking whatever the directory listed first.
-        let best =
-            candidates.first { normalised($0).contains(wanted) }
-            ?? candidates.first {
-                let file = normalised($0)
-                return file.contains(title) && file.contains(normalised(track.artist))
+        let userFiles = candidates.filter {
+            OnlineLyrics.cachedSource(for: URL(fileURLWithPath: $0)) == nil
+        }
+        let downloaded = candidates.filter {
+            OnlineLyrics.cachedSource(for: URL(fileURLWithPath: $0)) != nil
+        }
+
+        func best(in candidates: [String]) -> String? {
+            let ordered = candidates.sorted {
+                $0.localizedStandardCompare($1) == .orderedAscending
             }
-            ?? candidates.first { normalised($0).contains(title) }
-        return best.map { directory.appendingPathComponent($0) }
+            // Both names present is a better match than the title alone, so it
+            // is preferred rather than taking whatever the directory listed first.
+            return
+                ordered.first { normalised($0).contains(wanted) }
+                ?? ordered.first {
+                    let file = normalised($0)
+                    return file.contains(title) && file.contains(normalised(track.artist))
+                }
+                ?? ordered.first { normalised($0).contains(title) }
+        }
+
+        // A file the listener deliberately supplied remains authoritative.
+        // Provider caches are fallbacks, even when their generated filename is
+        // an artist-and-title match and the user chose a title-only filename.
+        return best(in: userFiles) ?? best(in: downloaded)
     }
 
     /// Lower case, no accents, letters and digits only — so "Björk – Jóga.lrc"
@@ -3164,7 +3461,7 @@ final class RouterModel: ScriptTarget {
     /// would keep counting through a stalled writer.
     private func refreshRecordingState() {
         guard isRecording else { return }
-        recordingSeconds = engine.recordingDuration
+        publish(engine.recordingDuration, to: \.recordingSeconds)
         // The writer stops itself on a file-system error. Left unnoticed, the
         // button would go on saying "recording" over a file that stopped
         // growing minutes ago — which is what it did, because the writer
@@ -3209,6 +3506,34 @@ final class RouterModel: ScriptTarget {
             duration: 42, verdict: .speech, verdictConfidence: 0.86,
             verdictLabel: "speech", pitchHertz: 147)
         outputPeak = 0.39
+        nowPlaying = NowPlaying.Track(
+            application: "Spotify", title: "年少心動雨季", artist: "黃霄雲",
+            album: "天賜的聲音", position: 82, duration: 265, isPlaying: true)
+        lyrics = Lyrics(
+            title: "年少心動雨季", artist: "黃霄雲", album: "天賜的聲音",
+            lines: [
+                Lyrics.Line(
+                    time: 76,
+                    text: loc(
+                        "A long Chinese lyric wraps naturally instead of disappearing at the edge."
+                    )),
+                Lyrics.Line(
+                    time: 82,
+                    text: loc("The current line lights smoothly as the music moves.")),
+                Lyrics.Line(
+                    time: 88,
+                    text: loc("The next line stays legible so the singer can prepare.")),
+            ])
+        lyricsSourceName = loc("NetEase Cloud Music")
+        lyricsLookupStatus = .online
+        trackClock.duration = 265
+        trackClock.adopt(
+            82, isPlaying: true,
+            trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        followTheWords()
+        scoringReference = stride(from: 78.0, through: 90.0, by: 0.05).map {
+            PitchSample(time: $0, midi: $0 < 86 ? 57 : 60)
+        }
         // Two singers, because two is what the duet has to be checked at: one
         // score is one colour and proves nothing about whether the second is
         // legible beside it in either appearance. The switch above them stays
@@ -3241,7 +3566,13 @@ final class RouterModel: ScriptTarget {
         KaraokeScore(
             percentage: percentage, onPitchSeconds: 84 * percentage / 100,
             nearPitchSeconds: 6, silentSeconds: 12, referenceSeconds: 96, sungSeconds: 88,
-            meanErrorSemitones: error, lines: [])
+            meanErrorSemitones: error,
+            lines: [
+                KaraokeScore.Line(
+                    index: 1, time: 82, text: "",
+                    referenceSeconds: 4, onPitchSeconds: 3.1,
+                    nearPitchSeconds: 0.4, percentage: percentage)
+            ])
     }
 
     // MARK: Driver
@@ -3551,20 +3882,26 @@ final class RouterModel: ScriptTarget {
     /// truncated by whatever converts to the wire format downstream.
     private static let clipThreshold: Float = 0.999
 
+    /// Peak-hold arithmetic without the publication around it.
+    nonisolated static func nextPeakHold(previous: Float, incoming: Float) -> Float {
+        incoming > previous ? incoming : previous * 0.97
+    }
+
     private func refreshPeaks(_ current: [Float]) {
         if peakHolds.count != current.count {
-            peakHolds = current
-            clipped = current.map { $0 >= Self.clipThreshold }
+            publish(current, to: \.peakHolds)
+            publish(current.map { $0 >= Self.clipThreshold }, to: \.clipped)
             return
         }
         for index in current.indices {
             // Rises at once, falls slowly. The poll runs twenty times a second,
             // so this is roughly a second and a half of hold.
-            peakHolds[index] =
-                current[index] > peakHolds[index]
-                ? current[index] : peakHolds[index] * 0.97
+            let held = Self.nextPeakHold(
+                previous: peakHolds[index],
+                incoming: current[index])
+            publish(held, at: index, to: \.peakHolds)
             if current[index] >= Self.clipThreshold, !clipped[index] {
-                clipped[index] = true
+                publish(true, at: index, to: \.clipped)
             }
         }
     }
@@ -4276,6 +4613,11 @@ final class RouterModel: ScriptTarget {
     /// with the poll and draws nothing, eleven times over.
     static let meteredStages: Set<EffectKind> = [.compressor, .gate]
 
+    /// Dynamics-meter ballistics without the observable dictionary write.
+    nonisolated static func nextGainReduction(previous: Float, incoming: Float) -> Float {
+        incoming > previous ? incoming : previous * 0.82 + incoming * 0.18
+    }
+
     private func refreshGainReduction() {
         for kind in Self.meteredStages where enabledEffects.contains(kind) {
             guard let value = engine.gainReduction(of: kind) else { continue }
@@ -4283,11 +4625,14 @@ final class RouterModel: ScriptTarget {
             // the reduction moves at the release time, which at 150 ms is a
             // flicker rather than a reading.
             let previous = gainReduction[kind] ?? 0
-            gainReduction[kind] = value > previous ? value : previous * 0.82 + value * 0.18
+            publish(
+                Self.nextGainReduction(previous: previous, incoming: value),
+                for: kind,
+                to: \.gainReduction)
         }
         // Snapshotted, because the loop mutates the dictionary it is walking.
         for kind in Array(gainReduction.keys) where !enabledEffects.contains(kind) {
-            gainReduction[kind] = nil
+            publish(Optional<Float>.none, for: kind, to: \.gainReduction)
         }
     }
 
@@ -6655,11 +7000,64 @@ final class RouterModel: ScriptTarget {
         _ value: Value, to keyPath: ReferenceWritableKeyPath<RouterModel, Value>
     ) {
         pollCost.writes += 1
-        guard self[keyPath: keyPath] != value else {
+        guard Self.shouldPublish(current: self[keyPath: keyPath], incoming: value) else {
             pollCost.unchanged += 1
             return
         }
         self[keyPath: keyPath] = value
+    }
+
+    /// Pure decision behind every high-frequency publication.
+    ///
+    /// Kept reachable to tests so a minute of stable poll input can assert an
+    /// exact publication count without constructing audio hardware.
+    nonisolated static func shouldPublish<Value: Equatable>(
+        current: Value, incoming: Value
+    ) -> Bool {
+        current != incoming
+    }
+
+    /// The same gate for one observable array element.
+    ///
+    /// Meter holds are intentionally mutable arrays, but Observation sees a
+    /// subscript write as a publication of the whole property. At silence the
+    /// old loop wrote zero back to every route twenty times a second.
+    private func publish<Value: Equatable>(
+        _ value: Value,
+        at index: Int,
+        to keyPath: ReferenceWritableKeyPath<RouterModel, [Value]>
+    ) {
+        pollCost.writes += 1
+        guard
+            Self.shouldPublish(
+                current: self[keyPath: keyPath][index],
+                incoming: value)
+        else {
+            pollCost.unchanged += 1
+            return
+        }
+        self[keyPath: keyPath][index] = value
+    }
+
+    /// The same gate for one observable dictionary entry.
+    ///
+    /// A compressor at rest reports zero on every poll. Writing that zero into
+    /// its dictionary still invalidated the complete effects panel.
+    private func publish<Key: Hashable, Value: Equatable>(
+        _ value: Value?,
+        for key: Key,
+        to keyPath: ReferenceWritableKeyPath<RouterModel, [Key: Value]>
+    ) {
+        pollCost.writes += 1
+        guard
+            Self.shouldPublish(
+                current: self[keyPath: keyPath][key],
+                incoming: value)
+        else {
+            pollCost.unchanged += 1
+            return
+        }
+        self[keyPath: keyPath][key] = value
     }
 
     /// Reads the HAL-backed path verdict without stopping the main actor.
@@ -6711,8 +7109,30 @@ final class RouterModel: ScriptTarget {
             pollBreakdown[name, default: 0] +=
                 Double(DispatchTime.now().uptimeNanoseconds - entered) / 1e9
         }
-        lap("routePeaks") { publish(engine.routePeaks, to: \.levels) }
-        lap("refreshPeaks") { refreshPeaks(levels) }
+        var telemetry: RoutingEngine.TelemetrySnapshot?
+        lap("telemetry") { telemetry = engine.telemetrySnapshotIfAvailable }
+        if let telemetry {
+            // One coherent read and one lock acquisition. A busy graph means
+            // "hold the last frame", not "publish silence": the latter made
+            // every meter blink during an effect or device swap and read two
+            // mutable diagnostic arrays outside their protecting lock.
+            lap("routePeaks") { publish(telemetry.routePeaks, to: \.levels) }
+            lap("refreshPeaks") { refreshPeaks(telemetry.routePeaks) }
+            lap("outputPeak") { publish(telemetry.outputPeak, to: \.outputPeak) }
+            lap("failedPlugins") {
+                publish(telemetry.failedPlugins, to: \.failedPlugins)
+            }
+            lap("droppedMonitor") {
+                if let dropped = telemetry.droppedMonitor,
+                    dropped.uid == monitorDeviceUID
+                {
+                    monitorWasDropped(dropped)
+                }
+            }
+            lap("clipped") {
+                publish(telemetry.outputClippedSamples, to: \.outputClippedSamples)
+            }
+        }
         // Twice a second rather than twenty times, and at once when there is no
         // verdict yet. See `pathQualityEveryNPolls`.
         pollsSincePathQuality += 1
@@ -6735,19 +7155,6 @@ final class RouterModel: ScriptTarget {
         lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }
         lap("rateRatio") { publish(engine.measuredRateRatio, to: \.measuredRateRatio) }
         lap("recordingState") { refreshRecordingState() }
-        lap("outputPeak") { publish(engine.outputPeak, to: \.outputPeak) }
-        lap("failedPlugins") { publish(engine.failedPlugins, to: \.failedPlugins) }
-        // Not only after a start this model asked for: the clock-lock recovery
-        // rebuilds the route from the engine's own snapshot, and a monitor
-        // dropped there would otherwise go unmentioned while the picker went on
-        // naming it. Reading a stale drop back is prevented by the comparison —
-        // once it has been acted on, the monitor is nil and nothing matches.
-        lap("droppedMonitor") {
-            if let dropped = engine.droppedMonitor, dropped.uid == monitorDeviceUID {
-                monitorWasDropped(dropped)
-            }
-        }
-        lap("clipped") { publish(engine.outputClippedSamples, to: \.outputClippedSamples) }
         // Drained every poll whether or not the analysis panel is open. The ring
         // is finite, so a consumer that only ran while a view was visible would
         // hand the loudness meter a stream with holes in it and report an
@@ -6756,7 +7163,7 @@ final class RouterModel: ScriptTarget {
         lap("analyser") {
             if let analyser, !analyser.isIdle {
                 analyser.drain(from: engine)
-                analysis = analyser.reading()
+                publish(analyser.reading(), to: \.analysis)
             }
         }
         if isTranscribing || isScoringSinging || isSingingVisible { pumpSourceTaps() }
@@ -7005,7 +7412,13 @@ final class RouterModel: ScriptTarget {
                     slot, into: buffer.baseAddress!, capacity: buffer.count)
                 guard taken > 0 else { return }
                 let borrowed = UnsafeBufferPointer(start: buffer.baseAddress, count: taken)
-                if slot < singerTracks.count { singerTracks[slot].add(borrowed) }
+                if slot < singerTracks.count {
+                    // Keep the tuner live while paused without moving the score
+                    // clock or recording the voice as part of the performance.
+                    let advancesTimeline = !isScoringSinging || trackClock.isPlaying
+                    singerTracks[slot].add(
+                        borrowed, advancesTimeline: advancesTimeline)
+                }
 
                 let application =
                     isSingingVisible ? recognitionApplication(for: slot) : nil
@@ -7567,7 +7980,7 @@ final class RouterModel: ScriptTarget {
             hearsSpeech: analyser?.classifier?.hearsSpeech ?? false,
             elapsed: elapsed,
             ceiling: ceiling)
-        autoLevelOffset = offset
+        publish(offset, to: \.autoLevelOffset)
 
         let wanted = autoLevelBase + Float(offset)
         guard abs(wanted - inputDecibels) > 0.01 else { return }
@@ -7656,6 +8069,13 @@ final class RouterModel: ScriptTarget {
     var watchesIOAllocations = false {
         didSet {
             guard oldValue != watchesIOAllocations else { return }
+            if watchesIOAllocations, isDebugBuild {
+                // The hook would count Swift's debug checking hundreds of
+                // thousands of times a second and slow every allocator call in
+                // the process while producing no shipping-code evidence.
+                watchesIOAllocations = false
+                return
+            }
             if watchesIOAllocations {
                 RoutingEngine.enableAllocationTripwire()
             } else {

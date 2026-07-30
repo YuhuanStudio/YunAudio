@@ -4230,27 +4230,96 @@ struct AdditionalDeviceFallbackTests {
 /// assertion this failure mode admits.
 @Suite("Asking the player from off the main actor")
 struct NowPlayingIsolationTests {
+    @Test("Spotify metadata with artwork decodes without asking the player")
+    func spotifyReply() throws {
+        let separator = "\u{1F}"
+        let track = try #require(
+            NowPlaying.parseTrackReply(
+                [
+                    "年少心動雨季", "黃霄雲", "天賜的聲音", "84.5", "265000",
+                    "playing", "spotify:track:fixture", "",
+                    "https://i.scdn.co/image/fixture",
+                ].joined(separator: separator),
+                application: "Spotify"))
 
-    @Test("the cheap read runs on a background queue without trapping")
-    func positionOffTheMainActor() async {
+        #expect(track.title == "年少心動雨季")
+        #expect(track.position == 84.5)
+        #expect(track.duration == 265)
+        #expect(track.isPlaying)
+        #expect(track.nativeLyrics == nil)
+        #expect(track.artworkURL?.host == "i.scdn.co")
+    }
+
+    @Test("a short Spotify clip still normalises milliseconds")
+    func shortSpotifyReply() throws {
+        let track = try #require(
+            NowPlaying.parseTrackReply(
+                [
+                    "Clip", "Artist", "Album", "1.2", "3000", "playing",
+                    "spotify:track:clip", "", "",
+                ].joined(separator: "\u{1F}"),
+                application: "Spotify"))
+        #expect(track.duration == 3)
+    }
+
+    @Test("a player without a track id refreshes metadata instead of freezing")
+    func emptyTrackIdentityRefreshes() {
+        #expect(
+            NowPlaying.needsTrackRead(
+                knownIdentity: "previous", receivedIdentity: ""))
+        #expect(
+            NowPlaying.needsTrackRead(
+                knownIdentity: nil, receivedIdentity: "first"))
+        #expect(
+            !NowPlaying.needsTrackRead(
+                knownIdentity: "same", receivedIdentity: "same"))
+        #expect(
+            NowPlaying.needsTrackRead(
+                knownIdentity: "previous", receivedIdentity: "next"))
+    }
+
+    @Test("an empty Music artwork field still produces the eight useful fields")
+    func musicReplyWithoutArtwork() throws {
+        let separator = "\u{1F}"
+        let track = try #require(
+            NowPlaying.parseTrackReply(
+                [
+                    "Song", "Singer", "Album", "12", "180", "paused",
+                    "music:fixture", "line one\nline two", "",
+                ].joined(separator: separator),
+                application: "Music"))
+
+        #expect(track.duration == 180)
+        #expect(!track.isPlaying)
+        #expect(track.nativeLyrics == "line one\nline two")
+        #expect(track.artworkURL == nil)
+    }
+
+    @Test("the cheap-read decision runs on a background queue without trapping")
+    func positionDecisionOffTheMainActor() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                // The answer is whatever this machine's players say, including
-                // nothing at all. What is being asserted is that asking is
-                // survivable.
-                _ = NowPlaying.position(preferring: nil)
-                _ = NowPlaying.position(preferring: "Spotify")
+                // Unit tests must not send Apple Events to a person's running
+                // players: that is machine state, can present a TCC prompt and
+                // makes concurrent suites violate NSAppleScript's serial-use
+                // contract. The source audit below covers the I/O entry points.
+                _ = NowPlaying.needsTrackRead(
+                    knownIdentity: "old", receivedIdentity: "new")
                 continuation.resume()
             }
         }
     }
 
-    @Test("and so does the expensive one")
-    func trackOffTheMainActor() async {
+    @Test("and so does the metadata decoder")
+    func trackDecoderOffTheMainActor() async {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
-                _ = NowPlaying.current()
-                _ = NowPlaying.track(from: "Music")
+                _ = NowPlaying.parseTrackReply(
+                    [
+                        "Song", "Artist", "Album", "1", "120", "playing",
+                        "fixture", "", "",
+                    ].joined(separator: "\u{1F}"),
+                    application: "Music")
                 continuation.resume()
             }
         }
@@ -4341,6 +4410,15 @@ struct PermissionRequestTests {
                 + "App/build-app.sh", encoding: .utf8)
         #expect(source.contains("com.apple.security.automation.apple-events"))
         #expect(source.contains("com.apple.security.device.audio-input"))
+    }
+
+    @Test("the assembled application is optimised unless debug is explicit")
+    func assembledAppDefaultsToRelease() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "App/build-app.sh", encoding: .utf8)
+        #expect(source.contains("CONFIGURATION=\"release\""))
+        #expect(source.contains("--debug) CONFIGURATION=\"debug\""))
     }
 }
 

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+import YunAudioMedia
 
 @testable import YunAudioApp
 
@@ -11,6 +12,130 @@ struct OnlineLyricsTests {
         HTTPURLResponse(
             url: request.url!, statusCode: status, httpVersion: "HTTP/1.1",
             headerFields: nil)!
+    }
+
+    @Test("an explicitly configured Musixmatch provider joins the same race")
+    func musixmatchJoinsRace() async throws {
+        actor Probe {
+            var coreCalls = 0
+            var musixmatchCalls = 0
+
+            func coreCalled() {
+                coreCalls += 1
+            }
+
+            func musixmatchCalled() {
+                musixmatchCalls += 1
+            }
+        }
+        let probe = Probe()
+        let musixmatch = MusixmatchSubtitleAdapter(apiKey: "unit-test-token") { request in
+            await probe.musixmatchCalled()
+            let body =
+                """
+                {"message":{
+                  "header":{"status_code":200,"region":"TW"},
+                  "body":{"subtitle":{
+                    "restricted":0,
+                    "subtitle_body":"[00:18.96]晚风里藏着\\n[00:25.65]满天的星辰",
+                    "lyrics_copyright":"Lyrics © Publisher",
+                    "script_tracking_url":"https://tracking.musixmatch.com/script",
+                    "pixel_tracking_url":"https://tracking.musixmatch.com/pixel.gif"
+                  }}
+                }}
+                """
+            return (Data(body.utf8), response(for: request))
+        }
+        let client = OnlineLyrics(musixmatch: musixmatch) { request in
+            await probe.coreCalled()
+            let url = try #require(request.url)
+            let body: String
+            let status: Int
+            switch url.host {
+            case "lrclib.net":
+                body = "[]"
+                status = 200
+            case "c.y.qq.com":
+                body = #"{"data":{"song":{"list":[]}}}"#
+                status = 200
+            case "music.163.com":
+                body = #"{"result":{"songs":[]}}"#
+                status = 200
+            case "api.lyrics.ovh":
+                body = "{}"
+                status = 404
+            default:
+                Issue.record("unexpected core request \(url)")
+                body = "{}"
+                status = 500
+            }
+            return (Data(body.utf8), response(for: request, status: status))
+        }
+
+        let match = try #require(
+            try await client.fetch(
+                .init(
+                    title: "年少心动雨季", artist: "黄霄雲",
+                    album: "天赐的声音", duration: 265)))
+        #expect(match.source == .musixmatch)
+        #expect(match.parsed?.lines.count == 2)
+        #expect(match.providerMetadata?.copyright == "Lyrics © Publisher")
+        #expect(match.providerMetadata?.scriptTrackingURL?.host == "tracking.musixmatch.com")
+        #expect(match.providerMetadata?.pixelTrackingURL?.lastPathComponent == "pixel.gif")
+        #expect(match.providerMetadata?.region == "TW")
+        #expect(await probe.coreCalls == 4)
+        #expect(await probe.musixmatchCalls == 1)
+    }
+
+    @Test("an adapter without a key never joins or calls its transport")
+    func unconfiguredMusixmatchIsAbsent() async throws {
+        actor Probe {
+            var musixmatchCalls = 0
+
+            func musixmatchCalled() {
+                musixmatchCalls += 1
+            }
+        }
+        let probe = Probe()
+        let musixmatch = MusixmatchSubtitleAdapter(apiKey: nil) { request in
+            await probe.musixmatchCalled()
+            return (Data(), response(for: request))
+        }
+        let client = OnlineLyrics(musixmatch: musixmatch) { request in
+            let url = try #require(request.url)
+            let body: String
+            switch url.host {
+            case "lrclib.net":
+                body = "[]"
+            case "c.y.qq.com":
+                body = #"{"data":{"song":{"list":[]}}}"#
+            case "music.163.com":
+                body = #"{"result":{"songs":[]}}"#
+            case "api.lyrics.ovh":
+                body = #"{"lyrics":"keyless fallback"}"#
+            default:
+                body = "{}"
+            }
+            return (Data(body.utf8), response(for: request))
+        }
+        let match = try #require(
+            try await client.fetch(
+                .init(title: "Song", artist: "Singer", album: "", duration: 200)))
+        #expect(match.source == .lyricsOvh)
+        #expect(await probe.musixmatchCalls == 0)
+    }
+
+    @Test("the live provider is enabled only by a non-empty session environment key")
+    func liveMusixmatchEntry() {
+        #expect(OnlineLyrics.liveMusixmatch(environment: [:]) == nil)
+        #expect(
+            OnlineLyrics.liveMusixmatch(
+                environment: ["MUSIXMATCH_API_KEY": " "]) == nil)
+        let adapter = OnlineLyrics.liveMusixmatch(
+            environment: ["MUSIXMATCH_API_KEY": "session-token"])
+        #expect(adapter?.isConfigured == true)
+        #expect(OnlineLyrics(musixmatch: adapter).isMusixmatchConfigured)
+        #expect(!OnlineLyrics(musixmatch: nil).isMusixmatchConfigured)
     }
 
     @Test("a Chinese timed result beats an independent plain fallback")
@@ -323,10 +448,112 @@ struct OnlineLyricsTests {
         let directory = URL(fileURLWithPath: "/tmp/lyrics")
         let query = OnlineLyrics.Query(
             title: "满天星辰不及你", artist: "ycccc", album: "", duration: 216)
-        let url = OnlineLyrics.cacheURL(
+        let qqURL = OnlineLyrics.cacheURL(
             for: query, source: .qqMusic, extension: "lrc", in: directory)
-        #expect(url.lastPathComponent.contains("[QQ Music]"))
-        #expect(url.pathExtension == "lrc")
+        let musixmatchURL = OnlineLyrics.cacheURL(
+            for: query, source: .musixmatch, extension: "lrc", in: directory)
+        #expect(qqURL.lastPathComponent.contains("[QQ Music]"))
+        #expect(qqURL.pathExtension == "lrc")
+        #expect(musixmatchURL.lastPathComponent.contains("[Musixmatch]"))
+        #expect(musixmatchURL.pathExtension == "lrc")
+        #expect(!musixmatchURL.absoluteString.contains("unit-test-token"))
+        #expect(OnlineLyrics.cachedSource(for: musixmatchURL) == .musixmatch)
+    }
+
+    @Test("a cache sidecar restores attribution without credentials or tracking")
+    func cacheAttributionRoundTrip() throws {
+        let scriptURL = try #require(
+            URL(string: "https://tracking.musixmatch.com/script?token=do-not-store"))
+        let pixelURL = try #require(
+            URL(string: "https://tracking.musixmatch.com/pixel.gif?key=do-not-store"))
+        let match = try #require(
+            OnlineLyrics.Match(
+                source: .musixmatch,
+                trackName: "年少心動雨季",
+                artistName: "黃霄雲",
+                albumName: "天賜的聲音",
+                duration: 265,
+                synchronised: "[00:18.96]晚風裡藏著",
+                plain: nil,
+                providerMetadata: .init(
+                    copyright: " Lyrics © Publisher ",
+                    scriptTrackingURL: scriptURL,
+                    pixelTrackingURL: pixelURL,
+                    region: " TW ")))
+
+        let data = try OnlineLyrics.encodeCacheAttribution(match.cacheAttribution)
+        let replayed = try OnlineLyrics.decodeCacheAttribution(data)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any])
+
+        #expect(replayed.provider == .musixmatch)
+        #expect(replayed.copyright == "Lyrics © Publisher")
+        #expect(replayed.region == "TW")
+        #expect(Set(object.keys) == ["provider", "copyright", "region"])
+        let serialised = String(decoding: data, as: UTF8.self)
+        #expect(!serialised.contains("tracking"))
+        #expect(!serialised.contains("do-not-store"))
+
+        let lyricsURL = URL(fileURLWithPath: "/tmp/年少心動雨季.lrc")
+        #expect(
+            OnlineLyrics.cacheAttributionURL(for: lyricsURL).lastPathComponent
+                == "年少心動雨季.lrc.attribution.json")
+    }
+
+    @Test("untrusted attribution sidecars are bounded")
+    func cacheAttributionBounds() {
+        let oversized = Data(
+            repeating: 0x20,
+            count: OnlineLyrics.CacheAttribution.maximumEncodedBytes + 1)
+        #expect(throws: OnlineLyrics.Failure.responseTooLarge) {
+            try OnlineLyrics.decodeCacheAttribution(oversized)
+        }
+
+        let attribution = OnlineLyrics.CacheAttribution(
+            provider: .musixmatch,
+            copyright: String(
+                repeating: "a",
+                count: OnlineLyrics.CacheAttribution.maximumCopyrightLength + 1),
+            region: "TW")
+        #expect(throws: OnlineLyrics.Failure.badResponse) {
+            try OnlineLyrics.encodeCacheAttribution(attribution)
+        }
+    }
+
+    @Test("a second play keeps the online provider attached to its cache")
+    @MainActor
+    func cachedProviderSurvivesRelaunch() {
+        let directory = URL(fileURLWithPath: "/tmp/lyrics")
+        let query = OnlineLyrics.Query(
+            title: "年少心動雨季", artist: "黃霄雲",
+            album: "天賜的聲音", duration: 265)
+        let cached = OnlineLyrics.cacheURL(
+            for: query, source: .netEase, extension: "lrc", in: directory)
+        let musixmatch = OnlineLyrics.cacheURL(
+            for: query, source: .musixmatch, extension: "lrc", in: directory)
+        let userFile = directory.appendingPathComponent("黃霄雲 - 年少心動雨季.lrc")
+
+        #expect(OnlineLyrics.cachedSource(for: cached) == .netEase)
+        #expect(OnlineLyrics.cachedSource(for: musixmatch) == .musixmatch)
+        #expect(RouterModel.lyricsStatus(forLocalURL: cached) == .online)
+        #expect(OnlineLyrics.cachedSource(for: userFile) == nil)
+        #expect(RouterModel.lyricsStatus(forLocalURL: userFile) == .local)
+        #expect(
+            RouterModel.lyricsSourceName(forLocalURL: cached)
+                != RouterModel.lyricsSourceName(forLocalURL: userFile))
+
+        let track = NowPlaying.Track(
+            application: "NetEaseMusic", title: query.title, artist: query.artist,
+            album: query.album, position: 0, duration: query.duration, isPlaying: true)
+        #expect(
+            RouterModel.bestFileName(
+                for: track,
+                names: [cached.lastPathComponent, userFile.lastPathComponent],
+                extensions: ["lrc"]) == userFile.lastPathComponent)
+        #expect(
+            RouterModel.bestFileName(
+                for: track, names: [cached.lastPathComponent], extensions: ["lrc"])
+                == cached.lastPathComponent)
     }
 
     @Test("a timed answer cancels slow fallbacks instead of waiting six seconds")
@@ -365,10 +592,216 @@ struct OnlineLyricsTests {
         // six-second sleepers, which is the regression this number catches.
         #expect(elapsed < .seconds(5), "lookup took \(elapsed)")
     }
+
+    @Test("a complete exact timeline wins within a bounded quality grace")
+    func completeTimelineWinsQualityGrace() async throws {
+        let completeTimeline = (0..<63).map { line in
+            let seconds = 12 + Double(line) * 4
+            return String(
+                format: "[%02d:%05.2f]line %02d",
+                Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60), line)
+        }.joined(separator: "\n")
+        let escapedTimeline = completeTimeline.replacingOccurrences(of: "\n", with: "\\n")
+        let client = OnlineLyrics { request in
+            let url = try #require(request.url)
+            let body: String
+            let status: Int
+            switch (url.host, url.path) {
+            case ("c.y.qq.com", let path) where path.contains("client_search"):
+                body =
+                    """
+                    {"data":{"song":{"list":[{
+                      "songmid":"fast-fragment","songname":"年少心动雨季",
+                      "albumname":"年少心动雨季","interval":265,
+                      "singer":[{"name":"黄霄雲"}]
+                    }]}}}
+                    """
+                status = 200
+            case ("c.y.qq.com", _):
+                body = #"{"lyric":"[00:18.96]first\n[00:25.65]second"}"#
+                status = 200
+            case ("music.163.com", let path) where path.contains("search"):
+                try await Task.sleep(for: .milliseconds(100))
+                body =
+                    """
+                    {"result":{"songs":[{
+                      "id":63,"name":"年少心动雨季","duration":265000,
+                      "album":{"name":"年少心动雨季"},
+                      "artists":[{"name":"黄霄雲"}]
+                    }]}}
+                    """
+                status = 200
+            case ("music.163.com", let path) where path.contains("lyric"):
+                body = #"{"lrc":{"lyric":"\#(escapedTimeline)"}}"#
+                status = 200
+            case ("lrclib.net", _), ("api.lyrics.ovh", _):
+                try await Task.sleep(for: .seconds(6))
+                body = url.host == "lrclib.net" ? "[]" : #"{"lyrics":"late"}"#
+                status = 200
+            default:
+                Issue.record("unexpected request \(url)")
+                body = "{}"
+                status = 500
+            }
+            return (Data(body.utf8), response(for: request, status: status))
+        }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let match = try #require(
+            try await client.fetch(
+                .init(
+                    title: "年少心动雨季", artist: "黄霄雲",
+                    album: "年少心动雨季", duration: 265)))
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(match.source == .netEase)
+        #expect(match.parsed?.lines.count == 63)
+        #expect((match.parsed?.lines.last?.time ?? 0) > 250)
+        #expect(elapsed >= .milliseconds(100), "lookup returned before the exact result")
+        // The exact answer arrives at 100 ms and the grace is 225 ms. A full
+        // second leaves scheduler headroom while still catching an accidental
+        // wait for either six-second provider.
+        #expect(elapsed < .seconds(1), "quality grace was not bounded: \(elapsed)")
+    }
+}
+
+@Suite("Hand-run lyric fallback")
+struct HandRunLyricsTests {
+    @Test("a Chinese title and artist become a stopped, bounded manual track")
+    @MainActor
+    func trackConstruction() throws {
+        let track = try #require(
+            RouterModel.handRunTrack(
+                title: "  年少心動雨季\n",
+                artist: " 黃霄雲 "))
+
+        #expect(track.title == "年少心動雨季")
+        #expect(track.artist == "黃霄雲")
+        #expect(track.position == 0)
+        #expect(track.duration == 0)
+        #expect(!track.isPlaying)
+        #expect(track.identity == "hand:黃霄雲\u{1F}年少心動雨季")
+
+        let longTitle = String(
+            repeating: "雨",
+            count: RouterModel.maximumHandLyricsFieldLength + 50)
+        let bounded = try #require(
+            RouterModel.handRunTrack(
+                title: "\n\(longTitle) ",
+                artist: String(
+                    repeating: "歌",
+                    count: RouterModel.maximumHandLyricsFieldLength + 50)))
+        #expect(bounded.title.count == RouterModel.maximumHandLyricsFieldLength)
+        #expect(bounded.artist.count == RouterModel.maximumHandLyricsFieldLength)
+        #expect(RouterModel.handRunTrack(title: " \n ", artist: "Nobody") == nil)
+    }
+
+    @Test("manual lookup adopts locally first and retry does not exclude hand-run")
+    func lookupStructure() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        let lookupStart = try #require(
+            source.range(of: "func findWordsByTitle("))
+        let lookupEnd = try #require(
+            source.range(
+                of: "private static func boundedHandLyricsField",
+                range: lookupStart.upperBound..<source.endIndex))
+        let lookup = source[lookupStart.lowerBound..<lookupEnd.lowerBound]
+        let handRun = try #require(lookup.range(of: "isHandRun = true"))
+        let adoption = try #require(lookup.range(of: "adopt(track)"))
+
+        #expect(handRun.lowerBound < adoption.lowerBound)
+        #expect(lookup.contains("guard let track = Self.handRunTrack"))
+        #expect(!lookup.contains("NowPlaying.current"))
+        #expect(!lookup.contains("Accessibility"))
+        #expect(!lookup.contains("microphone"))
+
+        let adoptStart = try #require(source.range(of: "private func adopt("))
+        let adoptEnd = try #require(
+            source.range(
+                of: "private func startLyricsLookup",
+                range: adoptStart.upperBound..<source.endIndex))
+        let adoptionFlow = source[adoptStart.lowerBound..<adoptEnd.lowerBound]
+        let localRead = try #require(adoptionFlow.range(of: "findLyricsMatch"))
+        let onlineStart = try #require(adoptionFlow.range(of: "startLyricsLookup"))
+        #expect(localRead.lowerBound < onlineStart.lowerBound)
+
+        let retryStart = try #require(source.range(of: "func retryLyricsLookup()"))
+        let retryEnd = try #require(
+            source.range(
+                of: "private func followTheWords",
+                range: retryStart.upperBound..<source.endIndex))
+        let retry = source[retryStart.lowerBound..<retryEnd.lowerBound]
+        #expect(retry.contains("startLyricsLookup(for: track)"))
+        #expect(!retry.contains("!isHandRun"))
+    }
+
+    @Test("the collapsible form and source list follow runtime configuration")
+    func interfaceStructure() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/SingingPanel.swift", encoding: .utf8)
+
+        #expect(source.contains("@State private var isTitleLookupExpanded"))
+        #expect(source.contains("TextField(loc(\"Song title\")"))
+        #expect(source.contains("TextField(loc(\"Artist (optional)\")"))
+        #expect(source.contains("model.findWordsByTitle(handTitle, artist: handArtist)"))
+        #expect(source.contains("OnlineLyrics.live.isMusixmatchConfigured"))
+        #expect(
+            source.contains(
+                "Searching LRCLIB, QQ Music, NetEase, lyrics.ovh and Musixmatch…"))
+        #expect(
+            source.contains(
+                "Searching LRCLIB, QQ Music, NetEase and lyrics.ovh…"))
+        #expect(
+            source.contains(
+                "No words were found in LRCLIB, QQ Music, NetEase, lyrics.ovh or Musixmatch."
+            ))
+        #expect(
+            source.contains(
+                "No words were found in LRCLIB, QQ Music, NetEase or lyrics.ovh."
+            ))
+    }
 }
 
 @Suite("Source-independent music recognition")
 struct MusicRecognitionTests {
+    @Test("a Chinese local cover follows the same song matching as its words")
+    @MainActor
+    func localCoverMatching() {
+        let track = NowPlaying.Track(
+            application: "Spotify", title: "年少心動雨季", artist: "黃霄雲",
+            album: "天賜的聲音", position: 0, duration: 265, isPlaying: true)
+        let found = RouterModel.bestFileName(
+            for: track,
+            names: [
+                "Unrelated Song.jpg",
+                "黃霄雲 - 年少心動雨季.png",
+                "年少心動雨季.lrc",
+            ],
+            extensions: ["jpg", "jpeg", "png", "heic", "webp"])
+
+        #expect(found == "黃霄雲 - 年少心動雨季.png")
+    }
+
+    @Test("hand-selected words use an exact-name neighbouring cover")
+    @MainActor
+    func coverBesideWords() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let words = directory.appendingPathComponent("年少心動雨季.lrc")
+        let cover = directory.appendingPathComponent("年少心動雨季.png")
+        try Data().write(to: words)
+        try Data([0]).write(to: cover)
+
+        #expect(RouterModel.artworkBesideWords(at: words) == cover)
+    }
+
     @Test("a catalogue signature receives every captured sample at the stated rate")
     func audioBuffer() throws {
         let samples: [Float] = [0.125, -0.25, 0.5, -1]
@@ -411,5 +844,40 @@ struct MusicRecognitionTests {
             sampleCount: 300, cooldownSamples: 500)
         #expect(stillCooling.discarded == 300)
         #expect(stillCooling.remaining == 200)
+    }
+
+    @Test("reference signature ranges never become a track duration")
+    func matchRangeIsNotDuration() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/MusicRecognition.swift", encoding: .utf8)
+        let start = try #require(source.range(of: "case let .match(match):"))
+        let end = try #require(
+            source.range(
+                of: "case .noMatch:",
+                range: start.upperBound..<source.endIndex))
+        let matchHandler = source[start.lowerBound..<end.lowerBound]
+
+        #expect(!matchHandler.contains("timeRanges.map"))
+        #expect(matchHandler.contains("duration: 0"))
+        #expect(matchHandler.contains("appleMusicURL: item.appleMusicURL"))
+    }
+
+    @Test("a recognised catalogue link survives in the source-independent match")
+    func catalogueLinkSurvives() throws {
+        let link = try #require(
+            URL(string: "https://music.apple.com/tw/album/example/123?i=456"))
+        let match = MusicRecognition.Match(
+            title: "年少心動雨季",
+            artist: "黃霄雲",
+            album: "天賜的聲音",
+            identity: "shazam:123",
+            position: 18.96,
+            duration: 0,
+            confidence: 0.95,
+            artworkURL: nil,
+            appleMusicURL: link)
+
+        #expect(match.appleMusicURL == link)
     }
 }

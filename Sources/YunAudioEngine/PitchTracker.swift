@@ -33,9 +33,12 @@ import Foundation
 /// dependency, not a faster way to do an FFT.
 public final class PitchTracker {
 
-    /// Frames the tracker takes at a time. A power of two, and long enough to
-    /// hold two periods of the lowest voice it looks for — an autocorrelation
-    /// cannot find a period it has not seen twice.
+    /// Frames the tracker takes at a time.
+    ///
+    /// A power of two for the FFT. At 96 kHz it holds only 1.28 periods of the
+    /// 60 Hz floor, so lag scores are normalised by the energy that actually
+    /// overlaps; dividing every lag by the full frame energy silently rejected
+    /// the lowest voices as the sample rate rose.
     public static let frameSize = 2048
 
     /// The range of a human speaking voice, generously.
@@ -89,21 +92,38 @@ public final class PitchTracker {
     private var real: [Float]
     private var imaginary: [Float]
     private var correlation: [Float]
+    /// Prefix energy of the mean-removed frame.
+    ///
+    /// A lag compares two shorter slices. Their energies come from this table
+    /// in O(1), keeping the whole estimate O(N log N) and allocation-free.
+    private var energyPrefix: [Float]
 
     public init?(sampleRate: Double) {
+        guard sampleRate.isFinite, sampleRate > 0 else { return nil }
+        // One candidate either side of the advertised limits gives the limit
+        // itself two neighbours. Without it an exact 60 Hz period sat at the
+        // end of the range and could never qualify as a local maximum.
+        let minimumLag =
+            max(1, Int((sampleRate / Self.highestHertz).rounded(.down)) - 1)
+        let maximumLag =
+            min(
+                Self.frameSize - 2,
+                Int((sampleRate / Self.lowestHertz).rounded(.up)) + 1)
+        guard minimumLag + 1 < maximumLag else { return nil }
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
             return nil
         }
         self.setup = setup
         self.sampleRate = sampleRate
-        minimumLag = Int(sampleRate / Self.highestHertz)
-        maximumLag = min(Self.frameSize - 1, Int(sampleRate / Self.lowestHertz))
+        self.minimumLag = minimumLag
+        self.maximumLag = maximumLag
 
         let half = Self.transformSize / 2
         padded = [Float](repeating: 0, count: Self.transformSize)
         real = [Float](repeating: 0, count: half)
         imaginary = [Float](repeating: 0, count: half)
         correlation = [Float](repeating: 0, count: Self.transformSize)
+        energyPrefix = [Float](repeating: 0, count: Self.frameSize + 1)
     }
 
     deinit { vDSP_destroy_fftsetup(setup) }
@@ -160,6 +180,12 @@ public final class PitchTracker {
         var negated = -mean
         vDSP_vsadd(frame, 1, &negated, &padded, 1, vDSP_Length(Self.frameSize))
         for index in Self.frameSize..<Self.transformSize { padded[index] = 0 }
+        energyPrefix[0] = 0
+        for index in 0..<Self.frameSize {
+            let sample = padded[index]
+            energyPrefix[index + 1] =
+                energyPrefix[index] + sample * sample
+        }
 
         let half = Self.transformSize / 2
         real.withUnsafeMutableBufferPointer { realBuffer in
@@ -206,6 +232,24 @@ public final class PitchTracker {
             10 * log10(meanSquare) > Self.floorDecibels
         else { return 0 }
 
+        // The raw linear autocorrelation falls with lag even for a perfect
+        // periodic signal, simply because fewer samples overlap. At 96 kHz a
+        // 60 Hz period is 1600 samples and only 448 samples overlap in this
+        // frame; dividing that sum by the full-frame energy caps confidence at
+        // about 0.22, below the voiced threshold. Normalise each lag by the
+        // energy of its own two slices so confidence means periodicity rather
+        // than "how short was the lag".
+        let transformScale = Float(2 * Self.transformSize)
+        let totalEnergy = energyPrefix[Self.frameSize]
+        for lag in minimumLag...maximumLag {
+            let leftEnergy = energyPrefix[Self.frameSize - lag]
+            let rightEnergy = totalEnergy - energyPrefix[lag]
+            let denominator =
+                transformScale * (leftEnergy * rightEnergy).squareRoot()
+            correlation[lag] =
+                denominator > 1e-12 ? correlation[lag] / denominator : 0
+        }
+
         // The shortest lag that scores nearly as well as the best, not the best
         // outright.
         //
@@ -215,7 +259,7 @@ public final class PitchTracker {
         // and it is why the tests below check for octaves specifically.
         var best: Float = 0
         for lag in minimumLag...maximumLag {
-            best = max(best, correlation[lag] / energy)
+            best = max(best, correlation[lag])
         }
         // Below this the frame is noise, breath or silence, and the best lag is
         // whatever the noise happened to favour. Reporting that as a pitch is
@@ -234,7 +278,7 @@ public final class PitchTracker {
             let previous = correlation[lag - 1]
             let centre = correlation[lag]
             let next = correlation[lag + 1]
-            guard centre > previous, centre >= next, centre / energy > best * 0.85 else {
+            guard centre > previous, centre >= next, centre > best * 0.85 else {
                 continue
             }
             // Parabolic interpolation around the peak: the true period is

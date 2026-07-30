@@ -1,8 +1,8 @@
-# 限制，以及什么行不通
+# 限制
 
 ← [README](../../README.zh-Hans.md) · [English](../limits.md)
 
-## 试过而且行不通的
+## 已排除的方案
 
 **`AUAudioMix`。** macOS 26 内置了一个分级的人声／环境分离器 —— 它是
 `AUSoundIsolation` 那种“开或关”的可调版本，带一个 Studio 风格（Apple 对
@@ -26,7 +26,7 @@ SwiftPM 没办法构建它的 Metal shader；而 MLX 在库缺失时**不会退�
 “启动与同步的成本高于算术本身”的尺度。vDSP 就是 Apple 为这件事写的。MLX 值得上场
 的时机是有一个训练好的模型要跑，那是另一个功能、另一种构建。
 
-## 已知限制
+## 现行限制
 
 - 驱动是 ad-hoc 签名。分发需要 Developer ID 身份与公证。
 - 人声隔离会让 `AudioUnitRender` 在 IO 线程上分配内存 —— 每个周期约 0.3 次，来自

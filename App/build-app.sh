@@ -6,8 +6,9 @@
 # LSUIElement and the microphone usage strings are read, and so TCC can attribute
 # the permission prompt to this app rather than to whatever launched it.
 #
-#   ./build-app.sh              debug build
-#   ./build-app.sh --release    optimised build
+#   ./build-app.sh              optimised build
+#   ./build-app.sh --debug      unoptimised diagnostic build
+#   ./build-app.sh --release    explicitly select the optimised build
 #   ./build-app.sh --run        build, then launch
 #   ./build-app.sh --verify     build, then prove the bundle is self-contained
 #
@@ -18,11 +19,12 @@ cd "$(dirname "$0")/.."
 # Ensures the SDK is new enough; see the script for why.
 source ./App/toolchain.sh
 
-CONFIGURATION="debug"
+CONFIGURATION="release"
 LAUNCH=0
 VERIFY=0
 for argument in "$@"; do
 	case "${argument}" in
+	--debug) CONFIGURATION="debug" ;;
 	--release) CONFIGURATION="release" ;;
 	--run) LAUNCH=1 ;;
 	--verify) VERIFY=1 ;;
@@ -95,6 +97,9 @@ codesign --force --sign - \
 	"${BUNDLE}"
 
 echo "built ${BUNDLE}"
+echo "Shazam catalogue: unavailable in this ad-hoc build."
+echo "QQ Music and NetEase audio can be captured, but automatic song identification"
+echo "needs a signed App ID with the ShazamKit App Service enabled and runtime verification."
 
 if [[ "${VERIFY}" == "1" ]]; then
 	# The one check that matters for shipping, and the only one that can find

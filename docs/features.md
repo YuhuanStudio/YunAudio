@@ -1,14 +1,13 @@
-# Every claim, at length
+# Capabilities
 
-The README keeps the ones that decide whether this project is interesting to
-you. This page is all of them, with the measurement behind each — it is the
-original feature section, kept whole rather than summarised away.
+Every capability, with the measurement supporting it. The README summarises
+these by area; this page is the complete list.
 
 ← [README](../README.md)
 
 English · [繁體中文](zh-Hant/features.md) · [简体中文](zh-Hans/features.md)
 
-## What is different about it
+## The complete list
 
 **The signal path is provably bit-exact.** Not "we don't think anything
 resamples it" — measured. `yunaudio-cli selftest` sends a 24-bit pseudorandom

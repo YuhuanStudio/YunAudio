@@ -171,6 +171,18 @@ public final class RoutingEngine: @unchecked Sendable {
         return Int(graph?.pointee.alignmentFrames ?? 0)
     }
     private var effectChain: EffectChain?
+    /// The currently installed handover and the old path it keeps alive.
+    ///
+    /// All references live here rather than in the graph, whose IO-facing
+    /// records are unmanaged. A later graph swap crosses the cycle fence before
+    /// releasing these, so a rapid second toggle cannot free the first
+    /// transition underneath the callback.
+    private var effectTransitionController: EffectTransition?
+    private var effectTransitionBlock: UnsafeMutablePointer<RTEffectTransition>?
+    private var transitionOldChain: EffectChain?
+    private var transitionOldUnit: VoiceIsolationUnit?
+    private var transitionOldBlock: UnsafeMutablePointer<RTVoiceIsolation>?
+    private var transitionOldFailures: UnsafeMutablePointer<UInt64>?
     /// Renders the model refused. Non-zero means audio passed through
     /// unprocessed, which the UI should surface rather than hide.
     /// Renders the model refused. Non-zero means audio passed through
@@ -1203,6 +1215,24 @@ public final class RoutingEngine: @unchecked Sendable {
         if let selftestBlock { RTSelftest.deallocate(selftestBlock) }
         selftestBlock = nil
 
+        if let effectTransitionBlock {
+            RTEffectTransition.deallocate(effectTransitionBlock)
+        }
+        effectTransitionBlock = nil
+        effectTransitionController = nil
+        if let transitionOldBlock {
+            transitionOldBlock.deinitialize(count: 1)
+            transitionOldBlock.deallocate()
+        }
+        transitionOldBlock = nil
+        if let transitionOldFailures {
+            transitionOldFailures.deinitialize(count: 1)
+            transitionOldFailures.deallocate()
+        }
+        transitionOldFailures = nil
+        transitionOldChain = nil
+        transitionOldUnit = nil
+
         // Order matters: the block is freed first so nothing can dereference
         // the unmanaged unit pointer afterwards, then the unit is released.
         if let isolationBlock {
@@ -1693,10 +1723,29 @@ public final class RoutingEngine: @unchecked Sendable {
     public func drainTranscript(
         _ slot: Int, into destination: UnsafeMutablePointer<Float>, capacity: Int
     ) -> Int {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        guard slot >= 0, slot < transcriptRings.count, capacity > 0 else { return 0 }
-        return Int(yun_rt_ring_read(transcriptRings[slot], destination, UInt32(capacity)))
+        guard capacity > 0 else { return 0 }
+        return Self.withTranscriptDrainLock(stateLock) {
+            guard slot >= 0, slot < transcriptRings.count else { return 0 }
+            return Int(
+                yun_rt_ring_read(transcriptRings[slot], destination, UInt32(capacity)))
+        }
+    }
+
+    /// Reads only when the graph owner is immediately available.
+    ///
+    /// The interface drains these rings on its meter tick. A graph replacement
+    /// can own the state lock for its 200 ms retirement wait, while a start can
+    /// own it across synchronous CoreAudio calls and a 750 ms cycle proof.
+    /// Waiting for either would freeze the interface. Returning zero leaves the
+    /// ring's read cursor untouched, so the next tick receives the same samples
+    /// in the same order.
+    @inline(__always)
+    private static func withTranscriptDrainLock(
+        _ lock: NSRecursiveLock, read: () -> Int
+    ) -> Int {
+        guard lock.try() else { return 0 }
+        defer { lock.unlock() }
+        return read()
     }
 
     /// How many sources are being tapped for transcription.
@@ -1707,6 +1756,25 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     private var transcriptRings: [OpaquePointer] = []
+
+    /// Installs an owned ring without constructing audio hardware.
+    ///
+    /// Test support for the lock boundary above. The ordinary installation path
+    /// is `startTranscriptTaps`; using that in a unit test would turn a
+    /// concurrency assertion into a CoreAudio integration test.
+    func installTranscriptRingForTesting(_ ring: OpaquePointer) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        precondition(transcriptRings.isEmpty)
+        transcriptRings.append(ring)
+    }
+
+    /// Holds the same lock as graph publication for a deterministic contention test.
+    func withStateLockForTesting(_ body: () -> Void) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        body()
+    }
 
     /// True while separate files are being written.
     public var isRecordingStems: Bool {
@@ -1945,6 +2013,12 @@ public final class RoutingEngine: @unchecked Sendable {
         let retiredUnit = isolationUnit
         let retiredBlock = isolationBlock
         let retiredFailures = isolationFailureCounter
+        let previousTransitionController = effectTransitionController
+        let previousTransitionBlock = effectTransitionBlock
+        let previousTransitionOldChain = transitionOldChain
+        let previousTransitionOldUnit = transitionOldUnit
+        let previousTransitionOldBlock = transitionOldBlock
+        let previousTransitionOldFailures = transitionOldFailures
 
         // The same split `start` makes: a chain for everything except the one
         // case the dedicated isolation unit exists for.
@@ -2000,7 +2074,11 @@ public final class RoutingEngine: @unchecked Sendable {
         let fromCancelled = echoBridge != nil && isolatedSource?.deviceUID == microphoneUID
         let mapped = isolatedSource.flatMap { inputMap[$0] }
         let point = mapped ?? (buffer: Int32(0), channel: Int32(0))
-        let isolates = stage != nil && (fromCancelled || mapped != nil)
+        let canReachSource = fromCancelled || mapped != nil
+        // Disabling the final stage still needs one isolated source while the
+        // old processed path fades to raw. Keying routes only on the new stage
+        // would route around the transition at the exact swap it exists for.
+        let isolates = canReachSource && (retiredBlock != nil || stage != nil)
 
         // Copied whole rather than rebuilt from `activeRoutes`: nothing about
         // the routes is changing, so their buffer indices, gains, mutes and —
@@ -2026,7 +2104,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // it points at the unit that is about to be released.
         var block: UnsafeMutablePointer<RTVoiceIsolation>?
         var failures: UnsafeMutablePointer<UInt64>?
-        if let stage, isolates {
+        if let stage, canReachSource {
             let counter = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
             counter.initialize(to: 0)
             failures = counter
@@ -2046,12 +2124,36 @@ public final class RoutingEngine: @unchecked Sendable {
             block = allocated
         }
 
+        let oldLatency = retiredChain?.latencyFrames ?? retiredUnit?.latencyFrames ?? 0
+        let newLatency = chain?.latencyFrames ?? unit?.latencyFrames ?? 0
+        var transitionController: EffectTransition?
+        var transitionBlock: UnsafeMutablePointer<RTEffectTransition>?
+        if isolates {
+            let controller = EffectTransition(
+                sampleRate: rate, oldLatencyFrames: oldLatency,
+                newLatencyFrames: newLatency)
+            transitionController = controller
+            transitionBlock = RTEffectTransition.allocate(
+                sourceBuffer: point.buffer,
+                sourceChannel: point.channel,
+                sourceIsCancelled: fromCancelled,
+                oldStage: retiredBlock,
+                oldIsChain: retiredChain != nil,
+                newStage: block,
+                newIsChain: stage?.isChain ?? false,
+                controller: controller,
+                maximumFrames: frames,
+                oldAlignmentFrames: oldLatency,
+                newAlignmentFrames: newLatency)
+        }
+
         let next = RTGraph.allocate(
             routes: rtRoutes, bufferFrames: frames, sampleRate: rate, sharedClock: sharedClock)
         if let block, let stage {
             next.pointee.voiceIsolation = block
             next.pointee.isolationIsChain = stage.isChain ? 1 : 0
         }
+        next.pointee.effectTransition = transitionBlock
 
         // Everything `updateRoutes` carries, for the reason it carries it:
         // whatever belongs to the route rather than to this particular graph is
@@ -2086,7 +2188,7 @@ public final class RoutingEngine: @unchecked Sendable {
         // rebuild that can change it. Set before the graph is published, or a
         // cycle would run the new chain against the old compensation.
         next.pointee.alignmentFrames = Int32(
-            min(chain?.latencyFrames ?? 0, RTGraph.maximumAlignmentFrames))
+            min(newLatency, RTGraph.maximumAlignmentFrames))
         for slot in 0..<Int(next.pointee.routeCount) {
             RTGraph.carryAlignment(from: previous, slot: slot, to: next, slot: slot)
         }
@@ -2121,6 +2223,12 @@ public final class RoutingEngine: @unchecked Sendable {
         isolationUnit = unit
         isolationBlock = block
         isolationFailureCounter = failures
+        effectTransitionController = transitionController
+        effectTransitionBlock = transitionBlock
+        transitionOldChain = transitionBlock == nil ? nil : retiredChain
+        transitionOldUnit = transitionBlock == nil ? nil : retiredUnit
+        transitionOldBlock = transitionBlock == nil ? nil : retiredBlock
+        transitionOldFailures = transitionBlock == nil ? nil : retiredFailures
         // Named rather than silently dropped, as at start: a chain that quietly
         // lost a stage sounds different and says nothing about why.
         failedPlugins = chain?.pluginFailures ?? []
@@ -2137,20 +2245,40 @@ public final class RoutingEngine: @unchecked Sendable {
         _ = yun_rt_cell_wait_for_swap(cell, 200)
         RTGraph.deallocate(previous)
 
-        // The block first, so nothing can dereference the unmanaged pointer
-        // inside it afterwards, then the counter it points at, and only then
-        // the units themselves — which is what the extended lifetime is for.
-        // Without it the optimiser is entitled to release them the moment they
-        // stop being read, which is before the swap has been seen.
-        if let retiredBlock {
-            retiredBlock.deinitialize(count: 1)
-            retiredBlock.deallocate()
+        // A previous handover is now beyond the same cycle fence as its graph.
+        // Its old path can finally be reclaimed; the current old path moved
+        // into the new handover above and must survive this return.
+        if let previousTransitionBlock {
+            RTEffectTransition.deallocate(previousTransitionBlock)
         }
-        if let retiredFailures {
-            retiredFailures.deinitialize(count: 1)
-            retiredFailures.deallocate()
+        if let previousTransitionOldBlock {
+            previousTransitionOldBlock.deinitialize(count: 1)
+            previousTransitionOldBlock.deallocate()
         }
-        withExtendedLifetime((retiredChain, retiredUnit)) {}
+        if let previousTransitionOldFailures {
+            previousTransitionOldFailures.deinitialize(count: 1)
+            previousTransitionOldFailures.deallocate()
+        }
+        withExtendedLifetime(
+            (
+                previousTransitionController, previousTransitionOldChain,
+                previousTransitionOldUnit
+            )
+        ) {}
+
+        // If neither side could be transitioned, the old path was not handed
+        // to the new graph and follows the ordinary retirement order.
+        if transitionBlock == nil {
+            if let retiredBlock {
+                retiredBlock.deinitialize(count: 1)
+                retiredBlock.deallocate()
+            }
+            if let retiredFailures {
+                retiredFailures.deinitialize(count: 1)
+                retiredFailures.deallocate()
+            }
+        }
+        withExtendedLifetime((retiredChain, retiredUnit, transitionController)) {}
         return true
     }
 
@@ -2162,6 +2290,7 @@ public final class RoutingEngine: @unchecked Sendable {
     /// top of the next cycle, so nothing is rebuilt and nothing blocks.
     @discardableResult
     public func setGain(_ gain: Float, forRouteAt index: Int) -> Bool {
+        guard gain.isFinite else { return false }
         stateLock.lock()
         defer { stateLock.unlock() }
         return push(kind: kYunRTCommandSetGain, index: index, value: gain)
@@ -2177,6 +2306,7 @@ public final class RoutingEngine: @unchecked Sendable {
     /// Trim on the microphone, ahead of every route that reads it.
     @discardableResult
     public func setInputGain(_ gain: Float) -> Bool {
+        guard gain.isFinite else { return false }
         stateLock.lock()
         defer { stateLock.unlock() }
         inputGain = gain
@@ -2194,6 +2324,7 @@ public final class RoutingEngine: @unchecked Sendable {
     /// The master, over the whole output bus after everything is mixed in.
     @discardableResult
     public func setOutputGain(_ gain: Float) -> Bool {
+        guard gain.isFinite else { return false }
         stateLock.lock()
         defer { stateLock.unlock() }
         outputGain = gain
@@ -2390,6 +2521,61 @@ public final class RoutingEngine: @unchecked Sendable {
     }
 
     // MARK: Introspection
+
+    /// One coherent set of values consumed by the interface's meter tick.
+    ///
+    /// Nil means the graph owner is busy, not that the signal or its diagnostics
+    /// became empty. Keeping that distinction in the type prevents a graph swap
+    /// from publishing a false zero frame between two real readings.
+    public struct TelemetrySnapshot: Sendable, Equatable {
+        public let routePeaks: [Float]
+        public let outputPeak: Float
+        public let outputClippedSamples: UInt64
+        public let failedPlugins: [AudioUnitLoadFailure]
+        public let droppedMonitor: DroppedMonitor?
+    }
+
+    /// Reads every interface value under one non-blocking lock acquisition.
+    public var telemetrySnapshotIfAvailable: TelemetrySnapshot? {
+        guard stateLock.try() else { return nil }
+        defer { stateLock.unlock() }
+        let count = graph.map { Int($0.pointee.routeCount) } ?? 0
+        let peaks =
+            graph.map { current in
+                (0..<count).map { current.pointee.peaks[$0] }
+            } ?? []
+        return TelemetrySnapshot(
+            routePeaks: peaks,
+            outputPeak: graph?.pointee.outputPeak ?? 0,
+            outputClippedSamples: graph?.pointee.outputClipped ?? 0,
+            failedPlugins: failedPlugins,
+            droppedMonitor: droppedMonitor)
+    }
+
+    /// Installs numeric state without constructing audio hardware.
+    ///
+    /// Test support for the snapshot boundary above. A non-zero fixture matters:
+    /// otherwise nil accidentally being replaced with an empty snapshot would
+    /// satisfy the test for the same wrong reason it made meters blink.
+    func installTelemetryForTesting(_ snapshot: TelemetrySnapshot) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        precondition(graph == nil)
+        let routes = snapshot.routePeaks.map { _ in
+            RTRoute(
+                sourceBuffer: 0, sourceChannel: 0,
+                destinationBuffer: 0, destinationChannel: 0)
+        }
+        let installed = RTGraph.allocate(routes: routes, bufferFrames: 64)
+        for (index, peak) in snapshot.routePeaks.enumerated() {
+            installed.pointee.peaks[index] = peak
+        }
+        installed.pointee.outputPeak = snapshot.outputPeak
+        installed.pointee.outputClipped = snapshot.outputClippedSamples
+        graph = installed
+        failedPlugins = snapshot.failedPlugins
+        droppedMonitor = snapshot.droppedMonitor
+    }
 
     /// Loudest sample leaving on the destination bus, after every gain stage.
     ///

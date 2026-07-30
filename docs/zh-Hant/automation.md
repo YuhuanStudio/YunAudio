@@ -1,11 +1,11 @@
 # 自動化
 
-底下每一種介面驅動的都是**同一個執行中的應用程式**，用的是同一套詞彙。
-`Sources/YunAudioControl` 只定義一次；視窗、命令列、MCP 伺服器和腳本，是它的四個前端。
+以下每一種介面都以同一套指令詞彙驅動同一個執行中的應用程式，該詞彙定義於
+`Sources/YunAudioControl`。視窗、命令列、MCP 伺服器與常駐腳本是它的四個前端。
 
 ← [README](../../README.zh-Hant.md) · [English](../automation.md)
 
-## 遠端控制
+## URL scheme
 
 任何能打開 URL 的東西都可以驅動它：捷徑、Stream Deck、Keyboard Maestro、AppleScript、
 從終端機執行 `open`。
@@ -22,7 +22,7 @@ open "yunaudio://preset/Voice%20call"
 幂等的 —— `mute/on` 執行兩次的結果是靜音，不是取消靜音。無法辨識的動詞會被拒絕而不是
 猜測，因為要避免的失敗是「打錯的靜音變成了停止」。
 
-### 從終端機
+## 命令列
 
 同樣的動詞，但**有答案回來** —— 那是 URL 做不到的部分。`yunaudio-cli` 是對「已經在跑的
 那個應用程式」說話，它自己不開任何硬體。
@@ -60,7 +60,7 @@ URL、打擊墊、一行 JavaScript 和 shell 用到。
 中介資料被發現的，而一個由 shell 腳本圍著 SwiftPM 執行檔組出來的應用程式產生不出那些。
 它們會編譯、會執行，然後永遠不出現在任何人用得到的地方。
 
-## 讓 agent 驅動它 —— MCP
+## MCP 伺服器
 
 `yunaudio-mcp` 是一個 Model Context Protocol 伺服器：stdio 上的 JSON-RPC 2.0、零相依、
 由你指向它的任何客戶端啟動。
@@ -97,7 +97,7 @@ Launch Services 收下事件的那一刻就回來了：它沒辦法說麥克風�
 到底存不存在、或者有沒有任何東西聽到了。那對 Stream Deck 的按鍵沒問題，因為有人在看
 結果；對 agent 就沒有用，因為沒有人在看 —— 而把狀態讀回來，正是 agent 存在的一半理由。
 
-## 和 OBS 對接
+## OBS 對接
 
 「設定 → 直播」連的是 `obs-websocket` v5，那個東西從 OBS 28 版就內建在裡面了。有兩樣
 東西會跨過它，而第二樣正是第一樣存在的原因。
@@ -126,7 +126,7 @@ Launch Services 收下事件的那一刻就回來了：它沒辦法說麥克風�
 模型 —— `MAX_AUDIO_MIXES` 是 libobs 裡的一個編譯期常數，那讓「六」成為別人的多工器
 限制，而不是一個值得照抄的形狀。
 
-### 一個撐得過應用程式重新啟動的擷取
+### 跨應用程式重啟的擷取
 
 OBS 的 issue #9144 —— 「Application Capture loses audio when application reopens on
 macOS」—— 從 2023 年 6 月開到現在，而 OBS 對它的回答是來源屬性裡一個標著

@@ -6268,6 +6268,9 @@ struct KaraokeScoreTests {
         #expect(score.percentage > 5)
         #expect(score.percentage < 15)
         #expect(score.silentSeconds > 8.5)
+        #expect(score.pitchPercentage > 99)
+        #expect(score.coveragePercentage > 9)
+        #expect(score.coveragePercentage < 11)
     }
 
     /// A live score is about the attempt so far. Notes that have not happened
@@ -6287,6 +6290,28 @@ struct KaraokeScoreTests {
         #expect(live.silentSeconds < 0.1)
         #expect(finished.percentage > 3)
         #expect(finished.percentage < 5)
+    }
+
+    @Test("microphone samples recorded during pause are outside the live score")
+    func pausedMicrophoneSamplesAreIgnored() {
+        let beforePause = singer(offBy: 0, seconds: 10)
+        let duringPause = singer(offBy: 3, seconds: 20, from: 10)
+        let exact = KaraokeScore.score(
+            sung: beforePause + duringPause,
+            reference: reference(seconds: 20), through: 10)
+
+        #expect(exact.percentage > 99)
+        #expect(abs(exact.referenceSeconds - 10) < 0.1)
+        #expect(abs(exact.sungSeconds - 10) < 0.1)
+        #expect(exact.silentSeconds < 0.1)
+
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let key = KaraokeScore.keyScore(
+            sung: beforePause + duringPause, key: cMajor,
+            lyrics: [Lyrics.Line(time: 0, text: "phrase")], through: 10)
+        // A lone timed line is a four-second phrase. Samples after it — paused
+        // or otherwise — are not part of key-and-timing scoring.
+        #expect(abs(key.sungSeconds - 4) < 0.1)
     }
 
     /// And a singer producing samples twice as fast cannot earn twice the
@@ -6448,6 +6473,51 @@ struct KaraokeScoreTests {
         #expect(score.silentSeconds < 0.1)
     }
 
+    @Test("singing through an instrumental cannot change a key score")
+    func keyFallbackIgnoresInstrumentalSinging() {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let lines = [
+            Lyrics.Line(time: 0, text: "first"),
+            Lyrics.Line(time: 30, text: "second"),
+        ]
+        let phrases =
+            singer(offBy: 0, midi: 60, seconds: 4)
+            + singer(offBy: 0, midi: 64, seconds: 34, from: 30)
+        let instrumental = singer(offBy: 0, midi: 61, seconds: 30, from: 4)
+        let withInstrumental = (phrases + instrumental).sorted { $0.time < $1.time }
+
+        let clean = KaraokeScore.keyScore(
+            sung: phrases, key: cMajor, lyrics: lines, through: 34)
+        let humming = KaraokeScore.keyScore(
+            sung: withInstrumental, key: cMajor, lyrics: lines, through: 34)
+
+        #expect(abs(clean.percentage - humming.percentage) < 1e-9)
+        #expect(abs(clean.sungSeconds - humming.sungSeconds) < 1e-9)
+        #expect(abs(clean.pitchPercentage - humming.pitchPercentage) < 1e-9)
+    }
+
+    @Test("excluded pitches cannot dilute the reported tuning error")
+    func keyFallbackErrorUsesOnlyScoredPitches() throws {
+        let cMajor = KeyDetector.Key(pitchClass: 0, isMinor: false, confidence: 0.8)
+        let lines = [
+            Lyrics.Line(time: 0, text: "first"),
+            Lyrics.Line(time: 30, text: "second"),
+        ]
+        let scored = singer(offBy: 0, midi: 61, seconds: 2)
+        let instrumental = singer(offBy: 0, midi: 60, seconds: 10, from: 5)
+        let future = singer(offBy: 0, midi: 60, seconds: 32, from: 30)
+
+        let result = KaraokeScore.keyScore(
+            sung: scored + instrumental + future, key: cMajor,
+            lyrics: lines, through: 2)
+        let error = try #require(result.meanErrorSemitones)
+        #expect(abs(error - 1) < 0.02)
+
+        let nothingReached = KaraokeScore.keyScore(
+            sung: future, key: cMajor, lyrics: lines, through: 2)
+        #expect(nothingReached.meanErrorSemitones == nil)
+    }
+
     @Test("a captured original supplies notes only while words are being sung")
     func capturedOriginalReference() {
         let samples =
@@ -6533,6 +6603,25 @@ struct SingerPitchTests {
         #expect(singer.comfortableMidi == nil)
         // But the clock still ran, or a rest would shift everything after it.
         #expect(singer.elapsed > 0.9)
+    }
+
+    @Test("a paused backing track freezes score time while the tuner stays live")
+    func pausedBackingFreezesScoreTime() throws {
+        let singer = try #require(SingerPitch(sampleRate: 48_000))
+        singer.reset(at: 10)
+        singer.add(tone(hertz: 220, seconds: 1))
+        let elapsedBeforePause = singer.elapsed
+        let samplesBeforePause = singer.samples
+
+        singer.add(tone(hertz: 330, seconds: 10), advancesTimeline: false)
+
+        #expect(singer.elapsed == elapsedBeforePause)
+        #expect(singer.samples == samplesBeforePause)
+        #expect(abs(Double(singer.hertz) - 330) < 3)
+
+        singer.add(tone(hertz: 220, seconds: 1))
+        #expect(abs(singer.elapsed - elapsedBeforePause - 0.98) < 0.05)
+        #expect(singer.samples.count > samplesBeforePause.count)
     }
 
     /// Two singers on two rings is the whole of duet mode, and what has to be
