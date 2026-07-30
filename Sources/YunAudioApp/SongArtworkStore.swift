@@ -150,6 +150,22 @@ actor SingleFlightResourceStore<Value: Sendable> {
         flights[url]?.waiters.count ?? 0
     }
 
+    /// How long an abandoned flight is kept before it is cancelled.
+    ///
+    /// Long enough for a view rebuild to re-subscribe — that happens in the
+    /// same run loop turn — and short enough that a song nobody is waiting for
+    /// stops downloading promptly.
+    nonisolated var abandonedFlightGrace: Double { 1.5 }
+
+    private func cancelIfStillAbandoned(url: URL, flightIdentifier: UInt64) {
+        guard let flight = flights[url],
+            flight.identifier == flightIdentifier,
+            flight.waiters.isEmpty
+        else { return }
+        flights[url] = nil
+        flight.task.cancel()
+    }
+
     private func cancelWaiter(
         url: URL,
         flightIdentifier: UInt64,
@@ -160,8 +176,26 @@ actor SingleFlightResourceStore<Value: Sendable> {
             flight.waiters.remove(waiterIdentifier) != nil
         else { return }
         if flight.waiters.isEmpty {
-            flights[url] = nil
-            flight.task.cancel()
+            // Not cancelled on the spot. A caller that goes away is routinely
+            // not a caller losing interest: SwiftUI cancels a `.task` whenever
+            // the view holding it is rebuilt, and the KTV stage rebuilds
+            // whenever the window crosses an arrangement boundary. Every
+            // capture of that stage reported `artwork cancelled` — the download
+            // started, a rebuild killed it, it started again and was killed
+            // again, so the cover never arrived and the placeholder was
+            // permanent.
+            //
+            // A grace period tells the two apart without the store having to
+            // know which happened. A rebuild re-subscribes within milliseconds
+            // and joins the flight already running; a song that has genuinely
+            // changed never comes back, and its flight is cancelled — which is
+            // what stops an obsolete URL publishing over a current one.
+            flights[url] = flight
+            Task { [grace = abandonedFlightGrace] in
+                try? await Task.sleep(for: .seconds(grace))
+                await self.cancelIfStillAbandoned(
+                    url: url, flightIdentifier: flightIdentifier)
+            }
         } else {
             flights[url] = flight
         }

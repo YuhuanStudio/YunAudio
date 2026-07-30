@@ -226,6 +226,8 @@ enum WindowCapture {
             // A stage laid out for a taller box than the window sinks its
             // content past the bottom edge, which is what every live capture
             // of this window shows and no render of it does.
+            FileHandle.standardError.write(
+                Data("\(label): artwork \(SongArtwork.lastTaskOutcome)\n".utf8))
             let measured = KTVStage.lastMeasuredStageSize
             let content = ktv.contentView?.frame.size ?? .zero
             if abs(measured.height - content.height) > 1

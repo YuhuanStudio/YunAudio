@@ -583,6 +583,9 @@ struct SongArtwork: View {
 
     @State private var image: NSImage?
 
+    /// What the most recent artwork fetch did, for the capture gate to report.
+    nonisolated(unsafe) static var lastTaskOutcome = "never started"
+
     var body: some View {
         Group {
             if let image {
@@ -607,14 +610,24 @@ struct SongArtwork: View {
         .task(id: url) {
             image = nil
             guard let url else { return }
+            SongArtwork.lastTaskOutcome = "started"
             guard
                 let decoded = await SongArtworkResources.shared.value(for: url),
                 !Task.isCancelled
-            else { return }
+            else {
+                // Which of the two it is. A capture that photographs the
+                // placeholder cannot say whether the decode returned nothing —
+                // a defect a user meets — or whether this task simply had not
+                // run yet, which is only the gate being impatient.
+                SongArtwork.lastTaskOutcome =
+                    Task.isCancelled ? "cancelled" : "no decoded value"
+                return
+            }
             let loaded = NSImage(
                 cgImage: decoded.image,
                 size: NSSize(width: decoded.image.width, height: decoded.image.height))
             guard !Task.isCancelled else { return }
+            SongArtwork.lastTaskOutcome = "loaded"
             image = loaded
         }
     }
