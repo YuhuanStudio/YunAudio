@@ -707,7 +707,7 @@ struct BackgroundResourceTests {
         #expect(ktv.ranges(of: "model.singers").count == 1)
         #expect(ktv.ranges(of: "SongArtwork(url:").count == 2)
         #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
-        #expect(singing.ranges(of: "model.lyricProgress").count >= 2)
+        #expect(singing.ranges(of: "model.lyricProgress").count == 1)
         #expect(singing.ranges(of: "model.singers").count == 1)
         #expect(singing.contains("Choose the words…"))
         #expect(singing.contains("Find words by title"))
@@ -717,7 +717,13 @@ struct BackgroundResourceTests {
         #expect(singing.contains(".clipShape(.rect(cornerRadius: Yun.Radius.card))"))
         #expect(singing.contains(".frame(width: 72, height: 72)"))
         #expect(singing.contains("let current = model.lyricLine ?? 0"))
-        #expect(singing.contains("SequentialTextFillRenderer(progress: model.lyricProgress)"))
+        #expect(
+            singing.contains(
+                "YunUIBenchmarkConfiguration.process.effectiveVariant == .lyricFillStatic"))
+        #expect(
+            singing.contains(
+                "let lyricProgress = freezesFill ? 0.5 : model.lyricProgress"))
+        #expect(singing.contains("SequentialTextFillRenderer(progress: lyricProgress)"))
         let header = try #require(singing.range(of: "trackHeader(track)"))
         let bottomTools = try #require(
             singing.range(of: "handRun", range: header.upperBound..<singing.endIndex))

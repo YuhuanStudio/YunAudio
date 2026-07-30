@@ -634,20 +634,24 @@ public struct YunScrollFade: ViewModifier {
     }
 
     public func body(content: Content) -> some View {
-        content.mask(
-            VStack(spacing: 0) {
-                // Opaque for everything but the last `depth` points, whatever
-                // the height is.
-                Rectangle().fill(Color.black)
-                LinearGradient(
-                    colors: [.black, .black.opacity(0)],
-                    startPoint: .top, endPoint: .bottom
-                )
-                .frame(height: depth)
-            }
-            // The mask must not itself be an obstacle to hit testing; it is
-            // only ever alpha.
-            .allowsHitTesting(false))
+        if YunUIBenchmarkConfiguration.process.effectiveVariant == .scrollFadesOff {
+            content
+        } else {
+            content.mask(
+                VStack(spacing: 0) {
+                    // Opaque for everything but the last `depth` points, whatever
+                    // the height is.
+                    Rectangle().fill(Color.black)
+                    LinearGradient(
+                        colors: [.black, .black.opacity(0)],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: depth)
+                }
+                // The mask must not itself be an obstacle to hit testing; it is
+                // only ever alpha.
+                .allowsHitTesting(false))
+        }
     }
 }
 

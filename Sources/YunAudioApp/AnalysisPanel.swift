@@ -202,7 +202,9 @@ struct LoudnessReadout: View {
                 Spacer(minLength: 0)
             }
 
-            if model.isSoundIdentificationEnabled || model.isAutoLevelling || model.isDucking {
+            if !YunUIBenchmarkConfiguration.process.isEnabled,
+                model.isSoundIdentificationEnabled || model.isAutoLevelling || model.isDucking
+            {
                 heardBadge
             }
         }

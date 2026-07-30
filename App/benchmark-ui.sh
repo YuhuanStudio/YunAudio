@@ -11,6 +11,7 @@ fi
 
 SECONDS_TO_MEASURE=${1:-4}
 STYLE_TO_MEASURE=${2:-current}
+VARIANT_TO_MEASURE=${3:-full}
 
 # YUNAUDIO_SCREENSHOT suppresses the first-launch permission guide and claims a
 # verification instance. UIResourceBenchmark runs before WindowCapture, so this
@@ -18,6 +19,7 @@ STYLE_TO_MEASURE=${2:-current}
 YUNAUDIO_UI_BENCHMARK=1 \
 YUNAUDIO_UI_BENCHMARK_SECONDS="$SECONDS_TO_MEASURE" \
 YUNAUDIO_UI_BENCHMARK_STYLE="$STYLE_TO_MEASURE" \
+YUNAUDIO_UI_BENCHMARK_VARIANT="$VARIANT_TO_MEASURE" \
 YUNAUDIO_SCREENSHOT=ui-benchmark \
 YUNAUDIO_SCREENSHOT_NO_AUDIO=1 \
 "$APP"

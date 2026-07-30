@@ -182,20 +182,34 @@ extension View {
     /// The card surface for the current style.
     @ViewBuilder
     public func yunSurface(cornerRadius: CGFloat = Yun.Radius.card) -> some View {
+        let benchmark = YunUIBenchmarkConfiguration.process
         switch YunTheme.shared.style {
         case .flat:
-            self
-                .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
-                }
-                // shadow-xs from the source system. Small enough to read as a
-                // lift rather than a drop, which is what keeps the surface calm.
-                .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
+            if benchmark.effectiveVariant == .cardEffectsOff {
+                self
+                    .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+                    }
+            } else {
+                self
+                    .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+                    }
+                    // shadow-xs from the source system. Small enough to read as a
+                    // lift rather than a drop, which is what keeps the surface calm.
+                    .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
+            }
         case .glass:
-            self
-                .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+            if benchmark.effectiveVariant == .cardEffectsOff {
+                self
+            } else {
+                self
+                    .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+            }
         }
     }
 
@@ -203,11 +217,16 @@ extension View {
     /// material has something to be a material over.
     @ViewBuilder
     public func yunWindowBackground() -> some View {
+        let benchmark = YunUIBenchmarkConfiguration.process
         switch YunTheme.shared.style {
         case .flat:
             self.background(Yun.Palette.windowBackground)
         case .glass:
-            self.background(.ultraThinMaterial)
+            if benchmark.effectiveVariant == .windowMaterialOff {
+                self.background(Yun.Palette.windowBackground)
+            } else {
+                self.background(.ultraThinMaterial)
+            }
         }
     }
 }

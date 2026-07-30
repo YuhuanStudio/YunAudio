@@ -29,7 +29,13 @@ struct AppSourceList: View {
                 }
             }
 
-            let listing = model.appListing(limit: limit)
+            // A resource benchmark must not inherit the person's captured apps.
+            // That changes both the number of icon rows and whether the ducking
+            // controls exist, so two machines would be measuring different trees.
+            let listing =
+                YunUIBenchmarkConfiguration.process.isEnabled
+                ? RouterModel.AppListing(applications: [], overflow: 0, background: [])
+                : model.appListing(limit: limit)
             if listing.applications.isEmpty {
                 YunEmptyState(
                     symbol: "speaker.slash",
@@ -51,7 +57,9 @@ struct AppSourceList: View {
             // The daemons are still reachable, just not first. Someone who
             // genuinely wants to capture `avconferenced` can, and everyone
             // else never sees it.
-            if model.hiddenAppCount > 0 || model.showsBackgroundApps {
+            if !YunUIBenchmarkConfiguration.process.isEnabled,
+                model.hiddenAppCount > 0 || model.showsBackgroundApps
+            {
                 Button {
                     model.showsBackgroundApps.toggle()
                 } label: {
@@ -94,7 +102,12 @@ struct AppSourceList: View {
         // The list was refreshed by the Refresh button and by starting a route,
         // and by nothing else — so the first time anybody opened this it was
         // empty, and said so, on a machine that was playing three things.
-        .task { model.refreshAppsIfStale() }
+        .task {
+            guard
+                !YunUIBenchmarkConfiguration.process.suppressesApplicationRefresh
+            else { return }
+            model.refreshAppsIfStale()
+        }
     }
 
     /// Enough for about eight rows. The daemons scroll rather than pushing

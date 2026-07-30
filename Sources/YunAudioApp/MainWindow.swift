@@ -249,7 +249,9 @@ struct MainWindow: View {
             // Saved ones after the built-in four, with the same shape: the
             // distinction between "the four we chose" and "the ones you saved"
             // matters when deleting and nowhere else.
-            ForEach(model.userPresets) { preset in
+            ForEach(
+                YunUIBenchmarkConfiguration.process.isEnabled ? [] : model.userPresets
+            ) { preset in
                 Button(preset.name) { model.apply(preset) }
                     .buttonStyle(
                         YunButtonStyle(
@@ -286,9 +288,10 @@ struct MainWindow: View {
                     .truncationMode(.middle)
                     .help(error)
             }
-            if PermissionCentre.shared.systemAudio == .needsRequest
-                || PermissionCentre.shared.microphone == .needsRequest
-                || model.autoStartNeedsPermissionReview
+            if !YunUIBenchmarkConfiguration.process.isEnabled,
+                PermissionCentre.shared.systemAudio == .needsRequest
+                    || PermissionCentre.shared.microphone == .needsRequest
+                    || model.autoStartNeedsPermissionReview
             {
                 Button(loc("Review permissions")) {
                     SettingsWindow.open(model: model, initialSection: .permissions)
@@ -532,7 +535,9 @@ struct MainWindow: View {
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {
                         AppSourceList(model: model, limit: 8, showsRefresh: false)
-                        if !model.capturedAppBundleIDs.isEmpty {
+                        if !YunUIBenchmarkConfiguration.process.isEnabled,
+                            !model.capturedAppBundleIDs.isEmpty
+                        {
                             YunDivider()
                             Text(loc("While routed"))
                                 .font(Yun.Text.caption)
@@ -868,7 +873,9 @@ struct MainWindow: View {
                     Text(loc("Hold to talk"))
                         .font(Yun.Text.label)
                         .foregroundStyle(Yun.Palette.textPrimary)
-                    if let shortcut = model.activeShortcuts[.pushToTalk] {
+                    if !YunUIBenchmarkConfiguration.process.isEnabled,
+                        let shortcut = model.activeShortcuts[.pushToTalk]
+                    {
                         YunBadge(shortcut.displayName)
                     }
                     if model.isPushToTalkEnabled && model.isPushToTalkHeld {

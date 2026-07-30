@@ -18,6 +18,36 @@ enum UIResourceBenchmark {
         let footprintBytes: UInt64
     }
 
+    /// Source-level compositor sites in the deterministic main-window fixture.
+    ///
+    /// These are not claimed to be Core Animation render passes. They are the
+    /// effect modifiers the real fixture instantiates, logged beside the resource
+    /// result so a future layout change cannot silently alter what is compared.
+    private struct FixtureComposition {
+        let cards = 7
+        let pills = 1
+        let scrollMasks: Int
+        let materialEffects: Int
+        let cardShadows: Int
+        let movingLyricFills: Int
+
+        init(style: YunStyle, variant: YunUIBenchmarkVariant) {
+            scrollMasks = variant == .scrollFadesOff ? 0 : 3
+            movingLyricFills = variant == .lyricFillStatic ? 0 : 1
+            switch style {
+            case .flat:
+                materialEffects = 0
+                cardShadows = variant == .cardEffectsOff ? 0 : cards
+            case .glass:
+                let cardMaterials = variant == .cardEffectsOff ? 0 : cards
+                let windowMaterial = variant == .windowMaterialOff ? 0 : 1
+                // The state pill stays unchanged in the card experiment.
+                materialEffects = cardMaterials + windowMaterial + pills
+                cardShadows = 0
+            }
+        }
+    }
+
     private static let lyricFixture = """
         [ti:UI resource benchmark]
         [ar:YunAudio]
@@ -34,6 +64,18 @@ enum UIResourceBenchmark {
     static func run(model: RouterModel) async -> Bool {
         guard ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil else {
             report("UI benchmark refused: YUNAUDIO_SCREENSHOT_NO_AUDIO is required")
+            return false
+        }
+        let benchmark = YunUIBenchmarkConfiguration.process
+        guard benchmark.isEnabled else {
+            report("UI benchmark refused: its guarded environment is incomplete")
+            return false
+        }
+        guard let variant = benchmark.requestedVariant else {
+            let choices = YunUIBenchmarkVariant.allCases.map(\.rawValue).joined(separator: ", ")
+            report(
+                "UI benchmark refused: unknown variant \(benchmark.requestedName); "
+                    + "choose \(choices)")
             return false
         }
         guard
@@ -58,7 +100,9 @@ enum UIResourceBenchmark {
             report("UI benchmark refused: style must be current, flat, or glass")
             return false
         }
-        report("UI benchmark style \(requestedStyle)")
+        report(
+            "UI benchmark fresh process \(getpid()), style \(requestedStyle), "
+                + "variant \(variant.rawValue)")
 
         let fixture = FileManager.default.temporaryDirectory.appendingPathComponent(
             "YunAudio-ui-benchmark-\(getpid()).lrc")
@@ -85,6 +129,15 @@ enum UIResourceBenchmark {
         model.inspectorTab = .singing
         window.makeKeyAndOrderFront(nil)
         await settle(for: 1)
+        guard fixtureIsIsolated(model) else { return false }
+
+        let composition = FixtureComposition(style: YunTheme.shared.style, variant: variant)
+        report(
+            "UI benchmark composition cards \(composition.cards), "
+                + "pills \(composition.pills), scroll masks \(composition.scrollMasks), "
+                + "material effects \(composition.materialEffects), "
+                + "card shadows \(composition.cardShadows), "
+                + "moving lyric fills \(composition.movingLyricFills)")
 
         let seeded = usage()
         let staticSeconds = 4.0
@@ -135,6 +188,47 @@ enum UIResourceBenchmark {
                     format: "UI benchmark body %-16s %4d (%.2f Hz)",
                     (name as NSString).utf8String!, count,
                     Double(count) / movingSeconds))
+        }
+        return true
+    }
+
+    /// Verifies the state whose compositor counts are logged above.
+    ///
+    /// App rows are the important boundary: a `.task` used to enumerate HAL
+    /// after the fixture explicitly declined application refresh, making the
+    /// one-second settle period machine-dependent.
+    private static func fixtureIsIsolated(_ model: RouterModel) -> Bool {
+        let applicationList = model.appListing(limit: .max)
+        let hasNoApplications =
+            model.availableApps.isEmpty
+            && applicationList.applications.isEmpty
+            && applicationList.background.isEmpty
+            && model.appsRefreshedAt == nil
+        guard hasNoApplications else {
+            report(
+                "UI benchmark refused: application discovery escaped the fixture "
+                    + "(available \(model.availableApps.count), "
+                    + "refreshed \(model.appsRefreshedAt != nil))")
+            return false
+        }
+
+        let hasExpectedTree =
+            model.isRunning
+            && model.inputDevices.isEmpty
+            && model.outputDevices.isEmpty
+            && model.selectedSource == nil
+            && model.selectedDestination == nil
+            && model.buses.isEmpty
+            && model.activeRoutes.isEmpty
+            && model.inspectorTab == .singing
+            && model.nowPlaying != nil
+            && model.lyrics != nil
+            && StatusPills.pills(for: model).count == 1
+        guard hasExpectedTree else {
+            report(
+                "UI benchmark refused: main-window fixture no longer has "
+                    + "7 cards, 3 columns and 1 status pill")
+            return false
         }
         return true
     }

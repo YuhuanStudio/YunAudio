@@ -637,6 +637,11 @@ private struct SingingLyrics: View {
     var body: some View {
         let _ = BodyCount.tick("SingingLyrics")
         let current = model.lyricLine ?? 0
+        let freezesFill =
+            YunUIBenchmarkConfiguration.process.effectiveVariant == .lyricFillStatic
+        // Keep the same TextRenderer and the same partially filled shape. Only
+        // its moving Observation input is removed, so this remains one variable.
+        let lyricProgress = freezesFill ? 0.5 : model.lyricProgress
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             ForEach(-1...1, id: \.self) { offset in
                 let index = current + offset
@@ -654,7 +659,7 @@ private struct SingingLyrics: View {
                             .font(.system(size: 27, weight: .semibold))
                             .foregroundStyle(Yun.Palette.accent)
                             .textRenderer(
-                                SequentialTextFillRenderer(progress: model.lyricProgress)
+                                SequentialTextFillRenderer(progress: lyricProgress)
                             )
                             .contentTransition(.opacity)
                     }
@@ -685,7 +690,10 @@ private struct SingingLyrics: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(reduceMotion ? nil : .linear(duration: 0.1), value: model.lyricProgress)
+        .animation(
+            reduceMotion || freezesFill ? nil : .linear(duration: 0.1),
+            value: lyricProgress
+        )
         .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
     }
 }
