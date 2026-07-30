@@ -3,6 +3,53 @@ import AVFoundation
 import Foundation
 import YunAudioHAL
 
+enum EchoCancellationUnitSetupStep: String, CaseIterable, Sendable {
+    case enableInput
+    case enableOutput
+    case setCurrentDevice
+    case readCurrentDevice
+    case setCaptureFormat
+    case setRenderFormat
+    case setMaximumFrames
+    case disableAutomaticGain
+    case setInputCallback
+    case setRenderCallback
+    case initialise
+}
+
+struct EchoCancellationUnitSetupFailure: Sendable, Equatable {
+    let step: EchoCancellationUnitSetupStep
+    let status: OSStatus
+    let expectedDeviceID: AudioObjectID?
+    let actualDeviceID: AudioObjectID?
+
+    init(
+        step: EchoCancellationUnitSetupStep,
+        status: OSStatus,
+        expectedDeviceID: AudioObjectID? = nil,
+        actualDeviceID: AudioObjectID? = nil
+    ) {
+        self.step = step
+        self.status = status
+        self.expectedDeviceID = expectedDeviceID
+        self.actualDeviceID = actualDeviceID
+    }
+}
+
+struct EchoCancellationUnitSetupOperations {
+    let setProperty:
+        (
+            AudioUnitPropertyID, AudioUnitScope, AudioUnitElement,
+            UnsafeRawPointer, UInt32
+        ) -> OSStatus
+    let getProperty:
+        (
+            AudioUnitPropertyID, AudioUnitScope, AudioUnitElement,
+            UnsafeMutableRawPointer, inout UInt32
+        ) -> OSStatus
+    let initialise: () -> OSStatus
+}
+
 /// Captures a microphone with acoustic echo cancellation.
 ///
 /// `AUVoiceProcessingIO` is one IO unit bound to one device, so the microphone
@@ -202,51 +249,6 @@ public final class EchoCancellingCapture {
             mDataByteSize: UInt32(capacity * MemoryLayout<Float>.size),
             mData: UnsafeMutableRawPointer(captureBuffer))
 
-        var enable: UInt32 = 1
-        AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
-            &enable, UInt32(MemoryLayout<UInt32>.size))
-        AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
-            &enable, UInt32(MemoryLayout<UInt32>.size))
-
-        if let boundDeviceID {
-            var deviceID = boundDeviceID
-            AudioUnitSetProperty(
-                unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                &deviceID, UInt32(MemoryLayout<AudioObjectID>.size))
-        }
-
-        var format = AudioStreamBasicDescription(
-            mSampleRate: rate,
-            mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
-                | kAudioFormatFlagIsNonInterleaved,
-            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
-            mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
-        let formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        // Element 1 output scope is the microphone as this unit hands it out;
-        // element 0 input scope is the far end going towards the speaker.
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
-            &format, formatSize)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-            &format, formatSize)
-
-        var frames = UInt32(maximumFrames)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
-            &frames, UInt32(MemoryLayout<UInt32>.size))
-
-        // Automatic gain control belongs to the conferencing application, not to
-        // a router sitting in front of it. Two AGCs fighting is what makes a
-        // voice pump.
-        var agc: UInt32 = 0
-        AudioUnitSetProperty(
-            unit, AudioUnitPropertyID(kAUVoiceIOProperty_VoiceProcessingEnableAGC),
-            kAudioUnitScope_Global, 0, &agc, UInt32(MemoryLayout<UInt32>.size))
-
         let context = Unmanaged.passUnretained(callbacks).toOpaque()
 
         var inputCallback = AURenderCallbackStruct(
@@ -284,9 +286,6 @@ public final class EchoCancellingCapture {
                 return noErr
             },
             inputProcRefCon: context)
-        AudioUnitSetProperty(
-            unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
-            &inputCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
 
         var renderCallback = AURenderCallbackStruct(
             inputProc: { refCon, _, _, _, frameCount, ioData -> OSStatus in
@@ -315,13 +314,27 @@ public final class EchoCancellingCapture {
                 return noErr
             },
             inputProcRefCon: context)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-            &renderCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
 
         callbacks.owner = self
 
-        guard AudioUnitInitialize(unit) == noErr else {
+        let operations = EchoCancellationUnitSetupOperations(
+            setProperty: { property, scope, element, data, size in
+                AudioUnitSetProperty(
+                    created, property, scope, element, data, size)
+            },
+            getProperty: { property, scope, element, data, size in
+                AudioUnitGetProperty(
+                    created, property, scope, element, data, &size)
+            },
+            initialise: { AudioUnitInitialize(created) })
+        let setupFailure = Self.setupVoiceProcessingUnit(
+            boundDeviceID: boundDeviceID,
+            sampleRate: rate,
+            maximumFrames: maximumFrames,
+            inputCallback: &inputCallback,
+            renderCallback: &renderCallback,
+            operations: operations)
+        guard setupFailure == nil else {
             AudioComponentInstanceDispose(unit)
             captureBuffer.deallocate()
             truncatedBlocks.deinitialize(count: 1)
@@ -329,6 +342,7 @@ public final class EchoCancellingCapture {
             callbackDiagnostics.deinitialize(count: 1)
             callbackDiagnostics.deallocate()
             free(bufferList.unsafeMutablePointer)
+            builtAggregate?.destroy()
             return nil
         }
         keepsAlignedRates = true
@@ -357,6 +371,118 @@ public final class EchoCancellingCapture {
             }
         }
         return shared.contains(48_000) ? 48_000 : shared.max()
+    }
+
+    /// Applies every property required for the callback's memory and device
+    /// contracts, then initialises the unit only after they have all held.
+    ///
+    /// Keeping the operations injectable makes the failure order measurable
+    /// without opening a microphone or changing the machine's default device.
+    static func setupVoiceProcessingUnit(
+        boundDeviceID: AudioObjectID?,
+        sampleRate: Double,
+        maximumFrames: Int,
+        inputCallback: inout AURenderCallbackStruct,
+        renderCallback: inout AURenderCallbackStruct,
+        operations: EchoCancellationUnitSetupOperations
+    ) -> EchoCancellationUnitSetupFailure? {
+        func failure(
+            _ step: EchoCancellationUnitSetupStep, _ status: OSStatus
+        ) -> EchoCancellationUnitSetupFailure? {
+            status == noErr ? nil : .init(step: step, status: status)
+        }
+
+        var enable: UInt32 = 1
+        let valueSize = UInt32(MemoryLayout<UInt32>.size)
+        var status = operations.setProperty(
+            kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1,
+            &enable, valueSize)
+        if let failure = failure(.enableInput, status) { return failure }
+
+        status = operations.setProperty(
+            kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+            &enable, valueSize)
+        if let failure = failure(.enableOutput, status) { return failure }
+
+        if let boundDeviceID {
+            var requestedDeviceID = boundDeviceID
+            let deviceSize = UInt32(MemoryLayout<AudioObjectID>.size)
+            status = operations.setProperty(
+                kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &requestedDeviceID, deviceSize)
+            if let failure = failure(.setCurrentDevice, status) { return failure }
+
+            var actualDeviceID = AudioObjectID(kAudioObjectUnknown)
+            var actualSize = deviceSize
+            status = operations.getProperty(
+                kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                &actualDeviceID, &actualSize)
+            if status != noErr || actualSize != deviceSize {
+                return .init(
+                    step: .readCurrentDevice,
+                    status: status == noErr ? OSStatus(-50) : status,
+                    expectedDeviceID: boundDeviceID,
+                    actualDeviceID: actualDeviceID)
+            }
+            guard actualDeviceID == boundDeviceID else {
+                return .init(
+                    step: .readCurrentDevice,
+                    status: noErr,
+                    expectedDeviceID: boundDeviceID,
+                    actualDeviceID: actualDeviceID)
+            }
+        }
+
+        var format = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+                | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
+        let formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        // Element 1 output scope is the microphone as this unit hands it out;
+        // element 0 input scope is the far end going towards the speaker.
+        status = operations.setProperty(
+            kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+            &format, formatSize)
+        if let failure = failure(.setCaptureFormat, status) { return failure }
+
+        status = operations.setProperty(
+            kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+            &format, formatSize)
+        if let failure = failure(.setRenderFormat, status) { return failure }
+
+        guard maximumFrames > 0, maximumFrames <= Int(UInt32.max) else {
+            return .init(step: .setMaximumFrames, status: OSStatus(-50))
+        }
+        var frames = UInt32(maximumFrames)
+        status = operations.setProperty(
+            kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+            &frames, valueSize)
+        if let failure = failure(.setMaximumFrames, status) { return failure }
+
+        // Automatic gain control belongs to the conferencing application, not
+        // to a router sitting in front of it. Two AGCs fighting is what makes a
+        // voice pump, so failing to turn this one off is a setup failure.
+        var agc: UInt32 = 0
+        status = operations.setProperty(
+            AudioUnitPropertyID(kAUVoiceIOProperty_VoiceProcessingEnableAGC),
+            kAudioUnitScope_Global, 0, &agc, valueSize)
+        if let failure = failure(.disableAutomaticGain, status) { return failure }
+
+        status = operations.setProperty(
+            kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+            &inputCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        if let failure = failure(.setInputCallback, status) { return failure }
+
+        status = operations.setProperty(
+            kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+            &renderCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        if let failure = failure(.setRenderCallback, status) { return failure }
+
+        status = operations.initialise()
+        return failure(.initialise, status)
     }
 
     /// Fills one mono far-end buffer without trusting either side of the
