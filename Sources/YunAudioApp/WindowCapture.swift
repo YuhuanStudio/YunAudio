@@ -212,6 +212,14 @@ enum WindowCapture {
         // the offscreen renderer — which is what the other two were judged
         // from — hands the stage an explicit size and so cannot reproduce a
         // reader that disagrees with its window.
+        // A real suspension, not a run-loop spin. `settle` occupies the main
+        // actor while it turns the loop, and the body of a `.task` is
+        // MainActor-isolated — so it cannot start until the main actor yields,
+        // which spinning never does. Every `.task` on the KTV stage was
+        // therefore waiting for a turn that the harness never gave it, and the
+        // stage photographed with no artwork and nothing else that waits to
+        // appear having run.
+        try? await Task.sleep(for: .milliseconds(600))
         for (label, size) in [
             ("ktv-window", CGSize(width: 1080, height: 720)),
             ("ktv-window-narrow", CGSize(width: 760, height: 900)),
