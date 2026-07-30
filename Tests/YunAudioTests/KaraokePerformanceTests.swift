@@ -37,6 +37,8 @@ struct KaraokePerformanceTests {
             sung: Array(sung.prefix(100)), key: key,
             lyrics: Array(lyrics.prefix(2)), through: 8)
 
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
         RoutingEngine.enableAllocationTripwire()
         defer { RoutingEngine.disableAllocationTripwire() }
         let before = RoutingEngine.allocationViolations

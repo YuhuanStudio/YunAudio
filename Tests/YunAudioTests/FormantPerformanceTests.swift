@@ -32,6 +32,8 @@ struct FormantPerformanceTests {
             shifter.process($0.baseAddress!, count: FormantShifter.windowSize)
         }
 
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
         RoutingEngine.enableAllocationTripwire()
         defer { RoutingEngine.disableAllocationTripwire() }
         let before = RoutingEngine.allocationViolations

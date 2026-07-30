@@ -6444,6 +6444,8 @@ struct SingerPitchTests {
         singer.add(Array(samples.prefix(PitchTracker.frameSize)))
         singer.reset(at: 0)
 
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
         RoutingEngine.enableAllocationTripwire()
         defer { RoutingEngine.disableAllocationTripwire() }
         let before = RoutingEngine.allocationViolations
