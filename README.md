@@ -154,8 +154,11 @@ Reference: **[docs/automation.md](docs/automation.md)**.
 
 ### Performance
 
-0.40 % of one core for a stereo route at 128 frames, and 4.7 MB resident,
-measured over a six-minute run. Zero allocations on the IO thread, asserted in
+A bare stereo route costs 0.42 % of one core and 7.1 MB resident, measured over
+six minutes by `yunaudio-cli soak` with no interface attached. The application
+itself is a different figure and a larger one: with a route running and the
+window open it measures around 18 % of one core and 180 MB. That gap is being
+worked on, and quoting only the first number would misrepresent it. Zero allocations on the IO thread, asserted in
 release builds by a hook in front of every allocation the process makes. The
 single exception is stated rather than hidden: Apple's voice isolation model
 allocates approximately 0.3 times per cycle internally.
