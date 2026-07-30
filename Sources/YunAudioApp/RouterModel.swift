@@ -4498,6 +4498,18 @@ final class RouterModel: ScriptTarget {
         levels = [0.28, 0.0]
     }
 
+    /// Moves the fixture to a moment in the song it is already showing.
+    ///
+    /// Some states exist only at one point in a song — the count into the
+    /// singing is four seconds long — and a capture that always renders the
+    /// same second can never contain them. Only the renderer calls this.
+    func renderAt(second: Double) {
+        trackClock.adopt(
+            second, isPlaying: true,
+            trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
+        followTheWords()
+    }
+
     /// A score with nothing behind it, for the design captures only.
     private static func previewScore(percentage: Double, error: Double) -> KaraokeScore {
         KaraokeScore(

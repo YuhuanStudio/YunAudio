@@ -189,6 +189,17 @@ enum PanelRenderer {
             directory: directory,
             size: CGSize(width: 1080, height: 720))
         KTVStage.browsedLineForRendering = nil
+        // The count into the singing, which lasts four seconds out of a
+        // four-minute song and so appears in no capture taken at a fixed
+        // moment. 1:30.5 is inside the fixture's instrumental break, which
+        // begins at 1:28 with the words returning at 1:33.15.
+        model.renderAt(second: 90.5)
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-count-in\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        model.prepareForRendering()
 
         for section in PreferencesWindow.Section.allCases {
             render(
