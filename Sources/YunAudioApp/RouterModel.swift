@@ -2343,6 +2343,44 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Every index's answer for the song playing now.
+    ///
+    /// Held here rather than read back from `OnlineLyrics.lastAnswers` at the
+    /// moment the button is pressed: that global belongs to whichever lookup
+    /// ran last, which after a song with no online words at all is the song
+    /// before — and cycling would then have drawn the previous song's words.
+    private var lyricAnswers: [OnlineLyrics.Match] = []
+
+    /// Indexes that answered for this song, so another can be chosen.
+    private(set) var lyricAlternatives: [OnlineLyrics.Source] = []
+
+    /// Which index the words on screen came from.
+    private(set) var lyricSource: OnlineLyrics.Source?
+
+    /// Takes the next index that answered for this song and remembers it.
+    ///
+    /// Cycling rather than presenting a list: at the moment somebody notices
+    /// the words are wrong they do not know which index is right either, and
+    /// pressing until it looks correct is the shape of that question.
+    func useNextLyricSource() {
+        guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)),
+            let next = LyricSourceChoice.next(
+                after: lyricSource, among: lyricAlternatives),
+            next != lyricSource
+        else { return }
+        LyricSourceChoice.remember(next, for: identity)
+        guard let match = lyricAnswers.first(where: { $0.source == next }),
+            let parsed = match.parsed
+        else { return }
+        lyricSource = next
+        lyricsSourceName = Self.lyricsSourceName(for: next)
+        lyricsCopyright = match.providerMetadata?.copyright
+        lyricsRegion = match.providerMetadata?.region
+        fileLyricOffset = parsed.offset
+        lyrics = parsed
+        applyLyricOffset()
+    }
+
     /// Whether the floating desktop lyric is showing.
     var showsDesktopLyrics: Bool {
         get { UserDefaults.standard.bool(forKey: "YunAudioShowsDesktopLyrics") }
@@ -2414,6 +2452,10 @@ final class RouterModel: ScriptTarget {
     /// Takes a new song, with the words and the tune that go with it.
     private func adopt(_ track: NowPlaying.Track?) {
         cancelLyricsLookup()
+        // A new song has no alternatives until its own lookup answers.
+        lyricAnswers = []
+        lyricAlternatives = []
+        lyricSource = nil
         let track = track.map { incoming in
             var resolved = incoming
             if resolved.artworkURL == nil {
@@ -2501,19 +2543,40 @@ final class RouterModel: ScriptTarget {
                         self.plainLyrics == nil ? .notFound : self.lyricsLookupStatus
                     return
                 }
-                if let parsed = match.parsed {
+                self.lyricAnswers = OnlineLyrics.lastAnswers
+                self.lyricAlternatives = OnlineLyrics.lastAnswers.map(\.source)
+                self.lyricSource = match.source
+                // A choice this person already made for this song wins over the
+                // ranking. Without it the ranking picks the same wrong cover
+                // every time the song comes round, and the correction has to be
+                // made again on every play.
+                let chosen: OnlineLyrics.Match = {
+                    guard let remembered = LyricSourceChoice.preferred(for: identity),
+                        remembered != match.source,
+                        let alternative = OnlineLyrics.lastAnswers.first(
+                            where: { $0.source == remembered }),
+                        // A remembered index that has nothing to show for this
+                        // song is not a reason to leave the stage blank.
+                        alternative.parsed != nil || alternative.plain != nil
+                    else { return match }
+                    self.lyricSource = remembered
+                    return alternative
+                }()
+                if let parsed = chosen.parsed {
                     self.lyrics = parsed
                     self.plainLyrics = nil
-                } else if let plain = match.plain {
+                } else if let plain = chosen.plain {
                     self.plainLyrics = plain
                 } else {
                     self.lyricsLookupStatus =
                         self.plainLyrics == nil ? .notFound : self.lyricsLookupStatus
                     return
                 }
-                self.lyricsSourceName = Self.lyricsSourceName(for: match.source)
-                self.lyricsCopyright = match.providerMetadata?.copyright
-                self.lyricsRegion = match.providerMetadata?.region
+                // `chosen`, not `match`: when a remembered choice overrode the
+                // ranking the attribution has to name the words on the stage.
+                self.lyricsSourceName = Self.lyricsSourceName(for: chosen.source)
+                self.lyricsCopyright = chosen.providerMetadata?.copyright
+                self.lyricsRegion = chosen.providerMetadata?.region
                 self.lyricsLookupStatus = .online
                 if var current = self.nowPlaying,
                     current.duration <= 0,
@@ -4369,6 +4432,10 @@ final class RouterModel: ScriptTarget {
         showsRomanisation = true
         lyricsSourceName = loc("NetEase Cloud Music")
         lyricsLookupStatus = .online
+        // Two indexes answering, so the capture contains the control that only
+        // appears when there is somewhere else to go.
+        lyricSource = .netEase
+        lyricAlternatives = [.netEase, .qqMusic]
         trackClock.duration = 265
         trackClock.adopt(
             80.7, isPlaying: true,

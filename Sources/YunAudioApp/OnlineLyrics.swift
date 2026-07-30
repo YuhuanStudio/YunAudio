@@ -418,7 +418,39 @@ struct OnlineLyrics: Sendable {
         }
     }
 
+    /// Every answer that came back, best first.
+    ///
+    /// `fetch` returns one; this keeps the rest, because when the best answer
+    /// is the wrong song — a cover, a live take, a different edit — nothing
+    /// else in the application can help and every reopen picks the same one
+    /// again. The alternatives were already fetched and were being discarded.
+    ///
+    /// Behind a lock rather than bare: this is written on whichever executor
+    /// ran the search and read on the main actor, and changing songs quickly
+    /// enough leaves two searches overlapping — cancellation is a request, not
+    /// a barrier.
+    private nonisolated(unsafe) static var answers: [Match] = []
+    private static let answersLock = NSLock()
+
+    static var lastAnswers: [Match] {
+        get {
+            answersLock.lock()
+            defer { answersLock.unlock() }
+            return answers
+        }
+        set {
+            answersLock.lock()
+            answers = newValue
+            answersLock.unlock()
+        }
+    }
+
     private func strongest(in answers: [Match], wanted: WantedMatch) -> Match? {
+        Self.lastAnswers =
+            answers
+            .filter { $0.parsed != nil }
+            .sorted { quality(of: $0, wanted: wanted) > quality(of: $1, wanted: wanted) }
+            .map { attributed($0, performers: wanted.performers) ?? $0 }
         guard
             let best = answers.max(by: {
                 quality(of: $0, wanted: wanted) < quality(of: $1, wanted: wanted)

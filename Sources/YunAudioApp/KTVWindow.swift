@@ -554,6 +554,23 @@ struct KTVStage: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(loc("Show pronunciation"))
                 .accessibilityIdentifier("KTVRomanisation")
+
+                // Only when another index actually answered for this song.
+                // A control that does nothing is worse than no control.
+                if model.lyricAlternatives.count > 1 {
+                    Button {
+                        model.useNextLyricSource()
+                    } label: {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                            .frame(width: 24, height: 24)
+                            .background(.white.opacity(0.10), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(loc("Try another lyric source"))
+                    .accessibilityIdentifier("KTVNextLyricSource")
+                }
             }
         }
     }
