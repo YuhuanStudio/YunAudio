@@ -38,7 +38,6 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         // never saved.
         YunTheme.shared.applyAppearance()
         InterfaceOptions.apply()
-        FirstLaunchPermissions.requestIfNeeded(environment: environment)
 
         if environment["YUNAUDIO_SETTINGS_CHECK"] != nil {
             NSApp.activate(ignoringOtherApps: true)
@@ -244,6 +243,10 @@ struct YunAudioApp: App {
                 return
             }
         }
+        // Present only after the re-entrancy guard above owns a status item.
+        // Ordering a window can evaluate the scene again in the same run-loop
+        // turn; presenting earlier could install a second socket and menu item.
+        FirstLaunchPermissions.presentGuideIfNeeded(model: model)
     }
 
     var body: some Scene {

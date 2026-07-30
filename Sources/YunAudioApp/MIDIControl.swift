@@ -387,6 +387,28 @@ extension MIDIAction {
 
 // MARK: - The client
 
+/// Collapses one physical MIDI change's notification burst before MainActor.
+///
+/// CoreMIDI calls from its own thread. Locking this two-state gate there means
+/// a thousand notifications allocate one MainActor task, not a thousand tasks
+/// that later discover only one of them had work to do.
+final class MIDISourceRefreshGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isScheduled = false
+
+    func request() -> Bool {
+        lock.withLock {
+            guard !isScheduled else { return false }
+            isScheduled = true
+            return true
+        }
+    }
+
+    func finish() {
+        lock.withLock { isScheduled = false }
+    }
+}
+
 /// The CoreMIDI half: one client, one input port, every source connected.
 ///
 /// Every source rather than a chosen one. A control surface is a single
@@ -405,7 +427,12 @@ final class MIDIController {
     private(set) var bindings: [MIDITarget: MIDIAddress] = [:]
 
     /// The row waiting to be told which control it belongs to, if any.
-    var learningTarget: MIDITarget?
+    var learningTarget: MIDITarget? {
+        didSet {
+            guard oldValue != learningTarget else { return }
+            publishClientDemand()
+        }
+    }
 
     /// The last message that arrived at all, bound or not.
     ///
@@ -428,6 +455,8 @@ final class MIDIController {
     var perform: ((MIDITarget, MIDIAction) -> Void)?
     /// Called whenever the bindings change, so they get written down.
     var onBindingsChanged: (() -> Void)?
+    /// Supplied by the application so pure controller tests never open CoreMIDI.
+    var onClientDemandChanged: ((Bool) -> Void)?
 
     @ObservationIgnored private var pickups: [MIDITarget: MIDIPickup] = [:]
     /// Updated for every event without invalidating a view. Opening the MIDI
@@ -446,6 +475,7 @@ final class MIDIController {
             } else {
                 lastDiagnosticPublicationNanoseconds = nil
             }
+            publishClientDemand()
         }
     }
     /// The receive path runs for every controller message. Bindings are shown
@@ -455,6 +485,8 @@ final class MIDIController {
     @ObservationIgnored private var client = MIDIClientRef()
     @ObservationIgnored private var port = MIDIPortRef()
     @ObservationIgnored private var connected: Set<MIDIEndpointRef> = []
+    @ObservationIgnored private let sourceRefreshGate = MIDISourceRefreshGate()
+    @ObservationIgnored private var sourceRefreshTask: Task<Void, Never>?
 
     // MARK: Bindings
 
@@ -480,6 +512,7 @@ final class MIDIController {
         // learned fader does is nothing.
         pickups[target] = MIDIPickup()
         onBindingsChanged?()
+        publishClientDemand()
     }
 
     func forget(_ target: MIDITarget) {
@@ -487,6 +520,7 @@ final class MIDIController {
         targetsByAddress[address] = nil
         pickups[target] = nil
         onBindingsChanged?()
+        publishClientDemand()
     }
 
     /// The flat form kept in the preferences file.
@@ -590,6 +624,22 @@ final class MIDIController {
 
     // MARK: CoreMIDI
 
+    /// No bindings and no visible MIDI interface means zero CoreMIDI objects.
+    nonisolated static func requiresClient(
+        bindingCount: Int, diagnosticsAreVisible: Bool, isLearning: Bool
+    ) -> Bool {
+        bindingCount > 0 || diagnosticsAreVisible || isLearning
+    }
+
+    /// Publishes once after restore, then whenever the demand inputs change.
+    func publishClientDemand() {
+        onClientDemandChanged?(
+            Self.requiresClient(
+                bindingCount: bindings.count,
+                diagnosticsAreVisible: diagnosticsAreVisible,
+                isLearning: learningTarget != nil))
+    }
+
     func start() {
         guard client == 0 else { return }
         var newClient = MIDIClientRef()
@@ -599,6 +649,7 @@ final class MIDIController {
         // observation, it is a `dispatch_assert_queue` trap on the first
         // message that arrives. The whole body has to be safe off the main
         // actor, which is why nothing here touches state directly.
+        let sourceRefreshGate = sourceRefreshGate
         let clientStatus = MIDIClientCreateWithBlock("YunAudio" as CFString, &newClient) {
             @Sendable [weak self] notification in
             // Hardware comes and goes. Without this, a controller plugged in
@@ -606,7 +657,8 @@ final class MIDIController {
             // and plugging it in is exactly what somebody does just before
             // pressing learn.
             guard notification.pointee.messageID == .msgSetupChanged else { return }
-            Task { @MainActor in self?.connectSources() }
+            guard sourceRefreshGate.request() else { return }
+            Task { @MainActor in self?.scheduleSourceRefresh() }
         }
         guard clientStatus == noErr else {
             startupError = String(
@@ -643,9 +695,33 @@ final class MIDIController {
         guard portStatus == noErr else {
             startupError = String(
                 format: loc("Could not open a MIDI input (%d)."), Int(portStatus))
+            MIDIClientDispose(client)
+            client = 0
             return
         }
         port = newPort
+        startupError = nil
+        connectSources()
+    }
+
+    private func scheduleSourceRefresh() {
+        guard client != 0 else {
+            sourceRefreshGate.finish()
+            return
+        }
+        sourceRefreshTask = Task { [weak self] in
+            // CoreMIDI publishes several setup changes for one physical event.
+            // A tenth of a second is imperceptible beside plugging something
+            // in and replaces the whole burst with one endpoint inventory.
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            self?.finishSourceRefresh()
+        }
+    }
+
+    private func finishSourceRefresh() {
+        sourceRefreshTask = nil
+        sourceRefreshGate.finish()
         connectSources()
     }
 
@@ -672,7 +748,7 @@ final class MIDIController {
             MIDIPortDisconnectSource(port, gone)
             connected.remove(gone)
         }
-        sourceNames = names
+        if sourceNames != names { sourceNames = names }
     }
 
     static func name(of endpoint: MIDIEndpointRef) -> String {
@@ -685,6 +761,9 @@ final class MIDIController {
     }
 
     func tearDown() {
+        sourceRefreshTask?.cancel()
+        sourceRefreshTask = nil
+        sourceRefreshGate.finish()
         if client != 0 { MIDIClientDispose(client) }
         client = 0
         port = 0
@@ -695,17 +774,24 @@ final class MIDIController {
 // MARK: - Carrying it out
 
 extension RouterModel {
-    /// Wires the controller to this model and opens the CoreMIDI client.
+    /// Wires the controller to this model and opens CoreMIDI only on demand.
     func installMIDI() {
-        midiControl.softwarePosition = { [weak self] target in
+        let midi = midiControl
+        midi.softwarePosition = { [weak self] target in
             self?.midiPosition(of: target) ?? 0
         }
-        midiControl.perform = { [weak self] target, action in
+        midi.perform = { [weak self] target, action in
             self?.applyMIDI(action, to: target)
         }
-        midiControl.onBindingsChanged = { [weak self] in self?.persistMIDIBindings() }
-        midiControl.restore(PreferencesStore.load().midiBindings ?? [:])
-        midiControl.start()
+        midi.onBindingsChanged = { [weak self] in self?.persistMIDIBindings() }
+        midi.onClientDemandChanged = { [weak midi] isNeeded in
+            if isNeeded {
+                midi?.start()
+            } else {
+                midi?.tearDown()
+            }
+        }
+        midi.publishClientDemand()
     }
 
     /// Where a continuous target currently sits, 0…1.

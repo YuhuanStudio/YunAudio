@@ -397,6 +397,7 @@ struct PanelView: View {
                 .fixedSize(horizontal: false, vertical: true)
             if PermissionCentre.shared.systemAudio == .needsRequest
                 || PermissionCentre.shared.microphone == .needsRequest
+                || model.autoStartNeedsPermissionReview
             {
                 Spacer(minLength: Yun.Space.sm)
                 Button(loc("Review permissions")) {

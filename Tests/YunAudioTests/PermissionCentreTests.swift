@@ -25,10 +25,13 @@ struct PermissionCentreTests {
             PermissionCentre.automationState(
                 OSStatus(errAEEventWouldRequireUserConsent))
                 == .needsRequest)
+        #expect(
+            PermissionCentre.automationState(OSStatus(procNotFound))
+                == .notDetermined)
         #expect(PermissionCentre.automationState(OSStatus(-50)) == .unavailable)
     }
 
-    @Test("privacy destinations remain three distinct settings routes")
+    @Test("protected settings remain four distinct routes")
     func privacyDestinations() throws {
         let automation = try #require(
             PermissionCentre.Destination.automation.settingsURL?.absoluteString)
@@ -36,11 +39,14 @@ struct PermissionCentreTests {
             PermissionCentre.Destination.microphone.settingsURL?.absoluteString)
         let systemAudio = try #require(
             PermissionCentre.Destination.systemAudio.settingsURL?.absoluteString)
+        let loginItems = try #require(
+            PermissionCentre.Destination.loginItems.settingsURL?.absoluteString)
 
-        #expect(Set([automation, microphone, systemAudio]).count == 3)
+        #expect(Set([automation, microphone, systemAudio, loginItems]).count == 4)
         #expect(automation.contains("Privacy_Automation"))
         #expect(microphone.contains("Privacy_Microphone"))
         #expect(systemAudio.contains("Privacy_ScreenCapture"))
+        #expect(loginItems.contains("LoginItems-Settings.extension"))
     }
 
     @Test("normal launch source contains no audio permission API")
@@ -53,10 +59,77 @@ struct PermissionCentreTests {
         for forbidden in [
             "AVCaptureDevice", "requestAccess(for: .audio)",
             "requestCaptureAccess()", "AudioHardwareCreateProcessTap",
+            "requestAutomationPermission", "AEDeterminePermission",
         ] {
             #expect(!launch.contains(forbidden), "launch contains \(forbidden)")
         }
-        #expect(launch.ranges(of: "requestAutomationPermission(for: bundleID)").count == 1)
+        let app = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
+            encoding: .utf8)
+        #expect(!app.contains("FirstLaunchPermissions.request"))
+    }
+
+    @Test("login item approval maps into the same settings surface")
+    func loginItemStates() {
+        #expect(PermissionCentre.loginItemState(.enabled) == .allowed)
+        #expect(PermissionCentre.loginItemState(.requiresApproval) == .needsRequest)
+        #expect(PermissionCentre.loginItemState(.notRegistered) == .notDetermined)
+        #expect(PermissionCentre.loginItemState(.unavailable) == .unavailable)
+    }
+
+    @Test("player reads preflight Automation without prompting")
+    func playerReadsDoNotInventConsent() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/NowPlaying.swift",
+            encoding: .utf8)
+
+        #expect(
+            source.contains(
+                "let permission = automationPermissionStatus(for: bundleID)"))
+        #expect(source.contains("guard permission == noErr else"))
+        #expect(
+            source.contains(
+                "determineAutomationPermission(for: bundleID, askingUser: false)"))
+    }
+
+    @Test("the first-launch guide cannot re-enter status installation")
+    func guideFollowsStatusItemGuard() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
+            encoding: .utf8)
+        let status = try #require(
+            source.range(of: "termination.statusItem = StatusItemController"))
+        let guardRange = try #require(
+            source.range(of: "guard termination.statusItem == nil else { return }"))
+        let guide = try #require(
+            source.range(
+                of: "FirstLaunchPermissions.presentGuideIfNeeded(model: model)"))
+
+        #expect(guardRange.lowerBound < status.lowerBound)
+        #expect(status.lowerBound < guide.lowerBound)
+    }
+
+    @Test("automatic routing cannot become a deferred permission prompt")
+    func autoStartPermissionGate() {
+        #expect(
+            FirstLaunchPermissions.canAutoStartWithoutRequest(
+                microphoneIsAllowed: true,
+                capturesApplications: false,
+                cancelsEcho: false))
+        for blocked in [
+            (false, false, false),
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+        ] {
+            #expect(
+                !FirstLaunchPermissions.canAutoStartWithoutRequest(
+                    microphoneIsAllowed: blocked.0,
+                    capturesApplications: blocked.1,
+                    cancelsEcho: blocked.2))
+        }
     }
 
     @Test("a missing tap can never be reported as permission granted")

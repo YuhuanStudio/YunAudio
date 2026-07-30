@@ -80,7 +80,8 @@ enum NowPlaying {
     nonisolated static func current() -> Track? {
         var paused: Track?
         for (name, bundleID) in players {
-            guard isRunning(bundleID) else { continue }
+            guard isPlayerRunning(bundleID) else { continue }
+            guard automationPermissionStatus(for: bundleID) == noErr else { continue }
             guard let track = read(name: name) else { continue }
             if track.isPlaying { return track }
             if paused == nil { paused = track }
@@ -226,7 +227,14 @@ enum NowPlaying {
         var paused: Position?
         var failure: QueryFailure?
         for (name, bundleID) in ordered(preferring: application) {
-            guard isRunning(bundleID) else { continue }
+            guard isPlayerRunning(bundleID) else { continue }
+            let permission = automationPermissionStatus(for: bundleID)
+            guard permission == noErr else {
+                failure =
+                    failure
+                    ?? queryFailure(application: name, code: Int(permission))
+                continue
+            }
             let query = readPosition(name: name)
             if let queryFailure = query.failure {
                 failure = failure ?? queryFailure
@@ -273,7 +281,12 @@ enum NowPlaying {
     /// Asked when the track identity changes and not otherwise. Four more
     /// property accesses, which measured 40 ms on top of the cheap read.
     nonisolated static func track(from application: String) -> Track? {
-        read(name: application)
+        guard
+            let bundleID = players.first(where: { $0.0 == application })?.1,
+            isPlayerRunning(bundleID),
+            automationPermissionStatus(for: bundleID) == noErr
+        else { return nil }
+        return read(name: application)
     }
 
     /// Running applications first, then the rest of the list in its own order.
@@ -287,7 +300,7 @@ enum NowPlaying {
             + players.enumerated().filter { $0.offset != index }.map(\.element)
     }
 
-    nonisolated private static func isRunning(_ bundleID: String) -> Bool {
+    nonisolated static func isPlayerRunning(_ bundleID: String) -> Bool {
         !NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).isEmpty
     }
 
@@ -332,7 +345,7 @@ enum NowPlaying {
         switch code {
         case errAETimeout:
             .timedOut(application: application)
-        case errAEEventNotPermitted:
+        case errAEEventNotPermitted, errAEEventWouldRequireUserConsent:
             .denied(application: application)
         default:
             .failed(application: application, code: code)

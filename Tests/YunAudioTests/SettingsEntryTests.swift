@@ -27,9 +27,11 @@ struct SettingsEntryTests {
 
     @Test("the settings-window check never requests first-launch permissions")
     func settingsCheckSkipsPermissions() {
+        #expect(FirstLaunchPermissions.automaticallyRequested.isEmpty)
         #expect(
-            !FirstLaunchPermissions.shouldRequest(
-                in: ["YUNAUDIO_SETTINGS_CHECK": "1"]))
+            !FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 0,
+                environment: ["YUNAUDIO_SETTINGS_CHECK": "1"]))
     }
 
     @Test("the retained settings graph is detached while its window is closed")

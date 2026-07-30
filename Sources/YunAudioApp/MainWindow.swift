@@ -288,6 +288,7 @@ struct MainWindow: View {
             }
             if PermissionCentre.shared.systemAudio == .needsRequest
                 || PermissionCentre.shared.microphone == .needsRequest
+                || model.autoStartNeedsPermissionReview
             {
                 Button(loc("Review permissions")) {
                     SettingsWindow.open(model: model, initialSection: .permissions)
@@ -1234,6 +1235,7 @@ struct MainWindow: View {
             sectionHeading(loc("Plugins"))
             YunCard { pluginList }
         }
+        .onAppear { model.refreshPluginsIfNeeded() }
     }
 
     @ViewBuilder
@@ -1360,6 +1362,10 @@ struct MainWindow: View {
                     }
                 }
             }
+        }
+        .onAppear {
+            model.refreshHeadphoneProfilesIfNeeded()
+            model.lighting.refreshDeviceAsynchronously()
         }
     }
 
@@ -1854,8 +1860,10 @@ struct MainWindow: View {
                     NSWorkspace.shared.open(directory)
                 }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
-                Button(loc("Refresh")) { model.refreshHeadphoneProfiles() }
-                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                Button(loc("Refresh")) {
+                    model.refreshHeadphoneProfilesAsynchronously()
+                }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
         }
     }

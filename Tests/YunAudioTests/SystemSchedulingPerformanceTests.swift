@@ -132,6 +132,16 @@ struct SystemSchedulingPerformanceTests {
         let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
         #expect(
             initialisation.ranges(of: "hydrateConfiguredDevicesAsynchronously()").count == 1)
+
+        let hydrationStart = try #require(
+            model.range(of: "private func hydrateConfiguredDevicesAsynchronously()"))
+        let hydrationEnd = try #require(
+            model.range(
+                of: "private func runConfiguredDeviceHydration(",
+                range: hydrationStart.upperBound..<model.endIndex))
+        let hydration = model[hydrationStart.lowerBound..<hydrationEnd.lowerBound]
+        #expect(hydration.contains("guard !deviceDetailUIDs.isEmpty"))
+        #expect(hydration.contains("deviceHydrationGate.invalidate()"))
     }
 
     @Test("Audio Unit registry discovery is absent from the first MainActor frame")
@@ -148,11 +158,13 @@ struct SystemSchedulingPerformanceTests {
         let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
         #expect(initialisation.ranges(of: "refreshPlugins()").isEmpty)
         #expect(initialisation.ranges(of: "AudioUnitPlugins.installed()").isEmpty)
-        #expect(initialisation.ranges(of: "refreshPluginsAsynchronously()").count == 1)
+        #expect(initialisation.ranges(of: "refreshPluginsIfNeeded()").count == 1)
+        #expect(initialisation.contains("if !enabledPlugins.isEmpty"))
+        #expect(initialisation.contains("if lighting.mode != .off"))
 
         let restore = try #require(initialisation.range(of: "restore()"))
         let deferred = try #require(
-            initialisation.range(of: "refreshPluginsAsynchronously()"))
+            initialisation.range(of: "refreshPluginsIfNeeded()"))
         #expect(restore.lowerBound < deferred.lowerBound)
 
         let workerStart = try #require(
@@ -173,6 +185,112 @@ struct SystemSchedulingPerformanceTests {
                 range: applyStart.upperBound..<model.endIndex))
         let apply = model[applyStart.lowerBound..<applyEnd.lowerBound]
         #expect(apply.ranges(of: "AudioUnitPlugins.installed()").isEmpty)
+    }
+
+    @Test("default launch creates no CoreMIDI client")
+    func midiClientIsLazy() throws {
+        #expect(
+            !MIDIController.requiresClient(
+                bindingCount: 0, diagnosticsAreVisible: false, isLearning: false))
+        #expect(
+            MIDIController.requiresClient(
+                bindingCount: 1, diagnosticsAreVisible: false, isLearning: false))
+        #expect(
+            MIDIController.requiresClient(
+                bindingCount: 0, diagnosticsAreVisible: true, isLearning: false))
+        #expect(
+            MIDIController.requiresClient(
+                bindingCount: 0, diagnosticsAreVisible: false, isLearning: true))
+
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/MIDIControl.swift",
+            encoding: .utf8)
+        let installStart = try #require(source.range(of: "func installMIDI()"))
+        let installEnd = try #require(
+            source.range(
+                of: "/// Where a continuous target currently sits",
+                range: installStart.upperBound..<source.endIndex))
+        let install = source[installStart.lowerBound..<installEnd.lowerBound]
+        #expect(install.ranges(of: "midiControl.start()").isEmpty)
+        #expect(install.ranges(of: "midi?.start()").count == 1)
+        #expect(install.ranges(of: "midi.publishClientDemand()").count == 1)
+        #expect(install.ranges(of: "PreferencesStore.load()").isEmpty)
+    }
+
+    @Test("one thousand CoreMIDI setup notifications schedule one MainActor task")
+    func midiSetupChangesAreCoalesced() {
+        let gate = MIDISourceRefreshGate()
+        var inventories = 0
+        for _ in 0..<1_000 {
+            if gate.request() { inventories += 1 }
+        }
+        #expect(inventories == 1)
+
+        gate.finish()
+        #expect(gate.request())
+        inventories += 1
+        #expect(inventories == 2)
+    }
+
+    @Test("status panel hosting is allocated only on first open")
+    func statusPanelIsLazy() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/StatusItem.swift",
+            encoding: .utf8)
+        let initStart = try #require(source.range(of: "init(model: RouterModel"))
+        let initEnd = try #require(
+            source.range(
+                of: "private var rightClickMenu",
+                range: initStart.upperBound..<source.endIndex))
+        let initialisation = source[initStart.lowerBound..<initEnd.lowerBound]
+        #expect(initialisation.ranges(of: "NSHostingController").isEmpty)
+
+        let factoryStart = try #require(source.range(of: "private func makePanelHost()"))
+        let factoryEnd = try #require(
+            source.range(
+                of: "/// Detaches the panel",
+                range: factoryStart.upperBound..<source.endIndex))
+        let factory = source[factoryStart.lowerBound..<factoryEnd.lowerBound]
+        #expect(factory.ranges(of: "NSHostingController").count == 1)
+    }
+
+    @Test("headphone files are parsed off MainActor only when needed")
+    func headphoneProfilesAreLazy() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let initStart = try #require(model.range(of: "init() {"))
+        let initEnd = try #require(
+            model.range(
+                of: "// MARK: Push to talk",
+                range: initStart.upperBound..<model.endIndex))
+        let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
+        #expect(initialisation.ranges(of: "refreshHeadphoneProfiles()").isEmpty)
+        #expect(initialisation.contains("if !busHeadphoneProfiles.isEmpty"))
+
+        let readStart = try #require(
+            model.range(of: "nonisolated private static func readHeadphoneProfiles()"))
+        let readEnd = try #require(
+            model.range(
+                of: "private func runHeadphoneProfileRefresh(",
+                range: readStart.upperBound..<model.endIndex))
+        let read = model[readStart.lowerBound..<readEnd.lowerBound]
+        #expect(read.ranges(of: "contentsOfDirectory").count == 1)
+        #expect(read.ranges(of: "String(").count == 1)
+
+        let applyStart = try #require(
+            model.range(of: "private func applyHeadphoneProfiles("))
+        let applyEnd = try #require(
+            model.range(
+                of: "/// True when a correction is chosen",
+                range: applyStart.upperBound..<model.endIndex))
+        let apply = model[applyStart.lowerBound..<applyEnd.lowerBound]
+        #expect(apply.ranges(of: "FileManager").isEmpty)
+        #expect(apply.ranges(of: "contentsOfDirectory").isEmpty)
+        #expect(apply.contains("if profilesChanged || !stale.isEmpty"))
     }
 
 }

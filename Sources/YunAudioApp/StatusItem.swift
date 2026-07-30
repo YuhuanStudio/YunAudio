@@ -63,25 +63,9 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         Self.current = self
 
         popover.behavior = .transient
-        // The panel is taller than any fixed height worth choosing: it grows
-        // with the number of routes, and every disclosure in it expands. Hosted
-        // flat at 560 points it was 639 points tall with everything collapsed,
-        // so the last section was simply unreachable — and there was nothing to
-        // say so, because a popover clips rather than scrolls.
-        let host = NSHostingController(
-            rootView: ScrollView {
-                PanelView(model: model)
-            }
-            .scrollIndicators(.never)
-            .frame(width: Self.panelWidth)
-            .frame(maxHeight: Self.maximumPanelHeight)
-        )
-        // Lets the popover shrink to a short panel instead of always claiming
-        // the maximum, while the frame above stops it growing past the screen.
-        host.sizingOptions = [.preferredContentSize]
-        // Not handed to the popover here. Assigning it at launch loads the view
-        // and starts the graph, and it never stops again — see `panelHost`.
-        panelHost = host
+        // The hosting controller itself is also deferred until the first open.
+        // A status item that is only ever used through its right-click menu now
+        // allocates no panel graph at launch.
         popover.delegate = self
 
         if let button = item.button {
@@ -553,9 +537,30 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// Attaches the panel and shows it. See `panelHost` for why it is not
     /// attached the rest of the time.
     private func showPanel(from button: NSStatusBarButton) {
+        if panelHost == nil { panelHost = makePanelHost() }
         popover.contentViewController = panelHost
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         popover.contentViewController?.view.window?.makeKey()
+    }
+
+    private func makePanelHost() -> NSViewController {
+        // The panel is taller than any fixed height worth choosing: it grows
+        // with the number of routes, and every disclosure in it expands. Hosted
+        // flat at 560 points it was 639 points tall with everything collapsed,
+        // so the last section was simply unreachable — and there was nothing to
+        // say so, because a popover clips rather than scrolls.
+        let host = NSHostingController(
+            rootView: ScrollView {
+                PanelView(model: model)
+            }
+            .scrollIndicators(.never)
+            .frame(width: Self.panelWidth)
+            .frame(maxHeight: Self.maximumPanelHeight)
+        )
+        // Lets the popover shrink to a short panel instead of always claiming
+        // the maximum, while the frame above stops it growing past the screen.
+        host.sizingOptions = [.preferredContentSize]
+        return host
     }
 
     /// Detaches the panel the moment it goes away.

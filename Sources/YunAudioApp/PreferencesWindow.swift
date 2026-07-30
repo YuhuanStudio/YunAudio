@@ -691,23 +691,87 @@ struct PreferencesWindow: View {
                             if index > 0 { YunDivider() }
                             permissionRow(
                                 title: target.name,
-                                detail: loc(
-                                    "Reads the current song and playback position for synchronised lyrics."
-                                ),
+                                detail:
+                                    NowPlaying.isPlayerRunning(target.bundleID)
+                                    ? loc(
+                                        "Reads the current song and playback position for synchronised lyrics."
+                                    )
+                                    : String(
+                                        format: loc(
+                                            "Open %@ before requesting Automation access."
+                                        ), target.name),
                                 state: permissions.automationState(for: target.bundleID),
                                 requestKey: target.bundleID,
                                 request: {
                                     permissions.requestAutomation(for: target.bundleID)
                                 },
-                                destination: .automation)
+                                destination: .automation,
+                                requestIsAvailable: NowPlaying.isPlayerRunning(target.bundleID))
                         }
                     }
                 }
             }
 
+            heading(loc("System approval"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    HStack(spacing: Yun.Space.sm) {
+                        Text(loc("Open at login"))
+                            .font(Yun.Text.body)
+                            .foregroundStyle(Yun.Palette.textPrimary)
+                        Spacer()
+                        YunBadge(loginItemPermissionTitle)
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+                        Text(
+                            loc(
+                                "macOS may require approval in Login Items after this is enabled. YunAudio cannot approve itself."
+                            )
+                        )
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: Yun.Space.sm)
+                        Button(loc("Open System Settings")) {
+                            permissions.openSettings(.loginItems)
+                        }
+                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                    }
+                }
+            }
+
+            heading(loc("No additional permission"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    YunDetailRow(
+                        loc("Transcription"),
+                        value: loc("On-device; no separate TCC grant"))
+                    Text(
+                        loc(
+                            "SpeechAnalyzer processes audio already supplied to YunAudio. It does not use the older cloud speech-recognition permission."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    YunDivider()
+                    YunDetailRow(
+                        loc("Notifications"),
+                        value: loc("Not requested"))
+                    Text(
+                        loc(
+                            "YunAudio does not currently post system notifications, so it does not request notification access."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             Text(
                 loc(
-                    "Opening YunAudio never requests microphone or system-audio access. Those requests occur only from the buttons above or when you explicitly start the feature that needs them."
+                    "Opening YunAudio never requests microphone, system-audio or Automation access. Protected access is requested only from the buttons above or when you explicitly start the audio feature that needs it."
                 )
             )
             .font(Yun.Text.caption)
@@ -717,10 +781,20 @@ struct PreferencesWindow: View {
         .onAppear { permissions.refreshSafeStatuses() }
     }
 
+    private var loginItemPermissionTitle: String {
+        switch LoginItem.state {
+        case .enabled: loc("Enabled")
+        case .requiresApproval: loc("Approval required")
+        case .notRegistered: loc("Not enabled")
+        case .unavailable: loc("Unavailable")
+        }
+    }
+
     private func permissionRow(
         title: String, detail: String, state: PermissionCentre.State,
         requestKey: String, request: @escaping () -> Void,
-        destination: PermissionCentre.Destination
+        destination: PermissionCentre.Destination,
+        requestIsAvailable: Bool = true
     ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.sm) {
             HStack(spacing: Yun.Space.sm) {
@@ -734,7 +808,9 @@ struct PreferencesWindow: View {
                         request()
                     }
                     .buttonStyle(YunButtonStyle(.primary, small: true))
-                    .disabled(permissions.requestInFlight.contains(requestKey))
+                    .disabled(
+                        permissions.requestInFlight.contains(requestKey)
+                            || !requestIsAvailable)
                 }
             }
             HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {

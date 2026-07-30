@@ -3,6 +3,7 @@ import ApplicationServices
 import AVFoundation
 import Foundation
 import Observation
+import ServiceManagement
 import YunAudioHAL
 import YunDesign
 
@@ -35,17 +36,30 @@ final class PermissionCentre {
         case automation
         case microphone
         case systemAudio
+        case loginItems
 
         var settingsURL: URL? {
-            let anchor =
-                switch self {
-                case .automation: "Privacy_Automation"
-                case .microphone: "Privacy_Microphone"
-                case .systemAudio: "Privacy_ScreenCapture"
-                }
-            return URL(
-                string:
-                    "x-apple.systempreferences:com.apple.preference.security?\(anchor)")
+            switch self {
+            case .automation:
+                URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"
+                )
+            case .microphone:
+                URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+                )
+            case .systemAudio:
+                URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                )
+            case .loginItems:
+                URL(
+                    string:
+                        "x-apple.systempreferences:com.apple.LoginItems-Settings.extension")
+            }
         }
     }
 
@@ -56,6 +70,7 @@ final class PermissionCentre {
     /// only the result of an explicit request made during this process.
     private(set) var systemAudio: State = .notDetermined
     private(set) var automation: [String: State] = [:]
+    private(set) var loginItem: State = .notDetermined
     private(set) var requestInFlight: Set<String> = []
 
     private init() {
@@ -66,6 +81,7 @@ final class PermissionCentre {
     func refreshSafeStatuses() {
         microphone = Self.microphoneState(
             AVCaptureDevice.authorizationStatus(for: .audio))
+        loginItem = Self.loginItemState(LoginItem.state)
         for target in NowPlaying.installedAutomationTargets {
             automation[target.bundleID] = Self.automationState(
                 NowPlaying.automationPermissionStatus(for: target.bundleID))
@@ -92,7 +108,6 @@ final class PermissionCentre {
             }.value
             automation[bundleID] = Self.automationState(status)
             requestInFlight.remove(bundleID)
-            FirstLaunchPermissions.markAttempted(bundleID: bundleID)
         }
     }
 
@@ -148,7 +163,17 @@ final class PermissionCentre {
         case OSStatus(errAEEventNotPermitted),
             OSStatus(errAEEventWouldRequireUserConsent):
             .needsRequest
+        case OSStatus(procNotFound): .notDetermined
         default: .unavailable
+        }
+    }
+
+    nonisolated static func loginItemState(_ state: LoginItem.State) -> State {
+        switch state {
+        case .enabled: .allowed
+        case .requiresApproval: .needsRequest
+        case .notRegistered: .notDetermined
+        case .unavailable: .unavailable
         }
     }
 }

@@ -1,47 +1,35 @@
 import Foundation
 
-/// Offers each installed music player one independent Automation request.
+/// The first-launch guide to protected capabilities.
 ///
-/// macOS has no combined permission sheet. Each prompt is owned by the API it
-/// protects. Neither microphone nor system-audio capture is touched here:
-/// launching the application is not consent to capture audio, and constructing
-/// a process tap briefly changes CoreAudio's topology even when the user has not
-/// started a route. Each capture feature owns its request at the point of use.
-/// Serial Automation prompts are less likely to obscure one another. Attempts
-/// are remembered per bundle identifier, so installing Spotify later still
-/// offers its grant and refusing Music never pretends Spotify was handled too.
-/// A refused grant can always be retried from Settings → Permissions.
+/// Kept as a pure list because a future protected feature must make an explicit
+/// decision here. An empty list is the contract: opening YunAudio never asks
+/// TCC for microphone, system audio, Automation or anything else. The first
+/// ordinary launch opens Settings → Permissions once, where every request is a
+/// separate button press.
 enum FirstLaunchPermissions {
-    private static let attemptKeyPrefix = "automationPermissionAttempted."
+    static let currentGuideVersion = 1
+    private static let guideVersionKey = "permissionGuideVersion"
 
-    @MainActor
-    static func requestIfNeeded(
-        defaults: UserDefaults = .standard,
-        environment: [String: String] = ProcessInfo.processInfo.environment
-    ) {
-        guard shouldRequest(in: environment) else { return }
-        let players = automaticRequestBundleIDs(
-            installed: NowPlaying.installedPlayerBundleIDs,
-            attempted: Set(
-                NowPlaying.installedPlayerBundleIDs.filter {
-                    defaults.bool(forKey: attemptKey(for: $0))
-                }))
-        guard !players.isEmpty else { return }
-        Task {
-            for bundleID in players {
-                // Written before crossing to TCC. If the application is quit
-                // while a sheet is open, the next launch must not immediately
-                // put the same sheet back; Settings remains the retry path.
-                defaults.set(true, forKey: attemptKey(for: bundleID))
-                _ = await Task.detached(priority: .utility) {
-                    NowPlaying.requestAutomationPermission(for: bundleID)
-                }.value
-            }
-            PermissionCentre.shared.refreshSafeStatuses()
-        }
+    enum Capability: CaseIterable {
+        case microphone
+        case systemAudio
+        case musicAutomation
     }
 
-    static func shouldRequest(in environment: [String: String]) -> Bool {
+    static let automaticallyRequested: Set<Capability> = []
+
+    static func canAutoStartWithoutRequest(
+        microphoneIsAllowed: Bool, capturesApplications: Bool,
+        cancelsEcho: Bool
+    ) -> Bool {
+        microphoneIsAllowed && !capturesApplications && !cancelsEcho
+    }
+
+    static func shouldPresentGuide(
+        storedVersion: Int, environment: [String: String]
+    ) -> Bool {
+        guard storedVersion < currentGuideVersion else { return false }
         return
             environment["YUNAUDIO_RENDER"] == nil
             && environment["YUNAUDIO_FLOWCHECK"] == nil
@@ -50,19 +38,19 @@ enum FirstLaunchPermissions {
             && environment["YUNAUDIO_ICON"] == nil
     }
 
-    static func automaticRequestBundleIDs(
-        installed: [String], attempted: Set<String>
-    ) -> [String] {
-        installed.filter { !attempted.contains($0) }
-    }
-
-    static func markAttempted(
-        bundleID: String, defaults: UserDefaults = .standard
+    @MainActor
+    static func presentGuideIfNeeded(
+        model: RouterModel, defaults: UserDefaults = .standard,
+        environment: [String: String] = ProcessInfo.processInfo.environment
     ) {
-        defaults.set(true, forKey: attemptKey(for: bundleID))
-    }
-
-    static func attemptKey(for bundleID: String) -> String {
-        attemptKeyPrefix + bundleID
+        guard
+            shouldPresentGuide(
+                storedVersion: defaults.integer(forKey: guideVersionKey),
+                environment: environment)
+        else { return }
+        // Written before presenting. Closing the window is a completed tour,
+        // not an invitation to reopen it on every launch.
+        defaults.set(currentGuideVersion, forKey: guideVersionKey)
+        SettingsWindow.open(model: model, initialSection: .permissions)
     }
 }

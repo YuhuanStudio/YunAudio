@@ -4494,34 +4494,33 @@ struct PermissionRequestTests {
                 application: "Spotify", code: Int(errAEEventNotPermitted))
                 == .denied(application: "Spotify"))
         #expect(
+            NowPlaying.queryFailure(
+                application: "Spotify",
+                code: Int(errAEEventWouldRequireUserConsent))
+                == .denied(application: "Spotify"))
+        #expect(
             NowPlaying.queryFailure(application: "Spotify", code: -50)
                 == .failed(application: "Spotify", code: -50))
     }
 
-    @Test("first-launch Automation attempts are independent and verification stays silent")
+    @Test("normal launch requests no protected capability")
     func firstLaunchOnly() {
-        let music = "com.apple.Music"
-        let spotify = "com.spotify.client"
-        #expect(FirstLaunchPermissions.shouldRequest(in: [:]))
+        #expect(FirstLaunchPermissions.Capability.allCases.count == 3)
+        #expect(FirstLaunchPermissions.automaticallyRequested.isEmpty)
         #expect(
-            !FirstLaunchPermissions.shouldRequest(
-                in: ["YUNAUDIO_FLOWCHECK": "1"]))
+            FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 0, environment: [:]))
         #expect(
-            !FirstLaunchPermissions.shouldRequest(
-                in: ["YUNAUDIO_RENDER": "out"]))
+            !FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 1, environment: [:]))
         #expect(
-            FirstLaunchPermissions.automaticRequestBundleIDs(
-                installed: [music, spotify], attempted: []) == [music, spotify])
+            !FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 0,
+                environment: ["YUNAUDIO_FLOWCHECK": "1"]))
         #expect(
-            FirstLaunchPermissions.automaticRequestBundleIDs(
-                installed: [music, spotify], attempted: [music]) == [spotify])
-        #expect(
-            FirstLaunchPermissions.automaticRequestBundleIDs(
-                installed: [music, spotify], attempted: [music, spotify]
-            ).isEmpty)
-        #expect(
-            FirstLaunchPermissions.attemptKey(for: music)
-                != FirstLaunchPermissions.attemptKey(for: spotify))
+            !FirstLaunchPermissions.shouldPresentGuide(
+                storedVersion: 0,
+                environment: ["YUNAUDIO_SCREENSHOT": "out"]))
     }
 
     @Test("the first launch never touches an audio capture API")
@@ -4529,13 +4528,16 @@ struct PermissionRequestTests {
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/FirstLaunchPermissions.swift", encoding: .utf8)
-        #expect(source.contains("requestAutomationPermission(for: bundleID)"))
+        #expect(!source.contains("requestAutomationPermission"))
         #expect(!source.contains("requestCaptureAccess()"))
         #expect(!source.contains("AudioHardwareCreateProcessTap"))
         #expect(!source.contains("AVCaptureDevice"))
         #expect(!source.contains("requestAccess(for: .audio)"))
-        #expect(source.contains("defaults.set(true, forKey: attemptKey(for: bundleID))"))
-        #expect(!source.contains("firstLaunchPermissionsVersion"))
+        let app = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/YunAudioApp.swift", encoding: .utf8)
+        #expect(!app.contains("FirstLaunchPermissions.request"))
+        #expect(app.contains("FirstLaunchPermissions.presentGuideIfNeeded(model: model)"))
     }
 
     @Test("the duplicate check asks Launch Services only for this bundle")

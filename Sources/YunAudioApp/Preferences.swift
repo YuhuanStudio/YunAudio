@@ -444,8 +444,25 @@ enum InterfaceOptions {
 /// the system owns the state, so it is read back rather than mirrored locally.
 @MainActor
 enum LoginItem {
+    enum State: Equatable {
+        case enabled
+        case requiresApproval
+        case notRegistered
+        case unavailable
+    }
+
+    static var state: State {
+        switch SMAppService.mainApp.status {
+        case .enabled: .enabled
+        case .requiresApproval: .requiresApproval
+        case .notRegistered: .notRegistered
+        case .notFound: .unavailable
+        @unknown default: .unavailable
+        }
+    }
+
     static var isEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+        state == .enabled
     }
 
     /// Returns nil on success, or a message explaining why it did not take.
@@ -462,7 +479,9 @@ enum LoginItem {
             // The most common cause is the app not being in /Applications, or
             // running unsigned from a build directory. Say so rather than
             // failing silently.
-            return "Could not update the login item: \(error.localizedDescription)"
+            return String(
+                format: loc("Could not update the login item: %@"),
+                error.localizedDescription)
         }
     }
 }

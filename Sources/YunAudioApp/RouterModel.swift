@@ -322,6 +322,8 @@ final class RouterModel: ScriptTarget {
     /// Shipping a copy of all of them would be a licensing problem, an update
     /// problem, and worse than the file for somebody's exact unit.
     private(set) var headphoneProfiles: [ParametricEQ] = []
+    @ObservationIgnored private var headphoneProfilesWereRequested = false
+    @ObservationIgnored private var headphoneProfileRefreshGate = LatestRefreshGate()
 
     /// Ten slider positions per bus, in decibels, at the band centres in
     /// `ParametricEQ`, keyed by the bus's output device UID.
@@ -463,20 +465,34 @@ final class RouterModel: ScriptTarget {
     var headphoneCurve: ParametricEQ? { correctedOutputUID.flatMap { curve(forBus: $0) } }
 
     /// Where corrections are read from.
-    static var headphoneDirectory: URL? {
+    nonisolated static var headphoneDirectory: URL? {
         FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
             .appendingPathComponent("YunAudio/Headphones", isDirectory: true)
     }
 
     func refreshHeadphoneProfiles() {
+        headphoneProfilesWereRequested = true
+        headphoneProfileRefreshGate.invalidate()
+        applyHeadphoneProfiles(Self.readHeadphoneProfiles())
+    }
+
+    func refreshHeadphoneProfilesIfNeeded() {
+        guard !headphoneProfilesWereRequested else { return }
+        refreshHeadphoneProfilesAsynchronously()
+    }
+
+    func refreshHeadphoneProfilesAsynchronously() {
+        headphoneProfilesWereRequested = true
+        guard let token = headphoneProfileRefreshGate.request() else { return }
+        runHeadphoneProfileRefresh(token)
+    }
+
+    nonisolated private static func readHeadphoneProfiles() -> [ParametricEQ] {
         guard let directory = Self.headphoneDirectory,
             let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
-        else {
-            headphoneProfiles = []
-            return
-        }
-        headphoneProfiles =
+        else { return [] }
+        return
             names
             .filter { $0.lowercased().hasSuffix(".txt") }
             .sorted()
@@ -491,6 +507,30 @@ final class RouterModel: ScriptTarget {
                 return ParametricEQ.parse(
                     text, name: (file as NSString).deletingPathExtension)
             }
+    }
+
+    private func runHeadphoneProfileRefresh(_ token: LatestRefreshGate.Token) {
+        systemDiscoveryQueue.async {
+            let profiles = Self.readHeadphoneProfiles()
+            Task { @MainActor in
+                self.finishHeadphoneProfileRefresh(profiles, token: token)
+            }
+        }
+    }
+
+    private func finishHeadphoneProfileRefresh(
+        _ profiles: [ParametricEQ], token: LatestRefreshGate.Token
+    ) {
+        guard headphoneProfileRefreshGate.accepts(token) else { return }
+        applyHeadphoneProfiles(profiles)
+        if case .start(let next) = headphoneProfileRefreshGate.finish(token) {
+            runHeadphoneProfileRefresh(next)
+        }
+    }
+
+    private func applyHeadphoneProfiles(_ profiles: [ParametricEQ]) {
+        let profilesChanged = headphoneProfiles != profiles
+        if profilesChanged { headphoneProfiles = profiles }
         // A profile that has been deleted from the folder must stop being used,
         // not silently keep running from memory. Every bus, not only the one
         // the device tab shows: a file deleted while the send was using it
@@ -500,8 +540,9 @@ final class RouterModel: ScriptTarget {
         if !stale.isEmpty {
             for id in stale.keys { busHeadphoneProfiles[id] = nil }
             persist()
-            scheduleCorrections()
         }
+        // This also reapplies a selected file whose coefficients changed.
+        if profilesChanged || !stale.isEmpty { scheduleCorrections() }
     }
 
     /// True when a correction is chosen somewhere and is not reaching anything.
@@ -2637,14 +2678,23 @@ final class RouterModel: ScriptTarget {
     private(set) var failedPlugins: [AudioUnitLoadFailure] = []
     @ObservationIgnored private var pluginParameterCache: [String: [EffectParameter]] = [:]
     @ObservationIgnored private var pluginRefreshGate = LatestRefreshGate()
+    @ObservationIgnored private var pluginRegistryWasRequested = false
     private let systemDiscoveryQueue = DispatchQueue(
         label: "com.yuhuanstudio.yunaudio.system-discovery", qos: .utility)
 
     func refreshPlugins() {
         // An explicit Rescan is deterministic: when it returns, the window
         // shows the answer. It also makes an older launch scan obsolete.
+        pluginRegistryWasRequested = true
         pluginRefreshGate.invalidate()
         applyPluginRefresh(AudioUnitPlugins.installed())
+    }
+
+    /// Loads the registry when a route or the plug-in page first needs it.
+    func refreshPluginsIfNeeded() {
+        guard !pluginRegistryWasRequested else { return }
+        pluginRegistryWasRequested = true
+        refreshPluginsAsynchronously()
     }
 
     private func refreshPluginsAsynchronously() {
@@ -3447,6 +3497,7 @@ final class RouterModel: ScriptTarget {
         set {
             guard lighting.mode != newValue else { return }
             lighting.mode = newValue
+            if newValue != .off { lighting.refreshDeviceAsynchronously() }
             persist()
         }
     }
@@ -4998,6 +5049,7 @@ final class RouterModel: ScriptTarget {
 
     private(set) var isRunning = false
     private(set) var lastError: String?
+    private(set) var autoStartNeedsPermissionReview = false
 
     /// What to say when voice isolation was asked for and did not attach.
     ///
@@ -5236,15 +5288,18 @@ final class RouterModel: ScriptTarget {
         refreshDevices()
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
-        refreshHeadphoneProfiles()
         restore()
         // Registry discovery walks every installed Audio Unit. It was one
         // synchronous MainActor operation before the first frame, and it ran
         // before restore — when there were no enabled plug-ins to prune anyway.
         // Verification asks explicitly where it needs a deterministic answer.
         if !Self.isVerificationProcess {
-            refreshPluginsAsynchronously()
-            lighting.refreshDeviceAsynchronously()
+            // Optional system registries stay completely asleep for the
+            // default configuration. A saved feature still becomes available
+            // without waiting for its settings page to be opened.
+            if !enabledPlugins.isEmpty { refreshPluginsIfNeeded() }
+            if !busHeadphoneProfiles.isEmpty { refreshHeadphoneProfilesIfNeeded() }
+            if lighting.mode != .off { lighting.refreshDeviceAsynchronously() }
         }
         // After `restore`, so loading the file does not immediately write it
         // back — and `restore` is guarded anyway, which is belt and braces on
@@ -5272,7 +5327,16 @@ final class RouterModel: ScriptTarget {
             selectedSource != nil, selectedDestination != nil,
             !routeRequiresExplicitInputSelection
         {
-            start()
+            if FirstLaunchPermissions.canAutoStartWithoutRequest(
+                microphoneIsAllowed: PermissionCentre.shared.microphone == .allowed,
+                capturesApplications: !capturedAppBundleIDs.isEmpty,
+                cancelsEcho: cancelsEcho)
+            {
+                start()
+            } else {
+                autoStartNeedsPermissionReview = true
+                lastError = loc("Automatic routing is waiting for permission review.")
+            }
         }
     }
 
@@ -5446,6 +5510,9 @@ final class RouterModel: ScriptTarget {
         defer { isRestoring = false }
 
         let saved = PreferencesStore.load()
+        // The launch already decodes this blob here. MIDI used to load it a
+        // second time during installation solely for this one field.
+        midiControl.restore(saved.midiBindings ?? [:])
         autoStart = Self.restoredAutoStart(
             savedEnabled: saved.autoStart,
             consentVersion: UserDefaults.standard.integer(
@@ -5732,6 +5799,13 @@ final class RouterModel: ScriptTarget {
     /// and the first/latest gate bounds a rapid sequence of picker changes to
     /// two queue jobs.
     private func hydrateConfiguredDevicesAsynchronously() {
+        guard !deviceDetailUIDs.isEmpty else {
+            // Clearing the final endpoint also makes an in-flight answer stale.
+            // With no route configured, launch now schedules zero hydration
+            // jobs instead of one empty utility-queue round trip.
+            deviceHydrationGate.invalidate()
+            return
+        }
         guard let token = deviceHydrationGate.request() else { return }
         runConfiguredDeviceHydration(token)
     }
@@ -6456,6 +6530,7 @@ final class RouterModel: ScriptTarget {
     ///   sequence, so it is never on for ordinary routing.
     func start(selftest: Bool) {
         guard !isBusy else { return }
+        autoStartNeedsPermissionReview = false
         // `prepareForAutomatedAudioUse()` chooses a local input before either
         // harness starts. This guard is the last line of defence for a future
         // test that forgets: failing that test is preferable to waking a phone.
