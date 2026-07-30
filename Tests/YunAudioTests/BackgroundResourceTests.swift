@@ -40,10 +40,11 @@ struct BackgroundResourceTests {
         let delivered = DispatchSemaphore(value: 0)
         let count = Count()
         let coalescer = DeviceChangeCoalescer(
-            queue: queue, delay: .milliseconds(50)
+            queue: queue
         ) {
             count.increment()
             delivered.signal()
+            return true
         }
 
         for _ in 0..<100 { coalescer.signal() }

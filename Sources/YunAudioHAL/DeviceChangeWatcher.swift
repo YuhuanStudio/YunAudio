@@ -19,14 +19,19 @@ public final class DeviceChangeWatcher {
     public init(onChange: @escaping @Sendable () -> Void) {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
         self.queue = queue
-        let inventory = DeviceInventoryGate(initial: Self.inventorySignature())
+        let inventory = DeviceInventoryProbe(
+            initial: Self.inventorySignature(),
+            read: Self.inventorySignature)
         coalescer = DeviceChangeCoalescer(queue: queue) {
             // Some audio plug-ins announce the device-list property after a
             // harmless property read. Re-enumerating complete devices in
             // response asks the same plug-in again and can create a permanent
-            // notification loop. Only an inventory change reaches the model.
-            guard inventory.shouldDeliver(Self.inventorySignature()) else { return }
-            onChange()
+            // notification loop. An unchanged answer increases the probe
+            // interval, while an actual inventory change restores the 50 ms
+            // response for the next physical device event.
+            let changed = inventory.readChanged()
+            if changed { onChange() }
+            return changed
         }
 
         let listener: AudioObjectPropertyListenerBlock = { [coalescer] _, _ in
@@ -62,29 +67,84 @@ public final class DeviceChangeWatcher {
 /// cannot postpone recovery indefinitely.
 final class DeviceChangeCoalescer: @unchecked Sendable {
     private let queue: DispatchQueue
-    private let delay: DispatchTimeInterval
-    private let handler: @Sendable () -> Void
+    private let clock: @Sendable () -> UInt64
+    private let handler: @Sendable () -> Bool
     /// Accessed only on `queue`.
-    private var isPending = false
+    private var schedule: DeviceChangeSchedule
 
     init(
-        queue: DispatchQueue, delay: DispatchTimeInterval = .milliseconds(50),
-        handler: @escaping @Sendable () -> Void
+        queue: DispatchQueue,
+        schedule: DeviceChangeSchedule = DeviceChangeSchedule(),
+        clock: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        handler: @escaping @Sendable () -> Bool
     ) {
         self.queue = queue
-        self.delay = delay
+        self.schedule = schedule
+        self.clock = clock
         self.handler = handler
     }
 
     func signal() {
         queue.async { [weak self] in
-            guard let self, !isPending else { return }
-            isPending = true
-            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            let now = clock()
+            guard let deadline = schedule.signal(at: now) else { return }
+            queue.asyncAfter(
+                deadline: DispatchTime(uptimeNanoseconds: deadline)
+            ) { [weak self] in
                 guard let self else { return }
-                isPending = false
-                handler()
+                schedule.complete(inventoryChanged: handler())
             }
+        }
+    }
+}
+
+/// Schedules device-list probes without allowing a noisy endpoint to poll HAL.
+///
+/// The first notification in a quiet period is delivered after 50 ms so one
+/// physical plug event can publish all of its properties. Repeated unchanged
+/// answers back off to 250 ms. That cap keeps a real device change responsive
+/// even when an unrelated plug-in is continuously publishing false changes.
+struct DeviceChangeSchedule: Sendable {
+    private let initialDelay: UInt64
+    private let maximumDelay: UInt64
+    private let quietReset: UInt64
+    private var delay: UInt64
+    private var lastSignal: UInt64?
+    private var isPending = false
+
+    init(
+        initialDelay: UInt64 = 50_000_000,
+        maximumDelay: UInt64 = 250_000_000,
+        quietReset: UInt64 = 500_000_000
+    ) {
+        precondition(initialDelay > 0)
+        precondition(maximumDelay >= initialDelay)
+        precondition(quietReset >= initialDelay)
+        self.initialDelay = initialDelay
+        self.maximumDelay = maximumDelay
+        self.quietReset = quietReset
+        delay = initialDelay
+    }
+
+    mutating func signal(at now: UInt64) -> UInt64? {
+        if let lastSignal, now &- lastSignal >= quietReset {
+            delay = initialDelay
+        }
+        lastSignal = now
+        guard !isPending else { return nil }
+        isPending = true
+        return now.addingReportingOverflow(delay).partialValue
+    }
+
+    mutating func complete(inventoryChanged: Bool) {
+        isPending = false
+        if inventoryChanged {
+            delay = initialDelay
+        } else {
+            delay = min(delay.multipliedReportingOverflow(by: 2).partialValue, maximumDelay)
         }
     }
 }
@@ -105,5 +165,26 @@ final class DeviceInventoryGate: @unchecked Sendable {
         guard let candidate, candidate != current else { return false }
         current = candidate
         return true
+    }
+}
+
+/// Reads the device ID set only when the coalescer's probe deadline arrives.
+///
+/// Keeping the read behind a closure makes the expensive system-object IPC
+/// count measurable without asking CoreAudio during a unit test.
+final class DeviceInventoryProbe: @unchecked Sendable {
+    private let gate: DeviceInventoryGate
+    private let read: @Sendable () -> Set<AudioObjectID>?
+
+    init(
+        initial: Set<AudioObjectID>?,
+        read: @escaping @Sendable () -> Set<AudioObjectID>?
+    ) {
+        gate = DeviceInventoryGate(initial: initial)
+        self.read = read
+    }
+
+    func readChanged() -> Bool {
+        gate.shouldDeliver(read())
     }
 }
