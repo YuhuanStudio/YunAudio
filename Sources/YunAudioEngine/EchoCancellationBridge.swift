@@ -251,7 +251,8 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                     guard let reference = handles.farEnd else { return 0 }
                     let wanted = min(frames, handles.scratchCapacity)
                     let taken = reference.read(into: handles.scratch, frames: wanted)
-                    buffer.update(from: handles.scratch, count: taken)
+                    EchoCancellationBridge.copySafeReference(
+                        from: handles.scratch, to: buffer, count: taken)
                     return taken
                 })
             if started {
@@ -297,6 +298,24 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     /// Turns the cancellation off while leaving the same path in place, which
     /// is what makes its effect measurable rather than merely asserted.
     public func setBypassed(_ bypassed: Bool) { capture.setBypassed(bypassed) }
+
+    /// Copies process audio into the stateful voice-processing unit.
+    ///
+    /// The route graph sanitises every sample it emits, but the far-end
+    /// reference reaches `AUVoiceProcessingIO` before that graph. One NaN from
+    /// a captured application can otherwise enter the canceller's adaptive
+    /// history and keep its later output non-finite after the source recovers.
+    @inline(__always)
+    static func copySafeReference(
+        from source: UnsafePointer<Float>,
+        to destination: UnsafeMutablePointer<Float>,
+        count: Int
+    ) {
+        guard count > 0 else { return }
+        for index in 0..<count {
+            destination[index] = sanitisedAudioSample(source[index])
+        }
+    }
 }
 
 /// The pointers the realtime callbacks need, in one `Sendable` parcel.
