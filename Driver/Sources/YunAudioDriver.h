@@ -104,6 +104,22 @@ enum {
 
 #pragma mark - Driver state
 
+/// One coherently published view of the clock for GetZeroTimeStamp.
+///
+/// Every member is atomic because a sequence counter alone does not make
+/// concurrent non-atomic C accesses legal. The reader retries a bounded number
+/// of times and therefore never waits for a property setter holding stateMutex.
+typedef struct {
+    _Atomic UInt64 version;
+    _Atomic UInt64 anchorHostTime;
+    _Atomic UInt64 hostTicksPerFrameBits;
+    _Atomic UInt64 nominalTicksPerFrameBits;
+    _Atomic UInt64 lastAnchorReceivedAt;
+    _Atomic UInt64 anchorTimeoutTicks;
+    _Atomic UInt64 isClockFollowing;
+    _Atomic UInt64 seed;
+} YunPublishedClock;
+
 typedef struct {
     /// Guards everything below except the ring buffer, which is touched only
     /// by the IO thread and by readers that tolerate a frame of skew.
@@ -128,10 +144,11 @@ typedef struct {
     /// Scalar 0...1, as the controls report it.
     Float32 inputVolume;
     Float32 outputVolume;
-    /// Linear gain derived from the scalar, kept alongside it so the IO thread
-    /// never has to call powf or take the lock to find it.
-    Float32 inputGain;
-    Float32 outputGain;
+    /// Effective linear gains as IEEE-754 bits. Mute is folded into the value,
+    /// so an IO cycle makes one coherent lock-free load rather than racing two
+    /// independently changing control fields.
+    _Atomic UInt32 inputGainBits;
+    _Atomic UInt32 outputGainBits;
     bool inputMuted;
     bool outputMuted;
 
@@ -144,7 +161,9 @@ typedef struct {
     /// snap back when following stops.
     Float64 nominalTicksPerFrame;
     UInt64 anchorHostTime;
-    UInt64 timeStampCount;
+    UInt64 clockSeed;
+    UInt64 anchorTimeoutTicks;
+    YunPublishedClock publishedClock;
 
     // Clock following
     /// Previous anchor from the application, used to measure the master's real

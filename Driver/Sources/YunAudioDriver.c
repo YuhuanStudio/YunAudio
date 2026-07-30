@@ -23,9 +23,10 @@ YunDriverState gDriver = {
     .pendingSampleRate = 0.0,
     .inputVolume = 1.0f,
     .outputVolume = 1.0f,
-    .inputGain = 1.0f,
-    .outputGain = 1.0f,
+    .inputGainBits = 0x3F800000,
+    .outputGainBits = 0x3F800000,
     .hostTicksPerFrame = 0.0,
+    .clockSeed = 1,
 };
 
 static AudioServerPlugInDriverInterface gInterface;
@@ -43,6 +44,10 @@ static const Float64 kSupportedSampleRates[] = { 44100.0, 48000.0, 88200.0, 9600
 static const UInt32 kSupportedSampleRateCount =
     sizeof(kSupportedSampleRates) / sizeof(kSupportedSampleRates[0]);
 
+_Static_assert(ATOMIC_INT_LOCK_FREE == 2, "UInt32 atomics must be lock-free on the IO thread");
+_Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
+               "UInt64 atomics must be lock-free in GetZeroTimeStamp");
+
 #define YUN_GUARD(condition, error, label) \
     if (!(condition)) {                    \
         status = (error);                  \
@@ -50,6 +55,124 @@ static const UInt32 kSupportedSampleRateCount =
     }
 
 #pragma mark - Helpers
+
+static UInt32 Float32Bits(Float32 value) {
+    UInt32 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static Float32 Float32FromBits(UInt32 bits) {
+    Float32 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+static UInt64 Float64Bits(Float64 value) {
+    UInt64 bits;
+    memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+static Float64 Float64FromBits(UInt64 bits) {
+    Float64 value;
+    memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+/// Returns every whole timestamp period that has elapsed, not merely one.
+///
+/// A delayed callback used to advance exactly once. At 48 kHz one period is
+/// 2.731 seconds, so a ten-period scheduling delay left the published clock
+/// nine periods behind and invited the host to poll repeatedly to catch up.
+static UInt64 TimestampPeriodAtHostTime(UInt64 anchorHostTime,
+                                        UInt64 hostTime,
+                                        Float64 ticksPerPeriod) {
+    if (hostTime <= anchorHostTime || ticksPerPeriod <= 0.0) return 0;
+    return (UInt64)((Float64)(hostTime - anchorHostTime) / ticksPerPeriod);
+}
+
+/// Rebases a slope at a host instant without changing its timestamp count.
+static UInt64 RebasedAnchorHostTime(UInt64 anchorHostTime,
+                                    Float64 oldTicksPerPeriod,
+                                    Float64 newTicksPerPeriod,
+                                    UInt64 rebaseHostTime) {
+    UInt64 period =
+        TimestampPeriodAtHostTime(anchorHostTime, rebaseHostTime, oldTicksPerPeriod);
+    Float64 currentHostTime =
+        (Float64)anchorHostTime + (Float64)period * oldTicksPerPeriod;
+    Float64 newOffset = (Float64)period * newTicksPerPeriod;
+    return currentHostTime > newOffset ? (UInt64)(currentHostTime - newOffset) : 0;
+}
+
+typedef struct {
+    UInt64 anchorHostTime;
+    Float64 hostTicksPerFrame;
+    Float64 nominalTicksPerFrame;
+    UInt64 lastAnchorReceivedAt;
+    UInt64 anchorTimeoutTicks;
+    bool isClockFollowing;
+    UInt64 seed;
+} YunClockSnapshot;
+
+static void PublishClockState_Locked(void) {
+    atomic_fetch_add_explicit(&gDriver.publishedClock.version, 1, memory_order_acq_rel);
+    atomic_store_explicit(&gDriver.publishedClock.anchorHostTime,
+                          gDriver.anchorHostTime, memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.hostTicksPerFrameBits,
+                          Float64Bits(gDriver.hostTicksPerFrame), memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.nominalTicksPerFrameBits,
+                          Float64Bits(gDriver.nominalTicksPerFrame), memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.lastAnchorReceivedAt,
+                          gDriver.lastAnchorReceivedAt, memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.anchorTimeoutTicks,
+                          gDriver.anchorTimeoutTicks, memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.isClockFollowing,
+                          gDriver.isClockFollowing ? 1 : 0, memory_order_relaxed);
+    atomic_store_explicit(&gDriver.publishedClock.seed,
+                          gDriver.clockSeed, memory_order_relaxed);
+    atomic_fetch_add_explicit(&gDriver.publishedClock.version, 1, memory_order_release);
+}
+
+/// Reads a coherent publication without ever waiting for the writer.
+static YunClockSnapshot ReadPublishedClock(void) {
+    YunClockSnapshot snapshot = { 0 };
+    for (UInt32 attempt = 0; attempt < 3; ++attempt) {
+        UInt64 before =
+            atomic_load_explicit(&gDriver.publishedClock.version, memory_order_acquire);
+        if ((before & 1) != 0) continue;
+
+        snapshot.anchorHostTime = atomic_load_explicit(
+            &gDriver.publishedClock.anchorHostTime, memory_order_relaxed);
+        snapshot.hostTicksPerFrame = Float64FromBits(atomic_load_explicit(
+            &gDriver.publishedClock.hostTicksPerFrameBits, memory_order_relaxed));
+        snapshot.nominalTicksPerFrame = Float64FromBits(atomic_load_explicit(
+            &gDriver.publishedClock.nominalTicksPerFrameBits, memory_order_relaxed));
+        snapshot.lastAnchorReceivedAt = atomic_load_explicit(
+            &gDriver.publishedClock.lastAnchorReceivedAt, memory_order_relaxed);
+        snapshot.anchorTimeoutTicks = atomic_load_explicit(
+            &gDriver.publishedClock.anchorTimeoutTicks, memory_order_relaxed);
+        snapshot.isClockFollowing = atomic_load_explicit(
+            &gDriver.publishedClock.isClockFollowing, memory_order_relaxed) != 0;
+        snapshot.seed =
+            atomic_load_explicit(&gDriver.publishedClock.seed, memory_order_relaxed);
+
+        UInt64 after =
+            atomic_load_explicit(&gDriver.publishedClock.version, memory_order_acquire);
+        if (before == after) return snapshot;
+    }
+
+    // Property changes are rare and bounded. If all three reads overlap one,
+    // a nominal snapshot is safer than either waiting or publishing a mixed
+    // followed-clock slope. Every load remains a legal lock-free C access.
+    snapshot.anchorHostTime = atomic_load_explicit(
+        &gDriver.publishedClock.anchorHostTime, memory_order_relaxed);
+    snapshot.nominalTicksPerFrame = Float64FromBits(atomic_load_explicit(
+        &gDriver.publishedClock.nominalTicksPerFrameBits, memory_order_relaxed));
+    snapshot.hostTicksPerFrame = snapshot.nominalTicksPerFrame;
+    snapshot.seed = atomic_load_explicit(&gDriver.publishedClock.seed, memory_order_relaxed);
+    return snapshot;
+}
 
 static void FillStreamDescription(AudioStreamBasicDescription *description, Float64 sampleRate) {
     description->mSampleRate = sampleRate;
@@ -84,20 +207,12 @@ static void RefreshTimebase_Locked(void) {
     }
     gDriver.nominalTicksPerFrame = sTicksPerSecond / gDriver.sampleRate;
     gDriver.hostTicksPerFrame = gDriver.nominalTicksPerFrame;
+    gDriver.anchorTimeoutTicks = (UInt64)(sTicksPerSecond * kClockAnchorTimeoutSeconds);
     gDriver.hasLastAnchor = false;
     gDriver.isClockFollowing = false;
 }
 
-/// Converts mach ticks to seconds. Only used off the IO path.
-static Float64 TicksToSeconds(UInt64 ticks) {
-    static Float64 sSecondsPerTick = 0.0;
-    if (sSecondsPerTick == 0.0) {
-        struct mach_timebase_info timebase;
-        mach_timebase_info(&timebase);
-        sSecondsPerTick = ((Float64)timebase.numer / (Float64)timebase.denom) / 1000000000.0;
-    }
-    return (Float64)ticks * sSecondsPerTick;
-}
+static void ExpireClockAnchorIfStale_Locked(UInt64 now);
 
 /// Folds a new anchor from the application into the measured master rate.
 ///
@@ -107,6 +222,7 @@ static Float64 TicksToSeconds(UInt64 ticks) {
 /// holds stateMutex.
 static void ApplyClockAnchor_Locked(Float64 sampleTime, UInt64 hostTime, Float64 sampleRate) {
     UInt64 now = mach_absolute_time();
+    ExpireClockAnchorIfStale_Locked(now);
     gDriver.lastAnchorReceivedAt = now;
 
     if (gDriver.hasLastAnchor) {
@@ -133,12 +249,11 @@ static void ApplyClockAnchor_Locked(Float64 sampleTime, UInt64 hostTime, Float64
                 // Without this, changing the slope retroactively moves every
                 // past anchor and the host sees time jump — which is exactly
                 // the crackle this whole design exists to avoid.
-                Float64 oldTicksPerRing = gDriver.hostTicksPerFrame * (Float64)kRingBufferFrames;
+                Float64 oldTicksPerRing =
+                    gDriver.hostTicksPerFrame * (Float64)kRingBufferFrames;
                 Float64 newTicksPerRing = target * (Float64)kRingBufferFrames;
-                Float64 elapsed = (Float64)gDriver.timeStampCount;
-                Float64 currentAnchorHost =
-                    (Float64)gDriver.anchorHostTime + elapsed * oldTicksPerRing;
-                gDriver.anchorHostTime = (UInt64)(currentAnchorHost - elapsed * newTicksPerRing);
+                gDriver.anchorHostTime = RebasedAnchorHostTime(
+                    gDriver.anchorHostTime, oldTicksPerRing, newTicksPerRing, now);
 
                 gDriver.hostTicksPerFrame = target;
                 gDriver.isClockFollowing = true;
@@ -149,25 +264,26 @@ static void ApplyClockAnchor_Locked(Float64 sampleTime, UInt64 hostTime, Float64
     gDriver.lastAnchorSampleTime = sampleTime;
     gDriver.lastAnchorHostTime = hostTime;
     gDriver.hasLastAnchor = true;
+    PublishClockState_Locked();
 }
 
 /// Drops back to the nominal rate when the application stops publishing.
 /// Caller holds stateMutex.
-static void ExpireClockAnchorIfStale_Locked(void) {
+static void ExpireClockAnchorIfStale_Locked(UInt64 now) {
     if (!gDriver.isClockFollowing) return;
-    UInt64 now = mach_absolute_time();
     if (now <= gDriver.lastAnchorReceivedAt) return;
-    if (TicksToSeconds(now - gDriver.lastAnchorReceivedAt) < kClockAnchorTimeoutSeconds) return;
+    if (now - gDriver.lastAnchorReceivedAt < gDriver.anchorTimeoutTicks) return;
 
     Float64 oldTicksPerRing = gDriver.hostTicksPerFrame * (Float64)kRingBufferFrames;
     Float64 newTicksPerRing = gDriver.nominalTicksPerFrame * (Float64)kRingBufferFrames;
-    Float64 elapsed = (Float64)gDriver.timeStampCount;
-    Float64 currentAnchorHost = (Float64)gDriver.anchorHostTime + elapsed * oldTicksPerRing;
-    gDriver.anchorHostTime = (UInt64)(currentAnchorHost - elapsed * newTicksPerRing);
+    UInt64 staleAt = gDriver.lastAnchorReceivedAt + gDriver.anchorTimeoutTicks;
+    gDriver.anchorHostTime = RebasedAnchorHostTime(
+        gDriver.anchorHostTime, oldTicksPerRing, newTicksPerRing, staleAt);
 
     gDriver.hostTicksPerFrame = gDriver.nominalTicksPerFrame;
     gDriver.isClockFollowing = false;
     gDriver.hasLastAnchor = false;
+    PublishClockState_Locked();
 }
 
 /// Pulls the three anchor fields out of the dictionary the application set.
@@ -256,6 +372,8 @@ static OSStatus Yun_Initialize(AudioServerPlugInDriverRef inDriver,
             (size_t)kRingBufferFrames * kDevice_ChannelCount, sizeof(Float32));
     }
     RefreshTimebase_Locked();
+    gDriver.anchorHostTime = mach_absolute_time();
+    PublishClockState_Locked();
     gDriver.isInitialized = (gDriver.ringBuffer != NULL);
     OSStatus status = gDriver.isInitialized ? 0 : kAudioHardwareUnspecifiedError;
     pthread_mutex_unlock(&gDriver.stateMutex);
@@ -314,8 +432,9 @@ static OSStatus Yun_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef 
     RefreshTimebase_Locked();
     // Restart the timestamp series: sample time is meaningless across a rate
     // change, and leaving stale anchors is how virtual devices start crackling.
-    gDriver.timeStampCount = 0;
     gDriver.anchorHostTime = mach_absolute_time();
+    if (++gDriver.clockSeed == 0) gDriver.clockSeed = 1;
+    PublishClockState_Locked();
     if (gDriver.ringBuffer != NULL) {
         memset(gDriver.ringBuffer, 0,
                (size_t)kRingBufferFrames * kDevice_ChannelCount * sizeof(Float32));
@@ -854,7 +973,7 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
                   kAudioHardwareBadPropertySizeError, done);
 
         pthread_mutex_lock(&gDriver.stateMutex);
-        ExpireClockAnchorIfStale_Locked();
+        ExpireClockAnchorIfStale_Locked(mach_absolute_time());
         Float64 following = gDriver.isClockFollowing ? 1.0 : 0.0;
         Float64 ticksPerFrame = gDriver.hostTicksPerFrame;
         Float64 nominalTicks = gDriver.nominalTicksPerFrame;
@@ -1148,10 +1267,14 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         // powf or take this lock.
         if (isInput) {
             gDriver.inputVolume = scalar;
-            gDriver.inputGain = ScalarToGain(scalar);
+            Float32 gain = gDriver.inputMuted ? 0.0f : ScalarToGain(scalar);
+            atomic_store_explicit(
+                &gDriver.inputGainBits, Float32Bits(gain), memory_order_release);
         } else {
             gDriver.outputVolume = scalar;
-            gDriver.outputGain = ScalarToGain(scalar);
+            Float32 gain = gDriver.outputMuted ? 0.0f : ScalarToGain(scalar);
+            atomic_store_explicit(
+                &gDriver.outputGainBits, Float32Bits(gain), memory_order_release);
         }
         AudioServerPlugInHostRef host = gDriver.host;
         pthread_mutex_unlock(&gDriver.stateMutex);
@@ -1180,8 +1303,14 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         bool changed = (muted != (isInput ? gDriver.inputMuted : gDriver.outputMuted));
         if (isInput) {
             gDriver.inputMuted = muted;
+            Float32 gain = muted ? 0.0f : ScalarToGain(gDriver.inputVolume);
+            atomic_store_explicit(
+                &gDriver.inputGainBits, Float32Bits(gain), memory_order_release);
         } else {
             gDriver.outputMuted = muted;
+            Float32 gain = muted ? 0.0f : ScalarToGain(gDriver.outputVolume);
+            atomic_store_explicit(
+                &gDriver.outputGainBits, Float32Bits(gain), memory_order_release);
         }
         AudioServerPlugInHostRef host = gDriver.host;
         pthread_mutex_unlock(&gDriver.stateMutex);
@@ -1288,9 +1417,10 @@ static OSStatus Yun_StartIO(AudioServerPlugInDriverRef inDriver,
     pthread_mutex_lock(&gDriver.stateMutex);
     if (gDriver.ioRunningCount == 0) {
         // First client in: reset the timestamp series and clear stale audio.
-        gDriver.timeStampCount = 0;
         gDriver.anchorHostTime = mach_absolute_time();
         RefreshTimebase_Locked();
+        if (++gDriver.clockSeed == 0) gDriver.clockSeed = 1;
+        PublishClockState_Locked();
         if (gDriver.ringBuffer != NULL) {
             memset(gDriver.ringBuffer, 0,
                    (size_t)kRingBufferFrames * kDevice_ChannelCount * sizeof(Float32));
@@ -1334,26 +1464,29 @@ static OSStatus Yun_GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver,
         return kAudioHardwareIllegalOperationError;
     }
 
-    pthread_mutex_lock(&gDriver.stateMutex);
-
-    // If the application stopped publishing anchors, stop trusting the last
-    // measured rate before it is used to emit another timestamp.
-    ExpireClockAnchorIfStale_Locked();
-
-    Float64 ticksPerRing = gDriver.hostTicksPerFrame * (Float64)kRingBufferFrames;
+    YunClockSnapshot clock = ReadPublishedClock();
     UInt64 now = mach_absolute_time();
-    UInt64 nextAnchor = gDriver.anchorHostTime
-        + (UInt64)(((Float64)gDriver.timeStampCount + 1.0) * ticksPerRing);
-    if (now >= nextAnchor) {
-        ++gDriver.timeStampCount;
+
+    if (clock.isClockFollowing
+        && now > clock.lastAnchorReceivedAt
+        && now - clock.lastAnchorReceivedAt >= clock.anchorTimeoutTicks) {
+        Float64 oldTicksPerRing =
+            clock.hostTicksPerFrame * (Float64)kRingBufferFrames;
+        Float64 nominalTicksPerRing =
+            clock.nominalTicksPerFrame * (Float64)kRingBufferFrames;
+        UInt64 staleAt = clock.lastAnchorReceivedAt + clock.anchorTimeoutTicks;
+        clock.anchorHostTime = RebasedAnchorHostTime(
+            clock.anchorHostTime, oldTicksPerRing, nominalTicksPerRing, staleAt);
+        clock.hostTicksPerFrame = clock.nominalTicksPerFrame;
     }
 
-    *outSampleTime = (Float64)gDriver.timeStampCount * (Float64)kRingBufferFrames;
-    *outHostTime = gDriver.anchorHostTime
-        + (UInt64)((Float64)gDriver.timeStampCount * ticksPerRing);
-    *outSeed = 1;
+    Float64 ticksPerRing = clock.hostTicksPerFrame * (Float64)kRingBufferFrames;
+    UInt64 period = TimestampPeriodAtHostTime(clock.anchorHostTime, now, ticksPerRing);
+    *outSampleTime = (Float64)period * (Float64)kRingBufferFrames;
+    *outHostTime =
+        clock.anchorHostTime + (UInt64)((Float64)period * ticksPerRing);
+    *outSeed = clock.seed;
 
-    pthread_mutex_unlock(&gDriver.stateMutex);
     return 0;
 }
 
@@ -1417,11 +1550,8 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     Float32 *buffer = (Float32 *)ioMainBuffer;
 
     if (inOperationID == kAudioServerPlugInIOOperationReadInput) {
-        // Read without the lock: both are single scalars written by the control
-        // thread, and taking a mutex here would be the one thing this whole
-        // project exists to avoid. A cycle either side of a slider move is the
-        // worst case, and a slider move is not a sample-accurate event.
-        Float32 gain = gDriver.inputMuted ? 0.0f : gDriver.inputGain;
+        Float32 gain = Float32FromBits(
+            atomic_load_explicit(&gDriver.inputGainBits, memory_order_acquire));
 
         UInt64 startFrame = (UInt64)inIOCycleInfo->mInputTime.mSampleTime;
         if (gain == 1.0f) {
@@ -1448,7 +1578,8 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     }
 
     if (inOperationID == kAudioServerPlugInIOOperationWriteMix) {
-        Float32 gain = gDriver.outputMuted ? 0.0f : gDriver.outputGain;
+        Float32 gain = Float32FromBits(
+            atomic_load_explicit(&gDriver.outputGainBits, memory_order_acquire));
 
         UInt64 startFrame = (UInt64)inIOCycleInfo->mOutputTime.mSampleTime;
         if (gain == 1.0f) {

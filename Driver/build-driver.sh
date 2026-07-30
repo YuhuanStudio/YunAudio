@@ -35,6 +35,19 @@ clang \
 	-o "${BUNDLE}/Contents/MacOS/YunAudioDriver" \
 	Sources/YunAudioDriver.c
 
+echo "testing…"
+clang \
+	-O2 \
+	-Wall -Wextra \
+	-Werror=implicit-function-declaration \
+	-mmacosx-version-min=13.0 \
+	-framework CoreFoundation \
+	-framework CoreAudio \
+	-o "${BUILD_DIR}/DriverCoreTests" \
+	Tests/DriverCoreTests.c
+"${BUILD_DIR}/DriverCoreTests"
+./check-realtime.sh
+
 # The factory is looked up by name through CFPlugIn, so it has to stay visible
 # even though everything else is hidden.
 echo "signing…"
