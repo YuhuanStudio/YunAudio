@@ -708,13 +708,20 @@ struct BackgroundResourceTests {
         #expect(window.ranges(of: "model.singers").count == 0)
         #expect(ktv.ranges(of: "model.lyricProgress").count == 0)
         #expect(ktv.ranges(of: "model.singers").count == 1)
-        // Three: the blurred stage behind everything, the tile the side-by-side
-        // arrangement puts beside the words, and the small one in the strip the
-        // stacked and words-only arrangements use instead. `SongArtworkStore`
-        // decodes once per URL, so the count is about how many arrangements
-        // exist rather than how many decodes a frame costs — a fourth would
-        // mean a fourth arrangement, which is worth noticing.
+        // Three: the stage behind everything — which reaches SwiftUI only in
+        // the offscreen render, the real window taking the composited layer —
+        // the tile the side-by-side arrangement puts beside the words, and the
+        // small one in the strip the stacked and words-only arrangements use
+        // instead. `SongArtworkStore` decodes once per URL, so the count is
+        // about how many arrangements exist rather than how many decodes a
+        // frame costs — a fourth would mean a fourth arrangement, which is
+        // worth noticing.
         #expect(ktv.ranges(of: "SongArtwork(url:").count == 3)
+        // The drift belongs to the render server. Put back into SwiftUI it
+        // doubled the stage's processor time; the numbers are in
+        // `CompositedStageBackdrop`.
+        #expect(ktv.contains("CompositedStageBackdrop("))
+        #expect(ktv.ranges(of: ".scaleEffect(phase").count == 0)
         #expect(singing.ranges(of: "BodyCount.tick(\"SingingPanel\")").count == 1)
         #expect(singing.ranges(of: "model.lyricProgress").count == 0)
         #expect(singing.ranges(of: "model.singers").count == 1)

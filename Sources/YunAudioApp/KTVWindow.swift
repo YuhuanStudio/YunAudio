@@ -276,6 +276,9 @@ struct KTVStage: View {
         .accessibilityIdentifier("YunAudioKTVWindow")
     }
 
+    private static let isOffscreenRender =
+        ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] != nil
+
     /// Carries out what a key asked for.
     private func perform(_ command: KTVKeyCommand) {
         switch command {
@@ -290,36 +293,51 @@ struct KTVStage: View {
         }
     }
 
+    /// The stage with nothing on it: what shows before a cover arrives.
+    private var emptyStageGradient: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.082, green: 0.082, blue: 0.102),
+                Color(red: 0.020, green: 0.020, blue: 0.024),
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing)
+    }
+
     @ViewBuilder
     private func stageBackground() -> some View {
         if let track = model.nowPlaying {
-            let phase = (model.lyricLine ?? 0) % 4
-            SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fill)
+            let picture =
+                SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fill)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
-                // Blurred first and rasterised, then moved. Blurring after the
-                // move meant a fifty-two-point Gaussian over the whole window
-                // on every frame of the 1.8-second drift; this way the drift
-                // transforms a picture that was blurred once.
                 .blur(radius: 52)
-                .scaleEffect(phase.isMultiple(of: 2) ? 1.16 : 1.19)
-                .offset(
-                    x: phase < 2 ? -8 : 8,
-                    y: phase == 0 || phase == 3 ? -5 : 5
-                )
-                // Moving only when the lyric advances gives the stage life
-                // without a permanent display-link or background timer.
-                .animation(
-                    reduceMotion ? nil : .easeInOut(duration: 1.8),
-                    value: phase)
+            // The drift is the single most expensive thing on this stage —
+            // more than the words, the meters and the artwork together — and
+            // only because SwiftUI resamples the whole window every frame of
+            // it. On the render server it is a transform on a picture drawn
+            // once. See `CompositedStageBackdrop` for the measurements.
+            //
+            // `ImageRenderer` cannot rasterise an `NSViewRepresentable`; it
+            // draws a yellow prohibition sign instead. The offscreen gate
+            // takes the SwiftUI branch so that its images still mean
+            // something about colour and layout.
+            if Self.isOffscreenRender {
+                picture.scaleEffect(CompositedStageBackdrop.scale.from)
+            } else {
+                // The gradient underneath, not the picture: while the cover is
+                // still arriving — or for a song that has none — the layer has
+                // no contents, and something has to be behind it. Drawing the
+                // SwiftUI blur under it as well would pay for the picture
+                // twice.
+                emptyStageGradient
+                    .overlay {
+                        CompositedStageBackdrop(
+                            url: track.artworkURL, isMoving: !reduceMotion)
+                    }
+            }
         } else {
-            LinearGradient(
-                colors: [
-                    Color(red: 0.082, green: 0.082, blue: 0.102),
-                    Color(red: 0.020, green: 0.020, blue: 0.024),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing)
+            emptyStageGradient
         }
         // Judged against a real cover for the first time. At 0.58 a bright
         // sleeve — a face in daylight, which is most of them — came through
