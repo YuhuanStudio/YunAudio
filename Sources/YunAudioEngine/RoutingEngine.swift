@@ -2148,10 +2148,15 @@ public final class RoutingEngine: @unchecked Sendable {
         RTGraph.carryOutputStages(from: previous, to: next)
         next.pointee.outputLimiterPreGain = outputLimiterPreGain
         next.pointee.cancelledRing = previous.pointee.cancelledRing
-        next.pointee.inputGain = previous.pointee.inputGain
-        next.pointee.inputMuted = previous.pointee.inputMuted
-        next.pointee.outputGain = previous.pointee.outputGain
-        next.pointee.outputMuted = previous.pointee.outputMuted
+        // The scalar is the latest control truth even when its command is still
+        // waiting in the retiring graph. The moving state below is the audible
+        // truth; keeping both lets the replacement continue from the sample
+        // already heard towards the newest target.
+        next.pointee.inputGain = inputGain
+        next.pointee.inputMuted = isInputMuted ? 1 : 0
+        next.pointee.outputGain = outputGain
+        next.pointee.outputMuted = isOutputMuted ? 1 : 0
+        RTGraph.carryGlobalGainSlews(from: previous, to: next)
         next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
         next.pointee.analysisEnabled = previous.pointee.analysisEnabled
         next.pointee.duckEnabled = previous.pointee.duckEnabled
@@ -2203,6 +2208,7 @@ public final class RoutingEngine: @unchecked Sendable {
         {
             guard let old, old < Int(previous.pointee.routeCount) else { continue }
             RTGraph.carryAlignment(from: previous, slot: old, to: next, slot: index)
+            RTGraph.carryRouteGainSlew(from: previous, slot: old, to: next, slot: index)
             next.pointee.routes[index].stemIndex = previous.pointee.routes[old].stemIndex
             next.pointee.routes[index].stemChannel = previous.pointee.routes[old].stemChannel
             next.pointee.routes[index].transcriptIndex =
@@ -2357,6 +2363,10 @@ public final class RoutingEngine: @unchecked Sendable {
         for index in 0..<Int(previous.pointee.routeCount) {
             var route = previous.pointee.routes[index]
             let source = index < activeRoutes.count ? activeRoutes[index].source : nil
+            if index < activeRoutes.count {
+                route.gain = activeRoutes[index].gain
+                route.muted = activeRoutes[index].isMuted ? 1 : 0
+            }
             let isIsolated = isolates && source != nil && source == isolatedSource
             let fromMicrophone = echoBridge != nil && source?.deviceUID == microphoneUID
             route.usesIsolatedSource = isIsolated ? 1 : 0
@@ -2433,10 +2443,11 @@ public final class RoutingEngine: @unchecked Sendable {
         // switched. Bypass therefore has the same fixed delay as enabled mode.
         next.pointee.outputLimiterEnabled = kinds.contains(.limiter) ? 1 : 0
         next.pointee.cancelledRing = previous.pointee.cancelledRing
-        next.pointee.inputGain = previous.pointee.inputGain
-        next.pointee.inputMuted = previous.pointee.inputMuted
-        next.pointee.outputGain = previous.pointee.outputGain
-        next.pointee.outputMuted = previous.pointee.outputMuted
+        next.pointee.inputGain = inputGain
+        next.pointee.inputMuted = isInputMuted ? 1 : 0
+        next.pointee.outputGain = outputGain
+        next.pointee.outputMuted = isOutputMuted ? 1 : 0
+        RTGraph.carryGlobalGainSlews(from: previous, to: next)
         next.pointee.mainOutputBuffer = previous.pointee.mainOutputBuffer
         next.pointee.analysisEnabled = previous.pointee.analysisEnabled
         next.pointee.duckEnabled = previous.pointee.duckEnabled
@@ -2460,6 +2471,7 @@ public final class RoutingEngine: @unchecked Sendable {
             min(newLatency, RTGraph.maximumAlignmentFrames))
         for slot in 0..<Int(next.pointee.routeCount) {
             RTGraph.carryAlignment(from: previous, slot: slot, to: next, slot: slot)
+            RTGraph.carryRouteGainSlew(from: previous, slot: slot, to: next, slot: slot)
         }
 
         // Handed over rather than replaced, as in `updateRoutes`: the consumer
@@ -2570,6 +2582,7 @@ public final class RoutingEngine: @unchecked Sendable {
         graph.pointee.inputMuted = inputMuted ? 1 : 0
         graph.pointee.outputGain = outputGain
         graph.pointee.outputMuted = outputMuted ? 1 : 0
+        RTGraph.synchroniseGainSlews(on: graph)
     }
 
     /// Sets a route's gain without interrupting audio.

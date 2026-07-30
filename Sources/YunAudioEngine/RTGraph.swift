@@ -93,6 +93,14 @@ struct RTGraph {
     var routes: UnsafeMutablePointer<RTRoute>
     var routeCount: Int32
 
+    /// Audible route levels, one independently moving scalar per route.
+    ///
+    /// `RTRoute.gain` and `muted` remain the control truth. Keeping the moving
+    /// value beside them rather than in them means a graph rebuild can carry
+    /// the sample the listener reached without making the interface inherit an
+    /// intermediate value.
+    var routeGainSlews: UnsafeMutablePointer<RTGainSlew>
+
     /// Peak magnitude per route since the last read. Written by the realtime
     /// thread and read by the UI; a torn float is not worth a lock here,
     /// because the worst case is one frame of a meter being stale.
@@ -224,10 +232,14 @@ struct RTGraph {
     /// model decides *whether*, over the last few seconds.
     var duckAllowed: Int32
     /// Current smoothed duck gain, 1 when nothing is talking.
+    ///
+    /// Mirrored from `duckGainSlew` after each callback for the control-side
+    /// diagnostics that already report this value.
     var duckGain: Float
-    /// Per-cycle smoothing coefficients. Attack is fast enough not to clip the
-    /// first syllable, release slow enough that the music does not pump between
-    /// words.
+    /// Moving duck state and per-sample smoothing coefficients. Attack is fast
+    /// enough not to clip the first syllable, release slow enough that the
+    /// music does not pump between words.
+    var duckGainSlew: RTGainSlew
     var duckAttack: Float
     var duckRelease: Float
     /// Loudest microphone sample seen last cycle, which is what the trigger
@@ -289,6 +301,24 @@ struct RTGraph {
     var inputMuted: Int32
     var outputGain: Float
     var outputMuted: Int32
+    /// Audible input and output levels. Targets above remain separate so an
+    /// in-flight ramp never leaks back into persisted control state.
+    var inputGainSlew: RTGainSlew
+    var outputGainSlew: RTGainSlew
+    /// Five milliseconds towards silence; ten for every move away from it.
+    var muteRampFrames: Int32
+    var gainRampFrames: Int32
+    /// Three contiguous callback envelopes: input, duck and output. They are
+    /// shared rather than advanced once per route, which makes the answer
+    /// independent of route count and keeps the states on one timeline.
+    var gainEnvelopeScratch: UnsafeMutablePointer<Float>
+    var gainEnvelopeCapacity: Int32
+    /// Zero until the first callback has installed setup-time target changes.
+    ///
+    /// Tests are not the only caller that configures an unpublished graph by
+    /// writing its scalar targets. Making that setup atomic prevents a stored
+    /// mute from opening for the first five milliseconds of a fresh route.
+    var hasRendered: Int32
 
     /// Echo-cancelled microphone frames, or null when the canceller is off.
     ///
@@ -475,6 +505,19 @@ struct RTGraph {
         return Float(exp(-perCycle / seconds))
     }
 
+    /// One-pole coefficient for one sample rather than one callback.
+    static func sampleCoefficient(seconds: Double, sampleRate: Double) -> Float {
+        guard seconds > 0, sampleRate > 0 else { return 0.5 }
+        return Float(exp(-1 / (seconds * sampleRate)))
+    }
+
+    /// A wall-clock duration represented as a bounded whole number of frames.
+    static func rampFrames(seconds: Double, sampleRate: Double) -> Int32 {
+        guard seconds > 0, sampleRate > 0 else { return 1 }
+        let frames = min(max((seconds * sampleRate).rounded(), 1), Double(Int32.max))
+        return Int32(frames)
+    }
+
     /// Frames one processing stage may consume from this callback.
     ///
     /// Capacity is storage, never a request to manufacture more audio. Keeping
@@ -526,6 +569,11 @@ struct RTGraph {
                 appliesInputTrim: false), count: count)
         for (index, route) in routeList.enumerated() {
             routeStorage[index] = route
+        }
+        let routeSlewStorage = UnsafeMutablePointer<RTGainSlew>.allocate(capacity: count)
+        routeSlewStorage.initialize(repeating: RTGainSlew(0), count: count)
+        for (index, route) in routeList.enumerated() {
+            routeSlewStorage[index] = RTGainSlew(route.muted != 0 ? 0 : route.gain)
         }
 
         let peakStorage = UnsafeMutablePointer<Float>.allocate(capacity: count)
@@ -611,6 +659,11 @@ struct RTGraph {
             capacity: analysisCapacity)
         analysisScratch.initialize(repeating: 0, count: analysisCapacity)
 
+        let gainEnvelopeCapacity = max(bufferFrames, 4096)
+        let gainEnvelopeStorage = UnsafeMutablePointer<Float>.allocate(
+            capacity: gainEnvelopeCapacity * 3)
+        gainEnvelopeStorage.initialize(repeating: 1, count: gainEnvelopeCapacity * 3)
+
         let clockSampleStorage =
             sharedClock?.sampleTime
             ?? {
@@ -631,6 +684,7 @@ struct RTGraph {
             to: RTGraph(
                 routes: routeStorage,
                 routeCount: Int32(routeList.count),
+                routeGainSlews: routeSlewStorage,
                 peaks: peakStorage,
                 rms: rmsStorage,
                 calibrating: 0,
@@ -659,10 +713,9 @@ struct RTGraph {
                 duckThreshold: 0.02,
                 duckAllowed: 0,
                 duckGain: 1,
-                duckAttack: coefficient(
-                    seconds: 0.08, bufferFrames: bufferFrames, sampleRate: sampleRate),
-                duckRelease: coefficient(
-                    seconds: 0.6, bufferFrames: bufferFrames, sampleRate: sampleRate),
+                duckGainSlew: RTGainSlew(1),
+                duckAttack: sampleCoefficient(seconds: 0.08, sampleRate: sampleRate),
+                duckRelease: sampleCoefficient(seconds: 0.6, sampleRate: sampleRate),
                 micPeak: 0,
                 outputPeak: 0,
                 outputClipped: 0,
@@ -675,6 +728,13 @@ struct RTGraph {
                 inputMuted: 0,
                 outputGain: 1,
                 outputMuted: 0,
+                inputGainSlew: RTGainSlew(1),
+                outputGainSlew: RTGainSlew(1),
+                muteRampFrames: rampFrames(seconds: 0.005, sampleRate: sampleRate),
+                gainRampFrames: rampFrames(seconds: 0.010, sampleRate: sampleRate),
+                gainEnvelopeScratch: gainEnvelopeStorage,
+                gainEnvelopeCapacity: Int32(gainEnvelopeCapacity),
+                hasRendered: 0,
                 cancelledRing: nil,
                 cancelledBuffer: cancelledStorage,
                 cancelledCapacity: Int32(cancelledCapacity),
@@ -715,6 +775,8 @@ struct RTGraph {
         let count = max(Int(graph.pointee.routeCount), 1)
         graph.pointee.routes.deinitialize(count: count)
         graph.pointee.routes.deallocate()
+        graph.pointee.routeGainSlews.deinitialize(count: count)
+        graph.pointee.routeGainSlews.deallocate()
         graph.pointee.peaks.deinitialize(count: count)
         graph.pointee.peaks.deallocate()
         graph.pointee.rms.deinitialize(count: count)
@@ -771,6 +833,9 @@ struct RTGraph {
         graph.pointee.analysisScratch.deinitialize(
             count: Int(graph.pointee.analysisCapacity))
         graph.pointee.analysisScratch.deallocate()
+        graph.pointee.gainEnvelopeScratch.deinitialize(
+            count: Int(graph.pointee.gainEnvelopeCapacity) * 3)
+        graph.pointee.gainEnvelopeScratch.deallocate()
         if let ring = graph.pointee.analysisRing { yun_rt_ring_free(ring) }
         if let commands = graph.pointee.commands { yun_rt_queue_free(commands) }
         graph.deinitialize(count: 1)
@@ -922,6 +987,48 @@ struct RTGraph {
         next.pointee.recordLimiterPrimingFrames =
             previous.pointee.recordLimiterPrimingFrames
     }
+
+    /// Installs setup-time targets as audible values without opening a ramp.
+    ///
+    /// A graph that has not reached the IO thread has no previous sample to
+    /// protect. Persisted mute and gain therefore belong on its very first
+    /// sample, while the same change on a live graph is slewed.
+    static func synchroniseGainSlews(on graph: UnsafeMutablePointer<RTGraph>) {
+        for index in 0..<Int(graph.pointee.routeCount) {
+            let route = graph.pointee.routes[index]
+            graph.pointee.routeGainSlews[index] =
+                RTGainSlew(route.muted != 0 ? 0 : route.gain)
+        }
+        graph.pointee.inputGainSlew = RTGainSlew(
+            graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain)
+        graph.pointee.outputGainSlew = RTGainSlew(
+            graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain)
+        graph.pointee.duckGainSlew = RTGainSlew(graph.pointee.duckGain)
+        graph.pointee.hasRendered = 1
+    }
+
+    /// Carries the moving global levels across a live graph publication.
+    static func carryGlobalGainSlews(
+        from previous: UnsafeMutablePointer<RTGraph>,
+        to next: UnsafeMutablePointer<RTGraph>
+    ) {
+        next.pointee.inputGainSlew = previous.pointee.inputGainSlew
+        next.pointee.outputGainSlew = previous.pointee.outputGainSlew
+        next.pointee.duckGainSlew = previous.pointee.duckGainSlew
+        next.pointee.duckGain = previous.pointee.duckGain
+        next.pointee.hasRendered = previous.pointee.hasRendered
+    }
+
+    /// Carries one route's exact in-flight fader position to its new slot.
+    static func carryRouteGainSlew(
+        from previous: UnsafeMutablePointer<RTGraph>, slot old: Int,
+        to next: UnsafeMutablePointer<RTGraph>, slot new: Int
+    ) {
+        guard old >= 0, old < Int(previous.pointee.routeCount),
+            new >= 0, new < Int(next.pointee.routeCount)
+        else { return }
+        next.pointee.routeGainSlews[new] = previous.pointee.routeGainSlews[old]
+    }
 }
 
 // MARK: - The realtime callback
@@ -972,18 +1079,36 @@ func yunAudioIOProc(
             case Int32(kYunRTCommandSetInputGain.rawValue):
                 if command.value.isFinite {
                     graph.pointee.inputGain = command.value
+                    let target =
+                        graph.pointee.inputMuted != 0 ? 0 : command.value
+                    graph.pointee.inputGainSlew.retargetLinear(
+                        to: target, frames: Int(graph.pointee.gainRampFrames))
                 }
                 continue
             case Int32(kYunRTCommandSetInputMute.rawValue):
                 graph.pointee.inputMuted = command.value != 0 ? 1 : 0
+                graph.pointee.inputGainSlew.retargetLinear(
+                    to: graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain,
+                    frames: Int(
+                        graph.pointee.inputMuted != 0
+                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
                 continue
             case Int32(kYunRTCommandSetOutputGain.rawValue):
                 if command.value.isFinite {
                     graph.pointee.outputGain = command.value
+                    let target =
+                        graph.pointee.outputMuted != 0 ? 0 : command.value
+                    graph.pointee.outputGainSlew.retargetLinear(
+                        to: target, frames: Int(graph.pointee.gainRampFrames))
                 }
                 continue
             case Int32(kYunRTCommandSetOutputMute.rawValue):
                 graph.pointee.outputMuted = command.value != 0 ? 1 : 0
+                graph.pointee.outputGainSlew.retargetLinear(
+                    to: graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain,
+                    frames: Int(
+                        graph.pointee.outputMuted != 0
+                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
                 continue
             case Int32(kYunRTCommandSetLimiterPreGain.rawValue):
                 if command.value.isFinite, command.value >= 0 {
@@ -999,9 +1124,19 @@ func yunAudioIOProc(
             case Int32(kYunRTCommandSetGain.rawValue):
                 if command.value.isFinite {
                     graph.pointee.routes[index].gain = command.value
+                    let target =
+                        graph.pointee.routes[index].muted != 0 ? 0 : command.value
+                    graph.pointee.routeGainSlews[index].retargetLinear(
+                        to: target, frames: Int(graph.pointee.gainRampFrames))
                 }
             case Int32(kYunRTCommandSetMute.rawValue):
                 graph.pointee.routes[index].muted = command.value != 0 ? 1 : 0
+                graph.pointee.routeGainSlews[index].retargetLinear(
+                    to: graph.pointee.routes[index].muted != 0
+                        ? 0 : graph.pointee.routes[index].gain,
+                    frames: Int(
+                        graph.pointee.routes[index].muted != 0
+                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
             default:
                 break
             }
@@ -1014,6 +1149,114 @@ func yunAudioIOProc(
     // The destination the router is feeding, which is not necessarily buffer
     // zero once monitoring adds a second output device to the aggregate.
     let mainIndex = Int(graph.pointee.mainOutputBuffer)
+
+    // Setup writes happen before a graph is published and have no previous
+    // audible sample to interpolate from. This includes a persisted mute: its
+    // first sample must be silence rather than the beginning of a five-
+    // millisecond fade.
+    if graph.pointee.hasRendered == 0 {
+        RTGraph.synchroniseGainSlews(on: graph)
+        graph.pointee.hasRendered = 1
+    }
+
+    // The output tells us the callback's timeline even if a particular route
+    // has no source buffer this cycle. Fall back to the input for an input-only
+    // aggregate. Capacity was sized from the device's maximum frame request.
+    var cycleFrames = 0
+    if mainIndex >= 0, mainIndex < output.count {
+        let buffer = output[mainIndex]
+        let channels = Int(buffer.mNumberChannels)
+        if channels > 0 {
+            cycleFrames =
+                Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels)
+        }
+    } else {
+        for index in 0..<output.count {
+            let channels = Int(output[index].mNumberChannels)
+            if channels > 0 {
+                cycleFrames = max(
+                    cycleFrames,
+                    Int(output[index].mDataByteSize)
+                        / (MemoryLayout<Float>.size * channels))
+            }
+        }
+    }
+    if cycleFrames == 0 {
+        for buffer in input {
+            let channels = Int(buffer.mNumberChannels)
+            if channels > 0 {
+                cycleFrames = max(
+                    cycleFrames,
+                    Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels))
+            }
+        }
+    }
+    let envelopeFrames = min(cycleFrames, Int(graph.pointee.gainEnvelopeCapacity))
+    let inputEnvelope = graph.pointee.gainEnvelopeScratch
+    let duckEnvelope = inputEnvelope + Int(graph.pointee.gainEnvelopeCapacity)
+    let outputEnvelope = duckEnvelope + Int(graph.pointee.gainEnvelopeCapacity)
+
+    // Also notice unpublished scalar writes made by graph setup and test
+    // harnesses. Live controls take the command path above; this comparison is
+    // cheap when their target is already installed.
+    let inputTarget =
+        graph.pointee.inputMuted != 0 ? Float(0) : graph.pointee.inputGain
+    if inputTarget != graph.pointee.inputGainSlew.target {
+        graph.pointee.inputGainSlew.retargetLinear(
+            to: inputTarget,
+            frames: Int(
+                graph.pointee.inputMuted != 0
+                    ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+    }
+    let outputTarget =
+        graph.pointee.outputMuted != 0 ? Float(0) : graph.pointee.outputGain
+    if outputTarget != graph.pointee.outputGainSlew.target {
+        graph.pointee.outputGainSlew.retargetLinear(
+            to: outputTarget,
+            frames: Int(
+                graph.pointee.outputMuted != 0
+                    ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+    }
+
+    let inputIsMoving = graph.pointee.inputGainSlew.remainingFrames > 0
+    let outputIsMoving = graph.pointee.outputGainSlew.remainingFrames > 0
+    if inputIsMoving {
+        for frame in 0..<envelopeFrames {
+            inputEnvelope[frame] = graph.pointee.inputGainSlew.nextLinear()
+        }
+        graph.pointee.inputGainSlew.advanceLinear(frames: cycleFrames - envelopeFrames)
+    }
+    if outputIsMoving {
+        for frame in 0..<envelopeFrames {
+            outputEnvelope[frame] = graph.pointee.outputGainSlew.nextLinear()
+        }
+        graph.pointee.outputGainSlew.advanceLinear(frames: cycleFrames - envelopeFrames)
+    }
+
+    // Ducking shares the callback timeline with the faders but keeps one-pole
+    // time constants: 80 ms down and 600 ms back up, one sample at a time.
+    let talking =
+        graph.pointee.duckEnabled != 0
+        && graph.pointee.duckAllowed != 0
+        && graph.pointee.micPeak > graph.pointee.duckThreshold
+        && graph.pointee.inputMuted == 0
+    let duckTarget =
+        graph.pointee.duckEnabled != 0 && talking ? graph.pointee.duckDepth : 1
+    let duckCoefficient =
+        duckTarget < graph.pointee.duckGainSlew.current
+        ? graph.pointee.duckAttack : graph.pointee.duckRelease
+    let duckIsMoving = duckTarget != graph.pointee.duckGainSlew.current
+    if duckIsMoving {
+        for frame in 0..<envelopeFrames {
+            duckEnvelope[frame] = graph.pointee.duckGainSlew.nextOnePole(
+                towards: duckTarget, coefficient: duckCoefficient)
+        }
+        for _ in envelopeFrames..<cycleFrames {
+            _ = graph.pointee.duckGainSlew.nextOnePole(
+                towards: duckTarget, coefficient: duckCoefficient)
+        }
+    }
+    graph.pointee.duckGain = graph.pointee.duckGainSlew.current
 
     // CoreAudio does not promise a zeroed output buffer, and routes accumulate
     // into it, so clear first. Any channel with no route feeding it must end up
@@ -1191,31 +1434,6 @@ func yunAudioIOProc(
         }
     }
 
-    // Ducking, decided once for the whole cycle.
-    //
-    // The trigger is last cycle's microphone peak, and the qualifier is the
-    // classifier's recent verdict. Both have to agree: an envelope alone ducks
-    // for a cough or a keyboard, and the model alone is half a second late for
-    // the front of a word.
-    if graph.pointee.duckEnabled != 0 {
-        let talking =
-            graph.pointee.duckAllowed != 0
-            && graph.pointee.micPeak > graph.pointee.duckThreshold
-            && graph.pointee.inputMuted == 0
-        let target = talking ? graph.pointee.duckDepth : 1
-        // Falling towards the duck uses the attack, coming back uses the
-        // release. One coefficient for both would either clip the first
-        // syllable or leave the music down for a second after every word.
-        let coefficient =
-            target < graph.pointee.duckGain
-            ? graph.pointee.duckAttack : graph.pointee.duckRelease
-        graph.pointee.duckGain =
-            target + (graph.pointee.duckGain - target) * coefficient
-    } else {
-        graph.pointee.duckGain = 1
-    }
-    let duckGain = graph.pointee.duckGain
-
     let routeCount = Int(graph.pointee.routeCount)
     let routes = graph.pointee.routes
     let peaks = graph.pointee.peaks
@@ -1226,6 +1444,22 @@ func yunAudioIOProc(
 
     for index in 0..<routeCount {
         let route = routes[index]
+        let routeTarget = route.muted != 0 ? Float(0) : route.gain
+        if routeTarget != graph.pointee.routeGainSlews[index].target {
+            graph.pointee.routeGainSlews[index].retargetLinear(
+                to: routeTarget,
+                frames: Int(
+                    route.muted != 0
+                        ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+        }
+        let routeIsMoving = graph.pointee.routeGainSlews[index].remainingFrames > 0
+        var renderedGainFrames = 0
+        defer {
+            if routeIsMoving {
+                graph.pointee.routeGainSlews[index].advanceLinear(
+                    frames: cycleFrames - renderedGainFrames)
+            }
+        }
 
         let destinationIndex = Int(route.destinationBuffer)
         guard destinationIndex < output.count else { continue }
@@ -1381,14 +1615,6 @@ func yunAudioIOProc(
         }
 
         let destination = destinationData.assumingMemoryBound(to: Float.self)
-        // The trim rides on the route's own fader rather than being a separate
-        // pass over the samples: one multiply either way, and no second walk.
-        let trim =
-            route.appliesInputTrim != 0
-            ? (graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain) : 1
-        let duck = route.isDuckable != 0 ? duckGain : 1
-        let gain = sanitisedAudioSample(
-            route.muted != 0 ? 0 : route.gain * trim * duck)
 
         var peak: Float = 0
         // Accumulated unconditionally rather than behind a branch on whether
@@ -1406,19 +1632,62 @@ func yunAudioIOProc(
         // always strided, so the fast paths are never the ones taken.
         var readAt = sourceChannel
         var writeAt = destinationChannel
-        for _ in 0..<frames {
-            let sample = sanitisedAudioSample(source[readAt])
-            let contribution = sanitisedAudioSample(sample * gain)
-            destination[writeAt] += contribution
-            // Metered before gain: a meter should show what arrived, not what
-            // the fader did to it. It also lets a gain-0 route act as a pure
-            // probe, which is how the loopback verification works.
-            let magnitude = abs(sample)
-            if magnitude > peak { peak = magnitude }
-            energy += sample * sample
-            readAt += sourceStride
-            writeAt += destinationStride
+        let trimIsMoving = route.appliesInputTrim != 0 && inputIsMoving
+        let duckIsMovingForRoute = route.isDuckable != 0 && duckIsMoving
+        if routeIsMoving || trimIsMoving || duckIsMovingForRoute {
+            for frame in 0..<frames {
+                let sample = sanitisedAudioSample(source[readAt])
+                let routeGain =
+                    routeIsMoving
+                    ? graph.pointee.routeGainSlews[index].nextLinear()
+                    : graph.pointee.routeGainSlews[index].current
+                // The shared envelopes were advanced once at the top of the
+                // cycle. Reading them here keeps two routes from consuming
+                // twice as much fader or duck time as one route.
+                let trim =
+                    route.appliesInputTrim != 0
+                    ? (trimIsMoving && frame < envelopeFrames
+                        ? inputEnvelope[frame] : graph.pointee.inputGainSlew.current)
+                    : 1
+                let duck =
+                    route.isDuckable != 0
+                    ? (duckIsMovingForRoute && frame < envelopeFrames
+                        ? duckEnvelope[frame] : graph.pointee.duckGainSlew.current)
+                    : 1
+                let gain = sanitisedAudioSample(routeGain * trim * duck)
+                let contribution = sanitisedAudioSample(sample * gain)
+                destination[writeAt] += contribution
+                let magnitude = abs(sample)
+                if magnitude > peak { peak = magnitude }
+                energy += sample * sample
+                readAt += sourceStride
+                writeAt += destinationStride
+            }
+        } else {
+            // The overwhelmingly common path keeps the complete gain in one
+            // register, preserving the old route loop's measured cost once a
+            // ten-millisecond move has finished.
+            let trim =
+                route.appliesInputTrim != 0 ? graph.pointee.inputGainSlew.current : 1
+            let duck =
+                route.isDuckable != 0 ? graph.pointee.duckGainSlew.current : 1
+            let gain = sanitisedAudioSample(
+                graph.pointee.routeGainSlews[index].current * trim * duck)
+            for _ in 0..<frames {
+                let sample = sanitisedAudioSample(source[readAt])
+                let contribution = sanitisedAudioSample(sample * gain)
+                destination[writeAt] += contribution
+                // Metered before gain: a meter should show what arrived, not
+                // what the fader did to it. It also lets a gain-0 route act as a
+                // pure probe, which is how the loopback verification works.
+                let magnitude = abs(sample)
+                if magnitude > peak { peak = magnitude }
+                energy += sample * sample
+                readAt += sourceStride
+                writeAt += destinationStride
+            }
         }
+        renderedGainFrames = frames
 
         // Into the stem scratch, before the fader and before the master: a
         // stem is what that source produced, which is the whole point of having
@@ -1496,21 +1765,29 @@ func yunAudioIOProc(
     // The master, over the whole output bus once everything has been mixed
     // into it. After the routes and before the recorder, so what lands on disk
     // is what the far end hears — which is the recorder's whole premise.
-    let master = sanitisedAudioSample(
-        graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain)
-    if master != 1 {
-        let exempt = Int(graph.pointee.masterExemptBuffer)
-        var scale = master
-        for index in 0..<output.count where index != exempt {
-            guard let data = output[index].mData else { continue }
-            let samples = Int(output[index].mDataByteSize) / MemoryLayout<Float>.size
-            let pointer = data.assumingMemoryBound(to: Float.self)
-            guard samples > 0 else { continue }
-            // The bus is contiguous and every channel gets the same number, so
-            // this is one vector multiply rather than a loop that happens to do
-            // the same thing one sample at a time. Same arithmetic, same
-            // result: a scale is not an accumulation, so there is no rounding
-            // order to disagree about.
+    let master = sanitisedAudioSample(graph.pointee.outputGainSlew.current)
+    let exempt = Int(graph.pointee.masterExemptBuffer)
+    for index in 0..<output.count where index != exempt {
+        guard let data = output[index].mData else { continue }
+        let channels = Int(output[index].mNumberChannels)
+        guard channels > 0 else { continue }
+        let samples = Int(output[index].mDataByteSize) / MemoryLayout<Float>.size
+        let frames = samples / channels
+        let pointer = data.assumingMemoryBound(to: Float.self)
+        guard samples > 0 else { continue }
+        if outputIsMoving {
+            for frame in 0..<frames {
+                let scale =
+                    frame < envelopeFrames ? outputEnvelope[frame] : master
+                let start = frame * channels
+                for channel in 0..<channels {
+                    pointer[start + channel] *= scale
+                }
+            }
+        } else if master != 1 {
+            var scale = master
+            // A settled bus is contiguous and every channel gets the same
+            // scalar, so the vector pass remains the cheaper steady path.
             vDSP_vsmul(pointer, 1, &scale, pointer, 1, vDSP_Length(samples))
         }
     }
@@ -2034,6 +2311,9 @@ public enum RTBenchmark {
         graph.pointee.analysisEnabled = options.analysis ? 1 : 0
         graph.pointee.alignmentFrames = Int32(
             min(max(options.alignmentFrames, 0), RTGraph.maximumAlignmentFrames))
+        // Benchmark the requested steady state rather than the first ten
+        // milliseconds of setup being mistaken for ongoing mixer cost.
+        RTGraph.synchroniseGainSlews(on: graph)
 
         var recordRing: OpaquePointer?
         if options.record {

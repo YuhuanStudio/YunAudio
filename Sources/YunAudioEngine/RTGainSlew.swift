@@ -104,7 +104,16 @@ struct RTGainSlew: Sendable, Equatable {
         // the subtraction overflows for opposite finite Float extremes.
         let next = current * coefficient + value * (1 - coefficient)
         if next.isFinite {
-            current = next
+            // At unity a Float eventually cannot represent the one-pole's next
+            // increment. Measured for the 600 ms release at 48 kHz, the old
+            // state stalled forever at 0.9991424: an inaudible −61.3 dB gain
+            // error that nevertheless kept every duckable route on its moving
+            // per-sample path. Once arithmetic proves no further movement is
+            // representable, assigning the target is the only way to finish;
+            // the discontinuity is bounded by the measured −61.3 dB residual.
+            current =
+                next == current && coefficient < 1 && current != value
+                ? value : next
         } else {
             current = Float(
                 Double(current) * Double(coefficient)
