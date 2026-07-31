@@ -4156,6 +4156,15 @@ enum UIFlowCheck {
             }
         }
 
+        try section("the words can be driven")
+        if inWantedSection {
+            if written {
+                await checkDrivingTheWords(model: model, words: words)
+            } else {
+                note("could not write the test files — skipped")
+            }
+        }
+
         try section("scoring what was actually sung")
         if inWantedSection {
             if written {
@@ -4167,6 +4176,90 @@ enum UIFlowCheck {
     }
 
     /// Which line is current, at which moment, against real audio.
+    /// The controls the stage grew: playing from a line, moving through the
+    /// song, and the size of the words.
+    ///
+    /// Every one of these had a unit test for its arithmetic and a rendered
+    /// image of its appearance, and neither of those can tell whether pressing
+    /// it does anything. A still photograph of a button is not evidence that
+    /// the button is wired to something.
+    ///
+    /// No audio and no player: these are the parts that are local arithmetic on
+    /// the track clock, which is exactly what makes them checkable here. The
+    /// Apple event that would tell a real player to follow is sent from a
+    /// detached task and is somebody else's to answer.
+    private static func checkDrivingTheWords(model: RouterModel, words: URL) async {
+        await bringRoutingBack(model)
+        model.isSingingVisible = true
+        // Restored whatever happens: this writes to the real preference domain
+        // and a gate that leaves somebody's stage at 1.6× has broken their
+        // application to test itself.
+        let sizeBefore = model.lyricScale
+        defer {
+            model.lyricScale = sizeBefore
+            model.closeWords()
+            model.isSingingVisible = false
+        }
+        guard model.openWords(at: words) else {
+            note("the hand-run words would not open — skipped")
+            return
+        }
+        model.runWords(from: 0)
+
+        // Clicking the fourth line. The words are one note a second, so the
+        // fourth line is at three seconds and the line being sung must become
+        // the fourth.
+        model.seekToLyricLine(3)
+        model.refreshNowPlaying()
+        check("playing from a line lands on that line", model.lyricLine == 3)
+        let atFourth = model.songSecond
+        check(
+            "and the song is where that line is",
+            abs(Double(atFourth) - 3 * chainNoteSeconds) < 1.0)
+
+        // Back five seconds from three lands before the first line, which is
+        // the clamp doing its job rather than a negative position.
+        model.skipNowPlaying(by: -5)
+        model.refreshNowPlaying()
+        check("moving back past the start stops at the start", model.songSecond == 0)
+
+        model.seekToLyricLine(1)
+        model.skipNowPlaying(by: 2)
+        model.refreshNowPlaying()
+        check(
+            "moving forward moves by what was asked",
+            abs(Double(model.songSecond) - (chainNoteSeconds + 2)) < 1.0)
+
+        // The count into the singing, on the song that is actually loaded.
+        // Nothing is counted while a line is being sung — the negative case is
+        // the one an arithmetic test cannot claim about a real model.
+        let counting = model.lyrics.flatMap {
+            KTVCountIn.secondsUntilWords(
+                in: $0, playing: model.lyricLine, position: Double(model.songSecond),
+                nudge: model.lyricNudge)
+        }
+        check("nothing is counted in over a line being sung", counting == nil)
+
+        // The size of the words, which is a preference and therefore has to
+        // come back to where it was.
+        model.nudgeLyricScale(by: KTVKeyCommand.sizeStep)
+        check(
+            "the words can be made larger",
+            model.lyricScale > sizeBefore || sizeBefore >= 1.8)
+        model.lyricScale = 99
+        check("and cannot be made absurd", model.lyricScale == 1.8)
+        model.resetLyricScale()
+        check("and go back to the size the window implies", model.lyricScale == 1)
+
+        // Pressing the source switch on a song no index answered for must do
+        // nothing at all — not clear the words, not adopt another song's.
+        let before = model.lyrics?.lines.count
+        model.useNextLyricSource()
+        check(
+            "asking for another lyric source with none to offer changes nothing",
+            model.lyrics?.lines.count == before)
+    }
+
     private static func checkTheWords(
         model: RouterModel, words: URL, audio: URL
     ) async {
