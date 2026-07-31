@@ -59,6 +59,150 @@ public struct KaraokeScore: Sendable, Equatable {
     public let meanErrorSemitones: Double?
     public let lines: [Line]
 
+    /// What the performance looks like once the two series have been lined up.
+    ///
+    /// Everything above is measured moment to moment, which is right for "did
+    /// the note sound when it should have" and wrong for a singer who is
+    /// phrasing. This is the same performance measured after aligning it — see
+    /// `KaraokeAlignment` — and it is deliberately *beside* the old numbers
+    /// rather than instead of them: the live score is incremental and cannot be
+    /// realigned four times a second, so what somebody watches while singing and
+    /// what they are told at the end would stop agreeing.
+    ///
+    /// Nil while a song is being sung. Filled in when it ends, which is when
+    /// there is a whole performance to align and the time to do it.
+    public var timing: Timing?
+
+    /// The alignment's reading of one performance.
+    public struct Timing: Sendable, Equatable {
+        /// 0…100 on pitch, after the two were lined up.
+        public let alignedPercentage: Double
+        /// Mean signed offset in seconds, positive meaning late.
+        public let secondsLate: Double
+        /// 0…1, one being metronomic.
+        public let steadiness: Double
+        /// How many lines had enough of both series to align at all.
+        public let alignedLines: Int
+
+        public init(
+            alignedPercentage: Double, secondsLate: Double, steadiness: Double,
+            alignedLines: Int
+        ) {
+            self.alignedPercentage = alignedPercentage
+            self.secondsLate = secondsLate
+            self.steadiness = steadiness
+            self.alignedLines = alignedLines
+        }
+
+        /// What to tell somebody about their timing, in one clause.
+        ///
+        /// Steadiness first, because it is the part that is worth acting on: a
+        /// singer who is consistently late is phrasing, and one who is
+        /// scattered has lost the beat. The lateness itself is only mentioned
+        /// when it is large enough to be a decision rather than a rounding.
+        public var verdict: TimingVerdict {
+            if steadiness < 0.45 { return .scattered }
+            if secondsLate > 0.15 { return .behind }
+            if secondsLate < -0.15 { return .ahead }
+            return .withTheBeat
+        }
+    }
+
+    public enum TimingVerdict: Sendable, Equatable {
+        case withTheBeat
+        case behind
+        case ahead
+        case scattered
+    }
+
+    /// The same score with an alignment attached.
+    public func withTiming(_ timing: Timing?) -> Self {
+        var copy = self
+        copy.timing = timing
+        return copy
+    }
+
+    /// Aligns a whole performance, one lyric line at a time.
+    ///
+    /// A line at a time rather than the whole song, for two reasons that happen
+    /// to agree: a line is two to five seconds, which is what makes the banded
+    /// alignment cheap, and it is also the unit anybody talks about a
+    /// performance in. Aligning a four-minute song in one pass would let one
+    /// late entrance in the first verse shift everything after it.
+    ///
+    /// - Returns: Nil when no line had enough of both series to align, which is
+    ///   a silence rather than a bad performance.
+    public static func timing(
+        sung: [PitchSample], reference: [PitchSample], lyrics: [Lyrics.Line]
+    ) -> Timing? {
+        guard !lyrics.isEmpty, !sung.isEmpty, !reference.isEmpty else { return nil }
+        var accuracy = 0.0
+        var late = 0.0
+        var weight = 0.0
+        var aligned = 0
+        var onsets: [Double] = []
+        for (index, line) in lyrics.enumerated() {
+            let start = line.time
+            let end = index + 1 < lyrics.count ? lyrics[index + 1].time : .infinity
+            let sungSlice = sung.filter { $0.time >= start && $0.time < end }
+            let referenceSlice = reference.filter { $0.time >= start && $0.time < end }
+            guard
+                let result = KaraokeAlignment.align(
+                    sung: sungSlice, reference: referenceSlice),
+                let firstSung = sungSlice.first, let firstReference = referenceSlice.first
+            else { continue }
+            // Weighted by how much tune the line had. A two-word line and a
+            // whole chorus are not one opinion each.
+            let share = max(0.001, result.comparedSeconds)
+            accuracy += result.pitchAccuracy * share
+
+            // Lateness comes from the **entrance**, not from the alignment.
+            //
+            // A test caught this and it is worth keeping the reason. Dynamic
+            // time warping answers "were these the right notes" and cannot
+            // answer "were you on time" for a line held on one pitch: every
+            // sung sample matches every reference sample at zero cost, so the
+            // cheapest path is the diagonal and the alignment honestly reports
+            // no offset. It is not wrong — there is nothing in a held note to
+            // tell early from late.
+            //
+            // The entrance always can. When the reference line starts sounding
+            // and when the singer does are two facts, and their difference is
+            // exactly the thing anybody means by coming in late. So each tool
+            // answers what it can: the alignment the notes, the onset the beat.
+            let onset = firstSung.time - firstReference.time
+            late += onset * share
+            onsets.append(onset)
+            weight += share
+            aligned += 1
+        }
+        guard weight > 0, aligned > 0 else { return nil }
+        let meanLate = late / weight
+        // Steadiness is how much the entrances agreed with each other, not how
+        // close they were to nought. Somebody a quarter of a second behind on
+        // every line is phrasing; somebody early, then late, then early has
+        // lost the beat, and only the second is worth calling a fault.
+        //
+        // One line cannot disagree with itself, so a single-line performance is
+        // steady by definition rather than by measurement.
+        let steadiness: Double
+        if onsets.count < 2 {
+            steadiness = 1
+        } else {
+            let mean = onsets.reduce(0, +) / Double(onsets.count)
+            let variance =
+                onsets.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(onsets.count)
+            // A quarter of a second of scatter is where a listener stops
+            // hearing phrasing and starts hearing somebody lost.
+            steadiness = max(0, 1 - variance.squareRoot() / 0.25)
+        }
+        return Timing(
+            alignedPercentage: max(0, min(100, accuracy / weight * 100)),
+            secondsLate: meanLate,
+            steadiness: min(1, steadiness),
+            alignedLines: aligned)
+    }
+
     /// - Parameters:
     ///   - percentage: 0...100 over everything with a tune under it.
     ///   - onPitchSeconds: Seconds within `onPitchSemitones` of the tune.

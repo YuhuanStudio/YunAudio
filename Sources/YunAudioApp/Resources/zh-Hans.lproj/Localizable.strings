@@ -487,6 +487,11 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"right with the beat" = "踩在拍上";
+"about %.1f s behind, steadily" = "大约晚 %.1f 秒，很稳";
+"about %.1f s ahead, steadily" = "大约早 %.1f 秒，很稳";
+"the timing wandered" = "节奏飘了";
+"%1$@ — allowing for that, %2$.0f%% of the notes were right" = "%1$@——把这个算进去，%2$.0f%% 的音是对的";
 "Smaller words" = "字小一点";
 "Larger words" = "字大一点";
 "Try another source" = "换一个歌词来源";

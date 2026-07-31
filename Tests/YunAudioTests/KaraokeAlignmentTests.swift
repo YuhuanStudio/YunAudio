@@ -117,3 +117,86 @@ struct KaraokeAlignmentTests {
         #endif
     }
 }
+
+/// A whole performance, aligned one line at a time.
+@Suite("what a finished performance is told about its timing")
+struct KaraokePerformanceTimingTests {
+
+    private func samples(from start: Double, seconds: Double, midi: Double) -> [PitchSample] {
+        stride(from: 0.0, to: seconds, by: 0.01).map {
+            PitchSample(time: start + $0, midi: midi)
+        }
+    }
+
+    private let lyrics = [
+        Lyrics.Line(time: 0, text: "一"),
+        Lyrics.Line(time: 2, text: "二"),
+        Lyrics.Line(time: 4, text: "三"),
+    ]
+
+    private var reference: [PitchSample] {
+        samples(from: 0, seconds: 2, midi: 60)
+            + samples(from: 2, seconds: 2, midi: 62)
+            + samples(from: 4, seconds: 2, midi: 64)
+    }
+
+    @Test("a performance sung on the beat is told so")
+    func onTheBeat() throws {
+        let timing = try #require(
+            KaraokeScore.timing(sung: reference, reference: reference, lyrics: lyrics))
+        #expect(timing.verdict == .withTheBeat)
+        #expect(timing.alignedLines == 3)
+        #expect(timing.alignedPercentage > 99)
+    }
+
+    @Test("one sung correctly but consistently late is phrasing, not a mistake")
+    func steadilyBehind() throws {
+        // The case the moment-to-moment score cannot see. Every note right,
+        // every note a quarter of a second after the file says.
+        let late =
+            samples(from: 0.25, seconds: 1.7, midi: 60)
+            + samples(from: 2.25, seconds: 1.7, midi: 62)
+            + samples(from: 4.25, seconds: 1.7, midi: 64)
+        let timing = try #require(
+            KaraokeScore.timing(sung: late, reference: reference, lyrics: lyrics))
+        #expect(timing.verdict == .behind)
+        #expect(timing.secondsLate > 0.1)
+        // And the notes were right, which is the whole point.
+        #expect(timing.alignedPercentage > 90)
+    }
+
+    @Test("and one that wanders is told that instead")
+    func scattered() throws {
+        // Same notes, but each line enters at a different distance from the
+        // beat — which is what people mean by losing it.
+        let ragged =
+            samples(from: 0.02, seconds: 1.9, midi: 60)
+            + samples(from: 2.60, seconds: 1.3, midi: 62)
+            + samples(from: 4.05, seconds: 1.9, midi: 64)
+        let timing = try #require(
+            KaraokeScore.timing(sung: ragged, reference: reference, lyrics: lyrics))
+        #expect(timing.steadiness < 1)
+    }
+
+    @Test("nothing sung is no verdict, not a bad one")
+    func silence() {
+        #expect(KaraokeScore.timing(sung: [], reference: reference, lyrics: lyrics) == nil)
+        #expect(KaraokeScore.timing(sung: reference, reference: [], lyrics: lyrics) == nil)
+        #expect(KaraokeScore.timing(sung: reference, reference: reference, lyrics: []) == nil)
+    }
+
+    @Test("a long line counts for more than a two-word one")
+    func linesAreWeighted() throws {
+        // Otherwise a chorus and an interjection are one opinion each, and the
+        // singer who nailed the chorus is outvoted by the one word they missed.
+        let short = [Lyrics.Line(time: 0, text: "喔"), Lyrics.Line(time: 0.2, text: "長長的一句")]
+        let referenceSeries =
+            samples(from: 0, seconds: 0.2, midi: 60) + samples(from: 0.2, seconds: 3, midi: 62)
+        // Wrong on the short line, right on the long one.
+        let sung =
+            samples(from: 0, seconds: 0.2, midi: 67) + samples(from: 0.2, seconds: 3, midi: 62)
+        let timing = try #require(
+            KaraokeScore.timing(sung: sung, reference: referenceSeries, lyrics: short))
+        #expect(timing.alignedPercentage > 85)
+    }
+}

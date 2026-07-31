@@ -119,6 +119,14 @@ struct SingingPanel: View {
                         Text(String(format: "%.0f%%", singer.score.percentage))
                             .font(Yun.Text.title.monospacedDigit())
                     }
+                    // The same reading as the stage, because the two must not
+                    // tell somebody different things about the same singing.
+                    if let timing = KTVPerformanceGrade.timing(for: singer.score) {
+                        Text(timing)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.accent)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .padding(Yun.Space.md)

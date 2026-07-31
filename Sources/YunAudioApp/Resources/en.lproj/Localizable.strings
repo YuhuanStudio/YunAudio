@@ -488,6 +488,11 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"right with the beat" = "right with the beat";
+"about %.1f s behind, steadily" = "about %.1f s behind, steadily";
+"about %.1f s ahead, steadily" = "about %.1f s ahead, steadily";
+"the timing wandered" = "the timing wandered";
+"%1$@ — allowing for that, %2$.0f%% of the notes were right" = "%1$@ — allowing for that, %2$.0f%% of the notes were right";
 "Smaller words" = "Smaller words";
 "Larger words" = "Larger words";
 "Try another source" = "Try another source";

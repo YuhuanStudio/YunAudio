@@ -1370,6 +1370,15 @@ struct KTVStage: View {
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(.white.opacity(0.52))
             }
+            // Timing, which the moment-to-moment score cannot express at all: a
+            // singer who was right and late reads as flat, and this is the line
+            // that tells them otherwise. See `KaraokeAlignment`.
+            if let timing = KTVPerformanceGrade.timing(for: score) {
+                Text(timing)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Yun.Palette.accent.opacity(0.9))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // The line that went best, which is the part somebody repeats to
             // the room. A score with no line behind it is a number; this is a
             // moment in the song.

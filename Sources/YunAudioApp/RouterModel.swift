@@ -1460,8 +1460,31 @@ final class RouterModel: ScriptTarget {
         guard isScoringSinging, let finished,
             singers.contains(where: { $0.score.isMeaningful })
         else { return }
+        // The alignment happens here and nowhere else, and the timing is why.
+        //
+        // The live score is incremental — it has to be, four times a second
+        // over a growing performance — and an incremental score cannot be
+        // realigned, because the alignment of the whole is not the sum of the
+        // alignments of the parts. Doing it at the end costs one pass over a
+        // finished performance, on a main thread that has just stopped having
+        // anything else to do, and gives the reading somebody actually keeps.
+        //
+        // Beside the live number rather than replacing it: what somebody
+        // watches while singing and what they are told at the end must agree
+        // about what they did, and they would not if one were aligned.
+        let lines = lyrics?.lines ?? []
+        let aligned = singers.enumerated().map { index, singer -> Singer in
+            guard singerTracks.indices.contains(index) else { return singer }
+            let timing = KaraokeScore.timing(
+                sung: singerTracks[index].samples,
+                reference: scoringReference,
+                lyrics: lines)
+            return Singer(
+                uid: singer.uid, name: singer.name, hertz: singer.hertz,
+                score: singer.score.withTiming(timing))
+        }
         lastPerformance = Performance(
-            title: finished.title, artist: finished.artist, singers: singers)
+            title: finished.title, artist: finished.artist, singers: aligned)
     }
     /// Set when scoring could not start, in words somebody can act on.
     private(set) var singingError: String?

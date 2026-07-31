@@ -17,6 +17,36 @@ enum KTVPerformanceGrade: String, CaseIterable, Sendable {
     case good
     case keepGoing
 
+    /// What the alignment found, in one clause somebody can act on.
+    ///
+    /// Only after a song has ended, because that is when there is a whole
+    /// performance to align. Nil when there was not enough of both series to
+    /// line up, which is a silence rather than a verdict.
+    ///
+    /// The pitch reading goes with it because it is the point of the exercise:
+    /// a score of 61 that becomes 88 once the phrasing is allowed for is a
+    /// singer who was right and late, and telling them 61 and nothing else is
+    /// the lie this replaces.
+    @MainActor
+    static func timing(for score: KaraokeScore) -> String? {
+        guard let timing = score.timing, timing.alignedLines > 0 else { return nil }
+        let verdict: String =
+            switch timing.verdict {
+            case .withTheBeat: loc("right with the beat")
+            case .behind:
+                String(format: loc("about %.1f s behind, steadily"), timing.secondsLate)
+            case .ahead:
+                String(format: loc("about %.1f s ahead, steadily"), -timing.secondsLate)
+            case .scattered: loc("the timing wandered")
+            }
+        // Said only when the alignment changes the answer by enough to matter.
+        // Repeating the same number in different words teaches nobody anything.
+        guard abs(timing.alignedPercentage - score.percentage) >= 5 else { return verdict }
+        return String(
+            format: loc("%1$@ — allowing for that, %2$.0f%% of the notes were right"),
+            verdict, timing.alignedPercentage)
+    }
+
     static func of(_ percentage: Double) -> KTVPerformanceGrade {
         switch percentage {
         case 90...: .perfect
