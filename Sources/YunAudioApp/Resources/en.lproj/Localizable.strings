@@ -674,6 +674,7 @@
 "Sharp by about %.0f cents" = "Sharp by about %.0f cents";
 "Best line: %@ (%.0f%%)" = "Best line: %@ (%.0f%%)";
 "Hide the desktop lyrics" = "Hide the desktop lyrics";
+"%@ will not run JavaScript for YunAudio. Turn on “Allow JavaScript from Apple Events” in its Develop menu." = "%@ will not run JavaScript for YunAudio. Turn on “Allow JavaScript from Apple Events” in its Develop menu.";
 "Desktop lyrics" = "Desktop lyrics";
 "Nothing is playing" = "Nothing is playing";
 "Show pronunciation" = "Show pronunciation";

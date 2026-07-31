@@ -2270,7 +2270,9 @@ final class RouterModel: ScriptTarget {
             // request waits a minute, because only a setting change can alter
             // that answer.
             switch failure {
-            case .denied:
+            case .denied, .javaScriptNotAllowed:
+                // Both need somebody to change a setting, and asking again
+                // before they have is a minute of events nobody wanted.
                 pollsSinceNowPlaying = -1180
             case .timedOut, .failed:
                 pollsSinceNowPlaying = -180
@@ -2386,6 +2388,12 @@ final class RouterModel: ScriptTarget {
     var nowPlayingProblem: String? {
         guard let failure = nowPlayingFailure else { return nil }
         switch failure {
+        case let .javaScriptNotAllowed(application):
+            return String(
+                format: loc(
+                    "%@ will not run JavaScript for YunAudio. Turn on “Allow "
+                        + "JavaScript from Apple Events” in its Develop menu."),
+                application)
         case let .timedOut(application):
             return String(
                 format: loc("%@ did not answer YunAudio. Playback audio is still available."),

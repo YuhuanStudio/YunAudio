@@ -673,6 +673,7 @@
 "Sharp by about %.0f cents" = "大约高了 %.0f 音分";
 "Best line: %@ (%.0f%%)" = "唱得最好的一句：%@（%.0f%%）";
 "Hide the desktop lyrics" = "隐藏桌面歌词";
+"%@ will not run JavaScript for YunAudio. Turn on “Allow JavaScript from Apple Events” in its Develop menu." = "%@ 不允许 YunAudio 执行 JavaScript。请在它的“开发”菜单里打开“允许 Apple 事件中的 JavaScript”。";
 "Desktop lyrics" = "桌面歌词";
 "Nothing is playing" = "目前没有播放";
 "Show pronunciation" = "显示发音";

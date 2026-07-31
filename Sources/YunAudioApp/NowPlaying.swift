@@ -187,8 +187,23 @@ enum NowPlaying {
     enum QueryFailure: Equatable, Sendable {
         case timedOut(application: String)
         case denied(application: String)
+        /// A browser that will take the event but not run the JavaScript.
+        ///
+        /// Its own case because it has its own remedy, and the remedy is a
+        /// switch in a menu somebody has never opened rather than anything in
+        /// System Settings. Told "could not be read (Apple Event -2741)" they
+        /// would look in the wrong place, find the automation permission
+        /// already granted, and conclude the feature is broken.
+        case javaScriptNotAllowed(application: String)
         case failed(application: String, code: Int)
     }
+
+    /// Errors a browser answers with when the JavaScript switch is off.
+    ///
+    /// -2741 is the parser refusing `do JavaScript` outright, -1743 is the
+    /// event being disallowed, and 4 is Chrome's own "not allowed". All three
+    /// mean the same menu item.
+    nonisolated static let javaScriptRefusalCodes: Set<Int> = [-2741, -1743, 4]
 
     private struct PositionQuery {
         var position: Position?
@@ -504,6 +519,8 @@ enum NowPlaying {
         application: String, code: Int
     ) -> QueryFailure {
         switch code {
+        case _ where isBrowser(application) && javaScriptRefusalCodes.contains(code):
+            .javaScriptNotAllowed(application: application)
         case errAETimeout:
             .timedOut(application: application)
         case errAEEventNotPermitted, errAEEventWouldRequireUserConsent:

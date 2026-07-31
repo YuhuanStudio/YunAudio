@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import YunAudioApp
@@ -171,6 +172,29 @@ struct BrowserNowPlayingTests {
         #expect(BrowserNowPlaying.artworkURL(forTab: "https://www.youtube.com/") == nil)
         #expect(
             BrowserNowPlaying.artworkURL(forTab: "https://www.youtube.com/watch?v=a/../b") == nil)
+    }
+
+    @Test("a browser refusing JavaScript is told apart from one refusing the event")
+    func theRefusalHasItsOwnRemedy() {
+        // The two look the same from outside and have different remedies. Told
+        // "could not be read (Apple Event -2741)" somebody would open System
+        // Settings, find the automation permission already granted, and
+        // conclude the feature is broken — while the switch that would fix it
+        // is in a menu they have never opened.
+        for code in [-2741, -1743, 4] {
+            #expect(
+                NowPlaying.queryFailure(application: "Safari", code: code)
+                    == .javaScriptNotAllowed(application: "Safari"))
+        }
+        // A music player answering the same code means something else: it has
+        // no JavaScript switch to turn on.
+        #expect(
+            NowPlaying.queryFailure(application: "Spotify", code: -2741)
+                == .failed(application: "Spotify", code: -2741))
+        // And the ordinary refusals keep their own meanings for a browser too.
+        #expect(
+            NowPlaying.queryFailure(application: "Safari", code: Int(errAETimeout))
+                == .timedOut(application: "Safari"))
     }
 
     @Test("seeking is bounded and never asks for a position that is not one")
