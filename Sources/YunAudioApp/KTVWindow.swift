@@ -293,6 +293,10 @@ struct KTVStage: View {
         // Following again the moment the song changes: the lines somebody was
         // reading belong to a song that is no longer playing.
         .onChange(of: model.nowPlaying?.identity) { _, _ in followTheSongAgain() }
+        // And when the words are replaced under the same song: another index's
+        // take has its own line numbering, so a browsed line 50 can point at a
+        // different lyric, or at nothing in a shorter take.
+        .onChange(of: model.lyricsRevision) { _, _ in followTheSongAgain() }
         .coordinateSpace(name: "ktv-stage")
         .background(Color.black)
         .clipShape(.rect(cornerRadius: isRendering ? 18 : 0))

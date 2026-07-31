@@ -1359,7 +1359,26 @@ final class RouterModel: ScriptTarget {
         let singers: [Singer]
     }
 
-    private(set) var lastPerformance: Performance?
+    private(set) var lastPerformance: Performance? {
+        didSet { performanceShownAt = Self.now }
+    }
+
+    private var performanceShownAt: Double = 0
+
+    /// The least time a scoreboard stays up before the next song can take it
+    /// away.
+    ///
+    /// Without this the card is gone before it is read on exactly the songs
+    /// this project started with: 慢冷 has no leading silence, so its first
+    /// line is being sung within a frame of the track changing, and the rule
+    /// that hides the card when the next song reaches a line of its own fires
+    /// immediately. Four seconds is long enough to read two numbers and short
+    /// enough not to sit over the first verse.
+    static let leastPerformanceSeconds: Double = 4
+
+    private static var now: Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+    }
 
     func dismissPerformance() { lastPerformance = nil }
 
@@ -2416,6 +2435,13 @@ final class RouterModel: ScriptTarget {
         seekNowPlaying(toFraction: max(0, min(track.duration, target)) / track.duration)
     }
 
+    /// Bumped whenever the words are replaced under the same song.
+    ///
+    /// Switching lyric source keeps the track and changes the line numbering,
+    /// which nothing else in the model distinguishes — `nowPlaying.identity` is
+    /// the same before and after.
+    private(set) var lyricsRevision = 0
+
     /// Every index's answer for the song playing now.
     ///
     /// Held here rather than read back from `OnlineLyrics.lastAnswers` at the
@@ -2446,6 +2472,10 @@ final class RouterModel: ScriptTarget {
             let parsed = match.parsed
         else { return }
         lyricSource = next
+        // The new take has its own line numbering, so anything holding a line
+        // index from the old one is now pointing at a different lyric or at
+        // nothing. Published so the stage can put its column back on the song.
+        lyricsRevision &+= 1
         lyricsSourceName = Self.lyricsSourceName(for: next)
         lyricsCopyright = match.providerMetadata?.copyright
         lyricsRegion = match.providerMetadata?.region
@@ -2498,7 +2528,16 @@ final class RouterModel: ScriptTarget {
     /// being sung changes.
     var lyricRowBudget: (rowsPerLine: CGFloat, extraRows: CGFloat) {
         let romanised = showsRomanisation
-        let stamp = "\(lyrics?.lines.count ?? 0)|\(lyrics?.lines.first?.text ?? "")|\(romanised)"
+        // Translations arrive *after* the words, from a second field of the
+        // same reply, and change nothing else about the lyrics — same line
+        // count, same first line. A stamp made of those two would not notice,
+        // and the column would go on being budgeted for a song without
+        // translation rows while drawing one with them, which is an overflow
+        // by exactly the height of those rows.
+        let translated = lyrics?.lines.contains { $0.translation != nil } ?? false
+        let stamp =
+            "\(lyrics?.lines.count ?? 0)|\(lyrics?.lines.first?.text ?? "")"
+            + "|\(lyrics?.lines.last?.text ?? "")|\(romanised)|\(translated)"
         if let cached = rowBudgetCache, cached.stamp == stamp {
             return (cached.rowsPerLine, cached.extraRows)
         }
@@ -2844,7 +2883,11 @@ final class RouterModel: ScriptTarget {
         // next one is actually being sung it is in the way. Documented as this
         // behaviour when the card was written and not implemented: it stayed
         // up over the following song until somebody clicked it.
-        if lastPerformance != nil, index != nil { lastPerformance = nil }
+        if lastPerformance != nil, index != nil,
+            Self.now - performanceShownAt >= Self.leastPerformanceSeconds
+        {
+            lastPerformance = nil
+        }
         let lineChanged = lyricLine != index
         if lineChanged { lyricLine = index }
         if reanchoringCompositor || lineChanged || lyricPlaybackAnchor?.lineIndex != index {

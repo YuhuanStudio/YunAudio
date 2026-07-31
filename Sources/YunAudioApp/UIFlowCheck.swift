@@ -4259,8 +4259,17 @@ enum UIFlowCheck {
         check("a finished song leaves a scoreboard", model.lastPerformance != nil)
         model.seekToLyricLine(2)
         model.refreshNowPlaying()
+        // Not yet: a song with no leading silence — 慢冷, the song this whole
+        // line of work started with — is on its first line within a frame of
+        // the track changing, and a card that goes then is a card nobody
+        // read.
         check(
-            "and it goes when the next line is being sung",
+            "it survives a song whose first line starts at once",
+            model.lastPerformance != nil)
+        await pause(RouterModel.leastPerformanceSeconds + 0.3)
+        model.refreshNowPlaying()
+        check(
+            "and it goes once it has been up long enough to read",
             model.lastPerformance == nil)
 
         // Pressing the source switch on a song no index answered for must do
