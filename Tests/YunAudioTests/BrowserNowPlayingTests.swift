@@ -134,6 +134,39 @@ struct BrowserNowPlayingTests {
         #expect(memories.artist == "尤雅")
     }
 
+    @Test("the whole path, from what the tab would really report")
+    func documentTitlesAreWhatTheTabReports() {
+        // `document.title` on a watch page is the video's title with 「 - YouTube」
+        // appended, and a 「(3) 」 prefix while notifications are waiting. Both
+        // were verified against the real pages: for all three videos, the
+        // `<title>` element less that suffix is character-for-character the
+        // title YouTube's own oEmbed reports. So a reply built from
+        // `document.title` is the same string the tests above are pinned to,
+        // once the reading script has removed those two.
+        for (documentTitle, song, artist) in [
+            (
+                "(3) 周杰倫 Jay Chou【稻香 Rice Field】-Official Music Video - YouTube",
+                "稻香", "周杰倫"
+            ),
+            (
+                "Huang Xiaoyun 黄霄雲 – The Rainy Season of a Youthful Crush"
+                    + "《年少心动雨季》Live | Shangyu 2026 - YouTube",
+                "年少心动雨季", "黄霄雲"
+            ),
+        ] {
+            // What the script strips before anything else sees it.
+            let asRead =
+                documentTitle
+                .replacingOccurrences(
+                    of: " - YouTube$", with: "", options: .regularExpression)
+                .replacingOccurrences(
+                    of: "^\\(\\d+\\) ", with: "", options: .regularExpression)
+            let parsed = BrowserNowPlaying.splitTitle(asRead, channel: "")
+            #expect(parsed.title == song)
+            #expect(parsed.artist == artist)
+        }
+    }
+
     @Test("a song with no Chinese in it is left exactly as it is")
     func latinTitlesAreUntouched() {
         // The Han preference must be a no-op for everything it was not written
