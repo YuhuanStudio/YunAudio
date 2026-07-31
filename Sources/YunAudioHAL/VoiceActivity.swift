@@ -119,10 +119,22 @@ public final class VoiceActivityWatcher: @unchecked Sendable {
     public static func suggestedReferenceDeviceUID(for device: AudioObjectID) -> String? {
         guard #available(macOS 27, *) else { return nil }
         let property = AudioProperty<CFString>(
-            kAudioDevicePropertySuggestedReferenceDevice,
+            Self.suggestedReferenceDeviceSelector,
             scope: kAudioObjectPropertyScopeInput)
         return device.optionalString(of: property)
     }
+
+    /// `kAudioDevicePropertySuggestedReferenceDevice`, written out.
+    ///
+    /// The header only declares it in the macOS 27 SDK, so naming it directly
+    /// made the whole project refuse to build under the previous Xcode — which
+    /// meant the one comparison that could settle where a crash was coming from
+    /// could not be run at all. A four-character code is a number; the
+    /// `#available` guard above is what actually decides whether the property
+    /// is asked for, and that is a property of the running system rather than
+    /// of whichever SDK happened to compile it.
+    private static let suggestedReferenceDeviceSelector: AudioObjectPropertySelector =
+        0x656f_7264  // 'eord'
 
     /// Switches detection on and calls back whenever the answer changes.
     ///

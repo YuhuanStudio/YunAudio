@@ -215,6 +215,18 @@ enum UIFlowCheck {
     }()
 
     static func run(model: RouterModel) async {
+        // Line buffered, always, and this is not a nicety. Redirected to a file
+        // — which is how anybody runs this, because it takes minutes and holds
+        // the machine's audio hardware while it does — libc buffers four
+        // kilobytes, so nothing appears until the run ends. A run that ends is
+        // exactly the case where the output was never urgent.
+        //
+        // The case that matters is the other one. This run stalled at 0% CPU
+        // for twenty-eight minutes, and the file was empty, so there was no way
+        // to tell which section it had reached: it could not be attached to
+        // either, because an ad-hoc signature carries no `get-task-allow`. A
+        // check that goes quiet must at least be able to say how far it got.
+        setvbuf(stdout, nil, _IOLBF, 0)
         // Read on the first line so it is the launch that is measured and not
         // the wait for the lock below, which is somebody else's flow check.
         _ = launchSeconds
@@ -224,6 +236,7 @@ enum UIFlowCheck {
             exit(2)
         }
         await takeTheHardware()
+        noteAnySecondSwiftRuntime()
         // A filtered run ends by throwing out of whichever section was the last
         // one anybody asked for, which lands here. The summary is printed
         // either way, because a run that stopped early still found whatever it
@@ -6474,6 +6487,42 @@ enum UIFlowCheck {
     /// windows — "how much audio did the analyser count in two seconds of wall
     /// clock", "what does one poll cost averaged over four seconds" — and a
     /// window that ends early measures something else. Those stay.
+    /// Says so if this process has more than one Swift runtime in it.
+    ///
+    /// Chasing `EXC_BAD_ACCESS at 0x1e` inside the runtime's dynamic main-actor
+    /// check. The value is a constant across every report, malloc scribbling
+    /// and guard pages change nothing, and a reproduction with the same shape
+    /// and the same toolchain survives indefinitely — so it is not corruption
+    /// and not the compiler. What produces a constant, wrong executor identity
+    /// is two copies of the concurrency runtime in one process: each has its
+    /// own `MainActor`, and a check compiled against one comparing against the
+    /// other's is comparing unrelated data.
+    ///
+    /// This application loads third-party Audio Units, and an Audio Unit is a
+    /// bundle that may carry its own embedded Swift. So the images are simply
+    /// listed. Nothing is asserted — a second runtime may be perfectly
+    /// harmless — but if one is there, the next person reading a crash report
+    /// does not have to guess.
+    private static func noteAnySecondSwiftRuntime() {
+        var found: [String] = []
+        for index in 0..<_dyld_image_count() {
+            guard let raw = _dyld_get_image_name(index) else { continue }
+            let path = String(cString: raw)
+            let name = (path as NSString).lastPathComponent
+            guard name.hasPrefix("libswift") else { continue }
+            // The system's own copies are where every Swift process gets them.
+            guard !path.hasPrefix("/usr/lib/swift/"), !path.hasPrefix("/System/") else {
+                continue
+            }
+            found.append(path)
+        }
+        if found.isEmpty {
+            note("one Swift runtime, the system's")
+        } else {
+            note("a second Swift runtime is loaded: " + found.joined(separator: ", "))
+        }
+    }
+
     /// Whether the IO cycle counter can be seen counting up, right now.
     ///
     /// Sixteen places in this file used to ask this the same wrong way: take a

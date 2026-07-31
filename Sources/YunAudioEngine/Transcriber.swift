@@ -180,31 +180,41 @@ public actor Transcriber {
             }
         }
 
-        let converter: AnyObject?
-        do {
-            converter = try await AnalyzerInputConverter.converter(
-                compatibleWith: [transcriber])
-        } catch {
-            throw Unavailable.failed(error.localizedDescription)
-        }
-
-        let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
-        feed.open(converter: converter, continuation: continuation)
-        let analyser = SpeechAnalyzer(inputSequence: stream, modules: [transcriber])
-        self.analyser = analyser
-
-        startedAt = now
-        isRunning = true
-
-        resultsTask = Task { [weak self] in
+        // Compiled out under `YUNAUDIO_NO_SPEECH_ANALYZER`, which exists for
+        // exactly one purpose: `AnalyzerInputConverter` is macOS 27 API, so
+        // naming it made the whole project refuse to build under the previous
+        // Xcode — and that made it impossible to run the one comparison that
+        // could tell whether a crash came from the toolchain or from us. A flag
+        // nobody ships is cheaper than an unanswerable question.
+        #if YUNAUDIO_NO_SPEECH_ANALYZER
+            throw Unavailable.failed("built without the speech analyser")
+        #else
+            let converter: AnyObject?
             do {
-                for try await result in transcriber.results {
-                    await self?.append(result)
-                }
+                converter = try await AnalyzerInputConverter.converter(
+                    compatibleWith: [transcriber])
             } catch {
-                // The stream ending is how it stops; nothing to report.
+                throw Unavailable.failed(error.localizedDescription)
             }
-        }
+
+            let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
+            feed.open(converter: converter, continuation: continuation)
+            let analyser = SpeechAnalyzer(inputSequence: stream, modules: [transcriber])
+            self.analyser = analyser
+
+            startedAt = now
+            isRunning = true
+
+            resultsTask = Task { [weak self] in
+                do {
+                    for try await result in transcriber.results {
+                        await self?.append(result)
+                    }
+                } catch {
+                    // The stream ending is how it stops; nothing to report.
+                }
+            }
+        #endif
     }
 
     private func append(_ result: SpeechTranscriber.Result) {
@@ -320,16 +330,20 @@ public actor Transcriber {
             guard #available(macOS 27, *) else { return }
             lock.lock()
             defer { lock.unlock() }
-            guard let continuation,
-                let converter = converter as? AnalyzerInputConverter,
-                let inputs = try? converter.convert(buffer, at: nil)
-            else { return }
-            // Noted on the buffer the converter took rather than on the first
-            // one it gave something back for: it chunks, so the first call can
-            // yield nothing at all, and the analyser's zero is the first sample
-            // it swallowed either way.
-            if firstAccepted == nil { firstAccepted = Date().timeIntervalSince1970 }
-            for input in inputs { continuation.yield(input) }
+            #if YUNAUDIO_NO_SPEECH_ANALYZER
+                _ = buffer
+            #else
+                guard let continuation,
+                    let converter = converter as? AnalyzerInputConverter,
+                    let inputs = try? converter.convert(buffer, at: nil)
+                else { return }
+                // Noted on the buffer the converter took rather than on the
+                // first one it gave something back for: it chunks, so the first
+                // call can yield nothing at all, and the analyser's zero is the
+                // first sample it swallowed either way.
+                if firstAccepted == nil { firstAccepted = Date().timeIntervalSince1970 }
+                for input in inputs { continuation.yield(input) }
+            #endif
         }
 
         func close() {

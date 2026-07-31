@@ -9913,9 +9913,32 @@ final class RouterModel: ScriptTarget {
     /// for the live flow check, where Spotify is the known recording available
     /// on this machine.
     private func recognitionApplication(for slot: Int) -> AudioApplication? {
-        guard slot < sourceTapsFor.count,
-            let group = sourceGroups.first(where: { $0.uid == sourceTapsFor[slot] }),
-            let application = representative(of: group).flatMap(application(of:))
+        guard slot < sourceTapsFor.count else { return nil }
+        // Loops rather than `first(where:)`, `compactMap` and `contains`, and
+        // this is not a style preference. Handing a main-actor-isolated closure
+        // to a non-isolated generic makes the compiler insert a *dynamic*
+        // executor check at the conversion, and in this process those faults:
+        // `EXC_BAD_ACCESS at 0x1e` inside `swift_task_isMainExecutorImpl`,
+        // reached only when the check's fast path has already failed. Nine
+        // crash reports, every one of them at a dynamic executor check, and
+        // this function is the hottest one in the twenty-hertz poll.
+        //
+        // What is ruled out, each with an experiment rather than an argument:
+        // memory corruption (`MallocScribble`, `MallocPreScribble` and
+        // `MallocGuardEdges` leave the faulting address at exactly `0x1e`), the
+        // toolchain and the syntax (a reproduction with this shape, this
+        // toolchain and this timer survives 8,400 checks), and `AVAudioEngine`
+        // (the same reproduction with a file playing through a time-pitch unit
+        // survives too). A loop needs no conversion, so it needs no check.
+        var found: SourceGroup? = nil
+        let wanted = sourceTapsFor[slot]
+        for group in sourceGroups where group.uid == wanted {
+            found = group
+            break
+        }
+        guard let group = found,
+            let route = representative(of: group),
+            let application = self.application(of: route)
         else { return nil }
         let scripted = ["com.apple.Music", "com.spotify.client"]
         let checksScriptedPlayers = Self.recognisesScriptedPlayers
@@ -9928,15 +9951,23 @@ final class RouterModel: ScriptTarget {
         // one stable source until the route changes, preferring one CoreAudio
         // says is actually playing.
         if recognitionSourceUID == nil {
-            let candidate = sourceGroups.compactMap { group -> (String, AudioApplication)? in
-                guard let route = representative(of: group),
-                    let app = self.application(of: route),
-                    checksScriptedPlayers || !scripted.contains(app.bundleID)
-                else { return nil }
-                return (group.uid, app)
+            // Loops, for the reason above.
+            var firstAny: String? = nil
+            var firstPlaying: String? = nil
+            for candidate in sourceGroups {
+                guard let route = representative(of: candidate),
+                    let app = self.application(of: route)
+                else { continue }
+                var isScripted = false
+                for identifier in scripted where identifier == app.bundleID {
+                    isScripted = true
+                    break
+                }
+                guard checksScriptedPlayers || !isScripted else { continue }
+                if firstAny == nil { firstAny = candidate.uid }
+                if app.isPlaying, firstPlaying == nil { firstPlaying = candidate.uid }
             }
-            recognitionSourceUID =
-                candidate.first(where: { $0.1.isPlaying })?.0 ?? candidate.first?.0
+            recognitionSourceUID = firstPlaying ?? firstAny
         }
         guard recognitionSourceUID == group.uid else { return nil }
         return application
