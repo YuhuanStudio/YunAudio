@@ -170,8 +170,22 @@ final class LocalSongPlayer {
         // Connected per file rather than once: two files rarely share a
         // processing format, and a graph connected at the last file's rate
         // resamples the next one for no reason.
+        //
+        // **Torn down before it is rebuilt, and the second song is why.** The
+        // first version reconnected on top of the existing edges, and opening a
+        // stereo file after a mono one threw out of
+        // `AVAudioEngineGraph::UpdateGraphAfterReconfig` — an Objective-C
+        // exception, which Swift cannot catch, so it took the process with it.
+        // A KTV evening is one song after another; this is the second one.
+        engine.disconnectNodeOutput(node)
+        engine.disconnectNodeOutput(transpose)
         engine.connect(node, to: transpose, format: format)
-        engine.connect(transpose, to: engine.mainMixerNode, format: format)
+        // The mixer's own format, not the file's. The mixer is downstream of
+        // the output device, which this application switches while running, so
+        // insisting on the file's rate here is insisting on a rate the mixer
+        // may not have — and the same exception comes back. `nil` lets the
+        // engine pick a format both ends can hold, and it resamples if it must.
+        engine.connect(transpose, to: engine.mainMixerNode, format: nil)
         let tags = Self.metadata(of: url)
         let song = Song(
             url: url,
