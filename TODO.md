@@ -902,8 +902,24 @@ IINA 設定裡那個 `Core Audio / AVFoundation🧪` 是 **mpv 的 `--ao` 選擇
    macOS 26 起的 `AudioObjectID` 空間音訊屬性；**後者可能不需要換整條輸出路徑**，
    那會是更好的答案——先查這條。
 
-**還沒量，所以還沒決定。** 先查第 4 點：如果空間音訊能用 HAL 屬性打開而不必把
-輸出改走 AVAudioEngine，那整個交換條件就消失了，答案就是「兩個都要」。
+**第 4 點查過了 [macOS 27 SDK，2026-07-31]，答案是否定的。** 在 macOS 27.0 SDK 裡
+掃 CoreAudio、AudioToolbox、AVFAudio 三個框架的標頭：
+
+- **CoreAudio（HAL）裡一個空間音訊屬性都沒有。** 沒有
+  `kAudioDevicePropertySpatial*`，沒有任何可以對輸出裝置開關的東西。
+- AudioToolbox 只有 `kAudioServicesDetailIntendedSpatialExperience`——那是
+  **附在你播放的聲音上的一個意圖提示**，不是裝置屬性。
+- 真正的空間化型別全在 **AVFAudio**：`AVAudioEnvironmentNode`、
+  `AVAudioSessionRenderingModeSpatialAudio`、`AVAudioSessionSpatialExperience*`
+  ——而 `AVAudioSession` 那一組**在 macOS 上不存在**，是 iOS 的。
+
+**所以交換條件沒有消失，反而更硬**：要空間音訊就得把輸出改走 `AVAudioEngine` /
+`AVAudioEnvironmentNode`，也就是**整條輸出路徑換掉**——連帶位元一致與可量測延遲
+一起放棄。這正是 IINA 標🧪並且警告延遲的原因。
+
+**結論：不做**，除非哪天有人真的想要「唱歌時伴奏走空間音訊」，而且願意接受那一路
+不再位元一致。真要做，形狀就是上面那三條（只給輸出、預設關、兩個數字先量）。這條
+記在這裡是為了**下次有人再看到 IINA 那個開關時，不用再查一次**。
 
 ## 下一件事：唱歌的變調（KTV 最常按的那顆鍵）
 
