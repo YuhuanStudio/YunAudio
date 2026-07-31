@@ -897,6 +897,14 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 4. 量它：`.pitch` 是 `kAudioUnitSubType_NewTimePitch`，會加延遲，而
    `ProcessingLatency` 已經在管這件事——**移調之後對嘴會不會偏，要有數字**。
 
+**開工前先解決這個**：`.pitch` **已經被人聲變聲器佔用了**。`RouterModel:3472` 的
+`voicePreset` 就是往 `effectValues["pitch.cents"]` 寫，而 `enabledEffects` 是一組
+`EffectKind`——也就是說目前的形狀是「一組效果、一份參數」。伴奏要移調而人聲不要，
+需要的是**兩條各自獨立的鏈**（來源一條、麥克風一條），或者在 `RoutingEngine:1120`
+的 `sourceEffects` 那一層把參數按來源分開。**在確認這件事之前不要寫 UI**：接錯的
+後果是按「升調」把唱歌的人的聲音升上去，而伴奏原地不動——即時路徑、當場聽得出來、
+而且會被當成「移調功能壞掉」而不是「接錯匯流排」。
+
 **不需要 AVFoundation 的新東西**：`AVAudioUnitTimePitch` 包的就是同一顆 AudioUnit，
 而 `AVAudioEngine` 會在即時路徑上多一層它自己的 graph，這條路徑刻意不要。已經用到的
 更底層：`AudioObjectID`／process taps／`AUVoiceProcessingIO`／`kAudioUnitSubType_*`。
