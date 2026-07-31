@@ -1035,6 +1035,47 @@ executor 跟預期的對不上」之後，runtime 在處理這件事的路上自
 但上面那五個「這一節做了什麼」的假設全部被最小重現否定了，所以觸發條件是這一節製造出來的
 某種**時序**，不是它用到的任何一個 API。
 
+### 唯一有效的緩解：`-disable-dynamic-actor-isolation`
+
+那些檢查**不是我們要的**。編譯器把它們插在「main-actor 隔離的閉包交給 `@preconcurrency`
+conformance」的地方——也就是每一個 SwiftUI 容器、每一個 view。這個套件在 Swift 6 語言模式
+下，那個隔離**編譯期已經證明過了**；這些檢查只是替編譯器不得不信任的 conformance 再給一個
+執行期的意見，而在這個系統上那個意見是致命的。
+
+`Package.swift` 現在對 `YunAudioApp` 與 `YunDesign` 加上這個旗標。**效果是實測的**：
+
+| | 存活時間 |
+|---|---|
+| 沒有旗標 | 進入第 69 節後 **不到一分鐘** 死，每一次 |
+| 有旗標 | **10 分 38 秒**，而且是等到有人移動滑鼠才死 |
+
+而它死在哪，是整件事最後的證據：
+
+```
+4  SwiftUI  MainActor.assumeIsolated<A>(_:file:line:)
+5  SwiftUI  NSViewResponder.platformCurrentEvent.getter
+   ...      NSHostingView.mouseEntered(with:)
+```
+
+**堆疊裡沒有我們的程式碼。** SwiftUI 在每一次滑鼠移動的 hit test 裡自己呼叫
+`MainActor.assumeIsolated`，那是 Apple 編譯好的框架，我們沒有辦法重編它。連 Apple 自己都
+踩到這個 bug——這就是「修不好」的證明，也是要附在 Feedback 上的那一份報告。
+
+**旗標是緩解，不是解藥，而且它要被拿掉。** 下一個 macOS 修好 runtime 之後就刪掉它；判斷的
+方法是上面那五分鐘的檢查。
+
+### 當機被移開之後，底下露出一個版面風暴 [待修]
+
+沒有旗標的時候，第 69 節總是在「a mono recording will not have its centre cancelled」之後
+一分鐘內當掉。有了旗標，它不再當掉——**改成停在同一行不動，主執行緒 14% CPU 空轉十分鐘。**
+
+取樣說得很清楚：主執行緒整段都在 SwiftUI 的版面計算裡——`LayoutEngineBox.sizeThatFits`、
+`StackLayout.UnmanagedImplementation.placeChildren`、`DisplayList.ViewUpdater.update`——
+連續不斷，把 flow check 自己的 `await` 餓死。不是死結，是**版面風暴**。
+
+這是我們的，而且它一直都在，只是被當機蓋住了。下一步：開著 `YUNAUDIO_UI_BENCHMARK_STAGE=1`
+的 `BodyCount` 跑第 69 節，找出是哪一個 view 在那個時間點被重複重建。
+
 ### 結論與下一步
 
 **這是 macOS 27.0 (26A5388g) 內建 `libswift_Concurrency.dylib` 的缺陷。** 我們的程式沒有

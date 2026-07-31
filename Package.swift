@@ -1,6 +1,44 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
+// Why every user-interface target below disables dynamic actor isolation.
+//
+// macOS 27.0 (26A5388g) ships a `libswift_Concurrency` whose
+// `swift_task_isCurrentExecutorWithFlags` falls over on its slow path: it
+// dereferences the executor identity as an object and that identity is a small
+// integer — `0x1e`, `0x200`, `-1`, different garbage each time. One report names
+// the failure outright as a pointer authentication failure, and its registers
+// hold `CFMainExecutor`'s type metadata beside `DispatchMainExecutor`'s witness
+// table, which is two main-executor implementations being mixed.
+//
+// Those checks are not ours to want. The compiler inserts them where a
+// main-actor-isolated closure is handed to a `@preconcurrency` conformance —
+// which is every SwiftUI container, in every view. Twelve hypotheses were tested
+// and killed before this one, including the toolchain: Swift 6.3.3 crashes
+// identically. `TODO.md` has the table.
+//
+// Turning them off is safe *here* specifically because this package is in Swift
+// 6 language mode, so the isolation these checks re-verify at runtime has
+// already been proven at compile time. What they add is a second, dynamic
+// opinion for conformances the compiler had to trust — and on this system that
+// second opinion is fatal.
+//
+// It is a mitigation, not a cure. With the flag the application survived ten
+// minutes and thirty-eight seconds where every build before it died inside one,
+// and then crashed inside SwiftUI's own `NSViewResponder.platformCurrentEvent`,
+// which calls `MainActor.assumeIsolated` in Apple's compiled code on every
+// mouse-move hit test. Nothing in this repository can reach that.
+//
+// **Remove this the moment a macOS build fixes the runtime.** The check for
+// whether it has is five minutes:
+//
+//     YUNAUDIO_FLOWCHECK=1 YUNAUDIO_FLOWCHECK_ONLY="the song is ours to play" \
+//         ./build/YunAudio.app/Contents/MacOS/YunAudioApp
+//
+let noDynamicActorIsolation: [SwiftSetting] = [
+    .unsafeFlags(["-disable-dynamic-actor-isolation"])
+]
+
 let package = Package(
     name: "YunAudioKit",
     defaultLocalization: "en",
@@ -34,7 +72,7 @@ let package = Package(
                 .unsafeFlags(["-Xcc", "-DACCELERATE_NEW_LAPACK"])
             ]),
 
-        .target(name: "YunDesign"),
+        .target(name: "YunDesign", swiftSettings: noDynamicActorIsolation),
 
         .target(name: "YunAudioRazer"),
 
@@ -69,7 +107,8 @@ let package = Package(
                 // Swift. See the note there.
                 "YunAudioRT",
             ],
-            resources: [.process("Resources")]),
+            resources: [.process("Resources")],
+            swiftSettings: noDynamicActorIsolation),
 
         .executableTarget(
             name: "yunaudio-cli",
