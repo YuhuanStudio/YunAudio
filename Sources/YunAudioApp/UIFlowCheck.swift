@@ -4165,6 +4165,15 @@ enum UIFlowCheck {
             }
         }
 
+        try section("the song is ours to play")
+        if inWantedSection {
+            if written {
+                await checkPlayingOurOwnSong(model: model, audio: audio)
+            } else {
+                note("could not write the test files — skipped")
+            }
+        }
+
         try section("scoring what was actually sung")
         if inWantedSection {
             if written {
@@ -4188,6 +4197,75 @@ enum UIFlowCheck {
     /// the track clock, which is exactly what makes them checkable here. The
     /// Apple event that would tell a real player to follow is sent from a
     /// detached task and is somebody else's to answer.
+    /// The one source that is not somebody else's player.
+    ///
+    /// Everything else on the singing path is an Apple event: 73 ms to open the
+    /// conversation, an answer about once a second, and `TrackClock`
+    /// extrapolating in between. The number this section exists for is
+    /// `lastCorrection` — how far the extrapolation had strayed when the source
+    /// last answered. Against another application it is tens of milliseconds
+    /// and the whole design is built around living with that. Against a file we
+    /// are playing it should be the render quantum, because the answer is a
+    /// count of samples the output has consumed rather than a question.
+    private static func checkPlayingOurOwnSong(model: RouterModel, audio: URL) async {
+        await bringRoutingBack(model)
+        model.isSingingVisible = true
+        defer {
+            model.closeWords()
+            model.isSingingVisible = false
+        }
+        guard model.openSong(at: audio) else {
+            note("the song would not open — skipped")
+            return
+        }
+        check("a file this application opened is the song", model.isPlayingOwnSong)
+        // Six notes of a second each, counted out of the file rather than
+        // asked for: a player answering an Apple event says "about six".
+        let expected = Double(chainNotes.count) * chainNoteSeconds
+        let measured = model.nowPlaying?.duration ?? 0
+        note("song length \(measured) s, expected \(expected)")
+        check(
+            "its length is counted from the samples",
+            abs(measured - expected) < 0.01)
+        // `yunaudio-chain.lrc` sits beside `yunaudio-chain.wav`, which is how
+        // anybody with a folder of backing tracks already has them.
+        check("words beside the file are used", model.lyrics != nil)
+        check("and they are named as local", model.lyricsSourceName == loc("Local file"))
+
+        model.runWords(from: 0)
+        try? await Task.sleep(for: .milliseconds(600))
+        model.refreshNowPlaying()
+        let advanced = model.songPosition
+        note("position \(advanced) s after 600 ms of playing")
+        check(
+            "the position advances with the music",
+            advanced > 0.3 && advanced < 1.2)
+        // The headline. Anything above a couple of render quanta here means the
+        // clock is being extrapolated rather than counted, which is the whole
+        // thing this path exists to stop doing.
+        note("clock correction \(model.lyricClockCorrection) s")
+        check(
+            "and it is counted, not extrapolated",
+            abs(model.lyricClockCorrection) < 0.03)
+
+        // A seek is a fact rather than a request: no round trip, no waiting for
+        // the next poll to find out whether it took.
+        model.seekNowPlaying(toSeconds: 3)
+        model.refreshNowPlaying()
+        note("seek to 3 s landed at \(model.songPosition) s")
+        check(
+            "a seek lands where it was told to",
+            abs(model.songPosition - 3) < 0.15)
+        model.stopWords()
+        model.refreshNowPlaying()
+        let held = model.songPosition
+        try? await Task.sleep(for: .milliseconds(300))
+        model.refreshNowPlaying()
+        check(
+            "and a stopped song stays where it was stopped",
+            abs(model.songPosition - held) < 0.05)
+    }
+
     private static func checkDrivingTheWords(model: RouterModel, words: URL) async {
         await bringRoutingBack(model)
         model.isSingingVisible = true

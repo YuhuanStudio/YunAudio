@@ -1,0 +1,239 @@
+import AVFoundation
+import AppKit
+import Foundation
+
+/// Where a song is, when the song is ours to play.
+///
+/// Everything else in this application asks somebody else where the music has
+/// got to, and pays for the answer: an Apple event to Safari costs 73 ms, the
+/// answer is a second old by the time the words use it, and the whole of
+/// `TrackClock` exists to extrapolate between those answers. A file we opened
+/// ourselves has none of that problem — the position is a count of samples the
+/// output has actually consumed, so it is exact by construction.
+///
+/// Kept as a value apart from the player because the arithmetic is the part
+/// that can be wrong and the part no audio device is needed to check: a seek
+/// mid-song, a song whose length is not a whole number of render quanta, and a
+/// clock asked about a moment past the end.
+struct LocalSongClock: Equatable, Sendable {
+
+    /// Where in the song the current run of playback began, in frames.
+    ///
+    /// A player node counts from the moment it was told to play, not from the
+    /// start of the file, so a seek resets its count to zero and this is what
+    /// remembers where zero now is.
+    var startFrame: Int64 = 0
+    var sampleRate: Double = 0
+    var duration: Double = 0
+
+    /// Seconds into the song, given frames the node reports having played.
+    func position(playedFrames: Int64) -> Double {
+        guard sampleRate > 0 else { return 0 }
+        let frames = max(0, startFrame &+ max(0, playedFrames))
+        let seconds = Double(frames) / sampleRate
+        // A file is a finite thing and the node keeps counting past the end of
+        // it while the tail drains, so without this the words would run off the
+        // bottom of a song that had already finished.
+        guard duration > 0 else { return seconds }
+        return min(seconds, duration)
+    }
+
+    /// The frame a seek lands on, clamped inside the file.
+    func frame(forSeconds seconds: Double) -> Int64 {
+        guard sampleRate > 0, seconds.isFinite else { return 0 }
+        let bounded = duration > 0 ? min(max(0, seconds), duration) : max(0, seconds)
+        return Int64((bounded * sampleRate).rounded())
+    }
+}
+
+/// A song this application plays itself.
+///
+/// **Not the routing engine's path, and deliberately not on it.** `TODO.md`
+/// rules out `AVAudioEngine` for the microphone chain because it would put its
+/// own graph and its own thread between a real-time callback and a deadline of
+/// 2.7 ms. This is the other thing entirely: a file being decoded and played to
+/// whatever the system output is, with no real-time constraint of its own and
+/// nothing of the router's in it. What it buys is the position — a count of
+/// samples rather than a question asked of another process.
+///
+/// The audio goes wherever the system's default output goes. If that is the
+/// YunAudio device, the song arrives back through the router as a source and is
+/// mixed, monitored, scored and recorded exactly as a captured player would be;
+/// if it is the speakers, it simply plays. Both are correct and neither needs a
+/// setting, because both are what "play this file" already means on this Mac.
+@MainActor
+final class LocalSongPlayer {
+
+    struct Song: Equatable, Sendable {
+        var url: URL
+        var title: String
+        var artist: String
+        var album: String
+        var duration: Double
+        var artwork: Data?
+    }
+
+    /// Extensions worth offering, which is not the same as the extensions that
+    /// will open: `AVAudioFile` reads whatever the system has a decoder for,
+    /// and the list is only for the open panel.
+    static let openableTypes: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff]
+
+    private let engine = AVAudioEngine()
+    private let node = AVAudioPlayerNode()
+    private var file: AVAudioFile?
+    private var clock = LocalSongClock()
+    /// Where the song was when it was paused. A node that is not running has no
+    /// time at all, so this is the only thing that knows.
+    private var restingPosition: Double = 0
+
+    private(set) var song: Song?
+    private(set) var isPlaying = false
+
+    init() {
+        engine.attach(node)
+    }
+
+    /// Reads a file and makes it the song, without playing it.
+    ///
+    /// - Returns: The song, or nil when nothing on this system can decode it.
+    @discardableResult
+    func open(_ url: URL) -> Song? {
+        stop()
+        guard let opened = try? AVAudioFile(forReading: url) else { return nil }
+        let format = opened.processingFormat
+        guard format.sampleRate > 0, opened.length > 0 else { return nil }
+        file = opened
+        clock = LocalSongClock(
+            startFrame: 0,
+            sampleRate: format.sampleRate,
+            duration: Double(opened.length) / format.sampleRate)
+        // Connected per file rather than once: two files rarely share a
+        // processing format, and a graph connected at the last file's rate
+        // resamples the next one for no reason.
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+        let tags = Self.metadata(of: url)
+        let song = Song(
+            url: url,
+            title: tags.title ?? url.deletingPathExtension().lastPathComponent,
+            artist: tags.artist ?? "",
+            album: tags.album ?? "",
+            duration: clock.duration,
+            artwork: tags.artwork)
+        self.song = song
+        restingPosition = 0
+        return song
+    }
+
+    /// Starts, or restarts from a moment.
+    ///
+    /// - Returns: False when the engine would not start, which is a real
+    ///   outcome on a Mac whose default output has just been unplugged and is
+    ///   worth saying rather than silently doing nothing.
+    @discardableResult
+    func play(from seconds: Double? = nil) -> Bool {
+        guard let file else { return false }
+        let target = seconds ?? restingPosition
+        let startFrame = clock.frame(forSeconds: target)
+        let remaining = file.length - startFrame
+        guard remaining > 0 else {
+            // Asked to play from the end. Treated as a finished song rather
+            // than as a failure: scheduling zero frames succeeds and then
+            // nothing ever happens, which looks like a fault.
+            restingPosition = clock.duration
+            isPlaying = false
+            return false
+        }
+        node.stop()
+        clock.startFrame = startFrame
+        node.scheduleSegment(
+            file, startingFrame: startFrame, frameCount: AVAudioFrameCount(remaining),
+            at: nil)
+        if !engine.isRunning {
+            engine.prepare()
+            guard (try? engine.start()) != nil else {
+                isPlaying = false
+                return false
+            }
+        }
+        node.play()
+        restingPosition = target
+        isPlaying = true
+        return true
+    }
+
+    /// Moves the playhead, whether or not the song is running.
+    ///
+    /// A paused song moves without being started: scheduling and immediately
+    /// pausing would put a fragment of the new position through the output,
+    /// which is a click somebody hears every time they drag the bar.
+    func seek(to seconds: Double) {
+        guard file != nil else { return }
+        if isPlaying {
+            play(from: seconds)
+        } else {
+            restingPosition =
+                Double(clock.frame(forSeconds: seconds)) / max(1, clock.sampleRate)
+        }
+    }
+
+    func pause() {
+        guard isPlaying else { return }
+        restingPosition = position
+        node.pause()
+        engine.pause()
+        isPlaying = false
+    }
+
+    func stop() {
+        node.stop()
+        if engine.isRunning { engine.stop() }
+        file = nil
+        song = nil
+        clock = LocalSongClock()
+        restingPosition = 0
+        isPlaying = false
+    }
+
+    /// Seconds into the song, from the samples the output has consumed.
+    var position: Double {
+        guard isPlaying,
+            let nodeTime = node.lastRenderTime,
+            let played = node.playerTime(forNodeTime: nodeTime)
+        else { return restingPosition }
+        return clock.position(playedFrames: played.sampleTime)
+    }
+
+    /// Whether the song has reached its end, so the caller can stop the words.
+    var hasFinished: Bool {
+        guard song != nil, clock.duration > 0 else { return false }
+        return position >= clock.duration - 0.05
+    }
+
+    private static func metadata(
+        of url: URL
+    ) -> (
+        title: String?, artist: String?, album: String?, artwork: Data?
+    ) {
+        // The synchronous accessor, deliberately. It is deprecated in favour of
+        // an async load, and every call site here is a file the user has just
+        // chosen in an open panel — a local read of a tag block, on a path the
+        // person is waiting on anyway. An await here would make opening a song
+        // asynchronous for tens of microseconds of work.
+        let asset = AVURLAsset(url: url)
+        let items = asset.commonMetadata
+        func string(_ key: AVMetadataKey) -> String? {
+            let value = AVMetadataItem.metadataItems(
+                from: items, withKey: key, keySpace: .common
+            ).first?.stringValue
+            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return (trimmed?.isEmpty ?? true) ? nil : trimmed
+        }
+        let artwork = AVMetadataItem.metadataItems(
+            from: items, withKey: AVMetadataKey.commonKeyArtwork, keySpace: .common
+        ).first?.dataValue
+        return (
+            string(.commonKeyTitle), string(.commonKeyArtist),
+            string(.commonKeyAlbumName), artwork
+        )
+    }
+}

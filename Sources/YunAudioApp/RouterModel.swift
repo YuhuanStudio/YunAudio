@@ -1975,6 +1975,9 @@ final class RouterModel: ScriptTarget {
     /// highlight could not sweep, because nothing had time to draw it.
     func refreshNowPlaying() {
         guard isSingingVisible else { return }
+        // Free, so it happens every poll rather than once a second: the answer
+        // is a counter in this process, not a question put to another one.
+        adoptOwnSongPosition()
         if !isHandRun {
             // Counted rather than conditioned on there being an answer yet. A
             // running player with nothing loaded answers nil every time, and
@@ -2125,6 +2128,132 @@ final class RouterModel: ScriptTarget {
         return true
     }
 
+    // MARK: A song this application plays itself
+
+    /// The one path where nobody has to be asked where the music is.
+    ///
+    /// Every other source here is somebody else's player answered through an
+    /// Apple event — 73 ms to open the conversation, once a second at best, and
+    /// the whole of `TrackClock` extrapolating in between. A file we opened is
+    /// a count of samples the output has consumed, so the words are on the
+    /// music by construction rather than by correction.
+    ///
+    /// It enters the hand-run path rather than inventing a second one: that
+    /// path already means "the clock is not a player's", already keeps the
+    /// once-a-second poll switched off, and already carries words, tune, score
+    /// and stage. The only difference is who moves the clock.
+    let songPlayer = LocalSongPlayer()
+
+    /// True while the song on the stage is a file this application is playing.
+    var isPlayingOwnSong: Bool { songPlayer.song != nil }
+
+    /// Opens an audio file and makes it the song.
+    ///
+    /// Words are looked for beside the file first — `慢冷.mp3` next to
+    /// `慢冷.lrc` is how anybody with a folder of backing tracks already has
+    /// them — and only then online, keyed on whatever the file's own tags say.
+    @discardableResult
+    func openSong(at url: URL) -> Bool {
+        guard let song = songPlayer.open(url) else { return false }
+        cancelLyricsLookup()
+        isHandRun = true
+        lyrics = nil
+        plainLyrics = nil
+        melody = nil
+        lyricsSourceName = nil
+        lyricsCopyright = nil
+        lyricsRegion = nil
+        let track = NowPlaying.Track(
+            application: loc("This song"),
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            position: 0,
+            duration: song.duration,
+            isPlaying: false,
+            artworkURL: Self.artwork(for: song),
+            identity: "file:\(url.path)")
+        nowPlaying = track
+        trackClock.stop()
+        trackClock.duration = song.duration
+        lyricLine = nil
+        lyricProgress = 0
+        lyricPlaybackAnchor = nil
+        songSecond = 0
+        let words = ["lrc", "LRC"]
+            .lazy
+            .map { url.deletingPathExtension().appendingPathExtension($0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+        if let words {
+            adoptWordsBeside(words, keepingDuration: song.duration)
+        } else {
+            startLyricsLookup(for: track)
+        }
+        if isScoringSinging { rebuildScoringReference() }
+        return true
+    }
+
+    /// Words found next to the audio file, which beat every online index.
+    ///
+    /// The song's own length is kept: a `.lrc` says when its last line starts,
+    /// not when the recording ends, and the file we are playing knows the
+    /// second of those exactly.
+    private func adoptWordsBeside(_ url: URL, keepingDuration duration: Double) {
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+            let parsed = Lyrics.parse(text)
+        else { return }
+        lyrics = parsed
+        lyricsSourceName = loc("Local file")
+        lyricsLookupStatus = .local
+        melody =
+            ["mid", "midi"]
+            .lazy
+            .map { url.deletingPathExtension().appendingPathExtension($0) }
+            .compactMap { try? Data(contentsOf: $0) }
+            .compactMap(MidiMelody.parse)
+            .first
+        trackClock.duration = duration
+        applyLyricOffset()
+    }
+
+    /// Embedded artwork, written where a view can point an image at it.
+    ///
+    /// A tag block is bytes inside the audio file and `NowPlaying.Track` speaks
+    /// in URLs, so the bytes go to a file named after their own content: the
+    /// same song opened twice writes nothing the second time, and two songs
+    /// never collide.
+    private static func artwork(for song: LocalSongPlayer.Song) -> URL? {
+        if let beside = artworkBesideWords(at: song.url) { return beside }
+        guard let data = song.artwork, !data.isEmpty else { return nil }
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("YunAudio-artwork", isDirectory: true)
+        let file = directory.appendingPathComponent("\(data.count)-\(data.hashValue).img")
+        if FileManager.default.fileExists(atPath: file.path) { return file }
+        try? FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        guard (try? data.write(to: file)) != nil else { return nil }
+        return file
+    }
+
+    /// Takes the exact position from the player we are running.
+    ///
+    /// Called from the same poll that would otherwise have asked another
+    /// process, and costing nothing: no Apple event, no round trip, and
+    /// `lastCorrection` reads as the render quantum rather than as the tens of
+    /// milliseconds an extrapolated answer drifts by.
+    private func adoptOwnSongPosition() {
+        guard isPlayingOwnSong else { return }
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        // A song that has run out stops rather than sitting at the end
+        // pretending to play, which is what leaves the scoreboard waiting.
+        if songPlayer.isPlaying, songPlayer.hasFinished {
+            songPlayer.pause()
+            nowPlaying?.isPlaying = false
+        }
+        trackClock.adopt(
+            songPlayer.position, isPlaying: songPlayer.isPlaying, trueAt: now)
+    }
+
     /// Starts the hand-run words from a moment on the song's clock.
     ///
     /// The same instant re-anchors every singer, because the score and the
@@ -2132,6 +2261,7 @@ final class RouterModel: ScriptTarget {
     /// breakdown belongs to different lines than the ones it names.
     func runWords(from seconds: Double = 0) {
         guard isHandRun else { return }
+        if isPlayingOwnSong { songPlayer.play(from: seconds) }
         trackClock.adopt(
             seconds, isPlaying: true,
             trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
@@ -2146,6 +2276,7 @@ final class RouterModel: ScriptTarget {
     /// Stops them where they are.
     func stopWords() {
         guard isHandRun else { return }
+        if isPlayingOwnSong { songPlayer.pause() }
         let held = songPosition
         trackClock.adopt(
             held, isPlaying: false,
@@ -2161,6 +2292,10 @@ final class RouterModel: ScriptTarget {
     func closeWords() {
         guard isHandRun else { return }
         cancelLyricsLookup()
+        // Before the state is cleared: the engine holds a file open and an
+        // output device running, and handing the panel back to somebody else's
+        // player while still playing our own would put two songs in the room.
+        songPlayer.stop()
         isHandRun = false
         trackClock.stop()
         nowPlaying = nil
@@ -2408,7 +2543,6 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-
     // MARK: Transport
 
     /// Asks the player the stage is showing to do something.
@@ -2423,6 +2557,23 @@ final class RouterModel: ScriptTarget {
     /// the click, which reads as the click not having landed.
     func sendTransport(_ transport: NowPlaying.Transport) {
         guard let track = nowPlaying else { return }
+        // Our own song is not asked; it is told. No Apple event, no round trip,
+        // and the button takes effect in the same turn it was pressed.
+        if isPlayingOwnSong {
+            switch transport {
+            case .playPause:
+                if songPlayer.isPlaying {
+                    stopWords()
+                } else {
+                    runWords(from: songPosition)
+                }
+            case .next, .previous:
+                // There is no queue yet, so the two skip buttons move within
+                // the song rather than pretending there is another one.
+                skipNowPlaying(by: transport == .next ? 10 : -10)
+            }
+            return
+        }
         if transport == .playPause {
             nowPlaying?.isPlaying.toggle()
             trackClock.adopt(
@@ -2464,6 +2615,13 @@ final class RouterModel: ScriptTarget {
             seconds, isPlaying: track.isPlaying,
             trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
         followTheWords()
+        if isPlayingOwnSong {
+            // Exact, and immediate. A seek sent to another player is a request
+            // whose result arrives at the next poll; this one is the file being
+            // scheduled from a frame.
+            songPlayer.seek(to: seconds)
+            return
+        }
         let application = track.application
         Task.detached(priority: .userInitiated) {
             NowPlaying.seek(to: seconds, in: application)
@@ -2660,8 +2818,7 @@ final class RouterModel: ScriptTarget {
         return budget
     }
 
-    private var rowBudgetCache:
-        (stamp: String, rowsPerLine: CGFloat, extraRows: CGFloat)?
+    private var rowBudgetCache: (stamp: String, rowsPerLine: CGFloat, extraRows: CGFloat)?
 
     /// Whether the floating desktop lyric is showing.
     var showsDesktopLyrics: Bool {
@@ -4700,7 +4857,9 @@ final class RouterModel: ScriptTarget {
             // resizable image that arrives asynchronously and lays the stage
             // out twice. Every render and every photograph of this stage took
             // the first branch, so the one a user actually sees was untested.
-            artworkURL: URL(string: "https://p2.music.126.net/VZBj5FRD5zQpvkquGkBYEw==/109951173224181614.jpg"))
+            artworkURL: URL(
+                string:
+                    "https://p2.music.126.net/VZBj5FRD5zQpvkquGkBYEw==/109951173224181614.jpg"))
         // The line being sung carries word times, because a fixture without
         // them can only ever exercise the linear sweep — the compositor's
         // key-frame path had no picture of itself at all. Held syllables are

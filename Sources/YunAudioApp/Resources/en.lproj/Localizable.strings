@@ -493,6 +493,11 @@
 "Play something, or choose the words in the Sing panel." = "Play something, or choose the words in the Sing panel.";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "Local file" = "Local file";
+"This song" = "This song";
+"Open a song…" = "Open a song…";
+"Plays an audio file here, so the words follow the samples instead of asking another application where it is." = "Plays an audio file here, so the words follow the samples instead of asking another application where it is.";
+"That file could not be played" = "That file could not be played";
+"Nothing on this Mac could decode it. Try an MP3, M4A, WAV or AIFF." = "Nothing on this Mac could decode it. Try an MP3, M4A, WAV or AIFF.";
 "Words from %@" = "Words from %@";
 "Catalogue region %@" = "Catalogue region %@";
 "Open in Apple Music" = "Open in Apple Music";

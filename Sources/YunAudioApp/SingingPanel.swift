@@ -350,6 +350,12 @@ struct SingingPanel: View {
                 spacing: Yun.Space.sm, lineSpacing: 6,
                 balanced: true
             ) {
+                Button(loc("Open a song…")) { chooseSong() }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                    .help(
+                        loc(
+                            "Plays an audio file here, so the words follow the samples instead of asking another application where it is."
+                        ))
                 Button(model.isHandRun ? loc("Choose another") : loc("Choose the words…")) {
                     chooseWords()
                 }
@@ -489,6 +495,29 @@ struct SingingPanel: View {
         panel.directoryURL = RouterModel.lyricsDirectory
         guard panel.runModal() == .OK, let url = panel.url else { return }
         model.openWords(at: url)
+    }
+
+    /// Opening a song this application plays itself.
+    ///
+    /// The one source that costs nothing to follow: no Apple event, no
+    /// permission prompt, and a position that is a count of samples rather than
+    /// a second-old answer extrapolated forward. Words beside the file are used
+    /// where they exist, and the file's own tags are searched on where they do
+    /// not.
+    private func chooseSong() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = LocalSongPlayer.openableTypes
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = RouterModel.lyricsDirectory
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard model.openSong(at: url) else {
+            let alert = NSAlert()
+            alert.messageText = loc("That file could not be played")
+            alert.informativeText = loc(
+                "Nothing on this Mac could decode it. Try an MP3, M4A, WAV or AIFF.")
+            alert.runModal()
+            return
+        }
     }
 
     /// Moving the words against the recording.
