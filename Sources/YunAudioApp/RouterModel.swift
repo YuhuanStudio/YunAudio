@@ -8619,7 +8619,21 @@ final class RouterModel: ScriptTarget {
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
         let buffer = bufferFrames
-        let monitorUID = monitorDeviceUID
+        // A monitor that is the destination is not a monitor, it is the mix.
+        //
+        // Left in, every route into the destination is also a route into the
+        // monitor: the engine builds both, so the signal is summed twice — six
+        // decibels of level nobody asked for — and `remapMonitorRoutes` claims
+        // every main route as a monitor route, so the monitor fader drives what
+        // the far end hears. Both are audible and neither says anything.
+        //
+        // Reachable because the picker now offers a device that is *currently*
+        // the destination when the destination is also the source, which is a
+        // pair that cannot start; change the source afterwards and the pair
+        // becomes valid with the monitor sitting on top of it. So the invariant
+        // is enforced where it matters — at the start — rather than trusted to
+        // a list.
+        let monitorUID = monitorDeviceUID == selectedDestinationUID ? nil : monitorDeviceUID
         let extraSources = additionalSourceUIDs
         let extraDestinations = additionalDestinationUIDs
         let trim = outputLatencyFrames
