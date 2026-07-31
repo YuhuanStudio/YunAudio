@@ -239,8 +239,8 @@ render_wrote_everything() {
 	# that wrote nothing at all also exits zero, so the count is checked too.
 	local count
 	count=$(find "${WORK}/render" -name '*.png' | wc -l | tr -d ' ')
-	[[ "${count}" -eq 63 ]] || {
-		echo "expected exactly 63 rendered panels, got ${count}"
+	[[ "${count}" -eq 65 ]] || {
+		echo "expected exactly 65 rendered panels, got ${count}"
 		return 1
 	}
 	# Every inspector gets its own filename. `window-light.png` used to be

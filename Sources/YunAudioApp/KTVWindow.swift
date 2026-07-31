@@ -1059,10 +1059,20 @@ struct KTVStage: View {
                         // the rest's three notes during a break, and above the
                         // first line during an intro. Both are the centre row,
                         // so neither moves anything else on the stage.
+                        // Above the rest's own three notes rather than
+                        // instead of them. Replacing the mark meant a long
+                        // interlude drew nothing at all: the dots are blank
+                        // until the last four seconds, so between the start of
+                        // a break and its final bars the stage showed an empty
+                        // row where the sweep used to be. Collapsed while
+                        // there is nothing to count, so the height is only
+                        // taken when the count is on screen.
                         if offset == 0, countIn {
-                            KTVCountInDots(model: model, size: metrics.currentSize)
+                            KTVCountInDots(
+                                model: model, size: metrics.currentSize,
+                                reservesSpace: false)
                         }
-                        if !(offset == 0 && countIn && line.isInterlude) {
+                        if true {
                             lyricLine(
                                 line.isInterlude ? Self.interludeMark : line.text,
                                 offset: offset, isPlaying: index == playing,

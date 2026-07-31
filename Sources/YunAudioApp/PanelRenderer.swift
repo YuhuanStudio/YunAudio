@@ -228,6 +228,16 @@ enum PanelRenderer {
             size: CGSize(width: 380, height: 1_200))
         model.dismissPerformance()
         model.prepareForRendering()
+        // A song read out of a browser tab, which no capture has shown: no
+        // album, a cover derived from the address, and a broadcaster's name
+        // where a player would have put an artist's.
+        model.renderBrowserTrack()
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-browser\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        model.prepareForRendering()
         // Two voices, which the usual fixture song does not have. The colours
         // that tell them apart had no image to be judged in until this.
         model.renderDuet()

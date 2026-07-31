@@ -4834,6 +4834,30 @@ final class RouterModel: ScriptTarget {
             ])
     }
 
+    /// Puts a song read out of a browser tab on the fixture stage.
+    ///
+    /// The one source no capture has ever shown. A browser track is a
+    /// different shape from a player's: no album at all, a cover derived from
+    /// the address rather than supplied, and an "artist" that is often a
+    /// broadcaster's full name because the tab's title carried no credit — ten
+    /// characters where 「黃霄雲」 is three. If that overflows the track column
+    /// it does so only here. Renderer only.
+    func renderBrowserTrack() {
+        prepareForRendering()
+        nowPlaying?.application = "Safari"
+        nowPlaying?.title = "情結"
+        nowPlaying?.artist = "中國浙江衛視官方頻道"
+        nowPlaying?.album = ""
+        nowPlaying?.artworkURL = BrowserNowPlaying.artworkURL(
+            forTab: "https://www.youtube.com/watch?v=EkxJTjYGD70")
+        nowPlaying?.identity = "https://www.youtube.com/watch?v=EkxJTjYGD70"
+        // Both, or the image says 4:25 for a song the clock knows is 3:37 —
+        // a capture that disagrees with itself is worse than no capture.
+        nowPlaying?.duration = 217.021
+        trackClock.duration = 217.021
+        renderAt(second: 88.7)
+    }
+
     /// Puts a duet on the fixture stage, for the capture that judges it.
     ///
     /// The song the renderer normally uses is sung by one person, so the
