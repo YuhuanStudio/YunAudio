@@ -110,6 +110,35 @@ final class LocalSongPlayer {
         set { transpose.pitch = newValue }
     }
 
+    /// Whether the lead vocal is being taken out of the mix.
+    ///
+    /// Off by default, and it re-schedules from where the song is rather than
+    /// taking effect at the next line: a KTV machine's 原唱／伴奏 button is
+    /// pressed mid-song, usually mid-phrase, and a button that waits is a
+    /// button somebody presses twice.
+    private(set) var isCancellingCentre = false
+
+    /// True when this file has two channels to work with. A mono recording has
+    /// no side channel, so cancelling its centre cancels all of it.
+    var canCancelCentre: Bool {
+        guard let file else { return false }
+        return CentreCancel.isPossible(channels: file.processingFormat.channelCount)
+    }
+
+    @discardableResult
+    func setCancellingCentre(_ on: Bool) -> Bool {
+        guard on != isCancellingCentre else { return true }
+        guard !on || canCancelCentre else { return false }
+        let resumeAt = position
+        isCancellingCentre = on
+        if isPlaying {
+            play(from: resumeAt)
+        } else {
+            restingPosition = resumeAt
+        }
+        return true
+    }
+
     /// What the transpose costs in seconds, from the unit rather than assumed.
     ///
     /// It is not zero and it is not free to ignore: a time-pitch unit holds a
@@ -176,10 +205,19 @@ final class LocalSongPlayer {
             return false
         }
         node.stop()
+        scheduleGeneration &+= 1
         clock.startFrame = startFrame
-        node.scheduleSegment(
-            file, startingFrame: startFrame, frameCount: AVAudioFrameCount(remaining),
-            at: nil)
+        if isCancellingCentre {
+            // Read and processed a second at a time. The alternative is the
+            // whole file in memory — eighty-five megabytes for a four-minute
+            // stereo song — for a mode somebody switches on and off mid-verse.
+            chunkCursor = startFrame
+            for _ in 0..<Self.chunksInFlight { scheduleNextChunk() }
+        } else {
+            node.scheduleSegment(
+                file, startingFrame: startFrame, frameCount: AVAudioFrameCount(remaining),
+                at: nil)
+        }
         if !engine.isRunning {
             engine.prepare()
             guard (try? engine.start()) != nil else {
@@ -210,6 +248,7 @@ final class LocalSongPlayer {
 
     func pause() {
         guard isPlaying else { return }
+        scheduleGeneration &+= 1
         restingPosition = position
         node.pause()
         engine.pause()
@@ -217,6 +256,7 @@ final class LocalSongPlayer {
     }
 
     func stop() {
+        scheduleGeneration &+= 1
         node.stop()
         if engine.isRunning { engine.stop() }
         file = nil
@@ -246,6 +286,49 @@ final class LocalSongPlayer {
     var hasFinished: Bool {
         guard song != nil, clock.duration > 0 else { return false }
         return position >= clock.duration - 0.05
+    }
+
+    /// A second of audio per chunk, three in flight.
+    ///
+    /// One would leave the output waiting on the main thread between chunks —
+    /// the completion handler arrives on an audio thread and the refill has to
+    /// hop back — and any gap is a click. Three seconds of lead survives a busy
+    /// main thread and is short enough that a seek throws little away.
+    private static let chunkSeconds: Double = 1
+    private static let chunksInFlight = 3
+    private var chunkCursor: AVAudioFramePosition = 0
+    /// Bumped wherever scheduling restarts, so a chunk that was already in
+    /// flight cannot refill the queue after a seek, a pause or a new song.
+    private var scheduleGeneration = 0
+
+    private func scheduleNextChunk() {
+        guard isCancellingCentre, let file else { return }
+        let format = file.processingFormat
+        let frames = AVAudioFrameCount(Self.chunkSeconds * format.sampleRate)
+        let remaining = file.length - chunkCursor
+        guard remaining > 0, frames > 0, format.channelCount >= 2,
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
+        else { return }
+        file.framePosition = chunkCursor
+        guard
+            (try? file.read(
+                into: buffer, frameCount: min(frames, AVAudioFrameCount(remaining)))) != nil,
+            buffer.frameLength > 0, let channels = buffer.floatChannelData
+        else { return }
+        CentreCancel.apply(
+            left: channels[0], right: channels[1], frames: Int(buffer.frameLength),
+            amount: CentreCancel.defaultAmount)
+        chunkCursor += AVAudioFramePosition(buffer.frameLength)
+        let generation = scheduleGeneration
+        node.scheduleBuffer(buffer, completionCallbackType: .dataConsumed) { [weak self] _ in
+            // The callback arrives on an audio thread; everything this touches
+            // belongs to the main actor. The generation is what stops a chunk
+            // scheduled before a seek from refilling after one.
+            Task { @MainActor [weak self] in
+                guard let self, self.scheduleGeneration == generation else { return }
+                self.scheduleNextChunk()
+            }
+        }
     }
 
     private static func metadata(

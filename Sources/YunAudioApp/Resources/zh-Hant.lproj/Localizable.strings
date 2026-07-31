@@ -493,6 +493,8 @@
 "Play something, or choose the words in the Sing panel." = "請播放歌曲，或在唱歌面板中選擇歌詞。";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "這首沒有歌詞。把 .lrc 放進下面那個資料夾，會依名稱自動找到。";
 "Local file" = "本機檔案";
+"Original or backing" = "原唱／伴奏";
+"Removes what both channels share, which is usually the lead vocal — and the kick and bass with it." = "把左右聲道相同的部分拿掉，那通常就是主唱——大鼓和貝斯也會一起走。";
 "Already loaded, because automatic levelling or ducking is using it. This switch only keeps the readout up." = "已經載入了，因為自動響度或閃避正在用它。這個開關只決定要不要一直顯示讀數。";
 "Key" = "原調";
 "Take the song down a semitone" = "降半音";

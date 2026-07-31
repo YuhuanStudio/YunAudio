@@ -700,6 +700,37 @@ struct KTVStage: View {
                     songKey
                 }
 
+                // 原唱／伴奏, the other button every KTV machine has. Same rule:
+                // only where it does something, which means our own song and in
+                // stereo — a mono recording has no side channel to keep.
+                if model.canCancelLeadVocal {
+                    Button {
+                        model.toggleLeadVocal()
+                    } label: {
+                        Image(
+                            systemName: model.isCancellingLeadVocal
+                                ? "music.mic.circle.fill" : "music.mic"
+                        )
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(
+                            model.isCancellingLeadVocal
+                                ? Yun.Palette.accent : .white.opacity(0.72)
+                        )
+                        .frame(width: 24, height: 24)
+                        .background(
+                            .white.opacity(model.isCancellingLeadVocal ? 0.18 : 0.10),
+                            in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(
+                        loc(
+                            "Removes what both channels share, which is usually the lead vocal — and the kick and bass with it."
+                        )
+                    )
+                    .accessibilityLabel(loc("Original or backing"))
+                    .accessibilityIdentifier("KTVLeadVocal")
+                }
+
                 // Only when another index actually answered for this song.
                 // A control that does nothing is worse than no control.
                 if model.lyricAlternatives.count > 1 {

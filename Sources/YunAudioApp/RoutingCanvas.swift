@@ -262,6 +262,25 @@ private struct LiveCables: View {
     var body: some View {
         let _ = BodyCount.tick("LiveCables")
         let routeLevels = model.routeLevels
+        // Everything the draw closure needs, read here and captured as values.
+        //
+        // **A `Canvas` closure does not run on the main actor.** SwiftUI
+        // evaluates the display list through `Attribute.syncMainIfReferences`,
+        // and reaching into a `@MainActor` model from inside it makes the
+        // runtime perform a dynamic executor check on whatever thread that is.
+        // On macOS 27 that check segfaults outright — `objc_opt_class` on an
+        // executor reference of `0x1e` — and it takes the whole application
+        // down from the middle of `NSHostingView.layout()`, which looks like an
+        // AppKit fault and is not one. `routeLevels` was already hoisted for
+        // exactly this reason; `isSilenced` was the one that was left behind,
+        // and it only crashed once a route was actually silenced.
+        let silenced = routes.indices.map { model.isSilenced($0) }
+        // The palette too. Every one of these is a `@MainActor` computed
+        // property that reads the chosen accent out of the preferences, so
+        // leaving them inside the closure leaves the same dynamic check in it.
+        let danger = Yun.Palette.danger
+        let accent = Yun.Palette.accent
+        let success = Yun.Palette.success
         Canvas { context, _ in
             for (index, route) in routes.enumerated() {
                 guard let start = sourcePositions[route.source],
@@ -297,15 +316,14 @@ private struct LiveCables: View {
                 let level = RoutingCanvasLayout.level(
                     at: index,
                     levels: routeLevels,
-                    isSilenced: model.isSilenced(index))
+                    isSilenced: silenced.indices.contains(index) && silenced[index])
                 let lit = min(1, Double(level) * 4)
 
                 context.stroke(
                     path,
                     with: .color(
                         willBeRemoved
-                            ? Yun.Palette.danger
-                            : Yun.Palette.accent.opacity(isHighlighted ? 0.9 : 0.35)),
+                            ? danger : accent.opacity(isHighlighted ? 0.9 : 0.35)),
                     lineWidth: isHighlighted ? 2 : 1.5)
 
                 if lit > 0.02 && !willBeRemoved {
@@ -313,7 +331,7 @@ private struct LiveCables: View {
                     // stays as the route, and this is the signal on it.
                     context.stroke(
                         path,
-                        with: .color(Yun.Palette.success.opacity(0.35 + 0.65 * lit)),
+                        with: .color(success.opacity(0.35 + 0.65 * lit)),
                         lineWidth: 1.5 + 2 * lit)
                 }
             }

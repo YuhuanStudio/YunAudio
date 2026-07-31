@@ -493,6 +493,8 @@
 "Play something, or choose the words in the Sing panel." = "Play something, or choose the words in the Sing panel.";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "Local file" = "Local file";
+"Original or backing" = "Original or backing";
+"Removes what both channels share, which is usually the lead vocal — and the kick and bass with it." = "Removes what both channels share, which is usually the lead vocal — and the kick and bass with it.";
 "Already loaded, because automatic levelling or ducking is using it. This switch only keeps the readout up." = "Already loaded, because automatic levelling or ducking is using it. This switch only keeps the readout up.";
 "Key" = "Key";
 "Take the song down a semitone" = "Take the song down a semitone";

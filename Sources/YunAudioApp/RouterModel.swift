@@ -2142,10 +2142,36 @@ final class RouterModel: ScriptTarget {
     /// path already means "the clock is not a player's", already keeps the
     /// once-a-second poll switched off, and already carries words, tune, score
     /// and stage. The only difference is who moves the clock.
-    let songPlayer = LocalSongPlayer()
+    /// Built on the first song, not at launch.
+    ///
+    /// **Three crash reports say this matters.** With the player constructed
+    /// eagerly, `AVAudioEngine` and its `AudioSession` thread existed in every
+    /// session whether or not anybody played a file, and after about two
+    /// minutes every *dynamic main-actor check* in the process started faulting
+    /// — `EXC_BAD_ACCESS at 0x1e` inside `swift_task_isCurrentExecutor`, once
+    /// from a `Canvas` draw closure and twice from the twenty-hertz polling
+    /// timer, the last two from the same binary at the same place. The root
+    /// cause is not established; what is established is that the engine was
+    /// present in all three and that nothing before it had ever done this.
+    ///
+    /// Lazy is also simply right. An application nobody has asked to play a
+    /// file has no business holding an audio graph open, and this keeps the
+    /// whole of it — threads, session, units — inside the feature that needs
+    /// it rather than in everybody's launch.
+    var songPlayer: LocalSongPlayer {
+        if let player = madeSongPlayer { return player }
+        let player = LocalSongPlayer()
+        madeSongPlayer = player
+        return player
+    }
+
+    /// Nil until somebody opens a song. Read directly where the answer for "no
+    /// player yet" is the same as the answer for "player with nothing in it",
+    /// so that merely asking cannot build one.
+    private var madeSongPlayer: LocalSongPlayer?
 
     /// True while the song on the stage is a file this application is playing.
-    var isPlayingOwnSong: Bool { songPlayer.song != nil }
+    var isPlayingOwnSong: Bool { madeSongPlayer?.song != nil }
 
     /// Opens an audio file and makes it the song.
     ///
@@ -2272,6 +2298,23 @@ final class RouterModel: ScriptTarget {
         settingsRevision &+= 1
     }
 
+    /// Whether the lead vocal is being taken out of the song we are playing.
+    var isCancellingLeadVocal: Bool {
+        _ = settingsRevision
+        return madeSongPlayer?.isCancellingCentre == true
+    }
+
+    /// Whether the button would do anything: our own song, and in stereo.
+    var canCancelLeadVocal: Bool {
+        isPlayingOwnSong && madeSongPlayer?.canCancelCentre == true
+    }
+
+    func toggleLeadVocal() {
+        guard canCancelLeadVocal else { return }
+        songPlayer.setCancellingCentre(!songPlayer.isCancellingCentre)
+        settingsRevision &+= 1
+    }
+
     func resetSongKey() {
         guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return }
         SongKeys.clear(identity)
@@ -2286,7 +2329,7 @@ final class RouterModel: ScriptTarget {
     /// `lastCorrection` reads as the render quantum rather than as the tens of
     /// milliseconds an extrapolated answer drifts by.
     private func adoptOwnSongPosition() {
-        guard isPlayingOwnSong else { return }
+        guard isPlayingOwnSong, let songPlayer = madeSongPlayer else { return }
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
         // A song that has run out stops rather than sitting at the end
         // pretending to play, which is what leaves the scoreboard waiting.
@@ -2339,7 +2382,7 @@ final class RouterModel: ScriptTarget {
         // Before the state is cleared: the engine holds a file open and an
         // output device running, and handing the panel back to somebody else's
         // player while still playing our own would put two songs in the room.
-        songPlayer.stop()
+        madeSongPlayer?.stop()
         isHandRun = false
         trackClock.stop()
         nowPlaying = nil

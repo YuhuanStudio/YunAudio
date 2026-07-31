@@ -4291,6 +4291,40 @@ enum UIFlowCheck {
         model.resetSongKey()
         check("the song goes back to its own key", model.songKeySemitones == 0)
         check("and the unit with it", model.songPlayer.pitchCents == 0)
+
+        // 原唱／伴奏. A mono file has no side channel, so the button is refused
+        // rather than playing silence — this fixture is mono, and that guard is
+        // the thing to check on it.
+        check("a mono recording will not have its centre cancelled", !model.canCancelLeadVocal)
+
+        // And the stereo path, on a file with a centred part and a side part,
+        // which is what a real mix has.
+        let stereo = URL(fileURLWithPath: "/tmp/yunaudio-chain-stereo.wav")
+        defer { try? FileManager.default.removeItem(at: stereo) }
+        guard
+            (try? stereoWave(notes: chainNotes, secondsEach: chainNoteSeconds)
+                .write(to: stereo)) != nil,
+            model.openSong(at: stereo)
+        else {
+            note("could not write or open the stereo fixture — skipped")
+            return
+        }
+        check("a stereo song can have its centre cancelled", model.canCancelLeadVocal)
+        model.runWords(from: 0)
+        try? await Task.sleep(for: .milliseconds(300))
+        model.toggleLeadVocal()
+        check("the button takes effect", model.isCancellingLeadVocal)
+        // The part that can actually break: with the vocal out, the audio is
+        // read and processed a second at a time and handed over in chunks
+        // instead of as one segment. If that pump stalls the song stops dead,
+        // and the position is the only thing that says so.
+        let before = model.songPosition
+        try? await Task.sleep(for: .milliseconds(700))
+        model.refreshNowPlaying()
+        let after = model.songPosition
+        note("position \(before) → \(after) s across 700 ms with the vocal out")
+        check("and the song keeps playing through it", after > before + 0.3)
+        model.stopWords()
     }
 
     private static func checkDrivingTheWords(model: RouterModel, words: URL) async {
@@ -4957,8 +4991,32 @@ enum UIFlowCheck {
         return wave(samples, rate: rate)
     }
 
-    /// Wraps 16-bit mono samples in a RIFF header.
-    private static func wave(_ samples: [Int16], rate: Double) -> Data {
+    /// The same tone in both channels plus one only on the right.
+    ///
+    /// A centred part and a side part, which is what a real mix has and what
+    /// centre cancellation is a claim about. Mono would exercise nothing: the
+    /// player refuses it, which is a different check.
+    private static func stereoWave(
+        notes: [Int], secondsEach: Double, rate: Double = 48_000
+    )
+        -> Data
+    {
+        var samples: [Int16] = []
+        for note in notes {
+            let hertz = 440 * pow(2, (Double(note) - 69) / 12)
+            for frame in 0..<Int(secondsEach * rate) {
+                let phase = 2 * Double.pi * hertz * Double(frame) / rate
+                let centred = Int16(sin(phase) * 8000)
+                let side = Int16(sin(phase * 1.5) * 4000)
+                samples.append(centred)
+                samples.append(centred &+ side)
+            }
+        }
+        return wave(samples, rate: rate, channels: 2)
+    }
+
+    /// Wraps 16-bit samples in a RIFF header.
+    private static func wave(_ samples: [Int16], rate: Double, channels: Int = 1) -> Data {
         var bytes: [UInt8] = []
         func little32(_ value: Int) {
             bytes += [
@@ -4975,10 +5033,10 @@ enum UIFlowCheck {
         bytes += Array("WAVEfmt ".utf8)
         little32(16)
         little16(1)  // PCM
-        little16(1)  // mono
+        little16(channels)
         little32(Int(rate))
-        little32(Int(rate) * 2)
-        little16(2)
+        little32(Int(rate) * 2 * channels)
+        little16(2 * channels)
         little16(16)
         bytes += Array("data".utf8)
         little32(dataBytes)

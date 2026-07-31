@@ -37,6 +37,33 @@ swift build -c "${CONFIGURATION}" --product YunAudioApp
 BINARY=".build/${CONFIGURATION}/YunAudioApp"
 BUNDLE="${YUNAUDIO_APP_BUNDLE:-build/YunAudio.app}"
 
+# Never overwrite a bundle somebody is running.
+#
+# **This is not tidiness, it is a crash.** A running process has its text pages
+# mapped straight from the executable file; deleting and rewriting that file
+# under it leaves the mapping pointing at whatever is there now, and the process
+# faults on the next thing it touches. It looks nothing like a build problem:
+# two reports came in reading `EXC_BAD_ACCESS at 0x1e`, one inside a `Canvas`
+# draw closure and one inside a twenty-hertz timer, both in
+# `swift_task_isCurrentExecutor` — a plausible-looking concurrency fault in two
+# unrelated places, which is exactly what a rewritten binary looks like and is
+# not what it was. The same commit ran the flow check clean twice afterwards.
+#
+# Refused rather than warned about, because the failure lands minutes later in
+# somebody else's session and reads as a defect in the code being written.
+if [[ -z "${YUNAUDIO_ALLOW_OVERWRITE_RUNNING:-}" ]] && pgrep -qx YunAudioApp; then
+	cat >&2 <<'RUNNING'
+YunAudio is running, and rebuilding the bundle would overwrite the executable
+underneath it. That does not fail cleanly — the running copy segfaults somewhere
+unrelated a minute or two later.
+
+Quit it and build again. To build anyway (a copy running from elsewhere, say):
+
+  YUNAUDIO_ALLOW_OVERWRITE_RUNNING=1 ./App/build-app.sh
+RUNNING
+	exit 1
+fi
+
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
 # The icon is drawn by the binary that was just built, so it has to be told

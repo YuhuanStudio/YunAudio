@@ -456,7 +456,17 @@ public struct YunLevelMeter: View {
     }
 
     public var body: some View {
-        Canvas { context, size in
+        // Read here, not in the closure. A `Canvas` renderer is evaluated
+        // through SwiftUI's display-list update, and every one of these is a
+        // `@MainActor` computed property — reaching for one from inside makes
+        // the runtime check the current executor on whatever thread that turns
+        // out to be, which on macOS 27 segfaults. See `LiveCables`, which is
+        // where it actually happened.
+        let danger = Yun.Palette.danger
+        let warning = Yun.Palette.warning
+        let accent = Yun.Palette.accent
+        let unlit = Yun.Palette.elevated
+        return Canvas { context, size in
             let gap: CGFloat = 2
             let width = (size.width - gap * CGFloat(segments - 1)) / CGFloat(segments)
             let filled = normalized(level) * Double(segments)
@@ -475,17 +485,17 @@ public struct YunLevelMeter: View {
                 // the warning and danger hues rather than the neutral accent.
                 let color: Color =
                     if index >= segments - 1 {
-                        Yun.Palette.danger
+                        danger
                     } else if index >= segments - 3 {
-                        Yun.Palette.warning
+                        warning
                     } else {
-                        Yun.Palette.accent
+                        accent
                     }
 
                 if isLit || isHold {
                     context.fill(shape, with: .color(color.opacity(isLit ? 1 : 0.45)))
                 } else {
-                    context.fill(shape, with: .color(Yun.Palette.elevated))
+                    context.fill(shape, with: .color(unlit))
                 }
             }
         }
