@@ -1075,6 +1075,37 @@ run loop 裡它還沒有回去。所以輪詢就整段停掉，所有讀輪詢�
 **在這之前**：`startPolling` 的那個改動留著。它本身是對的（靜態隔離比動態檢查便宜也安全），
 只是它修不好一個 process 層級的毛病。
 
+## 這個當機是兩難，不是還沒找到的 bug [本機實測 2026-07-31]
+
+兩邊都量過了，各自壞在不同地方：
+
+| 輪詢的做法 | 動態 executor 檢查 | 結果 |
+|---|---|---|
+| `Timer` ＋ `MainActor.assumeIsolated`（原本、也是現在） | 有 | **每次都在 3:00–3:21 當機**（七份報告） |
+| 常駐 `@MainActor` task 迴圈 | 無 | **不當機**，但**巢狀 run loop 裡輪詢整段停掉** → 27 條 flow 斷言變紅 |
+
+**兩個都不能接受**，而且不是「還沒找到根因」——**兩邊的機制都已經知道了**：
+
+- task 迴圈死在語意上：巢狀 run loop 服務 `Timer`，不服務 continuation。這不是 bug，是
+  Swift concurrency 的定義。
+- `Timer` 死在 runtime 上：`swift_task_isCurrentExecutor` 讀到 `0x1e` 這種小整數。**而且
+  這個檢查本身沒問題**——最小重現（純 AppKit ＋ 每秒二十次同樣的檢查）跑滿 300 秒、6000 次
+  沒事。是**這個行程**裡有東西在三分鐘左右把它讀的狀態弄壞。
+
+**所以要修的是「什麼把它弄壞」，不是「用哪種輪詢」。** 在那之前，`Timer` 是對的選擇：它是
+今天以前就在跑的東西（那七份當機報告裡最早的幾份就是它），而 task 迴圈會靜靜地讓 27 條斷言
+失去意義——**東西還在動但沒有人在看**，這個專案最不能接受的就是這種。
+
+**下一步（還沒做）**，按可能性：
+
+1. 那個檢查讀的是「目前的 executor」。找出這個行程裡誰會動到 main thread 的 Swift
+   concurrency TLS——嫌疑最大的是**從非 Swift 執行緒建立 Task**（音訊回呼、HAL 回呼、
+   CoreMIDI 執行緒），或某個 framework 在主執行緒上做了 executor 相關的事。
+2. 用 `SWIFT_DEBUG_*` / `swift_task_enableSwiftTaskDebugging` 之類的旋鈕，看能不能在爆掉
+   之前先觀察到那個值變壞的時刻。
+3. 最後才是條件化 `kAudioDevicePropertySuggestedReferenceDevice` 之後用正式版工具鏈重建做
+   對照——`libswift_Concurrency` 的版本仍然是沒排除的變因。
+
 ## flow check 在這台機器現在的狀態下本來就有二十幾條紅的 [本機實測 2026-07-31]
 
 追那個當機的時候，完整 flow check 跑出 27 條失敗。其中 5 條確實是我弄的（輪詢改成 task

@@ -4329,6 +4329,39 @@ enum UIFlowCheck {
         note("position \(before) → \(after) s across 700 ms with the vocal out")
         check("and the song keeps playing through it", after > before + 0.3)
 
+        // The queue, which is the part that gets quietly wrong: the value type
+        // is tested to death, and none of that says the next song actually
+        // starts when this one ends.
+        model.stopWords()
+        let second = URL(fileURLWithPath: "/tmp/yunaudio-chain-stereo-two.wav")
+        defer { try? FileManager.default.removeItem(at: second) }
+        if (try? stereoWave(notes: chainNotes, secondsEach: chainNoteSeconds)
+            .write(to: second)) != nil,
+            model.openSongs(at: [stereo, second])
+        {
+            check("the queue holds what was put on it", model.hasAnotherSongQueued)
+            check("and the first of them is the song", model.nowPlaying?.identity
+                == "file:\(stereo.path)")
+            // Started near the end, so the handover happens in a few seconds
+            // rather than in the length of the fixture.
+            model.runWords(from: 0)
+            model.seekNowPlaying(toSeconds: max(0, (model.nowPlaying?.duration ?? 6) - 1.2))
+            var handedOver = false
+            for _ in 0..<40 {
+                try? await Task.sleep(for: .milliseconds(200))
+                model.refreshNowPlaying()
+                if model.nowPlaying?.identity == "file:\(second.path)" {
+                    handedOver = true
+                    break
+                }
+            }
+            check("the next song starts when this one ends", handedOver)
+            check("and nothing is left queued after the last", !model.hasAnotherSongQueued)
+            model.stopWords()
+        } else {
+            note("could not write or open the queue fixtures — skipped")
+        }
+
         // The soak, which is off unless asked for.
         //
         // Four crash reports put the process down at about two minutes with an

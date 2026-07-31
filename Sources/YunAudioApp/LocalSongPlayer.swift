@@ -180,12 +180,15 @@ final class LocalSongPlayer {
         engine.disconnectNodeOutput(node)
         engine.disconnectNodeOutput(transpose)
         engine.connect(node, to: transpose, format: format)
-        // The mixer's own format, not the file's. The mixer is downstream of
-        // the output device, which this application switches while running, so
-        // insisting on the file's rate here is insisting on a rate the mixer
-        // may not have — and the same exception comes back. `nil` lets the
-        // engine pick a format both ends can hold, and it resamples if it must.
-        engine.connect(transpose, to: engine.mainMixerNode, format: nil)
+        // The file's format on both edges. `nil` was tried here — the theory
+        // being that the mixer, sitting downstream of an output device this
+        // application switches while running, might not hold the file's rate.
+        // The flow check answered: with `nil` the graph connects and then
+        // renders nothing at all. Position stayed at 0.0 after 600 ms of
+        // playing and the time-pitch unit reported no latency, which is what an
+        // engine that never started looks like. The disconnect above is what
+        // fixed the exception; this was a guess on top of it.
+        engine.connect(transpose, to: engine.mainMixerNode, format: format)
         let tags = Self.metadata(of: url)
         let song = Song(
             url: url,

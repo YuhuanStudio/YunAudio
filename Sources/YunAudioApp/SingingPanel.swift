@@ -507,10 +507,12 @@ struct SingingPanel: View {
     private func chooseSong() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = LocalSongPlayer.openableTypes
-        panel.allowsMultipleSelection = false
+        // Several at once, because a KTV evening is a list rather than a song.
+        // See `KTVQueue`.
+        panel.allowsMultipleSelection = true
         panel.directoryURL = RouterModel.lyricsDirectory
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard model.openSong(at: url) else {
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
+        guard model.openSongs(at: panel.urls) else {
             let alert = NSAlert()
             alert.messageText = loc("That file could not be played")
             alert.informativeText = loc(

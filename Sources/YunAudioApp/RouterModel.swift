@@ -2170,6 +2170,46 @@ final class RouterModel: ScriptTarget {
     /// so that merely asking cannot build one.
     private var madeSongPlayer: LocalSongPlayer?
 
+    /// The songs that have been put on. See `KTVQueue` for what its verbs mean.
+    private(set) var songQueue = KTVQueue()
+
+    /// Whether the song being sung comes round again instead of the next one.
+    var repeatsOneSong: Bool {
+        get { songQueue.repeatsOne }
+        set {
+            songQueue.repeatsOne = newValue
+            settingsRevision &+= 1
+        }
+    }
+
+    /// Whether ⏭ has somewhere to go other than further into this song.
+    var hasAnotherSongQueued: Bool { !songQueue.upcoming.isEmpty }
+
+    /// Puts songs on, and starts the first if nothing is being sung.
+    ///
+    /// - Returns: False when the first song could not be opened. Songs that
+    ///   follow are not opened until their turn, so a folder with one bad file
+    ///   in it still plays.
+    @discardableResult
+    func openSongs(at urls: [URL]) -> Bool {
+        guard !urls.isEmpty else { return false }
+        guard let start = songQueue.append(urls) else { return true }
+        return openSong(at: start, keepingQueue: true)
+    }
+
+    /// 插播: after this one, not behind the other eleven.
+    func playSongNext(_ url: URL) {
+        songQueue.playNext(url)
+        settingsRevision &+= 1
+    }
+
+    /// ⏭ when there is a queue: the next song rather than ten seconds on.
+    func skipToNextSong() {
+        guard let next = songQueue.advance() else { return }
+        openSong(at: next, keepingQueue: true)
+        runWords(from: 0)
+    }
+
     /// True while the song on the stage is a file this application is playing.
     var isPlayingOwnSong: Bool { madeSongPlayer?.song != nil }
 
@@ -2179,7 +2219,14 @@ final class RouterModel: ScriptTarget {
     /// `慢冷.lrc` is how anybody with a folder of backing tracks already has
     /// them — and only then online, keyed on whatever the file's own tags say.
     @discardableResult
-    func openSong(at url: URL) -> Bool {
+    func openSong(at url: URL, keepingQueue: Bool = false) -> Bool {
+        // Opening a single song is starting again; opening the next one out of
+        // the queue is the queue doing its job. Without the distinction,
+        // advancing would throw away the list it was advancing through.
+        if !keepingQueue {
+            songQueue.clear()
+            songQueue.append([url])
+        }
         guard let song = songPlayer.open(url) else { return false }
         cancelLyricsLookup()
         isHandRun = true
@@ -2336,6 +2383,14 @@ final class RouterModel: ScriptTarget {
         if songPlayer.isPlaying, songPlayer.hasFinished {
             songPlayer.pause()
             nowPlaying?.isPlaying = false
+            // And then the next one, which is the entire point of a queue:
+            // nobody should have to walk back to the machine between songs.
+            // The scoreboard has already been kept by `keepPerformance`, which
+            // runs off the same stop.
+            if let next = songQueue.advance() {
+                openSong(at: next, keepingQueue: true)
+                runWords(from: 0)
+            }
         }
         trackClock.adopt(
             songPlayer.position, isPlaying: songPlayer.isPlaying, trueAt: now)
@@ -2654,10 +2709,18 @@ final class RouterModel: ScriptTarget {
                 } else {
                     runWords(from: songPosition)
                 }
-            case .next, .previous:
-                // There is no queue yet, so the two skip buttons move within
-                // the song rather than pretending there is another one.
-                skipNowPlaying(by: transport == .next ? 10 : -10)
+            case .next:
+                // The next song where there is one, ten seconds on where there
+                // is not. A skip button that moves inside the song while a
+                // queue is waiting is a skip button pointing at the wrong
+                // thing.
+                if hasAnotherSongQueued {
+                    skipToNextSong()
+                } else {
+                    skipNowPlaying(by: 10)
+                }
+            case .previous:
+                skipNowPlaying(by: -10)
             }
             return
         }
