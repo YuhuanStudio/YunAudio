@@ -1012,7 +1012,31 @@ UUID、同一個位置、都在啟動後約兩分鐘**，所以是可重現的�
 
 **驗法**：`YUNAUDIO_SOAK_SECONDS=<秒>` 讓 flow check 的「the song is ours to play」那一節在
 開著歌、播著的狀態下持續跑。斷言就是「跑到最後」——當機會把整個 process 帶走，所以一節能走完
-就代表它沒當。舊版在 3:21 倒。
+就代表它沒當。
+
+**結果：拿掉那一行沒有修好，而且答案比修好更有價值——當機換了地方。** 第六次
+（15:29:45）倒在 `StatusItemController.refreshImageOnTimer()`，**另一個計時器、另一個
+`@objc` 方法**，一樣的位址、一樣的 `swift_task_isCurrentExecutor`。而且時間幾乎一模一樣：
+啟動後 **3:21**，跟上一次（3:21）到秒都對得上。
+
+**所以這不是某一個呼叫點的問題。** 是**整個 process 裡任何一次動態 main-actor 檢查**，在啟動
+約三分二十秒之後開始爆——runtime 對「主執行器是什麼」的認知變成了垃圾（讀到 `0x1e` 這種小
+整數）。把呼叫點一個一個拿掉是打地鼠：SwiftUI 自己就在做這件事（第一次當機就是在 `Canvas`
+的顯示清單更新裡）。
+
+**下一步（還沒做）**，照可能性排：
+
+1. **換工具鏈重建再 soak。** 現在是用 Xcode-beta 的 Swift 6.4 建、跑在 macOS 27 beta 的
+   `libswift_Concurrency` 上。beta 工具鏈與 beta OS 之間的 concurrency ABI 對不上，正好會長
+   成這樣。這是最便宜也最有可能的一刀：`./App/toolchain.sh` 換成系統工具鏈，重建，跑同一個
+   soak，看 3:21 還在不在。
+2. **時間點本身是線索**：兩次都是 3:21。找出這個 process 裡什麼東西在三分二十秒左右做一次
+   ——如果有，那它就是嫌犯。
+3. 最小重現：一個空的 SwiftUI app、一個 20 Hz 計時器、一個 `MainActor.assumeIsolated`，同樣
+   的建置方式，放著跑。如果它也在 3:21 倒，那就跟這個專案完全無關，是可以回報給 Apple 的東西。
+
+**在這之前**：`startPolling` 的那個改動留著。它本身是對的（靜態隔離比動態檢查便宜也安全），
+只是它修不好一個 process 層級的毛病。
 
 ## 已定案 —— 沒有新證據就不要再試
 
