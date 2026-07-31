@@ -176,7 +176,7 @@ struct SingingPanel: View {
             if let lyrics = model.lyrics {
                 lyricsSource(synchronised: true)
                 SingingLyrics(model: model, lyrics: lyrics)
-                lyricNudge
+                KTVWordsControls(model: model, scale: .inspector)
             } else if let plain = model.plainLyrics {
                 lyricsSource(synchronised: false)
                 Text(plain)
@@ -626,29 +626,6 @@ struct SingingPanel: View {
     /// is right — the file was written against a different master, or a stream
     /// with a different silent lead-in — and without this the only remedy was
     /// editing the file between verses.
-    @ViewBuilder
-    private var lyricNudge: some View {
-        HStack(spacing: Yun.Space.sm) {
-            Text(loc("Words"))
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-            Button(loc("Earlier")) { model.nudgeLyrics(by: 0.1) }
-                .buttonStyle(YunButtonStyle(.ghost, small: true))
-            Button(loc("Later")) { model.nudgeLyrics(by: -0.1) }
-                .buttonStyle(YunButtonStyle(.ghost, small: true))
-            Spacer()
-            Text(
-                model.lyricNudge == 0
-                    ? loc("as written") : String(format: "%+.1f s", model.lyricNudge)
-            )
-            .font(Yun.Text.mono)
-            .foregroundStyle(
-                model.lyricNudge == 0 ? Yun.Palette.textMuted : Yun.Palette.textSecondary
-            )
-            .monospacedDigit()
-        }
-    }
-
     /// How much of the tune each person actually sang.
     ///
     /// Two microphones is two scores rather than one, and it costs nothing to

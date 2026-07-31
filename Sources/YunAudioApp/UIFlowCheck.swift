@@ -4638,22 +4638,23 @@ enum UIFlowCheck {
         let counting = model.lyrics.flatMap {
             KTVCountIn.secondsUntilWords(
                 in: $0, playing: model.lyricLine, position: Double(model.songSecond),
-                nudge: model.lyricNudge)
+                nudge: 0)
         }
         check("nothing is counted in over a line being sung", counting == nil)
 
         // And the positive case, through the whole chain: the intro is
         // counted, and shifting the words moves the count with them. The
-        // count-in reads the offset and the live nudge, both of which reach it
-        // by different routes — one folded into the lyrics value, one a
-        // property of the model — and neither was ever checked end to end.
+        // The count-in reads the offset, which is now the whole correction:
+        // there used to be a second, transient one beside it that the panel
+        // drove and the stage did not, so the same thing had two controls and
+        // they added up. See `KTVWordsControls`.
         model.seekToLyricLine(0)
         model.skipNowPlaying(by: -2)
         model.refreshNowPlaying()
         let countBefore = model.lyrics.flatMap {
             KTVCountIn.secondsUntilWords(
                 in: $0, playing: model.lyricLine, position: Double(model.songSecond),
-                nudge: model.lyricNudge)
+                nudge: 0)
         }
         // The hand-run song's first line is at zero, so there is no intro to
         // count — which is the 慢冷 shape, and the reason the count-in and the
@@ -4665,7 +4666,7 @@ enum UIFlowCheck {
         let countAfter = model.lyrics.flatMap {
             KTVCountIn.secondsUntilWords(
                 in: $0, playing: model.lyricLine, position: Double(model.songSecond),
-                nudge: model.lyricNudge)
+                nudge: 0)
         }
         check(
             "holding the words back gives the intro a count",
@@ -4720,14 +4721,14 @@ enum UIFlowCheck {
                 ? nil
                 : KTVCountIn.secondsUntilWords(
                     in: $0, playing: model.lyricLine,
-                    position: Double(model.songSecond), nudge: model.lyricNudge)
+                    position: Double(model.songSecond), nudge: 0)
         }
         check("no count is offered while the column is off the song", whileBrowsing == nil)
         model.followTheSongAgain()
         let afterReturning = model.lyrics.flatMap {
             KTVCountIn.secondsUntilWords(
                 in: $0, playing: model.lyricLine, position: Double(model.songSecond),
-                nudge: model.lyricNudge)
+                nudge: 0)
         }
         check(
             "and the count is there again the moment it returns",
@@ -4902,14 +4903,24 @@ enum UIFlowCheck {
 
         // Moving the words against the recording, which is the control every
         // downloaded `.lrc` eventually needs and the panel did not have.
+        // Against the *remembered* offset, which is now the only one. The panel
+        // used to drive a transient nudge of its own that the stage knew
+        // nothing about: the same correction had two controls, they added up,
+        // and only one of them survived changing song — which is precisely the
+        // control 「慢冷」 needs, because that file has no lead-in and no better
+        // one exists to find.
         model.runWords(from: 2.0)
         await pause(0.2)
         let before = model.lyricLine
-        model.nudgeLyrics(by: 1.0)
-        check("the words can be pulled a second earlier", model.lyricNudge == 1.0)
+        model.nudgeLyricOffset(by: 1.0)
+        check("the words can be pulled a second earlier", model.lyricOffsetSeconds == 1.0)
         check("which moves the highlight on by a line", model.lyricLine == (before ?? 0) + 1)
-        for _ in 0..<40 { model.nudgeLyrics(by: 1.0) }
-        check("and it stops at two seconds either way", model.lyricNudge == 2.0)
+        // And it survives the song being reopened, which the old one did not.
+        let remembered = model.lyricOffsetSeconds
+        model.refreshNowPlaying()
+        check("and it is remembered for this song", model.lyricOffsetSeconds == remembered)
+        model.clearLyricOffset()
+        check("clearing puts the words back where the file had them", model.lyricOffsetSeconds == 0)
         model.stopWords()
 
         // What asking a player costs, which is the whole reason the clock

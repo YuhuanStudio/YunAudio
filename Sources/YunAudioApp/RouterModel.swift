@@ -1160,7 +1160,6 @@ final class RouterModel: ScriptTarget {
     /// different silent lead-in. Everybody who has ever sung to a downloaded
     /// `.lrc` has wanted this control and the panel did not have one, so the
     /// only remedy was editing the file between verses.
-    private(set) var lyricNudge: Double = 0
     /// Set while somebody is looking at the lyrics, so nothing is asked of the
     /// music players when nobody is.
     /// Whether the stage has its own window on screen.
@@ -1197,11 +1196,6 @@ final class RouterModel: ScriptTarget {
     /// Bounded at two seconds either way: past that the file is for a different
     /// recording rather than out by a lead-in, and a control that can put the
     /// words a verse out is a control that loses somebody their place.
-    func nudgeLyrics(by seconds: Double) {
-        lyricNudge = max(-2, min(2, ((lyricNudge + seconds) * 10).rounded() / 10))
-        followTheWords()
-    }
-
     /// What key the backing track is in, once enough of it has been heard.
     private(set) var songKey: KeyDetector.Key?
     /// How far the song would have to move for this singer, in semitones.
@@ -1340,7 +1334,6 @@ final class RouterModel: ScriptTarget {
         lyricProgress = 0
         lyricPlaybackAnchor = nil
         songSecond = 0
-        lyricNudge = 0
         isHandRun = false
         trackClock.stop()
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
@@ -2942,7 +2935,12 @@ final class RouterModel: ScriptTarget {
     func seekToLyricLine(_ index: Int) {
         guard let lyrics, lyrics.lines.indices.contains(index) else { return }
         seekNowPlaying(
-            toSeconds: max(0, lyrics.lines[index].time - lyrics.offset - lyricNudge))
+            // `lyrics.offset` is the whole correction: the file's own
+            // `[offset:]` plus whatever this song was moved by. There used to be
+            // a second one beside it — a transient ±2 s the panel drove and the
+            // stage did not — so the same thing had two controls, they added up,
+            // and only one of them was remembered. See `KTVWordsControls`.
+            toSeconds: max(0, lyrics.lines[index].time - lyrics.offset))
     }
 
     /// Moves the music by a few seconds, keeping it inside the song.
@@ -3030,7 +3028,6 @@ final class RouterModel: ScriptTarget {
         // seconds applied to a take that already had them, and the words are
         // wrong again in the direction they just fixed.
         LyricOffsets.clear(identity)
-        lyricNudge = 0
         // The new take has its own line numbering, so anything holding a line
         // index from the old one is now pointing at a different lyric or at
         // nothing. Published so the stage can put its column back on the song.
@@ -3483,7 +3480,7 @@ final class RouterModel: ScriptTarget {
             if lyricPlaybackAnchor != nil { lyricPlaybackAnchor = nil }
             return
         }
-        let heard = position + lyricNudge
+        let heard = position
         let index = lyrics.index(at: heard)
         // The scoreboard belongs to the song that finished, and the moment the
         // next one is actually being sung it is in the way. Documented as this
@@ -3501,12 +3498,12 @@ final class RouterModel: ScriptTarget {
             lyricPlaybackAnchor = LyricPlaybackAnchor(
                 lineIndex: index,
                 lineStart: index.map {
-                    lyrics.lines[$0].time - lyrics.offset - lyricNudge
+                    lyrics.lines[$0].time - lyrics.offset
                 } ?? 0,
                 lineEnd: index.map {
                     $0 + 1 < lyrics.lines.count
-                        ? lyrics.lines[$0 + 1].time - lyrics.offset - lyricNudge
-                        : lyrics.lines[$0].time - lyrics.offset - lyricNudge + 4
+                        ? lyrics.lines[$0 + 1].time - lyrics.offset
+                        : lyrics.lines[$0].time - lyrics.offset + 4
                 } ?? 0,
                 position: position,
                 trueAt: now,

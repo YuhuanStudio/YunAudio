@@ -487,6 +487,9 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"Smaller words" = "字小一点";
+"Larger words" = "字大一点";
+"Try another source" = "换一个歌词来源";
 "Voice isolation is on, and it will treat the song as noise." = "人声隔离开着，它会把这首歌当成噪声。";
 "Apple's model keeps one person speaking and removes everything else, which is the backing track and the singing. It also adds about 56 ms." = "Apple 的模型只留下一个讲话的人，其余全部除掉——那就是伴奏和你的歌声。而且还多 56 毫秒延迟。";
 "Turn it off while singing" = "唱歌时关掉它";

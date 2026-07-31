@@ -683,155 +683,17 @@ struct KTVStage: View {
     /// correction nobody can find is a correction nobody makes, and the reading
     /// is what stops a shifted song being silently shifted for ever. At rest it
     /// says nothing but its two arrows.
+    /// Everything that can be done to the words, shared with the panel.
+    ///
+    /// This used to be the stage's own row: the offset, pronunciation, the
+    /// script switch and the size, each written here and half of them nowhere
+    /// else. Two presentations of one song that disagree about what can be done
+    /// to it is the same defect as two that disagree about who is singing, so
+    /// there is one construction and two scales. See `KTVWordsControls`.
     @ViewBuilder
     private var lyricAlignment: some View {
         if model.lyrics != nil {
-            let offset = model.lyricOffsetSeconds
-            HStack(spacing: Yun.Space.sm) {
-                Button {
-                    model.nudgeLyricOffset(by: -0.5)
-                } label: {
-                    Image(systemName: "arrow.left.to.line")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .frame(width: 24, height: 24)
-                        .background(.white.opacity(0.10), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(loc("Hold the words back"))
-                .accessibilityIdentifier("KTVLyricsEarlier")
-
-                // Only once it is not zero, so the row is two arrows at rest.
-                if abs(offset) >= 0.01 {
-                    Button {
-                        model.clearLyricOffset()
-                    } label: {
-                        Text(String(format: "%+.1f s", offset))
-                            .font(.system(size: 11, weight: .semibold).monospacedDigit())
-                            .foregroundStyle(Yun.Palette.accent.opacity(0.92))
-                    }
-                    .buttonStyle(.plain)
-                    .help(loc("Put the words back where the file had them"))
-                    .accessibilityIdentifier("KTVLyricsOffset")
-                }
-
-                Button {
-                    model.nudgeLyricOffset(by: 0.5)
-                } label: {
-                    Image(systemName: "arrow.right.to.line")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
-                        .frame(width: 24, height: 24)
-                        .background(.white.opacity(0.10), in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(loc("Send the words forward"))
-                .accessibilityIdentifier("KTVLyricsLater")
-
-                Button {
-                    model.showsRomanisation.toggle()
-                } label: {
-                    Text(verbatim: "拼")
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundStyle(
-                            model.showsRomanisation
-                                ? Yun.Palette.accent : .white.opacity(0.72)
-                        )
-                        .frame(width: 24, height: 24)
-                        .background(
-                            .white.opacity(model.showsRomanisation ? 0.18 : 0.10),
-                            in: Circle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(loc("Show pronunciation"))
-                .accessibilityIdentifier("KTVRomanisation")
-
-                // 簡／繁. A catalogue answers in whichever script it holds, and
-                // the same song from two indexes can arrive in two scripts on
-                // two evenings; somebody reading along should not have to find
-                // out which one they got. One button cycling three states
-                // rather than a picker, because it sits in a row of 24-point
-                // circles and is pressed while a song is playing.
-                //
-                // Shown only when there is Chinese to convert: an English song
-                // does not need a button that would do nothing.
-                if model.lyricsHaveChinese {
-                    Button {
-                        model.lyricScript = model.lyricScript.next
-                    } label: {
-                        Text(verbatim: model.lyricScript.mark)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(
-                                model.lyricScript == .asWritten
-                                    ? .white.opacity(0.72) : Yun.Palette.accent
-                            )
-                            .frame(width: 24, height: 24)
-                            .background(
-                                .white.opacity(model.lyricScript == .asWritten ? 0.10 : 0.18),
-                                in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(model.lyricScript.title)
-                    .accessibilityIdentifier("KTVLyricScript")
-                }
-
-                // The key, and only where there is something that can change
-                // it. Every other source on this stage is somebody else's
-                // player, and no scripting dictionary transposes anything —
-                // offering the buttons there would be offering a control that
-                // does nothing, which is worse than not offering one.
-                if model.canTransposeSong {
-                    songKey
-                }
-
-                // 原唱／伴奏, the other button every KTV machine has. Same rule:
-                // only where it does something, which means our own song and in
-                // stereo — a mono recording has no side channel to keep.
-                if model.canCancelLeadVocal {
-                    Button {
-                        model.toggleLeadVocal()
-                    } label: {
-                        Image(
-                            systemName: model.isCancellingLeadVocal
-                                ? "music.mic.circle.fill" : "music.mic"
-                        )
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(
-                            model.isCancellingLeadVocal
-                                ? Yun.Palette.accent : .white.opacity(0.72)
-                        )
-                        .frame(width: 24, height: 24)
-                        .background(
-                            .white.opacity(model.isCancellingLeadVocal ? 0.18 : 0.10),
-                            in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .help(
-                        loc(
-                            "Removes what both channels share, which is usually the lead vocal — and the kick and bass with it."
-                        )
-                    )
-                    .accessibilityLabel(loc("Original or backing"))
-                    .accessibilityIdentifier("KTVLeadVocal")
-                }
-
-                // Only when another index actually answered for this song.
-                // A control that does nothing is worse than no control.
-                if model.lyricAlternatives.count > 1 {
-                    Button {
-                        model.useNextLyricSource()
-                    } label: {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.72))
-                            .frame(width: 24, height: 24)
-                            .background(.white.opacity(0.10), in: Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(loc("Try another lyric source"))
-                    .accessibilityIdentifier("KTVNextLyricSource")
-                }
-            }
+            KTVWordsControls(model: model, scale: .stage)
         }
     }
 

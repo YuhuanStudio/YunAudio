@@ -488,6 +488,9 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"Smaller words" = "Smaller words";
+"Larger words" = "Larger words";
+"Try another source" = "Try another source";
 "Voice isolation is on, and it will treat the song as noise." = "Voice isolation is on, and it will treat the song as noise.";
 "Apple's model keeps one person speaking and removes everything else, which is the backing track and the singing. It also adds about 56 ms." = "Apple's model keeps one person speaking and removes everything else, which is the backing track and the singing. It also adds about 56 ms.";
 "Turn it off while singing" = "Turn it off while singing";

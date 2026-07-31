@@ -84,8 +84,12 @@ struct KTVCountInDots: View {
             model.lyrics.flatMap {
                 KTVCountIn.remaining(
                     seconds: KTVCountIn.secondsUntilWords(
+                        // Nought, because there is no second correction any
+                        // more: `lyrics.offset` carries the whole of it. The
+                        // parameter stays so the pure function can still be
+                        // asked what a correction would do to the count-in.
                         in: $0, playing: model.lyricLine,
-                        position: Double(model.songSecond), nudge: model.lyricNudge))
+                        position: Double(model.songSecond), nudge: 0))
             } ?? 0
         return HStack(spacing: dot * 0.7) {
             ForEach(0..<KTVCountIn.dots, id: \.self) { index in

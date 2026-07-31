@@ -70,12 +70,25 @@ struct LyricSourceSwitchTests {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
             .deletingLastPathComponent()
-        let stage = try String(
+        // The controls moved out of the stage and into one construction shared
+        // with the panel, which is the point of them: both presentations of one
+        // song must offer the same things. Scanning the stage for them would now
+        // fail on the change that made them identical.
+        let controls = try String(
             contentsOf: repository.appendingPathComponent(
-                "Sources/YunAudioApp/KTVWindow.swift"), encoding: .utf8)
+                "Sources/YunAudioApp/KTVWordsControls.swift"), encoding: .utf8)
 
-        #expect(stage.contains("if model.lyricAlternatives.count > 1"))
-        #expect(stage.contains("KTVNextLyricSource"))
-        #expect(stage.contains("model.useNextLyricSource()"))
+        #expect(controls.contains("if model.lyricAlternatives.count > 1"))
+        #expect(controls.contains("model.useNextLyricSource()"))
+
+        // And both sides really do take it, which is the invariant worth
+        // holding: a control added to one and not the other is the drift this
+        // replaced.
+        for file in ["KTVWindow.swift", "SingingPanel.swift"] {
+            let source = try String(
+                contentsOf: repository.appendingPathComponent(
+                    "Sources/YunAudioApp/\(file)"), encoding: .utf8)
+            #expect(source.contains("KTVWordsControls(model: model"), "\(file)")
+        }
     }
 }
