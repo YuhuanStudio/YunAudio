@@ -109,35 +109,64 @@ struct BrowserNowPlayingTests {
         #expect(BrowserNowPlaying.parsePosition(reply("https://github.com/x", "NaN", "paused")) == nil)
     }
 
-    @Test("a title that is not a credit is left whole")
-    func onlyRealCreditsAreSplit() {
-        // 「Wonderwall」 must not become 「Wonder」 and 「wall」: only a hyphen
-        // with space either side, and only when both halves have something.
-        #expect(BrowserNowPlaying.splitTitle("Wonderwall", channel: "Oasis").title == "Wonderwall")
-        #expect(BrowserNowPlaying.splitTitle("Wonderwall", channel: "Oasis").artist == "Oasis")
+    @Test("the three real titles YouTube answered with")
+    func realTitlesAreParsed() {
+        // Taken from YouTube's own oEmbed, not imagined. The first version of
+        // this parser was written from what a title looks like in the
+        // imagination and all three of the first three real ones defeated it.
+        let rainy = BrowserNowPlaying.splitTitle(
+            "Huang Xiaoyun 黄霄雲 – The Rainy Season of a Youthful Crush《年少心动雨季》Live | Shangyu 2026",
+            channel: "Xiaoyun Heavenly Voice")
+        #expect(rainy.title == "年少心动雨季")
+        #expect(rainy.artist == "黄霄雲")
+
+        let rice = BrowserNowPlaying.splitTitle(
+            "周杰倫 Jay Chou【稻香 Rice Field】-Official Music Video",
+            channel: "周杰倫 Jay Chou")
+        #expect(rice.title == "稻香")
+        #expect(rice.artist == "周杰倫")
+
+        let memories = BrowserNowPlaying.splitTitle(
+            "尤雅 - 往事只能回味『春風又吹紅了花蕊 你已經也添了新歲，你就要變心 像時光難倒回，"
+                + "我只有在夢裡相依偎。』【動態歌詞/Vietsub/Pinyin Lyrics】",
+            channel: "EHPMusicChannel")
+        #expect(memories.title == "往事只能回味")
+        #expect(memories.artist == "尤雅")
+    }
+
+    @Test("a song with no Chinese in it is left exactly as it is")
+    func latinTitlesAreUntouched() {
+        // The Han preference must be a no-op for everything it was not written
+        // for, which is most of the music in the world.
+        let wonderwall = BrowserNowPlaying.splitTitle("Wonderwall", channel: "Oasis")
+        #expect(wonderwall.title == "Wonderwall")
+        #expect(wonderwall.artist == "Oasis")
+
+        let never = BrowserNowPlaying.splitTitle(
+            "Rick Astley - Never Gonna Give You Up (Official Video)",
+            channel: "Rick Astley")
+        #expect(never.title == "Never Gonna Give You Up")
+        #expect(never.artist == "Rick Astley")
+        // A hyphen inside a word is not a credit.
         #expect(BrowserNowPlaying.splitTitle("Spider-Man", channel: "x").title == "Spider-Man")
-        #expect(BrowserNowPlaying.splitTitle("- lonely -", channel: "x").title == "- lonely -")
+    }
+
+    @Test("a name in brackets beats a credit outside them")
+    func bracketsNameTheSong() {
+        #expect(BrowserNowPlaying.bracketedName(in: "x《稻香》y") == "稻香")
+        #expect(BrowserNowPlaying.bracketedName(in: "x【稻香】y") == "稻香")
+        // A sentence in brackets is not a name, and taking it would replace
+        // the title with a line of the lyric.
+        #expect(
+            BrowserNowPlaying.bracketedName(
+                in: "【春風又吹紅了花蕊你已經也添了新歲你就要變心像時光難倒回】") == nil)
+        #expect(BrowserNowPlaying.bracketedName(in: "no brackets") == nil)
     }
 
     @Test("an automatic channel's label is not part of anybody's name")
     func topicChannelsAreCleaned() {
-        // YouTube appends 「 - Topic」 to the channels it generates, and a
-        // lyric index has never heard of an artist called that.
-        #expect(
-            BrowserNowPlaying.splitTitle("稻香", channel: "周杰倫 - Topic").artist == "周杰倫")
-    }
-
-    @Test("what an uploader wraps round a title is removed")
-    func decorationIsStripped() {
-        #expect(
-            BrowserNowPlaying.strippedDecoration("稻香 (Official Music Video)") == "稻香")
-        #expect(BrowserNowPlaying.strippedDecoration("稻香【完整版】") == "稻香")
-        #expect(BrowserNowPlaying.strippedDecoration("稻香 [HD]") == "稻香")
-        // And what is part of the title stays: a bracket is not decoration
-        // just for being a bracket.
-        #expect(
-            BrowserNowPlaying.strippedDecoration("年少心動雨季 (那年盛夏)")
-                == "年少心動雨季 (那年盛夏)")
+        // YouTube appends 「 - Topic」 to the channels it generates.
+        #expect(BrowserNowPlaying.splitTitle("稻香", channel: "周杰倫 - Topic").artist == "周杰倫")
     }
 
     @Test("the transport asks the page rather than inventing a queue")
@@ -210,6 +239,47 @@ struct BrowserNowPlayingTests {
         #expect(
             NowPlaying.queryFailure(application: "Safari", code: Int(errAETimeout))
                 == .timedOut(application: "Safari"))
+    }
+
+    @Test("a browser is never asked at the polling rate")
+    func browsersAreKeptOffThePollPath() {
+        // Measured on this machine with ten tabs open, less `osascript`'s own
+        // 37 ms of startup: one tab one evaluation is 88 ms, a sweep of ten is
+        // 171 ms. The position poll runs at twenty hertz — a fifty-millisecond
+        // budget — so either of those is over it by itself and the sweep by
+        // three times. Both intervals must stay well clear of that.
+        #expect(NowPlaying.browserAskInterval >= 0.5)
+        #expect(NowPlaying.browserSweepInterval >= NowPlaying.browserAskInterval)
+    }
+
+    @Test("the answer carried between asks is the answer, not a guess")
+    func carriedPositionsAdvance() throws {
+        // No sleeping. A wall-clock wait inside the full suite is a race
+        // against a saturated executor — the lesson this session already paid
+        // for twice — so what is checked is the arithmetic at the moment it is
+        // asked, where the elapsed time is nearly zero.
+        let playing = NowPlaying.Position(
+            application: "Safari", identity: "u", seconds: 10, isPlaying: true)
+        NowPlaying.rememberBrowserPosition(playing, for: "Safari")
+        let carried = try #require(NowPlaying.carriedBrowserPosition(for: "Safari"))
+        // Advanced by the elapsed time, which here is almost none — and never
+        // by more than the interval, because past that it is asked again.
+        #expect(carried.seconds >= 10)
+        #expect(carried.seconds < 10 + NowPlaying.browserAskInterval)
+        #expect(carried.identity == "u")
+        #expect(carried.isPlaying)
+
+        // A paused song does not move, and carrying it forward as if it did
+        // would run the words on without it.
+        let paused = NowPlaying.Position(
+            application: "Safari", identity: "u", seconds: 10, isPlaying: false)
+        NowPlaying.rememberBrowserPosition(paused, for: "Safari")
+        #expect(NowPlaying.carriedBrowserPosition(for: "Safari")?.seconds == 10)
+
+        // And forgetting one means the next poll asks rather than carrying a
+        // song that has gone.
+        NowPlaying.rememberBrowserPosition(nil, for: "Safari")
+        #expect(NowPlaying.carriedBrowserPosition(for: "Safari") == nil)
     }
 
     @Test("seeking is bounded and never asks for a position that is not one")

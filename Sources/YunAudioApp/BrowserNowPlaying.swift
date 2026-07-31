@@ -143,38 +143,121 @@ enum BrowserNowPlaying {
 
     /// Separates 「Artist - Title」 where a video is named that way.
     ///
-    /// Only on a hyphen with space either side, and only when both halves have
-    /// something in them: 「Wonderwall」 must not become 「Wonder」 and 「wall」,
-    /// and a title containing a dash mid-word is not a credit.
+    /// **Rewritten against real titles, taken from YouTube's own oEmbed.** The
+    /// first version was written from what a title looks like in the
+    /// imagination, and all three of the first three real ones defeated it:
+    ///
+    ///   · 「Huang Xiaoyun 黄霄雲 – The Rainy Season of a Youthful Crush
+    ///     《年少心动雨季》Live | Shangyu 2026」
+    ///   · 「周杰倫 Jay Chou【稻香 Rice Field】-Official Music Video」
+    ///   · 「尤雅 - 往事只能回味『春風又吹紅了花蕊 …』【動態歌詞/Vietsub/Pinyin Lyrics】」
+    ///
+    /// The song's own name is inside the brackets in the first two and outside
+    /// them in the third; the decoration is in brackets, after a bar, after a
+    /// hyphen, and in a quoted line of the lyric itself. What they have in
+    /// common is not a shape, so this is a sequence of removals ending in one
+    /// preference, and each step is pinned to one of those three strings.
     static func splitTitle(_ title: String, channel: String) -> (title: String, artist: String) {
         let cleaned = strippedDecoration(title)
+        // The name in brackets wins where there is one: an uploader who writes
+        // 《年少心动雨季》 or 【稻香 Rice Field】 is naming the song inside its own
+        // punctuation, and everything round it is theirs rather than the
+        // song's.
+        if let named = bracketedName(in: cleaned) {
+            let artist = cleaned.range(of: named).map {
+                String(cleaned[..<$0.lowerBound])
+            } ?? ""
+            return (
+                preferringHan(named),
+                preferringHan(creditedName(in: artist, or: channel))
+            )
+        }
         for separator in [" - ", " – ", " — ", " ‐ "] {
             guard let range = cleaned.range(of: separator) else { continue }
             let artist = String(cleaned[..<range.lowerBound])
                 .trimmingCharacters(in: .whitespaces)
             let song = String(cleaned[range.upperBound...])
                 .trimmingCharacters(in: .whitespaces)
-            if !artist.isEmpty, !song.isEmpty { return (song, artist) }
+            if !artist.isEmpty, !song.isEmpty {
+                return (preferringHan(song), preferringHan(artist))
+            }
         }
-        // The channel, less the 「 - Topic」 YouTube appends to the automatic
-        // ones, which is a label rather than part of anybody's name.
-        let performer =
-            channel.hasSuffix(" - Topic")
+        return (preferringHan(cleaned), preferringHan(creditedName(in: "", or: channel)))
+    }
+
+    /// The credit written before the song, or the channel when there is none.
+    private static func creditedName(in prefix: String, or channel: String) -> String {
+        let trimmed = prefix.trimmingCharacters(
+            in: CharacterSet(charactersIn: " -–—‐《》【】").union(.whitespaces))
+        if !trimmed.isEmpty { return trimmed }
+        // YouTube appends 「 - Topic」 to the channels it generates, and no
+        // lyric index has heard of an artist called that.
+        return channel.hasSuffix(" - Topic")
             ? String(channel.dropLast(" - Topic".count)) : channel
-        return (cleaned, performer)
+    }
+
+    /// The name an uploader put inside 《》 or 【】, when it is short enough to
+    /// be a name rather than a sentence.
+    static func bracketedName(in title: String) -> String? {
+        for pattern in ["《([^》]{1,24})》", "【([^】]{1,24})】"] {
+            guard let match = title.range(of: pattern, options: .regularExpression)
+            else { continue }
+            let inner = title[match].dropFirst().dropLast()
+            let name = inner.trimmingCharacters(in: .whitespaces)
+            if !name.isEmpty { return name }
+        }
+        return nil
+    }
+
+    /// Where a string carries both Chinese and Latin, the Chinese.
+    ///
+    /// 「周杰倫 Jay Chou」 and 「稻香 Rice Field」 are one name and one song with a
+    /// gloss attached for people who do not read the other script. A lyric
+    /// index holds one of the two, and it is the one the song was released
+    /// under. A title with no Han in it is left exactly as it is.
+    static func preferringHan(_ text: String) -> String {
+        var runs: [String] = []
+        var current = ""
+        for character in text {
+            let isHan = character.unicodeScalars.contains {
+                (0x2E80...0x9FFF).contains($0.value) || (0xF900...0xFAFF).contains($0.value)
+            }
+            if isHan || (!current.isEmpty && (character.isNumber || character.isWhitespace)) {
+                current.append(character)
+            } else {
+                runs.append(current)
+                current = ""
+            }
+        }
+        runs.append(current)
+        let best = runs.map { $0.trimmingCharacters(in: .whitespaces) }
+            .max { $0.count < $1.count } ?? ""
+        return best.isEmpty ? text.trimmingCharacters(in: .whitespaces) : best
     }
 
     /// Removes what an uploader puts round a title and a lyric index will not
-    /// match: 【】, official-video tags, quality claims.
+    /// match.
     static func strippedDecoration(_ title: String) -> String {
         var cleaned = title
         for pattern in [
-            "\\s*[\\(\\[（【][^\\)\\]）】]*(?i:official|mv|m/v|hd|4k|lyric|audio|video|字幕|歌詞|完整版)[^\\)\\]）】]*[\\)\\]）】]"
+            // A quoted line of the lyric, which uploaders use as a subtitle.
+            "[『「][^』」]*[』」]",
+            // Bracket groups that are about the upload rather than the song.
+            "\\s*[\\(\\[（【][^\\)\\]）】]*"
+                + "(?i:official|mv|m/v|hd|4k|lyric|audio|video|live|vietsub|pinyin"
+                + "|字幕|歌詞|歌词|完整版|高音質|純享|官方)"
+                + "[^\\)\\]）】]*[\\)\\]）】]",
+            // Everything after a bar: 「| Shangyu 2026」, 「| 官方版」.
+            "\\s*\\|.*$",
+            // A tail after a hyphen that is about the upload.
+            "\\s*[-–—‐]\\s*(?i:official|full|hd|4k|mv|m/v|lyrics?|audio|video|live)"
+                + "[^《【]*$",
         ] {
             cleaned = cleaned.replacingOccurrences(
                 of: pattern, with: "", options: .regularExpression)
         }
-        return cleaned.trimmingCharacters(in: .whitespaces)
+        return cleaned.trimmingCharacters(
+            in: CharacterSet(charactersIn: " -–—‐").union(.whitespaces))
     }
 
     /// The same tab, asked only where it is — twenty times a second.

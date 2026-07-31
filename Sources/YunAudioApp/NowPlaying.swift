@@ -126,6 +126,59 @@ enum NowPlaying {
         return paused
     }
 
+    /// How often a browser may be asked anything at all.
+    ///
+    /// **Measured on this machine, 2026-07-31, Safari with ten tabs open.**
+    /// Subtracting `osascript`'s own 37 ms of process startup:
+    ///
+    ///     one tab, one evaluation    88 ms
+    ///     a sweep of ten tabs       171 ms
+    ///
+    /// The position poll runs at twenty hertz — a fifty-millisecond budget —
+    /// so *either* of those is over it by itself, and the sweep is over it by
+    /// three times. A browser on that path would have spent the whole of it
+    /// waiting for an Apple Event, twenty times a second, for as long as the
+    /// application was open with nothing playing.
+    ///
+    /// So a browser is asked about once a second and the answer is carried
+    /// forward in between, advanced by the elapsed time exactly as the track
+    /// clock advances everything else between polls. A song does not move
+    /// faster than that, and the fill on the words has never come from this
+    /// number.
+    nonisolated static let browserAskInterval: Double = 0.9
+
+    /// The last answer from each browser, and when it was given.
+    nonisolated(unsafe) private static var lastBrowserAnswers:
+        [String: (position: Position, asked: Double)] = [:]
+
+    nonisolated private static var monotonicNow: Double {
+        Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+    }
+
+    /// The answer to carry forward, or nil when it is time to ask again.
+    nonisolated static func carriedBrowserPosition(for browser: String) -> Position? {
+        knownTabsLock.lock()
+        defer { knownTabsLock.unlock() }
+        guard let last = lastBrowserAnswers[browser] else { return nil }
+        let elapsed = monotonicNow - last.asked
+        guard elapsed >= 0, elapsed < browserAskInterval else { return nil }
+        guard last.position.isPlaying else { return last.position }
+        return Position(
+            application: last.position.application, identity: last.position.identity,
+            seconds: last.position.seconds + elapsed,
+            isPlaying: true)
+    }
+
+    nonisolated static func rememberBrowserPosition(_ position: Position?, for browser: String) {
+        knownTabsLock.lock()
+        if let position {
+            lastBrowserAnswers[browser] = (position, monotonicNow)
+        } else {
+            lastBrowserAnswers[browser] = nil
+        }
+        knownTabsLock.unlock()
+    }
+
     /// The tab each browser last answered from.
     ///
     /// A sweep runs the script in every tab, which is what finding the song
@@ -148,8 +201,32 @@ enum NowPlaying {
         knownTabsLock.unlock()
     }
 
-    /// Asks one browser what its tabs are playing.
+    /// How often the tab-by-tab sweep may run.
+    ///
+    /// 171 ms measured, and it is the expensive one because it evaluates the
+    /// script in every tab until one answers. Twice a second is far more often
+    /// than somebody starts a song, and between sweeps the last answer stands.
+    nonisolated static let browserSweepInterval: Double = 2.0
+
+    nonisolated(unsafe) private static var lastBrowserTracks:
+        [String: (track: Track?, asked: Double)] = [:]
+
+    /// Asks one browser what its tabs are playing, at most every two seconds.
     nonisolated static func readBrowser(_ name: String) -> Track? {
+        knownTabsLock.lock()
+        let cached = lastBrowserTracks[name]
+        knownTabsLock.unlock()
+        if let cached, monotonicNow - cached.asked < browserSweepInterval {
+            return cached.track
+        }
+        let track = sweepBrowser(name)
+        knownTabsLock.lock()
+        lastBrowserTracks[name] = (track, monotonicNow)
+        knownTabsLock.unlock()
+        return track
+    }
+
+    nonisolated private static func sweepBrowser(_ name: String) -> Track? {
         let source = BrowserNowPlaying.script(
             forBrowser: name, javaScript: BrowserNowPlaying.readingScript)
         guard let text = run(source, application: name).text, !text.isEmpty else {
@@ -345,6 +422,9 @@ enum NowPlaying {
         // answers with *that* player's position, so the words would follow a
         // song nobody is listening to. Twenty times a second.
         if isBrowser(name) {
+            if let carried = carriedBrowserPosition(for: name) {
+                return PositionQuery(position: carried, failure: nil)
+            }
             let reply = run(
                 BrowserNowPlaying.script(
                     forBrowser: name, javaScript: BrowserNowPlaying.positionScript,
@@ -358,14 +438,15 @@ enum NowPlaying {
                 // song. Forget it, so the next poll sweeps for another rather
                 // than asking an address nobody is on.
                 rememberTab(nil, in: name)
+                rememberBrowserPosition(nil, for: name)
                 return PositionQuery(position: nil, failure: nil)
             }
             rememberTab(answer.identity, in: name)
-            return PositionQuery(
-                position: Position(
-                    application: name, identity: answer.identity,
-                    seconds: answer.seconds, isPlaying: answer.isPlaying),
-                failure: nil)
+            let position = Position(
+                application: name, identity: answer.identity,
+                seconds: answer.seconds, isPlaying: answer.isPlaying)
+            rememberBrowserPosition(position, for: name)
+            return PositionQuery(position: position, failure: nil)
         }
         let source = """
             tell application "\(name)"
