@@ -1025,18 +1025,24 @@ UUID、同一個位置、都在啟動後約兩分鐘**，所以是可重現的�
 整數）。把呼叫點一個一個拿掉是打地鼠：SwiftUI 自己就在做這件事（第一次當機就是在 `Canvas`
 的顯示清單更新裡）。
 
+**最小重現：做了，它活下來了。** 純 AppKit、一個計時器、每秒二十次
+`MainActor.assumeIsolated`，沒有音訊、沒有 SwiftUI、沒有任何這個專案的東西，同一條工具鏈
+（Xcode-beta，Swift 6.4）建：**跑滿 300 秒、6000 次動態檢查，沒事**。所以「beta 工具鏈對
+上 beta OS 的 concurrency ABI」本身不會爆——**是這個行程裡有東西把它弄壞的**。
+
+**而且 3:21 大概不是時間，是進度。** 兩次死在 3:21 的都是 **flow check** 的執行，而且兩次
+的 log 都停在同一個地方（`volume keys` 那一節）。相對的，**一般啟動**（沒跑 flow check、
+只是把 app 放著）**活過 4:12**。所以「三分二十一秒」比較可能是那份腳本跑到某一節的時間，
+不是一個時鐘上的門檻。
+
 **下一步（還沒做）**，照可能性排：
 
-1. **換工具鏈重建再 soak —— 試了，被擋住了。** 用 `/Applications/Xcode.app`（正式版，
-   Swift 6.3.3）建會編不過：`kAudioDevicePropertySuggestedReferenceDevice` 在那個 SDK 裡不
-   存在（那是 CoreAudio 語音活動偵測那一段用的 macOS 27 符號）。所以要做這個對照，得先把那
-   一處用 `#if canImport` 之類的方式條件化，或者暫時拿掉那個功能再建。**這仍然是最可能的
-   方向**——beta 工具鏈的 Swift 6.4 對上 beta OS 的 `libswift_Concurrency`，concurrency ABI
-   對不上正好會長成這樣——只是它不是一行指令的事。
-2. **時間點本身是線索**：兩次都是 3:21。找出這個 process 裡什麼東西在三分二十秒左右做一次
-   ——如果有，那它就是嫌犯。
-3. 最小重現：一個空的 SwiftUI app、一個 20 Hz 計時器、一個 `MainActor.assumeIsolated`，同樣
-   的建置方式，放著跑。如果它也在 3:21 倒，那就跟這個專案完全無關，是可以回報給 Apple 的東西。
+1. **找出是哪一節。** 兩次都停在 `volume keys` 之後。用 `--flow=` 單獨跑那一節、以及它前後
+   幾節，看哪一個跑完之後動態檢查就開始爆。這是現在最窄也最可能的一刀。
+2. 找到之後，看那一節做了什麼——它們會啟停音訊裝置、切換裝置、套用 preset。**某個東西在拆
+   除的時候可能把主執行器的狀態帶走了。**
+3. 只有在 1 和 2 都問不出東西時，才回頭做工具鏈對照（需要先條件化
+   `kAudioDevicePropertySuggestedReferenceDevice`）。
 
 **在這之前**：`startPolling` 的那個改動留著。它本身是對的（靜態隔離比動態檢查便宜也安全），
 只是它修不好一個 process 層級的毛病。
