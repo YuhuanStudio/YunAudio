@@ -225,6 +225,40 @@ struct PitchAccuracyTests {
         #expect(worstSung < 25)
     }
 
+    @Test("a backing track in the microphone is where it actually fails")
+    func withBacking() {
+        // The real room. A KTV microphone hears the singer *and* the
+        // accompaniment coming back off the speakers, and autocorrelation has
+        // no way to prefer one periodicity over another — it locks onto
+        // whichever is strongest, which on a quiet phrase is the backing track.
+        //
+        // This is the case a learned estimator would exist to win, so it is
+        // measured before anything is trained: if the tracker copes, there is
+        // no argument for a model at all.
+        let chord: [Double] = [130.81, 164.81, 196.00]  // C3 E3 G3
+        for backingGain in [0.3, 0.6, 1.0] {
+            var worst = 0.0
+            var lost = 0
+            for wanted in [261.63, 329.63, 392.00, 440.00, 523.25] {
+                var mix = voice(hertz: wanted, seconds: 0.3)
+                for note in chord {
+                    let backing = voice(hertz: note, seconds: 0.3, harmonics: 5)
+                    for index in mix.indices {
+                        mix[index] += Float(backingGain / 3) * backing[index]
+                    }
+                }
+                let measured = track(mix, sung: true)
+                let error = cents(measured, wanted)
+                worst = max(worst, error)
+                if error > 50 { lost += 1 }
+            }
+            print(
+                String(
+                    format: "backing %.1f: worst %.0f cents, %d of 5 notes lost",
+                    backingGain, worst, lost))
+        }
+    }
+
     @Test("silence is silence rather than a guess")
     func silence() {
         #expect(track([Float](repeating: 0, count: 9600)) == 0)
