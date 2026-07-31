@@ -309,7 +309,18 @@ enum WindowCapture {
         for (label, size) in sizes {
             let opened = window.frame.size
             window.setContentSize(size)
-            window.contentView?.layoutSubtreeIfNeeded()
+            // Not `layoutSubtreeIfNeeded()`. Laying the subtree out by hand
+            // immediately after a resize runs the hosting view's constraint
+            // update inside the caller's frame, and when that update decides
+            // the window's content-size extrema have changed it posts a fresh
+            // needs-update to the window — from inside the pass that is
+            // already updating. AppKit throws for that, uncaught, and the
+            // gate died at 02:39:56 on 2026-07-31 in exactly that stack:
+            // `_postWindowNeedsUpdateConstraints` ← `updateConstraints` ←
+            // `updateWindowContentSizeExtremaIfNecessary`.
+            //
+            // The display cycle lays it out anyway, one turn later, which is
+            // what every check below already waits for.
             let resized = window.frame.size
             // Roughly the size it was asked for, and *still* that size several
             // run-loop turns later. Two windows were overriding the safe-area

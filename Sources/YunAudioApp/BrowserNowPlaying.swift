@@ -28,6 +28,14 @@ enum BrowserNowPlaying {
 
     /// Reads the first tab that has a video element with a source loaded.
     ///
+    /// **Measured against a real Safari, 2026-07-31.** The same sweep without
+    /// these two guards answered from a GitHub project page: a `<video>` with
+    /// no source, `currentTime` 0 and a duration of `NaN`, sitting in a README.
+    /// Unguarded, that page would have become the song — a track with a
+    /// nonsense length, a stage attached to it, and a lyric lookup for the
+    /// title of a repository. Pages carry video elements that are not media.
+    /// With the guards, the same browser answers "no tab".
+    ///
     /// Written without a single backslash. This string is pasted into an
     /// AppleScript string literal, which has its own escaping, and a JavaScript
     /// escape surviving that intact is a coin toss — `String.fromCharCode(31)`
@@ -54,19 +62,40 @@ enum BrowserNowPlaying {
     /// Every tab, not just the front one: music plays in a tab somebody left
     /// behind three windows ago, which is the whole reason this is worth
     /// having. The loop stops at the first tab that answers.
-    static func script(forBrowser name: String, javaScript: String) -> String {
+    static func script(
+        forBrowser name: String, javaScript: String, onlyTabAt address: String? = nil
+    ) -> String {
         let call =
             name == "Safari"
             ? "do JavaScript theCode in theTab"
             : "execute theTab javascript theCode"
+        // Running the script in every tab is what finding the song costs, and
+        // it is worth paying once. It is not worth paying twenty times a
+        // second, which is what the position poll would have done: thirty tabs
+        // is six hundred JavaScript evaluations a second to learn a number
+        // that came from one of them. Once the address is known, every other
+        // tab is skipped by a string comparison — the same sweep, without the
+        // part that costs anything.
+        let guardClause =
+            address == nil
+            ? ""
+            : """
+                            if (URL of theTab as text) is not theWanted then
+                                    exit repeat
+                                end if
+
+                """
+        let wanted =
+            address.map { "set theWanted to \"" + escapedForAppleScript($0) + "\"\n" }
+            ?? ""
         return """
             set theCode to "\(escapedForAppleScript(javaScript))"
-            tell application "\(name)"
+            \(wanted)tell application "\(name)"
                 if it is not running then return ""
                 repeat with theWindow in windows
                     repeat with theTab in tabs of theWindow
                         try
-                            set theAnswer to (\(call)) as text
+            \(guardClause)                set theAnswer to (\(call)) as text
                             if theAnswer is not "" then return theAnswer
                         end try
                     end repeat

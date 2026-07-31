@@ -126,14 +126,39 @@ enum NowPlaying {
         return paused
     }
 
+    /// The tab each browser last answered from.
+    ///
+    /// A sweep runs the script in every tab, which is what finding the song
+    /// costs and is worth paying once. It is not worth paying at the polling
+    /// rate: thirty tabs would be six hundred JavaScript evaluations a second
+    /// to learn a number that came from one of them. With the address known,
+    /// the sweep skips every other tab on a string comparison.
+    nonisolated(unsafe) private static var knownTabs: [String: String] = [:]
+    nonisolated private static let knownTabsLock = NSLock()
+
+    nonisolated static func knownTab(in browser: String) -> String? {
+        knownTabsLock.lock()
+        defer { knownTabsLock.unlock() }
+        return knownTabs[browser]
+    }
+
+    nonisolated static func rememberTab(_ address: String?, in browser: String) {
+        knownTabsLock.lock()
+        knownTabs[browser] = address
+        knownTabsLock.unlock()
+    }
+
     /// Asks one browser what its tabs are playing.
     nonisolated static func readBrowser(_ name: String) -> Track? {
         let source = BrowserNowPlaying.script(
             forBrowser: name, javaScript: BrowserNowPlaying.readingScript)
         guard let text = run(source, application: name).text, !text.isEmpty else {
+            rememberTab(nil, in: name)
             return nil
         }
-        return BrowserNowPlaying.parse(text, browser: name)
+        let track = BrowserNowPlaying.parse(text, browser: name)
+        rememberTab(track?.identity, in: name)
+        return track
     }
 
     /// Whether an application name is one of the browsers rather than a player.
@@ -322,14 +347,20 @@ enum NowPlaying {
         if isBrowser(name) {
             let reply = run(
                 BrowserNowPlaying.script(
-                    forBrowser: name, javaScript: BrowserNowPlaying.positionScript),
+                    forBrowser: name, javaScript: BrowserNowPlaying.positionScript,
+                    onlyTabAt: knownTab(in: name)),
                 application: name)
             guard let text = reply.text else {
                 return PositionQuery(position: nil, failure: reply.failure)
             }
             guard let answer = BrowserNowPlaying.parsePosition(text) else {
+                // The tab that was answering has gone, or stopped being a
+                // song. Forget it, so the next poll sweeps for another rather
+                // than asking an address nobody is on.
+                rememberTab(nil, in: name)
                 return PositionQuery(position: nil, failure: nil)
             }
+            rememberTab(answer.identity, in: name)
             return PositionQuery(
                 position: Position(
                     application: name, identity: answer.identity,

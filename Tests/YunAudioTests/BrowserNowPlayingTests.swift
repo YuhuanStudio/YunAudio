@@ -94,6 +94,21 @@ struct BrowserNowPlayingTests {
                 reply("", "", "1", "10", "playing", "u"), browser: "Safari") == nil)
     }
 
+    @Test("a page whose video is not media is not a song")
+    func decorativeVideosAreRefused() {
+        // Observed, not imagined: a sweep without the guards answered from a
+        // GitHub project page — a `<video>` in a README with no source and a
+        // duration of NaN. Unguarded it would have become the song, and the
+        // application would have looked up lyrics for the name of a
+        // repository. The reading script refuses it in the tab; this is the
+        // second refusal, for the case where a browser answers anyway.
+        #expect(
+            BrowserNowPlaying.parse(
+                reply("jingyaogong/minimind-o", "", "0", "NaN", "paused", "https://github.com/x"),
+                browser: "Safari") == nil)
+        #expect(BrowserNowPlaying.parsePosition(reply("https://github.com/x", "NaN", "paused")) == nil)
+    }
+
     @Test("a title that is not a credit is left whole")
     func onlyRealCreditsAreSplit() {
         // 「Wonderwall」 must not become 「Wonder」 and 「wall」: only a hyphen
