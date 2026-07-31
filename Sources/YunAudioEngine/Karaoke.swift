@@ -1228,7 +1228,14 @@ public final class SingerPitch {
     private var anchor: Double = 0
 
     public init?(sampleRate: Double) {
-        guard let tracker = PitchTracker(sampleRate: sampleRate) else { return nil }
+        // The sung range, not the spoken one. Above 400 Hz the speaking search
+        // returns the octave below, note for note — see `lowestSungHertz`.
+        guard
+            let tracker = PitchTracker(
+                sampleRate: sampleRate,
+                lowest: PitchTracker.lowestSungHertz,
+                highest: PitchTracker.highestSungHertz)
+        else { return nil }
         self.tracker = tracker
         self.sampleRate = sampleRate
         pending = .allocate(capacity: PitchTracker.frameSize)

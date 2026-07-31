@@ -487,6 +487,7 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"Singing" = "唱歌";
 "This song is in %@" = "这首歌的调是 %@";
 "Move it %@ for you" = "帮你移 %@";
 "Sing a little and it will work out how far to move it." = "先唱一下，它会算出要移多少。";

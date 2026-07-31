@@ -49,6 +49,29 @@ public final class PitchTracker {
     public static let lowestHertz: Double = 60
     public static let highestHertz: Double = 400
 
+    /// The range a **sung** voice needs, which is not the range a spoken one
+    /// needs.
+    ///
+    /// The limits above are for speech and the comment beside them says so:
+    /// "four hundred above any adult female". That is true of talking and
+    /// false of singing. A4 is 440 Hz, and a soprano line, a chorus, and most
+    /// of the female pop repertoire live above it.
+    ///
+    /// Measured before this existed, on synthesised vowels: **every note above
+    /// 400 Hz came back exactly one octave low** — 440→220, 523→262, 659→330,
+    /// 784→392 — because the search never looked at a lag short enough and the
+    /// octave below is a perfectly good period of the same signal. A soprano
+    /// was scored as singing an octave under the tune, note for note, and no
+    /// improvement to the estimator could have fixed it: the answer was not in
+    /// the search.
+    ///
+    /// C6 is above any pop vocal that is not a whistle tone. G1 is below any
+    /// bass. Widening does invite octave errors — that is why the speaking
+    /// range is narrow — which is why this is a second range for the one path
+    /// that needs it rather than a change to the first.
+    public static let lowestSungHertz: Double = 49
+    public static let highestSungHertz: Double = 1100
+
     /// Below this there is nothing worth calling a pitch, however periodic it
     /// is.
     ///
@@ -98,17 +121,28 @@ public final class PitchTracker {
     /// in O(1), keeping the whole estimate O(N log N) and allocation-free.
     private var energyPrefix: [Float]
 
-    public init?(sampleRate: Double) {
-        guard sampleRate.isFinite, sampleRate > 0 else { return nil }
+    /// - Parameters:
+    ///   - lowest: The bottom of the search, in hertz.
+    ///   - highest: The top of it. Defaults to the speaking range, because that
+    ///     is what the voice changer and the analysis panel want; the singing
+    ///     path passes `lowestSungHertz` and `highestSungHertz`.
+    public init?(
+        sampleRate: Double,
+        lowest: Double = PitchTracker.lowestHertz,
+        highest: Double = PitchTracker.highestHertz
+    ) {
+        guard sampleRate.isFinite, sampleRate > 0, lowest > 0, highest > lowest else {
+            return nil
+        }
         // One candidate either side of the advertised limits gives the limit
         // itself two neighbours. Without it an exact 60 Hz period sat at the
         // end of the range and could never qualify as a local maximum.
         let minimumLag =
-            max(1, Int((sampleRate / Self.highestHertz).rounded(.down)) - 1)
+            max(1, Int((sampleRate / highest).rounded(.down)) - 1)
         let maximumLag =
             min(
                 Self.frameSize - 2,
-                Int((sampleRate / Self.lowestHertz).rounded(.up)) + 1)
+                Int((sampleRate / lowest).rounded(.up)) + 1)
         guard minimumLag + 1 < maximumLag else { return nil }
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
             return nil

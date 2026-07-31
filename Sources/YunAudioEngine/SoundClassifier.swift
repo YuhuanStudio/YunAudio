@@ -21,12 +21,23 @@ public final class SoundClassifier: @unchecked Sendable {
     /// What the model heard, reduced to the handful of things worth acting on.
     public enum Verdict: String, Sendable, CaseIterable {
         case speech
+        /// Somebody singing, which the model distinguishes from speech and this
+        /// used to throw away.
+        ///
+        /// The taxonomy has `singing`, `choir`, `humming` and `yodeling` as
+        /// their own labels, and folding them into `music` discarded the one
+        /// thing a karaoke application most wants to know. See `SingingGate`.
+        case singing
         case typing
         case music
         case noise
         case quiet
 
-        public var isSpeech: Bool { self == .speech }
+        /// Levelling and ducking act on this, and singing counts: somebody
+        /// singing into a microphone is somebody using it, and a leveller that
+        /// gives up the moment they stop talking is a leveller that fights
+        /// every chorus.
+        public var isSpeech: Bool { self == .speech || self == .singing }
 
         /// Class labels from the version-1 taxonomy that map onto each verdict.
         ///
@@ -35,6 +46,11 @@ public final class SoundClassifier: @unchecked Sendable {
         /// down. Prefix matching rather than equality because the taxonomy uses
         /// compound labels like `keyboard_typing` and `speech_synthesizer`.
         static let prefixes: [(Verdict, [String])] = [
+            // Before speech and before music, because the taxonomy's own labels
+            // overlap both — `singing` sits under music and a sung line reads
+            // as speech to half the classifiers ever built. First match wins,
+            // so the most specific answer has to be asked for first.
+            (.singing, ["singing", "choir", "chant", "humming", "yodel", "rapping"]),
             (.speech, ["speech", "conversation", "narration", "shout", "yell", "whisper"]),
             (.typing, ["typing", "keyboard", "computer_keyboard", "mouse_click", "writing"]),
             (.music, ["music", "singing", "instrument", "guitar", "piano", "drum"]),

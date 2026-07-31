@@ -4,6 +4,16 @@ import YunAudioMedia
 
 @testable import YunAudioApp
 
+/// How many slow fallbacks were allowed to finish.
+///
+/// An actor rather than a counter with a lock: the stubs run on whatever
+/// executor the client's tasks are on, and a data race in a test is a test that
+/// fails for reasons nobody can reproduce.
+actor SlowFallbackTally {
+    private(set) var count = 0
+    func increment() { count += 1 }
+}
+
 @Suite("Multiple independent lyric sources")
 struct OnlineLyricsTests {
     private func response(
@@ -646,6 +656,7 @@ struct OnlineLyricsTests {
 
     @Test("a timed answer cancels slow fallbacks instead of waiting six seconds")
     func timedAnswerReturnsEarly() async throws {
+        let slowFallbacksThatFinished = SlowFallbackTally()
         let client = OnlineLyrics { request in
             let url = try #require(request.url)
             let body: String
@@ -662,6 +673,12 @@ struct OnlineLyricsTests {
                 body = #"{"lyric":"[00:01.00]first\n[00:04.00]second"}"#
             } else {
                 try await Task.sleep(for: .seconds(6))
+                // Reached only if the sleep was *not* cancelled, which is the
+                // regression this test exists for. Counting it is stronger than
+                // timing the whole lookup and immune to the scheduler: the old
+                // assertion was a wall clock against a saturated executor, and
+                // it started crying wolf the moment the suite grew.
+                await slowFallbacksThatFinished.increment()
                 body = url.host == "api.lyrics.ovh" ? #"{"lyrics":"late"}"# : "[]"
             }
             return (Data(body.utf8), response(for: request))
@@ -675,10 +692,12 @@ struct OnlineLyricsTests {
                     album: "年少心动雨季", duration: 265)))
         let elapsed = start.duration(to: clock.now)
         #expect(match.source == .qqMusic)
-        // The full suite deliberately saturates the cooperative executor with
-        // audio work. Leave scheduler headroom while staying below the
-        // six-second sleepers, which is the regression this number catches.
-        #expect(elapsed < .seconds(5), "lookup took \(elapsed)")
+        // The claim, stated as itself: no slow fallback ran to completion,
+        // because the fast answer cancelled them. The clock is kept only as a
+        // sanity bound well clear of the six-second sleepers — it is evidence,
+        // not the assertion.
+        #expect(await slowFallbacksThatFinished.count == 0)
+        #expect(elapsed < .seconds(5.5), "lookup took \(elapsed)")
     }
 
     @Test("a complete exact timeline wins the quality grace")

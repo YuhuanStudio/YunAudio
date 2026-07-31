@@ -2275,8 +2275,17 @@ struct SoundClassifierTests {
         #expect(SoundClassifier.fold("whispering") == .speech)
         #expect(SoundClassifier.fold("computer_keyboard") == .typing)
         #expect(SoundClassifier.fold("typing") == .typing)
-        #expect(SoundClassifier.fold("singing") == .music)
+        // Singing is its own verdict now. Folding it into music threw away the
+        // one thing a karaoke application most wants to know, and it made the
+        // leveller treat a chorus as something to stop working on: `isSpeech`
+        // is what levelling and ducking act on, and somebody singing into a
+        // microphone is somebody using it.
+        #expect(SoundClassifier.fold("singing") == .singing)
+        #expect(SoundClassifier.fold("choir") == .singing)
+        #expect(SoundClassifier.fold("humming") == .singing)
+        #expect(SoundClassifier.Verdict.singing.isSpeech)
         #expect(SoundClassifier.fold("acoustic_guitar") == .music)
+        #expect(!SoundClassifier.Verdict.music.isSpeech)
         #expect(SoundClassifier.fold("air_conditioning") == .noise)
         #expect(SoundClassifier.fold("hum") == .noise)
     }

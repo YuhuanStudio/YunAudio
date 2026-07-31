@@ -411,6 +411,7 @@ struct LoudnessReadout: View {
     private func symbol(for verdict: SoundClassifier.Verdict) -> String {
         switch verdict {
         case .speech: "waveform"
+        case .singing: "music.microphone"
         case .typing: "keyboard"
         case .music: "music.note"
         case .noise: "wind"
@@ -421,6 +422,7 @@ struct LoudnessReadout: View {
     private func title(for verdict: SoundClassifier.Verdict) -> String {
         switch verdict {
         case .speech: loc("Speech")
+        case .singing: loc("Singing")
         case .typing: loc("Typing")
         case .music: loc("Music")
         case .noise: loc("Room noise")
@@ -431,6 +433,7 @@ struct LoudnessReadout: View {
     private func tint(for verdict: SoundClassifier.Verdict) -> Color {
         switch verdict {
         case .speech: Yun.Palette.success
+        case .singing: Yun.Palette.accent
         case .typing: Yun.Palette.warning
         case .music: Yun.Palette.info
         case .noise: Yun.Palette.textTertiary
