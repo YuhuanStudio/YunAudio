@@ -1389,6 +1389,37 @@ final class RouterModel: ScriptTarget {
         trackClock.duration = 0
     }
 
+    /// Pretends another index answered, so a gate can press the switch.
+    ///
+    /// The control appears only when two indexes both returned words for the
+    /// song, which needs a network and two services agreeing to answer. What
+    /// is being checked here is what pressing it does to everything around it
+    /// — the offset, the browse, the line numbering — not how the answers
+    /// arrived. Only the flow check calls this.
+    func offerSecondLyricSourceForCheck() {
+        guard let lyrics, let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else {
+            return
+        }
+        _ = identity
+        // Written out as an `.lrc` rather than handed over as a parsed value:
+        // `Match` only accepts an answer that carries the words it claims to
+        // have, and a fixture that side-steps that would be checking a path no
+        // provider can take.
+        let written = lyrics.lines.map { line in
+            String(
+                format: "[%02d:%05.2f]%@", Int(line.time) / 60,
+                line.time.truncatingRemainder(dividingBy: 60), line.text)
+        }.joined(separator: "\n")
+        let alternative = OnlineLyrics.Match(
+            source: .qqMusic, trackName: nowPlaying?.title ?? "", artistName: "",
+            albumName: "", duration: nowPlaying?.duration,
+            synchronised: written, plain: nil)
+        guard let alternative else { return }
+        lyricAnswers = [alternative]
+        lyricAlternatives = [.netEase, .qqMusic]
+        lyricSource = .netEase
+    }
+
     /// Puts a scoreboard up so the flow check can watch it go away again.
     ///
     /// The card's own trigger is a song ending, which a gate cannot arrange
@@ -2524,6 +2555,15 @@ final class RouterModel: ScriptTarget {
             let parsed = match.parsed
         else { return }
         lyricSource = next
+        // A shift measured against one take is not evidence about another. The
+        // whole reason this control exists is that indexes disagree, and the
+        // commonest disagreement is exactly the one the offset compensates
+        // for: whether the file leaves room for the intro. Carrying it over
+        // means somebody who corrected 慢冷 by two seconds gets those two
+        // seconds applied to a take that already had them, and the words are
+        // wrong again in the direction they just fixed.
+        LyricOffsets.clear(identity)
+        lyricNudge = 0
         // The new take has its own line numbering, so anything holding a line
         // index from the old one is now pointing at a different lyric or at
         // nothing. Published so the stage can put its column back on the song.

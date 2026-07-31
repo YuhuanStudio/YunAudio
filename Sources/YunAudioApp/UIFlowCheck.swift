@@ -4350,6 +4350,20 @@ enum UIFlowCheck {
         check(
             "asking for another lyric source with none to offer changes nothing",
             model.lyrics?.lines.count == before)
+
+        // And when there is one to offer, what the switch does to everything
+        // around it. A shift measured against one take is not evidence about
+        // another — the commonest disagreement between two indexes is exactly
+        // whether the file leaves room for the intro, which is what the offset
+        // corrects — so carrying it over would apply somebody's two-second fix
+        // to a take that never needed it.
+        model.offerSecondLyricSourceForCheck()
+        model.nudgeLyricOffset(by: -1.5)
+        model.browseLyrics(byLines: -2)
+        check("a shift is remembered while the take is", model.lyricOffsetSeconds != 0)
+        model.useNextLyricSource()
+        check("switching take takes the shift with it", model.lyricOffsetSeconds == 0)
+        check("and puts the column back on the song", !model.lyricBrowse.isBrowsing)
     }
 
     private static func checkTheWords(
