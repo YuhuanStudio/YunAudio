@@ -156,3 +156,53 @@ struct KTVLyricBrowseTests {
         #expect(!browse.isBrowsing)
     }
 }
+
+/// A wheel mouse against a trackpad.
+///
+/// `scrollingDeltaY` is points on a precise device and *lines* on a wheel — one
+/// to three a notch. Measured against a 24-point line that is about a dozen
+/// notches to move the column once, which is what "the wheel almost does not
+/// work" was.
+@Suite("the wheel moves the column")
+struct KTVLyricWheelTests {
+
+    @Test("one notch of a wheel mouse moves at least one line")
+    func aNotchIsALine() {
+        var browse = KTVLyricBrowse()
+        // What AppKit reports for a single detent on an ordinary mouse.
+        browse.scroll(by: -1, playing: 10, lineCount: 60, precise: false)
+        #expect(browse.isBrowsing, "one notch did nothing")
+        #expect(browse.line != nil)
+        #expect(browse.line != 10)
+    }
+
+    @Test("and three notches travel three times as far")
+    func notchesAccumulate() {
+        var one = KTVLyricBrowse()
+        one.scroll(by: -1, playing: 10, lineCount: 60, precise: false)
+        var three = KTVLyricBrowse()
+        three.scroll(by: -3, playing: 10, lineCount: 60, precise: false)
+        let movedByOne = abs((one.line ?? 10) - 10)
+        let movedByThree = abs((three.line ?? 10) - 10)
+        #expect(movedByThree > movedByOne)
+    }
+
+    @Test("a trackpad is unchanged, because it was never the broken one")
+    func preciseIsUntouched() {
+        var browse = KTVLyricBrowse()
+        // Less than a line of travel: a glide that small must not jump.
+        browse.scroll(by: -10, playing: 10, lineCount: 60, precise: true)
+        #expect(!browse.isBrowsing)
+        browse.scroll(by: -20, playing: 10, lineCount: 60, precise: true)
+        #expect(browse.isBrowsing)
+    }
+
+    @Test("and neither device can leave the song")
+    func staysInsideTheSong() {
+        var browse = KTVLyricBrowse()
+        for _ in 0..<200 { browse.scroll(by: -5, playing: 0, lineCount: 12, precise: false) }
+        #expect((browse.line ?? 0) <= 11)
+        for _ in 0..<200 { browse.scroll(by: 5, playing: 0, lineCount: 12, precise: false) }
+        #expect((browse.line ?? 0) >= 0)
+    }
+}

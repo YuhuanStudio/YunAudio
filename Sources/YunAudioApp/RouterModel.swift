@@ -1596,6 +1596,18 @@ final class RouterModel: ScriptTarget {
     /// somebody makes on purpose.
     private static let seekToleranceSeconds: Double = 2
 
+    /// The part of the poll that belongs to the song rather than to the route.
+    ///
+    /// Deliberately the smallest thing that makes the stage work with nothing
+    /// routed: where the song is, which line that is, and what the transport
+    /// should read. Scoring is not here and cannot be — the singer only exists
+    /// in the router's own ring, so a microphone needs the route up.
+    private func pollTheSongOnly() {
+        guard isSingingVisible else { return }
+        refreshNowPlaying()
+        updateSinging()
+    }
+
     /// Opens a tap and a pitch tracker per source, or leaves the ones that are
     /// already right alone.
     ///
@@ -2945,10 +2957,11 @@ final class RouterModel: ScriptTarget {
 
     /// Takes the wheel, and says whether it moved the column.
     @discardableResult
-    func browseLyrics(byWheel deltaY: CGFloat) -> Bool {
+    func browseLyrics(byWheel deltaY: CGFloat, precise: Bool = true) -> Bool {
         guard let lyrics, lyrics.lines.count > 1 else { return false }
         lyricBrowse.scroll(
-            by: deltaY, playing: lyricLine, lineCount: lyrics.lines.count)
+            by: deltaY, playing: lyricLine, lineCount: lyrics.lines.count,
+            precise: precise)
         return lyricBrowse.isBrowsing
     }
 
@@ -9570,7 +9583,22 @@ final class RouterModel: ScriptTarget {
     }
 
     private func poll() {
-        guard isRunning else { return }
+        guard isRunning else {
+            // The words are not the router's.
+            //
+            // This whole poll was behind that guard, and everything the stage
+            // needs is in it: the position of the song, the line being sung and
+            // the now-playing state. So with the route stopped the words simply
+            // did not move, and using this application as a lyrics player or a
+            // KTV machine meant first routing audio somewhere for no reason.
+            //
+            // Nothing else runs here. Meters, the cycle counter, path quality,
+            // recording, ducking and the source taps are all questions about a
+            // graph that is not there, and asking them would cost the poll
+            // twenty times a second to answer "no route" twenty times a second.
+            pollTheSongOnly()
+            return
+        }
         let started = DispatchTime.now().uptimeNanoseconds
         defer {
             pollCost.polls += 1

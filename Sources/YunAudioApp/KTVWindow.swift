@@ -1167,7 +1167,11 @@ struct KTVStage: View {
             guard let window = KTVWindow.window, event.window === window,
                 model.lyrics != nil
             else { return event }
-            if model.browseLyrics(byWheel: event.scrollingDeltaY) { startTheWayBack() }
+            if model.browseLyrics(
+                byWheel: event.scrollingDeltaY, precise: event.hasPreciseScrollingDeltas)
+            {
+                startTheWayBack()
+            }
             // Swallowed: there is nothing else on this stage to scroll, and
             // letting it through means the window server hands it to whatever
             // is underneath.
