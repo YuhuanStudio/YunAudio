@@ -1,4 +1,9 @@
-.build/
+# Every scratch build directory, not just the default one. `.build/` alone was
+# what was here, and it did not cover `.build-old/` or `.build-nodyn/` — two
+# names invented on the spot for toolchain comparisons, each then swept into a
+# commit by `git add -A`. Six thousand files and a third of a gigabyte of
+# object code and dSYMs.
+.build*/
 build/
 .swiftpm/
 *.xcodeproj
