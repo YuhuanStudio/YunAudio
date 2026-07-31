@@ -4281,6 +4281,29 @@ enum UIFlowCheck {
         model.resetLyricScale()
         check("and go back to the size the window implies", model.lyricScale == 1)
 
+        // Looking through the words while the song carries on. This was view
+        // state until now, which meant it was the one piece of this feature no
+        // gate could observe — correct by reasoning and unchecked by anything.
+        model.seekToLyricLine(3)
+        model.refreshNowPlaying()
+        check("the column follows the song at rest", !model.lyricBrowse.isBrowsing)
+        check(
+            "a brush of the wheel does not take it off the song",
+            !model.browseLyrics(byWheel: 6))
+        let moved = model.browseLyrics(byWheel: KTVLyricBrowse.pointsPerLine * 2)
+        check("a real scroll does", moved)
+        check(
+            "and it looks where it was scrolled to",
+            model.lyricBrowse.centre(whilePlaying: model.lyricLine) == 1)
+        // The song moving underneath must not drag the column back.
+        model.seekToLyricLine(4)
+        model.refreshNowPlaying()
+        check(
+            "the song moving does not pull it back",
+            model.lyricBrowse.centre(whilePlaying: model.lyricLine) == 1)
+        model.followTheSongAgain()
+        check("and it goes back when asked", !model.lyricBrowse.isBrowsing)
+
         // A song whose length has not arrived. Spotify answers 0 until the
         // track settles and this model fills the gap from the lyric match,
         // which lands later still — while the words are already on screen and

@@ -163,8 +163,11 @@ struct KTVStage: View {
         model.lyricsSourceName == nil ? 0 : 12 * KTVLyricMetrics.rowHeight + 20
     }
 
-    /// Where the column is looking, when that is not where the song is.
-    @State private var browse = KTVLyricBrowse(line: KTVStage.browsedLineForRendering)
+    /// Where the column is looking, from the model — see `lyricBrowse` there
+    /// for why it is not view state.
+    private var browse: KTVLyricBrowse {
+        KTVStage.browsedLineForRendering.map(KTVLyricBrowse.init(line:)) ?? model.lyricBrowse
+    }
     @State private var returnToTheSong: Task<Void, Never>?
     @State private var wheel: Any?
 
@@ -332,9 +335,7 @@ struct KTVStage: View {
         case .resizeLyrics(let step):
             if step == 0 { model.resetLyricScale() } else { model.nudgeLyricScale(by: step) }
         case .browse(let lines):
-            guard let lyrics = model.lyrics, lyrics.lines.count > 1 else { return }
-            browse.step(by: lines, playing: model.lyricLine, lineCount: lyrics.lines.count)
-            startTheWayBack()
+            if model.browseLyrics(byLines: lines) { startTheWayBack() }
         }
     }
 
@@ -972,12 +973,9 @@ struct KTVStage: View {
         guard !isRendering, wheel == nil else { return }
         wheel = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { event in
             guard let window = KTVWindow.window, event.window === window,
-                let lyrics = model.lyrics, lyrics.lines.count > 1
+                model.lyrics != nil
             else { return event }
-            browse.scroll(
-                by: event.scrollingDeltaY, playing: model.lyricLine,
-                lineCount: lyrics.lines.count)
-            if browse.isBrowsing { startTheWayBack() }
+            if model.browseLyrics(byWheel: event.scrollingDeltaY) { startTheWayBack() }
             // Swallowed: there is nothing else on this stage to scroll, and
             // letting it through means the window server hands it to whatever
             // is underneath.
@@ -1010,8 +1008,7 @@ struct KTVStage: View {
     private func followTheSongAgain() {
         returnToTheSong?.cancel()
         returnToTheSong = nil
-        guard browse.isBrowsing else { return }
-        browse.stop()
+        model.followTheSongAgain()
     }
 
     /// One band of the column: the lines behind, the line being sung, or the

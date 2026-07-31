@@ -2455,6 +2455,38 @@ final class RouterModel: ScriptTarget {
         seekNowPlaying(toSeconds: trackClock.position(at: now) + seconds)
     }
 
+    /// Where the lyric column is looking, when that is not where the song is.
+    ///
+    /// On the model rather than on the stage, and the reason is verifiability
+    /// rather than sharing. As view state it was correct — the stage's identity
+    /// is stable, so scrolling survived an arrangement change — but "correct"
+    /// there was something I could reason about and no gate could observe.
+    /// Every other piece of state this feature added has a flow check behind
+    /// it; this one could not have had one while it lived in a `@State`.
+    private(set) var lyricBrowse = KTVLyricBrowse()
+
+    /// Takes the wheel, and says whether it moved the column.
+    @discardableResult
+    func browseLyrics(byWheel deltaY: CGFloat) -> Bool {
+        guard let lyrics, lyrics.lines.count > 1 else { return false }
+        lyricBrowse.scroll(
+            by: deltaY, playing: lyricLine, lineCount: lyrics.lines.count)
+        return lyricBrowse.isBrowsing
+    }
+
+    /// Moves the column a whole line, which is what a key press means.
+    @discardableResult
+    func browseLyrics(byLines lines: Int) -> Bool {
+        guard let lyrics, lyrics.lines.count > 1 else { return false }
+        lyricBrowse.step(by: lines, playing: lyricLine, lineCount: lyrics.lines.count)
+        return lyricBrowse.isBrowsing
+    }
+
+    func followTheSongAgain() {
+        guard lyricBrowse.isBrowsing else { return }
+        lyricBrowse.stop()
+    }
+
     /// Bumped whenever the words are replaced under the same song.
     ///
     /// Switching lyric source keeps the track and changes the line numbering,
@@ -2496,6 +2528,9 @@ final class RouterModel: ScriptTarget {
         // index from the old one is now pointing at a different lyric or at
         // nothing. Published so the stage can put its column back on the song.
         lyricsRevision &+= 1
+        // Another take of the same song has its own line numbering, so a
+        // browsed line points at a different lyric or at nothing.
+        lyricBrowse.stop()
         lyricsSourceName = Self.lyricsSourceName(for: next)
         lyricsCopyright = match.providerMetadata?.copyright
         lyricsRegion = match.providerMetadata?.region
@@ -2673,6 +2708,8 @@ final class RouterModel: ScriptTarget {
         // has just finished still has its scores.
         if nowPlaying?.identity != track?.identity { keepPerformance(of: nowPlaying) }
         cancelLyricsLookup()
+        // A new song is not the song somebody was reading ahead in.
+        lyricBrowse.stop()
         // A new song has no alternatives until its own lookup answers.
         lyricAnswers = []
         lyricAlternatives = []
