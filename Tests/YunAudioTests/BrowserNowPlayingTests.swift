@@ -87,7 +87,7 @@ struct BrowserNowPlayingTests {
                 reply("live", "", "10", "inf", "playing", "u"), browser: "Safari") == nil)
         #expect(
             BrowserNowPlaying.parse(
-                reply("advert", "", "1", "0", "playing", "u"), browser: "Safari") == nil)
+                reply("advert", "", "1", "11", "playing", "u"), browser: "Safari") == nil)
         #expect(BrowserNowPlaying.parse("", browser: "Safari") == nil)
         #expect(
             BrowserNowPlaying.parse(
@@ -165,6 +165,35 @@ struct BrowserNowPlayingTests {
             #expect(parsed.title == song)
             #expect(parsed.artist == artist)
         }
+    }
+
+    @Test("the tab that was actually open, advert and all")
+    func theLiveTabIsParsed() {
+        // Read off a real Safari tab: a televised performance, playing an
+        // eleven-second mid-roll advert at the moment it was asked.
+        let advert = BrowserNowPlaying.parse(
+            reply(
+                "【纯享版】《失眠》原唱登场 Suki刘舒妤温柔嗓音缓缓铺开深夜emo氛围 #天赐的声音7 EP6",
+                "中國浙江衛視官方頻道 Zhejiang STV Official Channel - 歡迎訂閱",
+                "10.235715667", "11.0735", "playing", "https://www.youtube.com/watch?v=Br2BdijMQ1Y"),
+            browser: "Safari")
+        // For those eleven seconds the stage would have taken the advert as
+        // the song, looked for its words, and thrown away the one it was on.
+        #expect(advert == nil)
+
+        // The same tab once the song itself is playing.
+        let song = BrowserNowPlaying.parse(
+            reply(
+                "【纯享版】《失眠》原唱登场 Suki刘舒妤温柔嗓音缓缓铺开深夜emo氛围 #天赐的声音7 EP6",
+                "中國浙江衛視官方頻道 Zhejiang STV Official Channel - 歡迎訂閱",
+                "62.5", "281.0", "playing", "https://www.youtube.com/watch?v=Br2BdijMQ1Y"),
+            browser: "Safari")
+        // 《》 outranks 【】: the first is the song, the second is a label the
+        // programme put on the upload.
+        #expect(song?.title == "失眠")
+        // And 「纯享版」 is not a person. With every bracket group taken out of
+        // the credit there is nothing left, so the channel stands.
+        #expect(song?.artist.contains("纯享") == false)
     }
 
     @Test("a song with no Chinese in it is left exactly as it is")

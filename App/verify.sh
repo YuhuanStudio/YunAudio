@@ -260,8 +260,32 @@ render_wrote_everything() {
 	}
 }
 
+# Any crash report this run produced, whatever it exited with.
+#
+# On 2026-07-31 the capture gate threw an uncaught AppKit exception *after*
+# writing every one of its files, so it exited zero and every check passed. The
+# only witness was the report macOS wrote, which nobody was reading. A gate that
+# cannot tell a clean run from a run that died at the end is a gate that
+# certifies crashes.
+crash_reports_since() {
+	local marker="$1"
+	find ~/Library/Logs/DiagnosticReports -maxdepth 2 -name 'YunAudioApp-*.ips' \
+		-newer "${marker}" 2>/dev/null | head -5
+}
+
+no_new_crash_report() {
+	local found
+	found=$(crash_reports_since "${WORK}/crash-marker")
+	[[ -z "${found}" ]] || {
+		echo "the run wrote a crash report — not accepted:"
+		echo "${found}"
+		return 1
+	}
+}
+
 photographed_the_real_window() {
 	rm -rf "${WORK}/shot"
+	touch "${WORK}/crash-marker"
 	# Bounded, and judged by what it produced rather than by how it ended. The
 	# capture asks the router to start so it can photograph a window with meters
 	# in it, and on a machine where CoreAudio cannot start IO that call blocks
@@ -325,6 +349,8 @@ photographed_the_real_window() {
 	# printed at the end.
 	rm -rf build/screenshots
 	cp -R "${WORK}/shot" build/screenshots
+	# Last, so a run that wrote every image and then died still fails.
+	no_new_crash_report || return 1
 }
 
 step "offscreen render" render_wrote_everything

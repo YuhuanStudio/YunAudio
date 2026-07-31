@@ -23,6 +23,16 @@ enum BrowserNowPlaying {
         ("Google Chrome", "com.google.Chrome"),
     ]
 
+    /// The shortest thing worth calling a song.
+    ///
+    /// **Observed, on a real tab.** A YouTube mid-roll advert reported a
+    /// duration of 11.07 seconds and a position of 10.24, and passed a guard
+    /// that only asked for a finite duration greater than zero — so for those
+    /// eleven seconds the stage would have taken the advert as the song, gone
+    /// looking for its words, and thrown away the one it was on. Forty-five
+    /// seconds is below any song and above every advert.
+    static let shortestSong: Double = 45
+
     /// Field separator, matching the one the player scripts already use.
     static let separator = "\u{1F}"
 
@@ -123,7 +133,7 @@ enum BrowserNowPlaying {
         let title = fields[0].trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return nil }
         guard let position = Double(fields[2]), let duration = Double(fields[3]),
-            position.isFinite, duration.isFinite, duration > 0
+            position.isFinite, duration.isFinite, duration >= shortestSong
         else { return nil }
 
         // 「Artist - Title」 is how a music video is named on YouTube, and the
@@ -204,7 +214,10 @@ enum BrowserNowPlaying {
 
     /// The credit written before the song, or the channel when there is none.
     private static func creditedName(in prefix: String, or channel: String) -> String {
-        let trimmed = prefix.trimmingCharacters(
+        // Bracket groups first: 「【纯享版】《」 in front of the song's name is
+        // a label the programme put there, not a person, and trimming only the
+        // marks would have left 「纯享版」 standing in as the artist.
+        let trimmed = withoutBracketGroups(prefix).trimmingCharacters(
             // The opening mark of whatever bracket the name was taken out of
             // belongs to the bracket, not to the person: 「YOASOBI「」 is a
             // channel called YOASOBI with a quote mark stuck to it.
@@ -295,7 +308,7 @@ enum BrowserNowPlaying {
             // Bracket groups that are about the upload rather than the song.
             "\\s*[\\(\\[（【][^\\)\\]）】]*"
                 + "(?i:official|mv|m/v|hd|4k|lyric|audio|video|live|vietsub|pinyin"
-                + "|字幕|歌詞|歌词|完整版|高音質|純享|官方)"
+                + "|字幕|歌詞|歌词|完整版|高音質|高音质|純享|纯享|官方|伴奏)"
                 + "[^\\)\\]）】]*[\\)\\]）】]",
             // Everything after a bar: 「| Shangyu 2026」, 「| 官方版」.
             "\\s*\\|.*$",
