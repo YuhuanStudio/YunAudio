@@ -11,7 +11,17 @@ import YunAudioMedia
 struct OnlineLyrics: Sendable {
     private static let jsonFormat = "json"
     private static let trueFlag = "true"
-    private static let qualityGrace: Duration = .milliseconds(225)
+    /// How long a first timed answer waits to see whether a better one lands.
+    ///
+    /// Injectable, and the reason is a test that lied. Asserting both halves of
+    /// this — that the grace lets a fuller timeline win, *and* that it does not
+    /// wait for a dead provider — against one fixed duration makes the check a
+    /// race between a timer, which fires on time, and a stubbed response, whose
+    /// continuation does not when the suite has saturated the executor. It
+    /// failed roughly once a run and passed alone, which is the shape of a
+    /// gatekeeper that will one day be ignored while it is telling the truth.
+    /// Two tests, two graces, no race.
+    static let defaultQualityGrace: Duration = .milliseconds(225)
 
     struct Query: Sendable, Equatable {
         let title: String
@@ -311,14 +321,17 @@ struct OnlineLyrics: Sendable {
 
     private let loader: Loader
     private let musixmatch: MusixmatchSubtitleAdapter?
+    private let qualityGrace: Duration
 
     init(
         musixmatch: MusixmatchSubtitleAdapter? = nil,
+        qualityGrace: Duration = OnlineLyrics.defaultQualityGrace,
         loader: @escaping Loader = { request in
             try await URLSession.shared.data(for: request)
         }
     ) {
         self.musixmatch = musixmatch?.isConfigured == true ? musixmatch : nil
+        self.qualityGrace = qualityGrace
         self.loader = loader
     }
 
@@ -379,6 +392,7 @@ struct OnlineLyrics: Sendable {
             var notFound = 0
             var providerCompletions = 0
             var graceStarted = false
+            let grace = qualityGrace
             while let result = try await group.next() {
                 try Task.checkCancellation()
                 switch result {
@@ -392,7 +406,7 @@ struct OnlineLyrics: Sendable {
                     if match.parsed != nil, !graceStarted {
                         graceStarted = true
                         group.addTask {
-                            try await Task.sleep(for: Self.qualityGrace)
+                            try await Task.sleep(for: grace)
                             return .qualityGraceExpired
                         }
                     }

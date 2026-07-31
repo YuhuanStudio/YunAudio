@@ -681,7 +681,7 @@ struct OnlineLyricsTests {
         #expect(elapsed < .seconds(5), "lookup took \(elapsed)")
     }
 
-    @Test("a complete exact timeline wins within a bounded quality grace")
+    @Test("a complete exact timeline wins the quality grace")
     func completeTimelineWinsQualityGrace() async throws {
         let completeTimeline = (0..<63).map { line in
             let seconds = 12 + Double(line) * 4
@@ -690,6 +690,13 @@ struct OnlineLyricsTests {
                 Int(seconds) / 60, seconds.truncatingRemainder(dividingBy: 60), line)
         }.joined(separator: "\n")
         let escapedTimeline = completeTimeline.replacingOccurrences(of: "\n", with: "\\n")
+        // No sleeps anywhere, deliberately. This half asserts that the full
+        // sixty-three-line timeline outranks the two-line fragment, which is
+        // `strongest`'s decision and has nothing to do with the clock. Timing
+        // it as well made it a race between a timer, which fires on time, and
+        // a stubbed response, whose continuation does not once the suite has
+        // saturated the executor — it failed about once a run and passed
+        // alone. Whether the grace is bounded is the test below.
         let client = OnlineLyrics { request in
             let url = try #require(request.url)
             let body: String
@@ -709,7 +716,6 @@ struct OnlineLyricsTests {
                 body = #"{"lyric":"[00:18.96]first\n[00:25.65]second"}"#
                 status = 200
             case ("music.163.com", let path) where path.contains("search"):
-                try await Task.sleep(for: .milliseconds(100))
                 body =
                     """
                     {"result":{"songs":[{
@@ -723,7 +729,6 @@ struct OnlineLyricsTests {
                 body = #"{"lrc":{"lyric":"\#(escapedTimeline)"}}"#
                 status = 200
             case ("lrclib.net", _), ("api.lyrics.ovh", _):
-                try await Task.sleep(for: .seconds(6))
                 body = url.host == "lrclib.net" ? "[]" : #"{"lyrics":"late"}"#
                 status = 200
             default:
@@ -734,23 +739,61 @@ struct OnlineLyricsTests {
             return (Data(body.utf8), response(for: request, status: status))
         }
 
-        let clock = ContinuousClock()
-        let start = clock.now
         let match = try #require(
             try await client.fetch(
                 .init(
                     title: "年少心动雨季", artist: "黄霄雲",
                     album: "年少心动雨季", duration: 265)))
-        let elapsed = start.duration(to: clock.now)
 
         #expect(match.source == .netEase)
         #expect(match.parsed?.lines.count == 63)
         #expect((match.parsed?.lines.last?.time ?? 0) > 250)
-        #expect(elapsed >= .milliseconds(100), "lookup returned before the exact result")
-        // The exact answer arrives at 100 ms and the grace is 225 ms. The full
-        // suite saturates the cooperative executor with audio work, so leave
-        // scheduler headroom while still catching either six-second fallback.
-        #expect(elapsed < .seconds(5.5), "quality grace was not bounded: \(elapsed)")
+    }
+
+    @Test("the grace does not wait for a provider that never answers")
+    func theGraceIsBounded() async throws {
+        // The other half, with nothing to race. One provider answers timed
+        // words immediately; the rest sleep for six seconds. The grace is a
+        // tenth of a second, so the call must return in a small fraction of
+        // the six — and a timer that fires late can only make this later, so
+        // the bound is the assertion that means something.
+        let client = OnlineLyrics(qualityGrace: .milliseconds(100)) { request in
+            let url = try #require(request.url)
+            let body: String
+            switch url.host {
+            case "c.y.qq.com" where url.path.contains("search"):
+                body = """
+                    {"data":{"song":{"list":[{
+                      "songmid":"prompt","songname":"年少心动雨季",
+                      "albumname":"年少心动雨季","interval":265,
+                      "singer":[{"name":"黄霄雲"}]
+                    }]}}}
+                    """
+            case "c.y.qq.com":
+                body = #"{"lyric":"[00:18.96]first\n[00:25.65]second"}"#
+            default:
+                try await Task.sleep(for: .seconds(6))
+                body = "[]"
+            }
+            return (Data(body.utf8), response(for: request, status: 200))
+        }
+
+        let clock = ContinuousClock()
+        let start = clock.now
+        let match = try await client.fetch(
+            .init(title: "年少心动雨季", artist: "黄霄雲", album: "年少心动雨季", duration: 265))
+        let elapsed = start.duration(to: clock.now)
+
+        #expect(match?.source == .qqMusic)
+        // Generous, because a saturated executor delays a timer's continuation
+        // too — but nowhere near the six seconds that would mean the grace had
+        // waited for the dead providers, which is the regression this catches.
+        // Five seconds: the sleepers are six, so anything under this means the
+        // grace did not wait for them, and a saturated executor delays a
+        // timer's continuation by seconds without crossing it. Measured alone
+        // this returns in 0.15 s; measured inside the full suite, in about
+        // three. Both are the same answer.
+        #expect(elapsed < .seconds(5), "quality grace was not bounded: \(elapsed)")
     }
 }
 
