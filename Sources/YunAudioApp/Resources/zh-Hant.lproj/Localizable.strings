@@ -488,6 +488,9 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "開啟 KTV 視窗";
+"As written" = "照原文";
+"Simplified" = "轉簡體";
+"Traditional" = "轉繁體";
 "Songs on" = "點歌單";
 "Sing it again" = "重唱";
 "Add songs…" = "點歌…";

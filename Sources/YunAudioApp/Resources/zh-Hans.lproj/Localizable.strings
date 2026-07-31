@@ -487,6 +487,9 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"As written" = "照原文";
+"Simplified" = "转简体";
+"Traditional" = "转繁体";
 "Songs on" = "点歌单";
 "Sing it again" = "重唱";
 "Add songs…" = "点歌…";

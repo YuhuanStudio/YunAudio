@@ -3142,6 +3142,46 @@ final class RouterModel: ScriptTarget {
         }
     }
 
+    /// Whether the words are converted between the two Chinese scripts.
+    ///
+    /// Remembered, like the pronunciation row: a catalogue answers in whichever
+    /// script it holds, and somebody who reads traditional should not have to
+    /// notice which index a song came from. See `LyricScript`.
+    var lyricScript: LyricScript {
+        get {
+            _ = settingsRevision
+            return UserDefaults.standard.string(forKey: LyricScript.defaultsKey)
+                .flatMap(LyricScript.init(rawValue:)) ?? .asWritten
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: LyricScript.defaultsKey)
+            settingsRevision &+= 1
+        }
+    }
+
+    /// Whether the song loaded has anything the script switch could convert.
+    ///
+    /// Cached on the song, because it walks every line: the answer cannot change
+    /// without the words changing, and asking it inside a view body would ask it
+    /// whenever the line being sung moved.
+    var lyricsHaveChinese: Bool {
+        let stamp = "\(lyricsRevision)|\(lyrics?.lines.count ?? 0)"
+        if let cached = chineseLyricsCache, cached.stamp == stamp { return cached.answer }
+        let answer =
+            lyrics?.lines.contains { LyricScript.containsHan($0.text) } ?? false
+        chineseLyricsCache = (stamp, answer)
+        return answer
+    }
+
+    @ObservationIgnored private var chineseLyricsCache: (stamp: String, answer: Bool)?
+
+    /// One line of the song, in the script somebody asked for.
+    ///
+    /// The single place the conversion happens, so the two presentations cannot
+    /// disagree about it — and so a line that is not Chinese costs a scalar scan
+    /// rather than a transform.
+    func words(_ text: String) -> String { lyricScript.convert(text) }
+
     /// Bumped by every setting that lives in `UserDefaults`, and read by every
     /// getter that returns one.
     ///
@@ -4666,15 +4706,49 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    /// Outputs that can be monitored on: anything with output channels that is
-    /// not already carrying the mix, and never our own virtual device — sending
-    /// the microphone back into the thing the far end is listening to is a loop,
-    /// not a monitor.
+    /// Outputs that can be monitored on.
+    ///
+    /// The microphone's own headphone socket is one of them, and used not to be.
+    /// A Razer Seiren, a Yeti, a Shure MV7 and every audio interface ever made
+    /// present as **one** CoreAudio device with the microphone's input and the
+    /// headphone jack's output on it, and this excluded the source device
+    /// outright — so the socket people buy those microphones for was the one
+    /// output the monitor picker would not offer. Choosing it as the
+    /// destination instead is refused, correctly, with "the input and the
+    /// output cannot be the same device", and monitoring had no entry at all.
+    /// Between the two there was no way to hear yourself in your own
+    /// microphone's headphones.
+    ///
+    /// The loop the old rule was guarding against is real, but it is about the
+    /// *destination*: the mix the far end hears must not be fed back in. A
+    /// headphone jack is not a microphone. Speakers still are — that is what
+    /// `monitorMayFeedBack` warns about, and it is a warning rather than a
+    /// refusal because somebody with a directional microphone across the room
+    /// knows better than this application does.
     var monitorOptions: [AudioDevice] {
         outputDevices.filter {
-            $0.uid != selectedDestinationUID && $0.uid != selectedSourceUID
-                && !$0.name.localizedCaseInsensitiveContains("YunAudio")
+            Self.canMonitor(
+                uid: $0.uid, name: $0.name, hasOutput: $0.hasOutput,
+                destinationUID: selectedDestinationUID)
         }
+    }
+
+    /// Whether one device can carry the monitor mix.
+    ///
+    /// Static and parameterised so the rule can be argued with in a test rather
+    /// than only by plugging a microphone in.
+    /// Takes what it uses rather than a device, so it can be asserted without
+    /// a microphone plugged in. The source is not a parameter any more, which
+    /// is the change: it was the only reason the socket was hidden.
+    nonisolated static func canMonitor(
+        uid: String, name: String, hasOutput: Bool, destinationUID: String?
+    ) -> Bool {
+        guard hasOutput else { return false }
+        // Our own virtual device is what the far end is listening to. Sending
+        // the microphone back into it is a loop, not a monitor.
+        guard !name.localizedCaseInsensitiveContains("YunAudio") else { return false }
+        // The mix already goes there.
+        return uid != destinationUID
     }
 
     /// True when the chosen monitor is a loudspeaker rather than headphones, as

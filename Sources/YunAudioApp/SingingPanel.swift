@@ -846,7 +846,9 @@ private struct SingingLyrics: View {
                 // line with no words is an intro, an interlude or an outro, and
                 // an empty row says none of that. The same mark, so the two
                 // presentations of the same song do not disagree.
-                let text = line.map { $0.isInterlude ? KTVStage.interludeMark : $0.text } ?? ""
+                let text =
+                    line.map { $0.isInterlude ? KTVStage.interludeMark : model.words($0.text) }
+                    ?? ""
                 let voice = voices.colour(for: line?.singer)
                 if offset == 0 {
                     // The sweep is the point: a line that lights up all at

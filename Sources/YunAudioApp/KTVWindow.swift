@@ -746,6 +746,35 @@ struct KTVStage: View {
                 .accessibilityLabel(loc("Show pronunciation"))
                 .accessibilityIdentifier("KTVRomanisation")
 
+                // 簡／繁. A catalogue answers in whichever script it holds, and
+                // the same song from two indexes can arrive in two scripts on
+                // two evenings; somebody reading along should not have to find
+                // out which one they got. One button cycling three states
+                // rather than a picker, because it sits in a row of 24-point
+                // circles and is pressed while a song is playing.
+                //
+                // Shown only when there is Chinese to convert: an English song
+                // does not need a button that would do nothing.
+                if model.lyricsHaveChinese {
+                    Button {
+                        model.lyricScript = model.lyricScript.next
+                    } label: {
+                        Text(verbatim: model.lyricScript.mark)
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(
+                                model.lyricScript == .asWritten
+                                    ? .white.opacity(0.72) : Yun.Palette.accent
+                            )
+                            .frame(width: 24, height: 24)
+                            .background(
+                                .white.opacity(model.lyricScript == .asWritten ? 0.10 : 0.18),
+                                in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(model.lyricScript.title)
+                    .accessibilityIdentifier("KTVLyricScript")
+                }
+
                 // The key, and only where there is something that can change
                 // it. Every other source on this stage is somebody else's
                 // player, and no scripting dictionary transposes anything —
@@ -1272,7 +1301,7 @@ struct KTVStage: View {
                         }
                         if true {
                             lyricLine(
-                                line.isInterlude ? Self.interludeMark : line.text,
+                                line.isInterlude ? Self.interludeMark : model.words(line.text),
                                 offset: offset, isPlaying: index == playing,
                                 voice: voice, metrics: metrics)
                         }
