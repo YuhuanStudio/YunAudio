@@ -217,6 +217,15 @@ enum PanelRenderer {
             basename: "ktv-performance\(suffix)",
             directory: directory,
             size: CGSize(width: 1080, height: 720))
+        // And the same scoreboard in the inspector, which is where somebody
+        // singing with the stage closed would see it.
+        render(
+            SingingPanel(model: model)
+                .frame(width: 380)
+                .background(Yun.Palette.background),
+            basename: "singing-performance\(suffix)",
+            directory: directory,
+            size: CGSize(width: 380, height: 1_200))
         model.dismissPerformance()
         model.prepareForRendering()
         // Two voices, which the usual fixture song does not have. The colours

@@ -26,9 +26,66 @@ struct SingingPanel: View {
             }
     }
 
+    /// How the song that just finished went, in the width of an inspector.
+    ///
+    /// The stage version can afford a best line and a sentence of advice per
+    /// singer; this is 380 points wide beside six other cards, so it keeps the
+    /// two things that do not fit anywhere else — the number and the word for
+    /// it — and lets the stage say the rest.
+    @ViewBuilder
+    private var finishedPerformance: some View {
+        if let performance = model.lastPerformance {
+            VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(loc("How that went"))
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textMuted)
+                    Spacer(minLength: Yun.Space.sm)
+                    Button {
+                        model.dismissPerformance()
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Yun.Palette.textMuted)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(loc("Done"))
+                    .accessibilityIdentifier("SingingDismissPerformance")
+                }
+                Text(performance.title)
+                    .font(Yun.Text.title)
+                    .lineLimit(1)
+                ForEach(performance.singers) { singer in
+                    HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+                        Text(singer.name)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                            .lineLimit(1)
+                        Spacer(minLength: Yun.Space.sm)
+                        Text(KTVPerformanceGrade.of(singer.score.percentage).title)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.accent)
+                        Text(String(format: "%.0f%%", singer.score.percentage))
+                            .font(Yun.Text.title.monospacedDigit())
+                    }
+                }
+            }
+            .padding(Yun.Space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.card))
+            .accessibilityIdentifier("SingingPerformanceCard")
+        }
+    }
+
     @ViewBuilder
     private var singing: some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
+            // Above everything, because it is about the song that has just
+            // gone and the header below it is already about the next one.
+            // Here as well as on the stage: somebody who sings with this panel
+            // open and the stage closed was having their score thrown away
+            // exactly as everybody was before the card existed.
+            finishedPerformance
             if let track = model.nowPlaying {
                 trackHeader(track)
             } else if let problem = model.musicRecognitionProblem {
