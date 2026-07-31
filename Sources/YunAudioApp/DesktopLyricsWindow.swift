@@ -133,6 +133,7 @@ struct DesktopLyrics: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(.white.opacity(0.08), lineWidth: 1)
         )
+        .overlay { DesktopLyricsControls(model: model) }
         .animation(.easeOut(duration: 0.28), value: model.lyricLine)
         .accessibilityIdentifier("YunAudioDesktopLyrics")
     }
@@ -142,5 +143,81 @@ struct DesktopLyrics: View {
             lyrics.lines.indices.contains(index)
         else { return nil }
         return lyrics.lines[index]
+    }
+}
+
+/// The transport, revealed by the pointer and otherwise not there.
+///
+/// This window is left on for a whole afternoon over somebody else's work, so
+/// it cannot carry a permanent row of buttons; and it is the one thing on
+/// screen when a song needs pausing, so it cannot carry none. Hover is the
+/// resolution both NetEase and QQ arrived at, and they arrived at it for this
+/// reason.
+///
+/// Its own view with its own state, for the same reason the stage's lyric rows
+/// are: hover held on the lyric view would rebuild the compositor surface on
+/// every crossing of the pointer, and rebuilding it restarts the fill the
+/// render server is part-way through.
+struct DesktopLyricsControls: View {
+    @Bindable var model: RouterModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isPointedAt = false
+
+    /// Reveals the row for a capture. Neither gate has a pointer, so the one
+    /// state this control has would otherwise never appear in an image. Set by
+    /// the renderer only.
+    nonisolated(unsafe) static var revealForRendering = false
+
+    private var isShowing: Bool { isPointedAt || Self.revealForRendering }
+
+    var body: some View {
+        // Fills the window and hit-tests, so the pointer anywhere over the
+        // words reveals the row — a control that only appears once you have
+        // found where it already was is not a control. `onHover` does not
+        // consume the mouse down, so dragging the window still moves it.
+        Color.clear
+            .contentShape(Rectangle())
+            .overlay(alignment: .trailing) {
+                HStack(spacing: 8) {
+                    button("backward.fill", loc("Previous track")) {
+                        model.sendTransport(.previous)
+                    }
+                    button(
+                        model.nowPlaying?.isPlaying == false ? "play.fill" : "pause.fill",
+                        model.nowPlaying?.isPlaying == false ? loc("Play") : loc("Pause")
+                    ) { model.sendTransport(.playPause) }
+                    button("forward.fill", loc("Next track")) {
+                        model.sendTransport(.next)
+                    }
+                    button("xmark", loc("Hide the desktop lyrics")) {
+                        DesktopLyricsWindow.close()
+                        model.showsDesktopLyrics = false
+                    }
+                }
+                .padding(.trailing, 14)
+                .opacity(isShowing ? 1 : 0)
+                .animation(
+                    reduceMotion ? nil : .easeOut(duration: 0.16), value: isShowing)
+                // Not hit-testable while invisible, so a stray click on a
+                // window that looks like plain words does not skip a track.
+                .allowsHitTesting(isShowing)
+            }
+            .onHover { isPointedAt = $0 }
+            .accessibilityIdentifier("DesktopLyricsControls")
+    }
+
+    private func button(
+        _ symbol: String, _ label: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.white.opacity(0.86))
+                .frame(width: 24, height: 24)
+                .background(.white.opacity(0.14), in: Circle())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
     }
 }

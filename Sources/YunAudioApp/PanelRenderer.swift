@@ -226,6 +226,14 @@ enum PanelRenderer {
             basename: "desktop-lyrics\(suffix)",
             directory: directory,
             size: CGSize(width: 760, height: 150))
+        // And with the transport revealed, which no gate has a pointer to do.
+        DesktopLyricsControls.revealForRendering = true
+        render(
+            DesktopLyrics(model: model),
+            basename: "desktop-lyrics-controls\(suffix)",
+            directory: directory,
+            size: CGSize(width: 760, height: 150))
+        DesktopLyricsControls.revealForRendering = false
         model.prepareForRendering()
 
         for section in PreferencesWindow.Section.allCases {
