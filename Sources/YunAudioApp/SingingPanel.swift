@@ -640,64 +640,20 @@ struct SingingPanel: View {
     /// do it that way: the sources were never mixed, so each already had its
     /// own ring. Every other product that does this has to work out from the
     /// sound which of the two is singing, and is sometimes wrong.
+    /// The scoring switch, the note being heard and the key suggestion.
+    ///
+    /// Shared with the stage rather than written here, which is where all of it
+    /// used to live — so the surface people actually sing at could not turn
+    /// scoring on. See `KTVScoringControls`.
     @ViewBuilder
     private var scoring: some View {
-        HStack(spacing: Yun.Space.sm) {
-            YunSwitch(isOn: $model.isScoringSinging)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(loc("Score the singing"))
-                    .font(Yun.Text.label)
-                    .foregroundStyle(Yun.Palette.textPrimary)
-                Text(
-                    loc(
-                        "Listens to each microphone on its own. A matching .mid gives an exact tune score; otherwise YunAudio uses captured original vocals or the detected key."
-                    )
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-            // The other button every karaoke machine has. Without it the only
-            // way to start the attempt again was the switch, which also throws
-            // away the tune, the taps and the words.
-            if model.isScoringSinging {
-                Button(loc("Start again")) { model.restartScore() }
-                    .buttonStyle(YunButtonStyle(.secondary, small: true))
-            }
-        }
-        if let problem = model.singingError {
-            Text(problem)
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.warning)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        if model.isScoringSinging {
-            Text(scoringReferenceDescription)
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        // Driven by whether there are any rather than by the switch, which is
-        // the same thing in the running application — the list is filled when
-        // scoring starts and emptied when it stops — and is what lets the
-        // offscreen capture show the rows without opening a tap.
+        KTVScoringControls(model: model, scale: .inspector)
+        // Its own observation leaf, and it has to stay one: these readings move
+        // at the scoring cadence, and drawing them from here would rebuild the
+        // whole inspector eighty times a performance. Deleting this line while
+        // sharing the switch above it was a real regression, caught by the
+        // structural test that exists for exactly this.
         SingerScores(model: model)
-    }
-
-    private var scoringReferenceDescription: String {
-        switch model.scoringReferenceMode {
-        case .waiting:
-            loc("Finding the strongest scoring reference…")
-        case .midi:
-            loc("Exact melody score from the matching MIDI file.")
-        case .capturedPlayer:
-            loc(
-                "Automatic score from the captured original vocal; a matching MIDI remains more exact."
-            )
-        case .key:
-            loc("Key and timing score — accompaniment alone does not contain the vocal melody.")
-        }
     }
 
     /// Score lines are stored in lyric order. Looking up the current one must

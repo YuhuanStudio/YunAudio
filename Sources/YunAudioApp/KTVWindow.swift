@@ -889,6 +889,12 @@ struct KTVStage: View {
 
             progress(track)
 
+            // The scoring switch, the note being heard and the key suggestion —
+            // all of which used to live only in the inspector column behind
+            // this window, which is the one place nobody looks while singing.
+            // See `KTVScoringControls`.
+            KTVScoringControls(model: model, scale: .stage)
+
             HStack(spacing: Yun.Space.sm) {
                 // The row drops what it cannot hold rather than wrapping it.
                 // At 760×900 the column is narrow enough that 「Spotify」 broke

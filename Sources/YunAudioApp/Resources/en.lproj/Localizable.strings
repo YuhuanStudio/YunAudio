@@ -488,6 +488,9 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"This song is in %@" = "This song is in %@";
+"Move it %@ for you" = "Move it %@ for you";
+"Sing a little and it will work out how far to move it." = "Sing a little and it will work out how far to move it.";
 "right with the beat" = "right with the beat";
 "about %.1f s behind, steadily" = "about %.1f s behind, steadily";
 "about %.1f s ahead, steadily" = "about %.1f s ahead, steadily";

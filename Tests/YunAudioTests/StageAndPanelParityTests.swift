@@ -55,6 +55,16 @@ struct StageAndPanelParityTests {
         }
     }
 
+    @Test("both offer the scoring switch, the note and the key suggestion")
+    func scoring() throws {
+        // The surface people actually sing at could not turn scoring on, see
+        // the note it was hearing, or act on the key it suggested — all of it
+        // lived in the column behind the window.
+        for file in ["KTVWindow.swift", "SingingPanel.swift"] {
+            #expect(try source(file).contains("KTVScoringControls(model: model"), "\(file)")
+        }
+    }
+
     @Test("and the queue is reachable from the stage")
     func queue() throws {
         #expect(try source("KTVWindow.swift").contains("KTVQueueList(model: model"))

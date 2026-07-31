@@ -730,7 +730,10 @@ struct BackgroundResourceTests {
         #expect(compositor.contains("variant == .lyricFillStatic ? 0.5 : nil"))
         #expect(singing.contains("Choose the words…"))
         #expect(singing.contains("Find words by title"))
-        #expect(singing.contains("Score the singing"))
+        // The switch itself is shared with the stage now, so the words live in
+        // the shared construction rather than here — what this file must still
+        // do is take it.
+        #expect(singing.contains("KTVScoringControls(model: model"))
         #expect(window.contains("YunCard(padding: 0) { SingingPanel(model: model) }"))
         #expect(singing.contains("cardBackground"))
         #expect(singing.contains(".clipShape(.rect(cornerRadius: Yun.Radius.card))"))
