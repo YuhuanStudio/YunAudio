@@ -877,6 +877,31 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 
 ---
 
+## KTV 這一輪量到的數字（2026-07-31）
+
+留在這裡是因為它們是**下一次改動的基準線**：任何一項變差都代表某個東西被弄壞了，
+而這些全部都不是猜的。
+
+| 路徑 | 數字 | 怎麼量的 |
+|---|---|---|
+| 舞台 body 重建 | 1.0 Hz → **0.2 Hz** | `BodyCount.tick`，`YUNAUDIO_UI_BENCHMARK_STAGE=1` |
+| 舞台 moving CPU | 310–373 → **150 ms / 5 s** | 同上，中位數取三次 |
+| 舞台關著（基準） | **144 ms / 5 s** | 同上 |
+| 合成器：長中文＋逐字＋換行 | **152–183 ms**，與短行無異 | `YUNAUDIO_UI_BENCHMARK_LYRICS=long` |
+| 一行的實際行高 | **1.1777** 倍點級 | SF Bold ascender 96.68 / descender −21.09 / leading 0，並與 `NSLayoutManager.defaultLineHeight` 交叉驗證 |
+| 對 Safari 送一個 Apple Event（不跑 JS） | **73 ms** | `osascript`，扣掉自身 35 ms 啟動 |
+| 一個分頁一次 JS 求值 | **91 ms** | 同上 |
+| 掃十個分頁 | **171–325 ms** | 同上，隨 Safari 忙碌程度變動 |
+| HAL 整份 process list ＋ 每個 `isRunningOutput` | **6.8 ms** | 二十次平均 |
+| 位置輪詢預算 | **50 ms**（20 Hz） | — |
+
+**三層閘門**由上面最後四列決定：HAL 6.8 ms 決定「要不要問」→ 安靜的瀏覽器 10 秒才掃一次
+→ 已知的歌 900 ms 問一次、之間沿用並依經過時間推進。
+
+**已排除**：`drawingGroup()` 用在背景飄移上會讓成本**翻倍**（685–734 ms），已丟棄。
+讓使用者「指定視窗」省不了多少——73 ms 是對 Safari 開口的地板，指定只能省掉每分頁約
+25 ms 的部分，而穩態輪詢本來就只問一個分頁。
+
 ## 已定案 —— 沒有新證據就不要再試
 
 每一項都花掉了真實的時間。`README.md` 與 `DEVICES.md` 有完整的寫法；這裡是索引。
