@@ -1068,10 +1068,12 @@ struct KTVStage: View {
                                 voice: voice, metrics: metrics)
                         }
                         // Pronunciation, above the translation and below the
-                        // words: the order a singer reads them in. Only for the
-                        // line being sung and the one after it — further away
-                        // it is a wall of Latin nobody is looking at, and the
-                        // transform is not free.
+                        // words: the order a singer reads them in. The line
+                        // being sung and the one either side of it — further
+                        // away it is a wall of Latin nobody is looking at, and
+                        // the transform is not free. The line before earns its
+                        // row because coming in late is when somebody needs it
+                        // most.
                         if model.showsRomanisation, abs(offset) <= 1,
                             !line.isInterlude,
                             let latin = LyricRomanisation.of(line.text)

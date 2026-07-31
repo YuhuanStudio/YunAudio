@@ -99,6 +99,15 @@ struct KTVLyricMetrics: Equatable, Sendable {
     /// going to miss: a pronunciation row is roughly three Latin characters per
     /// Chinese one, so at 0.68 of the size it passes the measure on any line
     /// over about fourteen characters and takes two rows, not one.
+    ///
+    /// Deliberately conservative in one place, and it is worth naming: the
+    /// stage draws a pronunciation row for the line being sung and the one
+    /// either side, not for all of them, but *which* rows those are depends on
+    /// how many lines fit — which is what this is being called to decide. So
+    /// every line is costed as though it carried one. The result is a column
+    /// that occasionally shows one line fewer than it strictly could, which is
+    /// the price of the guarantee that it never shows one more. Translations
+    /// are drawn on every line, so those are exact.
     static func budget(
         for lines: [(words: String, romanisation: String?, translation: String?)]
     ) -> (rowsPerLine: CGFloat, extraRows: CGFloat) {

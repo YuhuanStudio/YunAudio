@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 
 @testable import YunAudioApp
@@ -112,6 +113,39 @@ struct KTVLyricBrowseTests {
         var browse = KTVLyricBrowse()
         browse.scroll(by: 999, playing: nil, lineCount: 0)
         #expect(!browse.isBrowsing)
+    }
+
+    @Test("the capture seeds are written by the renderer and nobody else")
+    func renderSeedsAreRendererOnly() throws {
+        // Three statics exist so that the gates can photograph states a gate
+        // cannot reach: a browsed column, enlarged words, a revealed
+        // transport. Each says in its own documentation that only the renderer
+        // assigns it, and a claim like that is worth exactly as much as the
+        // check behind it — a stray assignment anywhere else would put a
+        // person's stage into a state they did not ask for and could not
+        // leave.
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/YunAudioApp")
+        let files = try FileManager.default
+            .contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            .filter { $0.pathExtension == "swift" }
+        for seed in ["browsedLineForRendering", "lyricScaleForRendering", "revealForRendering"] {
+            for file in files {
+                let source = try String(contentsOf: file, encoding: .utf8)
+                // Declarations are not assignments: `static var x = false`
+                // contains the same text and is the thing being declared.
+                let assignments =
+                    source.ranges(of: "\(seed) = ").count
+                    - source.ranges(of: "var \(seed) = ").count
+                guard assignments > 0 else { continue }
+                #expect(
+                    file.lastPathComponent == "PanelRenderer.swift",
+                    Comment(rawValue: "\(seed) is assigned in \(file.lastPathComponent)"))
+            }
+        }
     }
 
     @Test("a wheel that reports nothing sensible is ignored")
