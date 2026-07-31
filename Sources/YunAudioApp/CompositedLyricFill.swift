@@ -434,23 +434,54 @@ final class CompositedLyricView: NSView {
     /// really advances while SwiftUI's model stays unchanged.
     func presentationProgress() -> Double? {
         guard let layout = lyricLayout, !layout.rows.isEmpty else { return nil }
+        let feather = LyricFillFeather.width(forPointSize: font.pointSize)
         var filled = 0.0
         for (index, row) in layout.rows.enumerated() {
             guard revealRows.indices.contains(index) else { continue }
             guard let layer = revealRows[index].presentation() else { return nil }
-            let scale =
-                (layer.value(forKeyPath: "transform.scale.x") as? NSNumber)?.doubleValue
-                ?? 0
+            // Back out the half-feather the mask is drawn ahead by, so this
+            // reports the fraction of the row that has been sung rather than
+            // the fraction the mask covers. The benchmark compares it against
+            // the song's own clock, and half a fade is a real disagreement at
+            // the sizes the inspector uses.
+            let width = layer.bounds.width - feather / 2
+            let scale = row.rect.width > 0 ? width / row.rect.width : 0
             filled += max(0, min(1, scale)) * (row.endProgress - row.startProgress)
         }
         return max(0, min(1, filled))
     }
 
+    /// The mask layers, for a check with no screen to look at.
+    ///
+    /// The soft edge is a property of these layers — the image they carry and
+    /// the one column of it that may stretch — and nothing above this view can
+    /// see it: an offscreen render substitutes a static SwiftUI frame for the
+    /// whole representable, and `CALayer.render(in:)` ignores masks outright.
+    /// So the only place the mask can be asserted is here.
+    func revealRowsForCheck() -> [CALayer] { revealRows }
+
     private func rebuildRevealRows(for layout: CompositedLyricLayout) {
         revealRows.forEach { $0.removeFromSuperlayer() }
+        let feather = LyricFillFeather.width(forPointSize: font.pointSize)
+        let scale = window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
         revealRows = layout.rows.map { row in
             let layer = CALayer()
-            layer.backgroundColor = NSColor.white.cgColor
+            // A hard-edged mask puts a guillotine down the middle of whichever
+            // glyph is being sung: the left half is lit and the right half is
+            // not, with a vertical line between them that belongs to no letter.
+            // The soft edge is what every player people already like does, and
+            // what makes the sweep read as light crossing the words rather than
+            // as a wipe. It costs nothing per frame — the mask is one image the
+            // render server stretches, and the animation is the same one.
+            layer.contents = LyricFillFeather.image(
+                feather: feather, mirrored: row.startsOnRight)
+            layer.contentsScale = scale
+            // Only the leading pixel stretches, so the soft edge keeps the same
+            // width in points however far across the row the sweep has reached.
+            // Stretching the whole image instead would open the fade from
+            // nothing at the first word to the width of the row at the last.
+            layer.contentsCenter = LyricFillFeather.stretchableRegion(
+                feather: feather, mirrored: row.startsOnRight)
             layer.anchorPoint = CGPoint(x: row.startsOnRight ? 1 : 0, y: 0.5)
             layer.bounds = CGRect(origin: .zero, size: row.rect.size)
             layer.position = CGPoint(
@@ -488,17 +519,26 @@ final class CompositedLyricView: NSView {
             progress: progress,
             remainingDuration: shouldAnimate ? remainingDuration : 0)
         let now = CACurrentMediaTime()
+        let feather = LyricFillFeather.width(forPointSize: font.pointSize)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         for (index, rowLayer) in revealRows.enumerated() {
             rowLayer.removeAllAnimations()
             guard timings.indices.contains(index) else { continue }
             let timing = timings[index]
+            // Where the mask ends, in points. The soft edge is centred on the
+            // syllable boundary rather than trailing behind it: half the fade
+            // ahead of the word being sung and half behind, so the moment a
+            // word is fully lit is still the moment it is fully sung.
+            let rowWidth = lyricLayout?.rows[index].rect.width ?? 0
+            func edge(_ fraction: Double) -> Double {
+                max(0, min(rowWidth, fraction * rowWidth + feather / 2))
+            }
             if timing.duration == 0 {
-                rowLayer.setValue(timing.initialScale, forKeyPath: "transform.scale.x")
+                rowLayer.bounds.size.width = edge(timing.initialScale)
                 continue
             }
-            rowLayer.setValue(1.0, forKeyPath: "transform.scale.x")
+            rowLayer.bounds.size.width = rowWidth
             // The shape the words describe, where the file gave one. The whole
             // line's curve is handed over at once and the animation is started
             // in the past by however much of the line has already been sung, so
@@ -512,8 +552,8 @@ final class CompositedLyricView: NSView {
                     line: (anchor.lineStart, anchor.lineEnd),
                     text: text)
             {
-                let animation = CAKeyframeAnimation(keyPath: "transform.scale.x")
-                animation.values = curve.values
+                let animation = CAKeyframeAnimation(keyPath: "bounds.size.width")
+                animation.values = curve.values.map(edge)
                 animation.keyTimes = curve.keyTimes.map { NSNumber(value: $0) }
                 animation.duration = max(0.001, anchor.lineEnd - anchor.lineStart)
                 animation.beginTime =
@@ -524,9 +564,9 @@ final class CompositedLyricView: NSView {
                 rowLayer.add(animation, forKey: "lyric-fill")
                 continue
             }
-            let animation = CABasicAnimation(keyPath: "transform.scale.x")
-            animation.fromValue = timing.initialScale
-            animation.toValue = 1.0
+            let animation = CABasicAnimation(keyPath: "bounds.size.width")
+            animation.fromValue = edge(timing.initialScale)
+            animation.toValue = rowWidth
             animation.beginTime = now + timing.delay
             animation.duration = timing.duration
             animation.fillMode = .backwards

@@ -176,6 +176,44 @@ struct CompositedLyricFillTests {
     /// sampled, short enough that 180 milliseconds of it is still measurable.
     private static let lineSeconds: Double = 60
 
+    @Test("the sweep is lit through a soft edge, held to one width")
+    @MainActor
+    func revealRowsCarryTheFeather() throws {
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let size: CGFloat = 27
+        view.configure(
+            text: "光穿過字，而不是切過字",
+            font: .systemFont(ofSize: size, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: nil,
+            reduceMotion: false,
+            // Half way, so the mask is neither empty nor the whole row and the
+            // edge is somewhere a reader would be looking.
+            frozenProgress: 0.5)
+        view.layoutSubtreeIfNeeded()
+
+        let rows = view.revealRowsForCheck()
+        #expect(!rows.isEmpty)
+        let feather = LyricFillFeather.width(forPointSize: size)
+        let columns = CGFloat(LyricFillFeather.columns(feather: feather))
+        for row in rows {
+            // A plain rectangle is what put a vertical line down the middle of
+            // the glyph being sung; contents is how it stopped being one.
+            #expect(row.contents != nil)
+            // One column of the image stretches, so the fade stays this wide
+            // at every point across the row rather than opening as it goes.
+            #expect(abs(row.contentsCenter.width - 1 / columns) < 1e-6)
+            #expect(row.contentsCenter.height == 1)
+        }
+        // Half of an eleven-point fade sits ahead of the boundary, so the mask
+        // reaches past half the row rather than stopping short of it.
+        let widest = rows.map(\.bounds.width).max() ?? 0
+        #expect(widest > 0)
+        #expect(feather == 11)
+    }
+
     @Test("production call sites never observe the ten-hertz legacy progress")
     func productionObservationBoundary() throws {
         let repository = URL(fileURLWithPath: #filePath)

@@ -1138,6 +1138,12 @@ struct KTVStage: View {
                         model.seekToLyricLine(index)
                         followTheSongAgain()
                     }
+                    // Innermost, so it is this row's own spring rather than the
+                    // band's that moves it — the whole point being that the
+                    // rows do not all start together. See `KTVLyricMotion`.
+                    .animation(
+                        reduceMotion ? nil : KTVLyricMotion.advance(forOffset: offset),
+                        value: model.lyricLine)
                 }
             }
         }
@@ -1151,14 +1157,10 @@ struct KTVStage: View {
                 maxHeight: alignment == .leading ? nil : .infinity,
                 alignment: alignment
             )
-            // A spring rather than a curve. `easeOut` arrives and stops dead,
-            // which is what "生硬" is: the line lands like a slide changing.
-            // A spring with a little overshoot left in it settles the way a
-            // hand moving paper does, and the response is long enough to read
-            // as motion rather than as a jump.
+            // The band's own frame, which the rows inside it override with
+            // their staggered copies of the same spring. See `KTVLyricMotion`.
             .animation(
-                reduceMotion
-                    ? nil : .spring(response: 0.55, dampingFraction: 0.78),
+                reduceMotion ? nil : KTVLyricMotion.advance(forOffset: 0),
                 value: model.lyricLine)
     }
 
@@ -1193,7 +1195,9 @@ struct KTVStage: View {
                 .foregroundStyle((voice ?? .white).opacity(Self.lyricOpacity(for: offset)))
                 .contentTransition(.opacity)
                 .fixedSize(horizontal: false, vertical: true)
-                .blur(radius: abs(offset) == 2 ? 1.2 : 0)
+                .blur(
+                    radius: KTVLyricMotion.blurRadius(
+                        forOffset: offset, pointSize: metrics.neighbourSize))
         }
     }
 
@@ -1348,11 +1352,7 @@ struct KTVStage: View {
     static let interludeMark = "♪ ♪ ♪"
 
     private static func lyricOpacity(for offset: Int) -> Double {
-        switch offset {
-        case -1: 0.30
-        case 1: 0.48
-        default: 0.16
-        }
+        KTVLyricMotion.opacity(forOffset: offset)
     }
 
     static func clock(_ seconds: Double) -> String {
