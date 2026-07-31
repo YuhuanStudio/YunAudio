@@ -4304,6 +4304,34 @@ enum UIFlowCheck {
         model.followTheSongAgain()
         check("and it goes back when asked", !model.lyricBrowse.isBrowsing)
 
+        // Browsing and the count into the singing, together. The count is
+        // suppressed while the column is off the song — a cue is for the line
+        // the music is on — and the question is what happens the moment it
+        // comes back during an interlude, which is when both are live at once.
+        model.nudgeLyricOffset(by: -3)
+        model.seekToLyricLine(0)
+        model.skipNowPlaying(by: -1)
+        model.refreshNowPlaying()
+        model.browseLyrics(byLines: 3)
+        let whileBrowsing = model.lyrics.flatMap {
+            model.lyricBrowse.isBrowsing
+                ? nil
+                : KTVCountIn.secondsUntilWords(
+                    in: $0, playing: model.lyricLine,
+                    position: Double(model.songSecond), nudge: model.lyricNudge)
+        }
+        check("no count is offered while the column is off the song", whileBrowsing == nil)
+        model.followTheSongAgain()
+        let afterReturning = model.lyrics.flatMap {
+            KTVCountIn.secondsUntilWords(
+                in: $0, playing: model.lyricLine, position: Double(model.songSecond),
+                nudge: model.lyricNudge)
+        }
+        check(
+            "and the count is there again the moment it returns",
+            (afterReturning ?? 0) > 0)
+        model.clearLyricOffset()
+
         // A song whose length has not arrived. Spotify answers 0 until the
         // track settles and this model fills the gap from the lyric match,
         // which lands later still — while the words are already on screen and

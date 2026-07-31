@@ -228,6 +228,27 @@ struct LyricScaleTests {
         }
     }
 
+    @Test("a short stage at a large size keeps the line being sung whole")
+    func theDegenerateCaseStillFits() {
+        // The wordsOnly arrangement on a 420-point window, with the words at
+        // 1.8 and both sub-rows on: the column has room for the line being
+        // sung and nothing else. The invariant test above only claims the fit
+        // where a neighbour was drawn, so this is the case it steps over — and
+        // it is the one somebody actually reaches by pressing `=` four times
+        // on a short window.
+        let metrics = KTVLyricMetrics.resolve(
+            width: 1_050, height: 290, scale: 1.8, extraRowsPerLine: 1.46,
+            rowsPerLine: 1)
+        #expect(metrics.linesBehind == 0)
+        #expect(metrics.linesAhead == 0)
+        let drawn =
+            metrics.currentSize * KTVLyricMetrics.rowHeight * (1 + 1.46)
+            + metrics.spacing * 2
+        #expect(drawn <= 290)
+        // And it is still a stage rather than a caption.
+        #expect(metrics.currentSize >= KTVLyricMetrics.smallestCurrent)
+    }
+
     @Test("the rows a line carries are counted against the height")
     func extraRowsCostLines() {
         let bare = KTVLyricMetrics.resolve(width: 720, height: 620)

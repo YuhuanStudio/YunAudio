@@ -86,7 +86,8 @@ enum NowPlaying {
     ]
 
     static var installedAutomationTargets: [AutomationTarget] {
-        players.compactMap { name, bundleID in
+        (players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) })
+            .compactMap { name, bundleID in
             NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
                 ? nil : AutomationTarget(name: name, bundleID: bundleID)
         }
@@ -110,7 +111,34 @@ enum NowPlaying {
             if track.isPlaying { return track }
             if paused == nil { paused = track }
         }
+        // Then the browsers, which is where a great deal of music is actually
+        // played and none of it was reachable. After the players, not before:
+        // somebody with Spotify open and a YouTube tab from last week means
+        // Spotify, and a tab that is paused should not outrank a player that
+        // is not.
+        for browser in BrowserNowPlaying.browsers {
+            guard isPlayerRunning(browser.bundleID) else { continue }
+            guard automationPermissionStatus(for: browser.bundleID) == noErr else { continue }
+            guard let track = readBrowser(browser.name) else { continue }
+            if track.isPlaying { return track }
+            if paused == nil { paused = track }
+        }
         return paused
+    }
+
+    /// Asks one browser what its tabs are playing.
+    nonisolated static func readBrowser(_ name: String) -> Track? {
+        let source = BrowserNowPlaying.script(
+            forBrowser: name, javaScript: BrowserNowPlaying.readingScript)
+        guard let text = run(source, application: name).text, !text.isEmpty else {
+            return nil
+        }
+        return BrowserNowPlaying.parse(text, browser: name)
+    }
+
+    /// Whether an application name is one of the browsers rather than a player.
+    nonisolated static func isBrowser(_ application: String) -> Bool {
+        BrowserNowPlaying.browsers.contains { $0.name == application }
     }
 
     /// Where the asking happens.
@@ -366,6 +394,15 @@ enum NowPlaying {
     nonisolated static func send(
         _ transport: Transport, to application: String
     ) -> Bool {
+        if isBrowser(application) {
+            guard let javaScript = BrowserNowPlaying.script(for: transport) else {
+                return false
+            }
+            return run(
+                BrowserNowPlaying.script(forBrowser: application, javaScript: javaScript),
+                application: application
+            ).text == "ok"
+        }
         let source = """
             tell application "\(application)"
                 if it is running then
@@ -388,6 +425,14 @@ enum NowPlaying {
         to seconds: Double, in application: String
     ) -> Bool {
         guard seconds.isFinite, seconds >= 0 else { return false }
+        if isBrowser(application) {
+            return run(
+                BrowserNowPlaying.script(
+                    forBrowser: application,
+                    javaScript: BrowserNowPlaying.seekScript(toSeconds: seconds)),
+                application: application
+            ).text == "ok"
+        }
         let source = """
             tell application "\(application)"
                 if it is running then
