@@ -108,6 +108,7 @@ enum BrowserNowPlaying {
             performers: artist.isEmpty ? [] : [artist],
             position: position, duration: duration,
             isPlaying: fields[4] == "playing",
+            artworkURL: artworkURL(forTab: fields[5]),
             identity: fields[5])
     }
 
@@ -145,6 +146,47 @@ enum BrowserNowPlaying {
                 of: pattern, with: "", options: .regularExpression)
         }
         return cleaned.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// The same tab, asked only where it is — twenty times a second.
+    ///
+    /// A separate, smaller question from `readingScript` because it is asked
+    /// two hundred times for every one of those: no title, no channel, no
+    /// regular expressions, three fields.
+    static var positionScript: String {
+        let separator = "String.fromCharCode(31)"
+        return """
+            (function(){            var v=document.querySelector('video');            if(!v||!isFinite(v.duration)||v.duration<=0)return '';            return [location.href,v.currentTime,v.paused?'paused':'playing']            .join(\(separator));            })()
+            """
+    }
+
+    /// Identity, position and state from one tab's answer.
+    static func parsePosition(_ reply: String) -> (identity: String, seconds: Double, isPlaying: Bool)? {
+        let fields = reply.components(separatedBy: separator)
+        guard fields.count >= 3, let seconds = Double(fields[1]), seconds.isFinite
+        else { return nil }
+        return (fields[0], seconds, fields[2] == "playing")
+    }
+
+    /// The picture YouTube keeps for a video, from the address of the tab.
+    ///
+    /// Free, in the sense that matters: no request is made to find it out, the
+    /// identifier is in the URL the tab already reported. Without it a song
+    /// played from a browser is the one kind of song with no cover behind the
+    /// words, which is exactly the arrangement the stage is built around.
+    static func artworkURL(forTab address: String) -> URL? {
+        guard let components = URLComponents(string: address),
+            let host = components.host, host.contains("youtu")
+        else { return nil }
+        let identifier =
+            components.queryItems?.first(where: { $0.name == "v" })?.value
+            ?? (host.contains("youtu.be") ? String(components.path.dropFirst()) : nil)
+        guard let identifier, !identifier.isEmpty,
+            identifier.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" })
+        else { return nil }
+        // `hqdefault` rather than `maxresdefault`: every video has one, and the
+        // stage blurs it to a wash and draws it at 256 points anyway.
+        return URL(string: "https://i.ytimg.com/vi/\(identifier)/hqdefault.jpg")
     }
 
     /// JavaScript for one transport verb, or nil where a tab cannot do it.

@@ -133,6 +133,46 @@ struct BrowserNowPlayingTests {
         #expect(BrowserNowPlaying.script(for: .playPause)?.contains("v.pause()") == true)
     }
 
+    @Test("the tab is polled with a smaller question than it is read with")
+    func thePositionScriptIsCheap() {
+        // Asked twenty times a second against once a song: no title, no
+        // channel, no regular expression, three fields.
+        #expect(!BrowserNowPlaying.positionScript.contains("document.title"))
+        #expect(!BrowserNowPlaying.positionScript.contains("querySelector('ytd"))
+        #expect(BrowserNowPlaying.positionScript.count < BrowserNowPlaying.readingScript.count)
+
+        let answer = try? #require(
+            BrowserNowPlaying.parsePosition(
+                reply("https://y/watch?v=abc", "61.25", "playing")))
+        #expect(answer?.identity == "https://y/watch?v=abc")
+        #expect(abs((answer?.seconds ?? 0) - 61.25) < 0.001)
+        #expect(answer?.isPlaying == true)
+        // A tab with no usable video answers nothing rather than zero, or the
+        // words would follow a song that is not playing.
+        #expect(BrowserNowPlaying.parsePosition("") == nil)
+        #expect(BrowserNowPlaying.parsePosition(reply("u", "x", "playing")) == nil)
+    }
+
+    @Test("a video's own picture is taken from the address, without asking")
+    func artworkComesFromTheAddress() throws {
+        // No request is made to find this out: the identifier is in the URL the
+        // tab already reported. Without it a song played from a browser is the
+        // one kind with no cover behind the words, which is the arrangement the
+        // whole stage is built around.
+        #expect(
+            BrowserNowPlaying.artworkURL(forTab: "https://www.youtube.com/watch?v=dQw4w9WgXcQ")?
+                .absoluteString == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+        #expect(
+            BrowserNowPlaying.artworkURL(forTab: "https://youtu.be/dQw4w9WgXcQ")?
+                .absoluteString == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")
+        // Anywhere else, and anything that is not an identifier, gets nothing
+        // rather than a guessed address.
+        #expect(BrowserNowPlaying.artworkURL(forTab: "https://example.com/watch?v=a") == nil)
+        #expect(BrowserNowPlaying.artworkURL(forTab: "https://www.youtube.com/") == nil)
+        #expect(
+            BrowserNowPlaying.artworkURL(forTab: "https://www.youtube.com/watch?v=a/../b") == nil)
+    }
+
     @Test("seeking is bounded and never asks for a position that is not one")
     func seekingIsBounded() {
         #expect(BrowserNowPlaying.seekScript(toSeconds: 12.5).contains("12.500"))

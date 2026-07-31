@@ -300,6 +300,27 @@ enum NowPlaying {
     }
 
     nonisolated private static func readPosition(name: String) -> PositionQuery {
+        // A browser has no `player position`, and asking it for one does not
+        // merely fail: with a music player also running, the loop moves on and
+        // answers with *that* player's position, so the words would follow a
+        // song nobody is listening to. Twenty times a second.
+        if isBrowser(name) {
+            let reply = run(
+                BrowserNowPlaying.script(
+                    forBrowser: name, javaScript: BrowserNowPlaying.positionScript),
+                application: name)
+            guard let text = reply.text else {
+                return PositionQuery(position: nil, failure: reply.failure)
+            }
+            guard let answer = BrowserNowPlaying.parsePosition(text) else {
+                return PositionQuery(position: nil, failure: nil)
+            }
+            return PositionQuery(
+                position: Position(
+                    application: name, identity: answer.identity,
+                    seconds: answer.seconds, isPlaying: answer.isPlaying),
+                failure: nil)
+        }
         let source = """
             tell application "\(name)"
                 if it is running then
@@ -334,22 +355,27 @@ enum NowPlaying {
     /// property accesses, which measured 40 ms on top of the cheap read.
     nonisolated static func track(from application: String) -> Track? {
         guard
-            let bundleID = players.first(where: { $0.0 == application })?.1,
+            let bundleID = (players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) })
+                .first(where: { $0.0 == application })?.1,
             isPlayerRunning(bundleID),
             automationPermissionStatus(for: bundleID) == noErr
         else { return nil }
-        return read(name: application)
+        return isBrowser(application) ? readBrowser(application) : read(name: application)
     }
 
     /// Running applications first, then the rest of the list in its own order.
     nonisolated private static func ordered(
         preferring application: String?
     ) -> [(String, String)] {
+        // Browsers included, and for the same reason they are included in
+        // `current()`: a tab is a source of songs now, and one that is left out
+        // of the position poll is a song whose words stop moving.
+        let all = players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) }
         guard let application,
-            let index = players.firstIndex(where: { $0.0 == application })
-        else { return players }
-        return [players[index]]
-            + players.enumerated().filter { $0.offset != index }.map(\.element)
+            let index = all.firstIndex(where: { $0.0 == application })
+        else { return all }
+        return [all[index]]
+            + all.enumerated().filter { $0.offset != index }.map(\.element)
     }
 
     nonisolated static func isPlayerRunning(_ bundleID: String) -> Bool {
