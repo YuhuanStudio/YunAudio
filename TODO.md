@@ -1006,9 +1006,19 @@ UUID、同一個位置、都在啟動後約兩分鐘**，所以是可重現的�
 **五次的共同點只有一個**：`RouterModel.startPolling()` 裡那一行——`MainActor.assumeIsolated`，
 每秒二十次的**動態** executor 檢查，跑一輩子。
 
-**做的事**：把它換成一個常駐的 `@MainActor` task 迴圈。`@MainActor` 的 task 是**靜態隔離**
-的，根本沒有檢查要做，也就沒有東西可以爆；而且它是一個 task 在暫停與恢復，不是每一格配一個
-——後者才是當初不用 task 的理由。
+**試過的：換成常駐的 `@MainActor` task 迴圈** —— 靜態隔離、沒有動態檢查。**行不通，而且
+理由很硬**：一次跑就打掛 **27 條 flow 斷言**，形狀全部一樣——「cycles 24 剛剛，24 一會兒
+之後」「電平表還在重畫」「歌詞掃光還活著」。每一次音訊都是好的，**壞掉的是讀數**。
+
+原因是 task 做不到的那件事：`Timer` 在 `.common` 模式下會**從巢狀 run loop 裡觸發**，而
+應用程式在追游標、跑 modal、或做 flow check 那種阻塞工作時就是在巢狀 run loop 裡。
+**continuation 在那裡不會被服務**——`await` 要等 main actor 回到它自己的排程器，而在巢狀
+run loop 裡它還沒有回去。所以輪詢就整段停掉，所有讀輪詢值的東西都讀到舊的。
+
+**每秒二十次的輪詢一忙就停，比付一次動態檢查更糟**，所以 `MainActor.assumeIsolated` 收回來
+了。它到底還危不危險是**真的開放**：自從引擎改成延後建立、兩個 `Canvas` 閉包不再伸手拿
+`@MainActor` 狀態之後它就沒再出現過，而完整 flow check 跑滿六分鐘、每一次裝置切換都經過，
+一次都沒爆。這裡就這樣寫，不假裝任何一邊。
 
 **驗法**：`YUNAUDIO_SOAK_SECONDS=<秒>` 讓 flow check 的「the song is ours to play」那一節在
 開著歌、播著的狀態下持續跑。斷言就是「跑到最後」——當機會把整個 process 帶走，所以一節能走完
