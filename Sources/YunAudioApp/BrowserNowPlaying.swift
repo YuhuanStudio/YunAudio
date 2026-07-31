@@ -222,7 +222,20 @@ enum BrowserNowPlaying {
             // belongs to the bracket, not to the person: 「YOASOBI「」 is a
             // channel called YOASOBI with a quote mark stuck to it.
             in: CharacterSet(charactersIn: " -–—‐《》【】「」『』()（）").union(.whitespaces))
-        if !trimmed.isEmpty { return trimmed }
+        // A sentence is not a credit, and neither is a paragraph. The tab that
+        // was open said 「苦情歌天后遇上新生代實力Vocal！張碧晨徐子未心碎演繹
+        // 《情結》…」 — the song's name is right there in the brackets and
+        // everything before it is a presenter's line. Taken as the artist it
+        // becomes twelve characters of advertising in a lyric query.
+        // Length is not the test — 「Huang Xiaoyun 黄霄雲 – The Rainy Season of
+        // a Youthful Crush」 is a long credit and a real one, and the Chinese
+        // preference below reduces it to 黄霄雲. Punctuation is the test: a
+        // presenter's line has some and a name does not.
+        let isName =
+            !trimmed.isEmpty
+            && trimmed.rangeOfCharacter(
+                from: CharacterSet(charactersIn: "，。！？、；：,;!?")) == nil
+        if isName { return trimmed }
         // YouTube appends 「 - Topic」 to the channels it generates, and no
         // lyric index has heard of an artist called that.
         return channel.hasSuffix(" - Topic")

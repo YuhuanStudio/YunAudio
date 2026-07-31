@@ -196,6 +196,33 @@ struct BrowserNowPlayingTests {
         #expect(song?.artist.contains("纯享") == false)
     }
 
+    @Test("the whole chain, on the tab that was open, with the song playing")
+    func theLiveTabResolvesToTheRightSong() throws {
+        // Read off the same Safari tab once the song itself was playing, and
+        // then put to the real index. This is the end of the chain: a tab, a
+        // parser, a lyric provider, one song.
+        let track = try #require(
+            BrowserNowPlaying.parse(
+                reply(
+                    "【純享版】苦情歌天后遇上新生代實力Vocal！張碧晨徐子未心碎演繹《情結》"
+                        + "開口定調！淚腺崩塌就在一瞬間！#天賜的聲音6 EP7 20250530",
+                    "中國浙江衛視官方頻道 Zhejiang STV Official Channel - 歡迎訂閱 -",
+                    "88.66927702", "217.021", "paused",
+                    "https://www.youtube.com/watch?v=EkxJTjYGD70"),
+                browser: "Safari"))
+        #expect(track.title == "情結")
+        // Everything before the name is a presenter's line, not a credit.
+        // Taken as the artist it becomes twelve characters of advertising in
+        // a lyric query, so it falls back to the channel.
+        #expect(!track.artist.contains("苦情歌"))
+        // And the length is carried, which is what settles it: asked for
+        // 「情結」 the index answers 情结/徐子未 at 217 s, a Live version at
+        // 222, and two other songs of the same name at 242 and 121. Only the
+        // duration tells them apart, and only the tab knows it.
+        #expect(abs(track.duration - 217.021) < 0.01)
+        #expect(track.artworkURL?.absoluteString.contains("EkxJTjYGD70") == true)
+    }
+
     @Test("a song with no Chinese in it is left exactly as it is")
     func latinTitlesAreUntouched() {
         // The Han preference must be a no-op for everything it was not written
