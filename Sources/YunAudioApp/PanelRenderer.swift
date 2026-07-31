@@ -210,6 +210,15 @@ enum PanelRenderer {
             directory: directory,
             size: CGSize(width: 1080, height: 720))
         KTVStage.lyricScaleForRendering = nil
+        // The scoreboard, which exists only between one song and the next.
+        model.renderFinishedPerformance()
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-performance\(suffix)",
+            directory: directory,
+            size: CGSize(width: 1080, height: 720))
+        model.dismissPerformance()
+        model.prepareForRendering()
         // Two voices, which the usual fixture song does not have. The colours
         // that tell them apart had no image to be judged in until this.
         model.renderDuet()

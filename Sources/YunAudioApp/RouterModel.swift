@@ -1346,6 +1346,34 @@ final class RouterModel: ScriptTarget {
 
     /// One entry per source being listened to, in the order the sources appear.
     private(set) var singers: [Singer] = []
+
+    /// What a finished song came to, kept after the song itself has gone.
+    ///
+    /// The scores move while somebody sings and then vanish with the track,
+    /// which is every KTV machine's one unforgivable omission: the number that
+    /// matters is the one at the end, and it was on screen for as long as it
+    /// took the next song to start.
+    struct Performance: Equatable, Sendable {
+        let title: String
+        let artist: String
+        let singers: [Singer]
+    }
+
+    private(set) var lastPerformance: Performance?
+
+    func dismissPerformance() { lastPerformance = nil }
+
+    /// Keeps the scores of the song that has just ended, if they mean anything.
+    ///
+    /// Only on a real change of song, and only where a tune was actually being
+    /// scored: a card announcing 0% because nobody sang is a card in the way.
+    private func keepPerformance(of finished: NowPlaying.Track?) {
+        guard isScoringSinging, let finished,
+            singers.contains(where: { $0.score.isMeaningful })
+        else { return }
+        lastPerformance = Performance(
+            title: finished.title, artist: finished.artist, singers: singers)
+    }
     /// Set when scoring could not start, in words somebody can act on.
     private(set) var singingError: String?
 
@@ -2564,6 +2592,9 @@ final class RouterModel: ScriptTarget {
 
     /// Takes a new song, with the words and the tune that go with it.
     private func adopt(_ track: NowPlaying.Track?) {
+        // Before anything is replaced: this is the last moment the song that
+        // has just finished still has its scores.
+        if nowPlaying?.identity != track?.identity { keepPerformance(of: nowPlaying) }
         cancelLyricsLookup()
         // A new song has no alternatives until its own lookup answers.
         lyricAnswers = []
@@ -4594,6 +4625,42 @@ final class RouterModel: ScriptTarget {
             second, isPlaying: true,
             trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
         followTheWords()
+    }
+
+    /// Ends a song on the fixture stage, for the capture that judges the card.
+    ///
+    /// A performance card only exists in the second between one song ending
+    /// and the next beginning, which no gate can wait for. Renderer only.
+    func renderFinishedPerformance() {
+        prepareForRendering()
+        lastPerformance = Performance(
+            title: "年少心動雨季 《那年盛夏》電視劇片頭曲", artist: "黃霄雲",
+            singers: [
+                Singer(
+                    uid: "preview-one", name: loc("Microphone"), hertz: 220,
+                    score: KaraokeScore(
+                        percentage: 82, onPitchSeconds: 148, nearPitchSeconds: 22,
+                        silentSeconds: 12, referenceSeconds: 181, sungSeconds: 169,
+                        meanErrorSemitones: -0.31,
+                        lines: [
+                            KaraokeScore.Line(
+                                index: 6, time: 69.39, text: "原来年少心动是逆行在一场雨季",
+                                referenceSeconds: 5.4, onPitchSeconds: 5.1,
+                                nearPitchSeconds: 0.2, percentage: 94)
+                        ])),
+                Singer(
+                    uid: "preview-two", name: loc("Source"), hertz: 330,
+                    score: KaraokeScore(
+                        percentage: 54, onPitchSeconds: 92, nearPitchSeconds: 30,
+                        silentSeconds: 41, referenceSeconds: 181, sungSeconds: 140,
+                        meanErrorSemitones: 0.42,
+                        lines: [
+                            KaraokeScore.Line(
+                                index: 9, time: 93.15, text: "原来有些相遇明明知道会分离",
+                                referenceSeconds: 5, onPitchSeconds: 3.6,
+                                nearPitchSeconds: 0.5, percentage: 71)
+                        ])),
+            ])
     }
 
     /// Puts a duet on the fixture stage, for the capture that judges it.

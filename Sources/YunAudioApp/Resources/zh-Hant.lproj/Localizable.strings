@@ -663,6 +663,16 @@
 "Smaller" = "縮小";
 "The size the window implies" = "跟著視窗大小";
 "The singing starts in a moment" = "馬上就要開始唱了";
+"How that went" = "剛剛唱得如何";
+"Perfect" = "完美";
+"Great" = "很好";
+"Good" = "不錯";
+"Keep going" = "再來一次";
+"Done" = "知道了";
+"Much of the tune went unsung" = "有不少旋律沒唱到";
+"Flat by about %.0f cents" = "大約低了 %.0f 音分";
+"Sharp by about %.0f cents" = "大約高了 %.0f 音分";
+"Best line: %@ (%.0f%%)" = "唱得最好的一句：%@（%.0f%%）";
 "Hide the desktop lyrics" = "隱藏桌面歌詞";
 "Desktop lyrics" = "桌面歌詞";
 "Nothing is playing" = "目前沒有播放";

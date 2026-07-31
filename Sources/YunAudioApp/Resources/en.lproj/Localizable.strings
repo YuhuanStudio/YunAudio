@@ -663,6 +663,16 @@
 "Smaller" = "Smaller";
 "The size the window implies" = "The size the window implies";
 "The singing starts in a moment" = "The singing starts in a moment";
+"How that went" = "How that went";
+"Perfect" = "Perfect";
+"Great" = "Great";
+"Good" = "Good";
+"Keep going" = "Keep going";
+"Done" = "Done";
+"Much of the tune went unsung" = "Much of the tune went unsung";
+"Flat by about %.0f cents" = "Flat by about %.0f cents";
+"Sharp by about %.0f cents" = "Sharp by about %.0f cents";
+"Best line: %@ (%.0f%%)" = "Best line: %@ (%.0f%%)";
 "Hide the desktop lyrics" = "Hide the desktop lyrics";
 "Desktop lyrics" = "Desktop lyrics";
 "Nothing is playing" = "Nothing is playing";

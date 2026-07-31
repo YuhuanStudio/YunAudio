@@ -662,6 +662,16 @@
 "Smaller" = "缩小";
 "The size the window implies" = "跟着窗口大小";
 "The singing starts in a moment" = "马上就要开始唱了";
+"How that went" = "刚刚唱得如何";
+"Perfect" = "完美";
+"Great" = "很好";
+"Good" = "不错";
+"Keep going" = "再来一次";
+"Done" = "知道了";
+"Much of the tune went unsung" = "有不少旋律没唱到";
+"Flat by about %.0f cents" = "大约低了 %.0f 音分";
+"Sharp by about %.0f cents" = "大约高了 %.0f 音分";
+"Best line: %@ (%.0f%%)" = "唱得最好的一句：%@（%.0f%%）";
 "Hide the desktop lyrics" = "隐藏桌面歌词";
 "Desktop lyrics" = "桌面歌词";
 "Nothing is playing" = "目前没有播放";

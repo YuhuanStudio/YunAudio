@@ -276,6 +276,11 @@ struct KTVStage: View {
                     .padding(.top, WindowChrome.controlClearance)
                     .padding([.horizontal, .bottom], Yun.Space.lg)
 
+                // Last, and over everything including the words: the whole
+                // room turns to look at this, and a card sharing the stage
+                // with a lyric it is printed on top of is a card nobody can
+                // read the numbers on.
+                performanceCard
             }
         }
         // Does anything on this stage get a task at all? `SongArtwork` never
@@ -1155,6 +1160,103 @@ struct KTVStage: View {
                 .contentTransition(.opacity)
                 .fixedSize(horizontal: false, vertical: true)
                 .blur(radius: abs(offset) == 2 ? 1.2 : 0)
+        }
+    }
+
+    /// What the song that just finished came to.
+    ///
+    /// Shown over the stage rather than beside it: this is the one moment in a
+    /// KTV evening when everybody looks at the screen for a reason that is not
+    /// the words, and a card in a corner is a card nobody turns round for. It
+    /// goes when it is dismissed or when the next song has words of its own.
+    @ViewBuilder
+    private var performanceCard: some View {
+        if let performance = model.lastPerformance {
+            let card = VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(loc("How that went"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.52))
+                    Text(performance.title)
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                    Text(performance.artist)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.62))
+                        .lineLimit(1)
+                }
+                ForEach(performance.singers) { singer in
+                    performanceRow(singer)
+                }
+                Button {
+                    model.dismissPerformance()
+                } label: {
+                    Text(loc("Done"))
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 9)
+                        .background(.white.opacity(0.14), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .accessibilityIdentifier("KTVDismissPerformance")
+            }
+            .padding(Yun.Space.xl)
+            .frame(maxWidth: 460)
+            .background(.black.opacity(0.86), in: .rect(cornerRadius: 22))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22)
+                    .stroke(.white.opacity(0.10), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.5), radius: 40, y: 18)
+            .accessibilityIdentifier("KTVPerformanceCard")
+            ZStack {
+                // The stage dimmed rather than the card made opaque: the song
+                // is still there behind it, which is the point of a KTV
+                // scoreboard, but the numbers are read against a flat field
+                // instead of against a lyric line.
+                Color.black.opacity(0.62)
+                card
+            }
+        }
+    }
+
+    private func performanceRow(_ singer: RouterModel.Singer) -> some View {
+        let score = singer.score
+        let grade = KTVPerformanceGrade.of(score.percentage)
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+                Text(singer.name)
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .lineLimit(1)
+                Spacer(minLength: Yun.Space.sm)
+                Text(grade.title)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(Yun.Palette.accent.opacity(0.92))
+                Text(String(format: "%.0f%%", score.percentage))
+                    .font(.system(size: 26, weight: .bold).monospacedDigit())
+                    .foregroundStyle(.white)
+            }
+            if let advice = KTVPerformanceGrade.advice(for: score) {
+                Text(advice)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.52))
+            }
+            // The line that went best, which is the part somebody repeats to
+            // the room. A score with no line behind it is a number; this is a
+            // moment in the song.
+            if let best = KTVPerformanceGrade.bestLine(in: score) {
+                Text(
+                    String(
+                        format: loc("Best line: %@ (%.0f%%)"), best.text, best.percentage)
+                )
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.62))
+                .lineLimit(2)
+            }
         }
     }
 
