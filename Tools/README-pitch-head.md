@@ -18,6 +18,40 @@ Measured on `PitchAccuracyTests`, the same ruler both are judged by:
 Combined means: the head chooses the periodicity, and the rule's own parabolic
 interpolation places it exactly. Neither alone is better than both.
 
+## What it is worth end to end
+
+Per-frame numbers are not what a singer sees, so the whole pipeline was measured
+as well — a tune sung correctly with an accompaniment underneath it, through
+`SingerPitch` and `KaraokeScore` exactly as a performance is, with the head on
+and with `YUNAUDIO_NO_LEARNED_PITCH=1`:
+
+| backing level | with head | no head |
+|---|---|---|
+| 1.0× the voice | 95% | 95% |
+| 1.5× | **95%** | 92% |
+| 2.0× | **95%** | 89% |
+| 3.0× | **70%** | 57% |
+| 4.0× | 40% | 43% |
+
+Two things in there are worth saying plainly rather than burying.
+
+**Below the singer's own level it is worth nothing**, and the first two
+end-to-end fixtures showed exactly that. One of them was accidentally kind — its
+chord was rooted an exact octave under the melody, and `KaraokeScore` forgives
+octaves, so following the accompaniment still scored as following the tune. The
+per-frame failure was real and its consequence was not. That fixture was replaced
+rather than kept.
+
+**And at four times the level both collapse.** No choice among periodicities can
+recover a voice that is buried; the honest reading is that the head extends the
+range where scoring works, it does not remove the limit.
+
+Where it earns its place is a backing track louder than the singer, which is a
+KTV room with the PA up — three, six and thirteen points across that band. The
+two unambiguous levels are asserted in `LearnedPitchTests`, so removing the head
+or retraining it worse fails a test rather than quietly costing somebody their
+score in a loud room.
+
 ## Why it is not on the Neural Engine
 
 Because it is too small to pay for the trip, and that is measured rather than

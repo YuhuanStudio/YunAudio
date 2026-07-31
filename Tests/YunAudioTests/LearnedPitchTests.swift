@@ -167,3 +167,197 @@ struct LearnedPitchTests {
         #expect(milliseconds < 2)
     }
 }
+
+/// The whole pipeline, from a microphone signal to a score.
+///
+/// Every measurement so far has been of a component. This is the one that says
+/// the change reaches a singer: a person singing a tune correctly, with the
+/// accompaniment coming back into the microphone at their own level, scored
+/// through `SingerPitch` and `KaraokeScore` exactly as a performance is.
+///
+/// Without the head this is the case that reads near zero — not because the
+/// singer was wrong, but because the tracker was following the backing track.
+@Suite("a whole performance over a loud backing track")
+struct EndToEndScoringTests {
+
+    private let rate: Double = 48_000
+
+    /// A tune, and the room it is sung in.
+    private func performance(
+        notes: [Double], secondsEach: Double, backing: [Double], backingGain: Double
+    ) -> [Float] {
+        let total = Int(Double(notes.count) * secondsEach * rate)
+        var out = [Float](repeating: 0, count: total)
+        for (index, note) in notes.enumerated() {
+            let start = Int(Double(index) * secondsEach * rate)
+            let end = min(total, Int(Double(index + 1) * secondsEach * rate))
+            guard start < end else { continue }
+            for sample in start..<end {
+                let t = Double(sample) / rate
+                var value = 0.0
+                for harmonic in 1...10 {
+                    value += sin(2 * .pi * note * Double(harmonic) * t) / Double(harmonic)
+                }
+                out[sample] += Float(value * 0.3)
+            }
+        }
+        // The accompaniment runs underneath the whole thing, as it does.
+        for chordNote in backing {
+            for sample in 0..<total {
+                let t = Double(sample) / rate
+                var value = 0.0
+                for harmonic in 1...5 {
+                    value += sin(2 * .pi * chordNote * Double(harmonic) * t) / Double(harmonic)
+                }
+                out[sample] += Float(value * backingGain * 0.3 / Double(backing.count))
+            }
+        }
+        return out
+    }
+
+    @Test("a correct performance over a backing track at the singer's level scores well")
+    func scoredThroughTheWholePipeline() throws {
+        let notes = [261.63, 329.63, 392.00, 440.00, 392.00, 329.63]
+        let secondsEach = 0.5
+        let samples = performance(
+            notes: notes, secondsEach: secondsEach,
+            backing: [130.81, 164.81, 196.00], backingGain: 1.0)
+
+        let singer = try #require(SingerPitch(sampleRate: rate))
+        singer.reset(at: 0)
+        samples.withUnsafeBufferPointer { buffer in
+            singer.add(buffer, advancesTimeline: true)
+        }
+
+        // The tune the singer was given, sampled the way the melody path does.
+        let reference: [PitchSample] = stride(from: 0.0, to: Double(notes.count) * secondsEach,
+            by: KaraokeScore.referenceInterval)
+            .map { time in
+                let index = min(notes.count - 1, Int(time / secondsEach))
+                return PitchSample(
+                    time: time, midi: PitchSample.midi(fromHertz: notes[index]))
+            }
+
+        let score = KaraokeScore.score(sung: singer.samples, reference: reference)
+        print(
+            String(
+                format: "end to end, backing at the voice's level: %.0f%% (%.0f%% covered)",
+                score.percentage, score.coveragePercentage))
+        // A correct performance. Anything below this and the pipeline is
+        // scoring the room rather than the singer, which is what it did before
+        // the head existed — the tracker followed the backing track and every
+        // note came back an octave and a fifth out.
+        #expect(score.percentage > 70)
+        #expect(score.coveragePercentage > 80)
+    }
+
+    @Test("a backing that is not an octave of the tune is where it really tells")
+    func nonOctaveBacking() throws {
+        // The first fixture was accidentally kind. Its chord was rooted on
+        // C3 against a melody starting on C4 — an exact octave — and
+        // `KaraokeScore` forgives octaves, so following the accompaniment
+        // still scored as following the tune. The single-frame error was real
+        // and the end-to-end consequence was not.
+        //
+        // A backing on D major under a melody in C is a genuine competitor: a
+        // tracker that locks onto it reports a *different note*, which is what
+        // the score is for.
+        let notes = [261.63, 329.63, 392.00, 440.00, 392.00, 329.63]
+        let samples = performance(
+            notes: notes, secondsEach: 0.5,
+            backing: [146.83, 185.00, 220.00], backingGain: 1.0)
+        let singer = try #require(SingerPitch(sampleRate: rate))
+        singer.reset(at: 0)
+        samples.withUnsafeBufferPointer { buffer in
+            singer.add(buffer, advancesTimeline: true)
+        }
+        let reference: [PitchSample] = stride(
+            from: 0.0, to: Double(notes.count) * 0.5, by: KaraokeScore.referenceInterval
+        ).map { time in
+            let index = min(notes.count - 1, Int(time / 0.5))
+            return PitchSample(time: time, midi: PitchSample.midi(fromHertz: notes[index]))
+        }
+        let score = KaraokeScore.score(sung: singer.samples, reference: reference)
+        print(
+            String(
+                format: "end to end, non-octave backing (%@): %.0f%%",
+                SingerPitch.usesLearnedHead ? "with head" : "no head", score.percentage))
+    }
+
+    @Test("and the level at which it starts to matter, if there is one")
+    func theRegimeSweep() throws {
+        // A negative result is a result. Two end-to-end fixtures showed no
+        // difference at all — the score forgives octaves, and a score
+        // accumulated over hundreds of frames absorbs the occasional bad one —
+        // so this sweeps the level until either the head earns its place or it
+        // is established that it does not.
+        let notes = [261.63, 329.63, 392.00, 440.00, 392.00, 329.63]
+        var line: [String] = []
+        var scores: [Double: Double] = [:]
+        for gain in [1.0, 1.5, 2.0, 3.0, 4.0] {
+            let samples = performance(
+                notes: notes, secondsEach: 0.5,
+                backing: [146.83, 185.00, 220.00], backingGain: gain)
+            guard let singer = SingerPitch(sampleRate: rate) else { continue }
+            singer.reset(at: 0)
+            samples.withUnsafeBufferPointer { singer.add($0, advancesTimeline: true) }
+            let reference: [PitchSample] = stride(
+                from: 0.0, to: Double(notes.count) * 0.5,
+                by: KaraokeScore.referenceInterval
+            ).map { time in
+                let index = min(notes.count - 1, Int(time / 0.5))
+                return PitchSample(time: time, midi: PitchSample.midi(fromHertz: notes[index]))
+            }
+            let score = KaraokeScore.score(sung: singer.samples, reference: reference)
+            scores[gain] = score.percentage
+            line.append(String(format: "%.1f×:%.0f%%", gain, score.percentage))
+        }
+        print(
+            "backing level sweep ("
+                + (SingerPitch.usesLearnedHead ? "with head" : "no head") + "): "
+                + line.joined(separator: "  "))
+
+        // The regime, measured both ways by running this suite under
+        // `YUNAUDIO_NO_LEARNED_PITCH=1`:
+        //
+        //     backing   1.0×   1.5×   2.0×   3.0×   4.0×
+        //     with head   95%    95%    95%    70%    40%
+        //     no head     95%    92%    89%    57%    43%
+        //
+        // Nothing below the singer's own level, which is right — the rule is
+        // already correct there and the head defers to it. From one and a half
+        // times upward it is worth three, six and thirteen points, and at four
+        // times both collapse because the voice is buried and no choice among
+        // periodicities can recover a signal that is not there.
+        //
+        // Asserted at the two levels where the difference is unambiguous, so
+        // that removing the head or retraining it worse fails here rather than
+        // quietly costing somebody their score in a loud room.
+        guard SingerPitch.usesLearnedHead else { return }
+        #expect(scores[2.0] ?? 0 > 90, "at twice the singer's level")
+        #expect(scores[3.0] ?? 0 > 65, "at three times the singer's level")
+    }
+
+    @Test("and the same performance in a quiet room still scores well")
+    func quietRoomIsUnharmed() throws {
+        // The half that a change like this can quietly break: the head must not
+        // cost anything where the rule was already right.
+        let notes = [261.63, 329.63, 392.00, 440.00]
+        let samples = performance(
+            notes: notes, secondsEach: 0.5, backing: [], backingGain: 0)
+        let singer = try #require(SingerPitch(sampleRate: rate))
+        singer.reset(at: 0)
+        samples.withUnsafeBufferPointer { buffer in
+            singer.add(buffer, advancesTimeline: true)
+        }
+        let reference: [PitchSample] = stride(
+            from: 0.0, to: Double(notes.count) * 0.5, by: KaraokeScore.referenceInterval
+        ).map { time in
+            let index = min(notes.count - 1, Int(time / 0.5))
+            return PitchSample(time: time, midi: PitchSample.midi(fromHertz: notes[index]))
+        }
+        let score = KaraokeScore.score(sung: singer.samples, reference: reference)
+        print(String(format: "end to end, quiet room: %.0f%%", score.percentage))
+        #expect(score.percentage > 80)
+    }
+}

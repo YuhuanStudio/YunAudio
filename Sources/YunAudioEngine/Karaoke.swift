@@ -1229,6 +1229,15 @@ public final class SingerPitch {
 
     private let head: LearnedPitch?
 
+    /// Whether the learned head is consulted.
+    ///
+    /// Off only under `YUNAUDIO_NO_LEARNED_PITCH`, and it exists for one
+    /// reason: a claim about what the head is worth needs the same pipeline
+    /// measured without it. Without this switch the comparison would be
+    /// "95 per cent" against a number nobody ever took.
+    static let usesLearnedHead =
+        ProcessInfo.processInfo.environment["YUNAUDIO_NO_LEARNED_PITCH"] == nil
+
     public init?(sampleRate: Double) {
         // The sung range, not the spoken one. Above 400 Hz the speaking search
         // returns the octave below, note for note — see `lowestSungHertz`.
@@ -1298,7 +1307,7 @@ public final class SingerPitch {
                 // note. It is consulted only on the singing path — the voice
                 // changer and the analysis panel hear one person in a room, and
                 // have nothing to settle. See `LearnedPitch`.
-                if let head {
+                if let head, SingerPitch.usesLearnedHead {
                     let curve = tracker.correlationCurve(
                         frame: Array(
                             UnsafeBufferPointer(
