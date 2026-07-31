@@ -171,7 +171,13 @@ struct KTVLyricMetrics: Equatable, Sendable {
     static let smallestCurrent: CGFloat = 19
 
     /// And the largest, so a wall-sized display does not draw four words.
-    static let largestCurrent: CGFloat = 54
+    ///
+    /// Raised from 54 once a 2000×1080 stage was looked at: the words were the
+    /// size they are on a laptop, in a column with room for half again as
+    /// much. 72 is still under the measure — twenty-two characters at 72 is
+    /// 1584 points, which such a stage has — and a stage that cannot reach it
+    /// is bounded by its own height first, as before.
+    static let largestCurrent: CGFloat = 72
 
     /// - Parameters:
     ///   - width: Space the lyric column has, after the stage's own padding.

@@ -70,11 +70,24 @@ struct CompositedStageBackdrop: NSViewRepresentable {
         private var loading: Task<Void, Never>?
         private var isDrifting = false
 
+        /// The picture lives on a sublayer, not on the view's own backing layer.
+        ///
+        /// A view's backing layer belongs to AppKit: it sets the frame from the
+        /// view's, and it does that against its own idea of the anchor point.
+        /// Moving that anchor to the middle — which a scale about the centre
+        /// needs — leaves the two disagreeing, and the picture sits half a
+        /// window off to one side. That is what the offset background was.
+        /// A sublayer is mine: `CALayer` already anchors at its centre, so the
+        /// transform means what it says and nothing re-lays it out behind me.
+        let picture = CALayer()
+
         override init(frame: NSRect) {
             super.init(frame: frame)
             wantsLayer = true
-            layer?.contentsGravity = .resizeAspectFill
             layer?.masksToBounds = true
+            picture.contentsGravity = .resizeAspectFill
+            picture.masksToBounds = true
+            layer?.addSublayer(picture)
         }
 
         required init?(coder: NSCoder) { nil }
@@ -88,7 +101,7 @@ struct CompositedStageBackdrop: NSViewRepresentable {
             shown = .some(url)
             loading?.cancel()
             guard let url else {
-                layer?.contents = nil
+                picture.contents = nil
                 return
             }
             loading = Task { [weak self] in
@@ -99,7 +112,7 @@ struct CompositedStageBackdrop: NSViewRepresentable {
                     Self.blur(decoded.image)
                 }.value
                 guard !Task.isCancelled, let blurred else { return }
-                self?.layer?.contents = blurred
+                self?.picture.contents = blurred
             }
         }
 
@@ -111,13 +124,15 @@ struct CompositedStageBackdrop: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            guard let layer else { return }
-            // Around the middle, so growing does not walk the picture towards
-            // a corner. Set with the position, or the layer jumps by half its
-            // own size the first time it is changed.
-            layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
-            layer.position = CGPoint(x: bounds.midX, y: bounds.midY)
-            layer.bounds = CGRect(origin: .zero, size: bounds.size)
+            // Bounds and position rather than a frame: a layer carrying a
+            // transform has no meaningful frame, and setting one applies the
+            // transform to it twice.
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            picture.bounds = CGRect(origin: .zero, size: bounds.size)
+            picture.position = CGPoint(x: bounds.midX, y: bounds.midY)
+            CATransaction.commit()
+            let layer = picture
             // The drift is not rebuilt here. Layout runs on every frame of a
             // window drag, and rebuilding the animation resets it to its first
             // frame — which meant the background stood still for as long as
@@ -129,7 +144,7 @@ struct CompositedStageBackdrop: NSViewRepresentable {
         }
 
         private func applyDrift() {
-            guard let layer else { return }
+            let layer = picture
             layer.removeAnimation(forKey: "drift")
             let resting = CATransform3DMakeScale(
                 CompositedStageBackdrop.scale.from, CompositedStageBackdrop.scale.from, 1)

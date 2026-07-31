@@ -228,6 +228,14 @@ enum PanelRenderer {
             size: CGSize(width: 380, height: 1_200))
         model.dismissPerformance()
         model.prepareForRendering()
+        // A stage the size of an external display, which every capture so far
+        // has been too small to show: the cover stayed laptop-sized and the
+        // words with it, with half the screen empty beside them.
+        render(
+            KTVStage(model: model, isRendering: true),
+            basename: "ktv-wide\(suffix)",
+            directory: directory,
+            size: CGSize(width: 2000, height: 1080))
         // A song read out of a browser tab, which no capture has shown: no
         // album, a cover derived from the address, and a broadcaster's name
         // where a player would have put an artist's.

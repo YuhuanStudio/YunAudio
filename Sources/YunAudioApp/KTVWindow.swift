@@ -416,7 +416,14 @@ struct KTVStage: View {
     private func sideBySide(
         _ track: NowPlaying.Track, in size: CGSize, stageHeight: CGFloat
     ) -> some View {
-        let columnWidth = min(360, max(220, size.width * 0.31))
+        // The ceiling grows with the stage. 360 was chosen against a
+        // 1080-point window and then applied to every window: on a
+        // 2000×1080 display the cover stayed the size it is on a laptop with
+        // half the screen empty beside it. Height is what actually bounds a
+        // square cover, so the ceiling comes from the stage's height and the
+        // width still has the final say.
+        let columnWidth = min(
+            max(360, stageHeight * 0.52), max(220, size.width * 0.31))
         HStack(alignment: .center, spacing: max(36, size.width * 0.055)) {
             trackColumn(
                 track, width: columnWidth,
@@ -1144,8 +1151,15 @@ struct KTVStage: View {
                 maxHeight: alignment == .leading ? nil : .infinity,
                 alignment: alignment
             )
+            // A spring rather than a curve. `easeOut` arrives and stops dead,
+            // which is what "生硬" is: the line lands like a slide changing.
+            // A spring with a little overshoot left in it settles the way a
+            // hand moving paper does, and the response is long enough to read
+            // as motion rather than as a jump.
             .animation(
-                reduceMotion ? nil : .easeOut(duration: 0.32), value: model.lyricLine)
+                reduceMotion
+                    ? nil : .spring(response: 0.55, dampingFraction: 0.78),
+                value: model.lyricLine)
     }
 
     @ViewBuilder
@@ -1160,6 +1174,9 @@ struct KTVStage: View {
             let size = offset == 0 ? metrics.currentSize : metrics.neighbourSize
             CompositedLyricSurface(model: model, text: text, style: .stage(size), voice: voice)
                 .contentTransition(.opacity)
+                // Arrives from just under its own size, so a line becoming the
+                // one being sung grows into it instead of appearing at it.
+                .transition(.scale(scale: 0.94, anchor: .leading).combined(with: .opacity))
         } else if offset == 0 {
             // Centred but not being sung: prominent, and plainly not the one
             // the music is on.
@@ -1362,14 +1379,18 @@ private struct SeekableLine<Content: View>: View {
             // The row is mostly the space between the glyphs; a hit test
             // against the glyphs alone leaves most of a line dead.
             .contentShape(Rectangle())
-            .background {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(.white.opacity(isPointedAt ? 0.08 : 0))
-                    .padding(.horizontal, -12)
-                    .padding(.vertical, -6)
-            }
+            // The words answer, not a box behind them. A filled rectangle is
+            // the cheapest way to say "this is a target" and it looks like
+            // one: a grey slab across a stage whose whole design is type over
+            // a photograph. Lifting the line itself — a little brighter, a
+            // little larger, anchored where the eye already is — says the same
+            // thing and belongs to the picture.
+            .brightness(isPointedAt ? 0.16 : 0)
+            .scaleEffect(isPointedAt ? 1.018 : 1, anchor: .leading)
             .onHover { isPointedAt = $0 }
-            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isPointedAt)
+            .animation(
+                reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.7),
+                value: isPointedAt)
             .onTapGesture(perform: seek)
             .help(loc("Play from this line"))
     }
