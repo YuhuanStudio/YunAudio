@@ -1227,6 +1227,8 @@ public final class SingerPitch {
     private var frames = 0
     private var anchor: Double = 0
 
+    private let head: LearnedPitch?
+
     public init?(sampleRate: Double) {
         // The sung range, not the spoken one. Above 400 Hz the speaking search
         // returns the octave below, note for note — see `lowestSungHertz`.
@@ -1238,6 +1240,10 @@ public final class SingerPitch {
         else { return nil }
         self.tracker = tracker
         self.sampleRate = sampleRate
+        // Optional by design: a build without the model, or a machine that will
+        // not compile it, keeps the rule and loses only the case the rule was
+        // already losing.
+        head = LearnedPitch(sampleRate: sampleRate)
         pending = .allocate(capacity: PitchTracker.frameSize)
     }
 
@@ -1283,9 +1289,24 @@ public final class SingerPitch {
             consumed += copied
 
             if pendingCount == PitchTracker.frameSize {
-                let found = tracker.track(
+                var found = tracker.track(
                     frame: UnsafeBufferPointer(
                         start: pending, count: PitchTracker.frameSize))
+                // The learned head settles which periodicity belongs to the
+                // singer when the accompaniment is in the microphone at the
+                // same level, which is where the peak-picking rule loses every
+                // note. It is consulted only on the singing path — the voice
+                // changer and the analysis panel hear one person in a room, and
+                // have nothing to settle. See `LearnedPitch`.
+                if let head {
+                    let curve = tracker.correlationCurve(
+                        frame: Array(
+                            UnsafeBufferPointer(
+                                start: pending, count: PitchTracker.frameSize)))
+                    if !curve.isEmpty {
+                        found = head.hertz(from: curve, agreeingWith: found)
+                    }
+                }
                 hertz = found
                 if found > 0, advancesTimeline {
                     // The middle of the frame, because that is what an estimate

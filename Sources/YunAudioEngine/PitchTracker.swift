@@ -198,7 +198,52 @@ public final class PitchTracker {
         return estimate(address)
     }
 
+    /// The normalised correlation over every lag in the search, which is what
+    /// the peak picker looks at.
+    ///
+    /// Exposed because it is the input to the learned estimator, and because
+    /// exposing it is what makes training and inference agree. The alternative
+    /// — reimplementing the front end in Python to generate training data — is
+    /// two implementations of one thing, which is the defect this whole
+    /// session has been about.
+    ///
+    /// What it holds is a *decision problem*: for a voice over a backing track
+    /// at the same level, several lags score nearly identically and the peak
+    /// picker's rule — the shortest local maximum within 15% of the best —
+    /// picks the wrong one. Autocorrelation finds periodicity; it has no way to
+    /// prefer the singer's periodicity over the accompaniment's. That
+    /// preference is exactly what can be learned, and this curve is what it
+    /// would be learned from.
+    ///
+    /// - Returns: One value per lag from `lagRange`, or an empty array when the
+    ///   frame is too quiet to have a pitch at all.
+    public func correlationCurve(frame: [Float]) -> [Float] {
+        guard frame.count >= Self.frameSize else { return [] }
+        return frame.withUnsafeBufferPointer { buffer -> [Float] in
+            guard let address = buffer.baseAddress else { return [] }
+            guard estimateCorrelation(address) else { return [] }
+            return Array(correlation[minimumLag...maximumLag])
+        }
+    }
+
+    /// The lags the curve covers, so a caller can turn an index into a
+    /// frequency without knowing how the search was set up.
+    public var lagRange: ClosedRange<Int> { minimumLag...maximumLag }
+
+    /// The frequency a lag stands for.
+    public func hertz(forLag lag: Int) -> Double { sampleRate / Double(lag) }
+
     private func estimate(_ frame: UnsafePointer<Float>) -> Float {
+        guard estimateCorrelation(frame) else { return 0 }
+        return pickPeak()
+    }
+
+    /// Fills `correlation` with the normalised curve.
+    ///
+    /// - Returns: False when the frame is too quiet for the curve to mean
+    ///   anything, which is the same gate the estimate used to apply inline.
+    @discardableResult
+    private func estimateCorrelation(_ frame: UnsafePointer<Float>) -> Bool {
         // The mean comes off first.
         //
         // A constant offset correlates perfectly with itself at every lag, so
@@ -258,13 +303,13 @@ public final class PitchTracker {
         // The zero-lag term is the frame's total energy, which is exactly the
         // measurement needed — no second pass over the samples.
         let energy = correlation[0]
-        guard energy > 1e-9 else { return 0 }
+        guard energy > 1e-9 else { return false }
         // zrip's forward-inverse pair scales by 2N, so the mean square is the
         // zero-lag term over that and over the frame length.
         let meanSquare = energy / (2 * Float(Self.transformSize) * Float(Self.frameSize))
         guard meanSquare > 0,
             10 * log10(meanSquare) > Self.floorDecibels
-        else { return 0 }
+        else { return false }
 
         // The raw linear autocorrelation falls with lag even for a perfect
         // periodic signal, simply because fewer samples overlap. At 96 kHz a
@@ -284,6 +329,14 @@ public final class PitchTracker {
                 denominator > 1e-12 ? correlation[lag] / denominator : 0
         }
 
+        return true
+    }
+
+    /// The lag the curve says is the period, in hertz.
+    ///
+    /// Split from the curve so the learned estimator can read the same numbers
+    /// this rule reads, and so the two can be compared on identical input.
+    private func pickPeak() -> Float {
         // The shortest lag that scores nearly as well as the best, not the best
         // outright.
         //

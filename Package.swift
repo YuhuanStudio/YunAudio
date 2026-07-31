@@ -65,6 +65,10 @@ let package = Package(
         .target(
             name: "YunAudioEngine",
             dependencies: ["YunAudioHAL", "YunAudioRT"],
+            // The learned pitch head. `.copy` rather than `.process`: an
+            // `.mlpackage` is a directory Core ML opens by path, and processing
+            // would flatten it into the bundle root as loose files.
+            resources: [.copy("Resources/PitchHead.mlpackage")],
             swiftSettings: [
                 // Accelerate's current CBLAS declarations remove the macOS
                 // 13.3 deprecation from the strided realtime copy while
@@ -120,6 +124,12 @@ let package = Package(
         // An MCP server, so an agent can drive the application. Stateless: it
         // forwards over the control socket and holds nothing, which is what
         // lets an MCP client start and stop it whenever it likes.
+        // Training data for the learned pitch estimator. Not shipped — it
+        // exists so the features a model is trained on come out of the same
+        // code that will serve it.
+        .executableTarget(
+            name: "yunaudio-pitchdata", dependencies: ["YunAudioEngine"]),
+
         .executableTarget(name: "yunaudio-mcp", dependencies: ["YunAudioControl"]),
 
         .testTarget(
