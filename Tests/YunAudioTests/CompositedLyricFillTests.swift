@@ -214,6 +214,52 @@ struct CompositedLyricFillTests {
         #expect(feather == 11)
     }
 
+    @Test("the syllable being sung is brighter than the ones already sung")
+    @MainActor
+    func theHighlightTravels() throws {
+        _ = NSApplication.shared
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 120),
+            styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = view
+        window.orderFront(nil)
+        defer { window.orderOut(nil) }
+
+        let size: CGFloat = 30
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        view.configure(
+            text: "光走過的那一個字最亮",
+            font: .systemFont(ofSize: size, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: LyricPlaybackAnchor(
+                lineIndex: 0, lineStart: 0, lineEnd: 60, position: 0,
+                trueAt: now, isPlaying: true, revision: 1),
+            reduceMotion: false,
+            frozenProgress: nil)
+        view.layoutSubtreeIfNeeded()
+        CATransaction.flush()
+
+        let glow = view.glowForCheck()
+        // A halo rather than a second colour, because a colour would have to be
+        // chosen and this has to work over a blurred cover of any hue.
+        #expect(glow.layer.shadowOpacity == 1)
+        #expect(glow.layer.shadowOffset == .zero)
+        #expect(glow.layer.shadowRadius == size * 0.2)
+        #expect(glow.layer.mask != nil)
+        // One window per row, and each one moving: a highlight that does not
+        // travel is a smudge parked in the middle of a line.
+        #expect(!glow.bands.isEmpty)
+        for band in glow.bands {
+            #expect(band.animation(forKey: "lyric-glow") != nil)
+            // Narrow. Three feathers is about a character and a half — a
+            // highlight on a syllable rather than on the whole line.
+            #expect(band.bounds.width < view.bounds.width / 2)
+        }
+    }
+
     @Test("production call sites never observe the ten-hertz legacy progress")
     func productionObservationBoundary() throws {
         let repository = URL(fileURLWithPath: #filePath)

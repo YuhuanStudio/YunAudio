@@ -329,6 +329,11 @@ final class CompositedLyricView: NSView {
     private let fillLayer = CoreTextBackingLayer()
     private let revealLayer = CALayer()
     private var revealRows: [CALayer] = []
+    /// The travelling highlight: the same words again, haloed, behind a narrow
+    /// window that follows the sweep. See the note in `init`.
+    private let glowLayer = CoreTextBackingLayer()
+    private let glowMask = CALayer()
+    private var glowBands: [CALayer] = []
     private var text = ""
     private var font = NSFont.systemFont(ofSize: 27, weight: .semibold)
     private var baseColour = NSColor.secondaryLabelColor
@@ -353,6 +358,18 @@ final class CompositedLyricView: NSView {
         root.addSublayer(baseLayer)
         root.addSublayer(fillLayer)
         fillLayer.mask = revealLayer
+        // A third copy of the words, glowing, shown only through a narrow band
+        // that travels with the sweep. Everything people already like about a
+        // karaoke lyric has this: the syllable being sung is not merely lit, it
+        // is *brighter than lit* for the moment it is being sung, and that is
+        // what makes a line read as being sung rather than as being filled in.
+        //
+        // A halo rather than a second colour, because a colour would have to be
+        // chosen and this has to work over a blurred album cover of any hue.
+        glowLayer.shadowOffset = .zero
+        glowLayer.shadowOpacity = 1
+        glowLayer.mask = glowMask
+        root.addSublayer(glowLayer)
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
     }
@@ -414,8 +431,15 @@ final class CompositedLyricView: NSView {
         baseLayer.frame = CGRect(origin: .zero, size: layout.size)
         fillLayer.frame = baseLayer.frame
         revealLayer.frame = baseLayer.bounds
+        glowLayer.frame = baseLayer.frame
+        glowMask.frame = baseLayer.bounds
         baseLayer.configure(frame: layout.frame, colour: baseColour)
         fillLayer.configure(frame: layout.frame, colour: fillColour)
+        glowLayer.configure(frame: layout.frame, colour: fillColour)
+        glowLayer.shadowColor = fillColour.cgColor
+        // A fifth of a character. Wider is a smear that stops saying which
+        // syllable, narrower is invisible at the size the inspector uses.
+        glowLayer.shadowRadius = font.pointSize * 0.2
         rebuildRevealRows(for: layout)
         CATransaction.commit()
         applyTimeline()
@@ -460,6 +484,9 @@ final class CompositedLyricView: NSView {
     /// So the only place the mask can be asserted is here.
     func revealRowsForCheck() -> [CALayer] { revealRows }
 
+    /// The travelling highlight, for the same reason and with the same excuse.
+    func glowForCheck() -> (layer: CALayer, bands: [CALayer]) { (glowLayer, glowBands) }
+
     private func rebuildRevealRows(for layout: CompositedLyricLayout) {
         revealRows.forEach { $0.removeFromSuperlayer() }
         let feather = LyricFillFeather.width(forPointSize: font.pointSize)
@@ -488,6 +515,37 @@ final class CompositedLyricView: NSView {
                 x: row.startsOnRight ? row.rect.maxX : row.rect.minX,
                 y: row.rect.midY)
             revealLayer.addSublayer(layer)
+            return layer
+        }
+        rebuildGlowBands(for: layout, feather: feather, scale: scale)
+    }
+
+    /// One travelling window per row, for the halo to be seen through.
+    ///
+    /// A band rather than the same mask as the fill: the halo belongs *at* the
+    /// syllable being sung, not behind all of them. Clear at both ends so the
+    /// highlight arrives and leaves rather than switching on.
+    private func rebuildGlowBands(
+        for layout: CompositedLyricLayout, feather: CGFloat, scale: CGFloat
+    ) {
+        glowBands.forEach { $0.removeFromSuperlayer() }
+        // Three feathers wide: about a character and a half, which is a
+        // highlight on a syllable rather than on a word or on a line.
+        let width = max(12, feather * 3)
+        glowBands = layout.rows.map { row in
+            let layer = CAGradientLayer()
+            layer.colors = [
+                NSColor.white.withAlphaComponent(0).cgColor,
+                NSColor.white.cgColor,
+                NSColor.white.withAlphaComponent(0).cgColor,
+            ]
+            layer.locations = [0, 0.5, 1]
+            layer.startPoint = CGPoint(x: 0, y: 0.5)
+            layer.endPoint = CGPoint(x: 1, y: 0.5)
+            layer.contentsScale = scale
+            layer.bounds = CGRect(x: 0, y: 0, width: width, height: row.rect.height)
+            layer.position = CGPoint(x: row.rect.minX, y: row.rect.midY)
+            glowMask.addSublayer(layer)
             return layer
         }
     }
@@ -524,8 +582,18 @@ final class CompositedLyricView: NSView {
         CATransaction.setDisableActions(true)
         for (index, rowLayer) in revealRows.enumerated() {
             rowLayer.removeAllAnimations()
+            if glowBands.indices.contains(index) {
+                glowBands[index].removeAllAnimations()
+            }
             guard timings.indices.contains(index) else { continue }
             let timing = timings[index]
+            let row = layout.rows[index]
+            /// Where the highlight's centre sits for a given fraction of the
+            /// row, in the layer's own coordinates and in reading order.
+            func band(_ fraction: Double) -> Double {
+                let along = max(0, min(row.rect.width, fraction * row.rect.width))
+                return row.startsOnRight ? row.rect.maxX - along : row.rect.minX + along
+            }
             // Where the mask ends, in points. The soft edge is centred on the
             // syllable boundary rather than trailing behind it: half the fade
             // ahead of the word being sung and half behind, so the moment a
@@ -536,9 +604,13 @@ final class CompositedLyricView: NSView {
             }
             if timing.duration == 0 {
                 rowLayer.bounds.size.width = edge(timing.initialScale)
+                // A row that is not moving has nothing to highlight: a halo
+                // parked mid-line on a paused song is a smudge, not a sweep.
+                glowBands[safe: index]?.opacity = 0
                 continue
             }
             rowLayer.bounds.size.width = rowWidth
+            glowBands[safe: index]?.opacity = 1
             // The shape the words describe, where the file gave one. The whole
             // line's curve is handed over at once and the animation is started
             // in the past by however much of the line has already been sung, so
@@ -546,8 +618,10 @@ final class CompositedLyricView: NSView {
             // beginning — rather than a straight line fitted to what remains.
             if shouldAnimate, !syllables.isEmpty, let anchor,
                 let curve = CompositedLyricKeyFrames.fill(
-                    row: (layout.rows[index].startProgress,
-                        layout.rows[index].endProgress),
+                    row: (
+                        layout.rows[index].startProgress,
+                        layout.rows[index].endProgress
+                    ),
                     syllables: syllables,
                     line: (anchor.lineStart, anchor.lineEnd),
                     text: text)
@@ -562,6 +636,21 @@ final class CompositedLyricView: NSView {
                 animation.fillMode = .backwards
                 animation.isRemovedOnCompletion = true
                 rowLayer.add(animation, forKey: "lyric-fill")
+                if let glow = glowBands[safe: index] {
+                    // The same curve, so the halo and the fill cannot disagree
+                    // about which syllable is being sung — which they would the
+                    // moment either was given its own timing.
+                    let travel = CAKeyframeAnimation(keyPath: "position.x")
+                    travel.values = curve.values.map(band)
+                    travel.keyTimes = animation.keyTimes
+                    travel.duration = animation.duration
+                    travel.beginTime = animation.beginTime
+                    travel.calculationMode = .linear
+                    travel.fillMode = .backwards
+                    travel.isRemovedOnCompletion = true
+                    glow.position.x = band(1)
+                    glow.add(travel, forKey: "lyric-glow")
+                }
                 continue
             }
             let animation = CABasicAnimation(keyPath: "bounds.size.width")
@@ -573,8 +662,32 @@ final class CompositedLyricView: NSView {
             animation.timingFunction = CAMediaTimingFunction(name: .linear)
             animation.isRemovedOnCompletion = true
             rowLayer.add(animation, forKey: "lyric-fill")
+            if let glow = glowBands[safe: index] {
+                let travel = CABasicAnimation(keyPath: "position.x")
+                travel.fromValue = band(timing.initialScale)
+                travel.toValue = band(1)
+                travel.beginTime = animation.beginTime
+                travel.duration = animation.duration
+                travel.fillMode = .backwards
+                travel.timingFunction = CAMediaTimingFunction(name: .linear)
+                travel.isRemovedOnCompletion = true
+                glow.position.x = band(1)
+                glow.add(travel, forKey: "lyric-glow")
+            }
         }
         CATransaction.commit()
+    }
+}
+
+extension Array {
+    /// The element, or nil where there is none.
+    ///
+    /// Used where two arrays are built from the same layout and are therefore
+    /// the same length — which is exactly the assumption that stops being true
+    /// after a change nobody connected to this file, and a crash on a lyric is
+    /// a worse outcome than a line drawn without its highlight.
+    fileprivate subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
     }
 }
 
