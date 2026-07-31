@@ -447,14 +447,14 @@ struct SingingPanel: View {
                 spacing: Yun.Space.sm, lineSpacing: 6,
                 balanced: true
             ) {
-                Button(loc("Open a song…")) { chooseSong() }
+                Button(loc("Open a song…")) { KTVFilePickers.chooseSongs(into: model) }
                     .buttonStyle(YunButtonStyle(.ghost, small: true))
                     .help(
                         loc(
                             "Plays an audio file here, so the words follow the samples instead of asking another application where it is."
                         ))
                 Button(model.isHandRun ? loc("Choose another") : loc("Choose the words…")) {
-                    chooseWords()
+                    KTVFilePickers.chooseWords(for: model)
                 }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
                 Button {

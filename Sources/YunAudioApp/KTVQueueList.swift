@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import UniformTypeIdentifiers
 import YunDesign
 
 /// 點歌單: the songs that have been put on, and the buttons that put them there.
@@ -62,12 +61,21 @@ struct KTVQueueList: View {
                 row(position: position, url: url)
             }
             HStack(spacing: Yun.Space.sm) {
-                Button(loc("Add songs…")) { addSongs(playingNext: false) }
+                Button(loc("Add songs…")) {
+                    KTVFilePickers.chooseSongs(into: model)
+                }
                     .buttonStyle(YunButtonStyle(.primary, small: true))
                     .accessibilityIdentifier("KTVAddSongs")
-                Button(loc("插播")) { addSongs(playingNext: true) }
+                Button(loc("插播")) {
+                    KTVFilePickers.chooseSongs(into: model, playingNext: true)
+                }
                     .buttonStyle(YunButtonStyle(.secondary, small: true))
                     .accessibilityIdentifier("KTVPlayNext")
+                Button(loc("Choose the words…")) {
+                    KTVFilePickers.chooseWords(for: model)
+                }
+                .buttonStyle(YunButtonStyle(.secondary, small: true))
+                .accessibilityIdentifier("KTVChooseWords")
                 Spacer(minLength: 0)
                 Button(loc("Clear")) { model.clearSongQueue() }
                     .buttonStyle(YunButtonStyle(.ghost, small: true))
@@ -118,22 +126,4 @@ struct KTVQueueList: View {
         onDarkStage ? .white.opacity(0.6) : Yun.Palette.textSecondary
     }
 
-    /// - Parameter playingNext: 插播 rather than the back of the queue.
-    private func addSongs(playingNext: Bool) {
-        let panel = NSOpenPanel()
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.allowedContentTypes = LocalSongPlayer.openableTypes
-        guard panel.runModal() == .OK, !panel.urls.isEmpty else { return }
-        if playingNext {
-            // Reversed, so choosing three files puts them next in the order
-            // they were chosen rather than backwards: each insert goes directly
-            // after the current song.
-            for url in panel.urls.reversed() { model.playSongNext(url) }
-            // Nothing playing yet means 插播 is simply putting songs on.
-            if !model.isPlayingOwnSong { model.openSongs(at: []) }
-        } else {
-            model.openSongs(at: panel.urls)
-        }
-    }
 }
