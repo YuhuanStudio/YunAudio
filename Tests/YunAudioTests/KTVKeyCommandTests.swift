@@ -57,10 +57,19 @@ struct KTVKeyCommandTests {
         #expect(KTVKeyCommand.resolve(.downArrow) == .browse(1))
     }
 
+    @Test("escape puts away what is over the stage")
+    func escapeDismisses() {
+        // Resolved here, but the stage refuses it when there is nothing over
+        // the stage — otherwise escape would stop leaving full screen, which
+        // is what it does in every other window on the system.
+        #expect(KTVKeyCommand.resolve(.escape) == .dismiss)
+        #expect(KTVKeyCommand.resolve(.escape, modifiers: .command) == nil)
+    }
+
     @Test("keys the stage has no use for are left alone")
     func unknownKeysAreIgnored() {
         #expect(KTVKeyCommand.resolve(KeyEquivalent("q")) == nil)
         #expect(KTVKeyCommand.resolve(.return) == nil)
-        #expect(KTVKeyCommand.resolve(.escape) == nil)
+        #expect(KTVKeyCommand.resolve(KeyEquivalent("z")) == nil)
     }
 }

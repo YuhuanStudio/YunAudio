@@ -304,6 +304,9 @@ struct KTVStage: View {
         .onKeyPress { press in
             guard let command = KTVKeyCommand.resolve(press.key, modifiers: press.modifiers)
             else { return .ignored }
+            // Escape with nothing over the stage is not ours: full screen is
+            // left for the window to leave, which is what the key does there.
+            if command == .dismiss, model.lastPerformance == nil { return .ignored }
             perform(command)
             return .handled
         }
@@ -321,6 +324,7 @@ struct KTVStage: View {
         case .skip(let seconds): model.skipNowPlaying(by: seconds)
         case .nudgeLyrics(let seconds): model.nudgeLyricOffset(by: seconds)
         case .toggleFullScreen: KTVWindow.toggleFullScreen()
+        case .dismiss: model.dismissPerformance()
         case .resizeLyrics(let step):
             if step == 0 { model.resetLyricScale() } else { model.nudgeLyricScale(by: step) }
         case .browse(let lines):
@@ -1167,8 +1171,10 @@ struct KTVStage: View {
     ///
     /// Shown over the stage rather than beside it: this is the one moment in a
     /// KTV evening when everybody looks at the screen for a reason that is not
-    /// the words, and a card in a corner is a card nobody turns round for. It
-    /// goes when it is dismissed or when the next song has words of its own.
+    /// the words, and a card in a corner is a card nobody turns round for.
+    ///
+    /// It goes on Escape, on the button, or the moment the next song reaches a
+    /// line of its own — whichever happens first.
     @ViewBuilder
     private var performanceCard: some View {
         if let performance = model.lastPerformance {

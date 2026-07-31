@@ -4251,6 +4251,18 @@ enum UIFlowCheck {
         model.resetLyricScale()
         check("and go back to the size the window implies", model.lyricScale == 1)
 
+        // The scoreboard, and the thing it got wrong: it was documented as
+        // going away when the next song reaches a line of its own, and did
+        // not — it stayed over the following song until somebody clicked it.
+        model.showPerformanceForCheck(
+            title: "flow check", artist: "flow check", percentage: 71)
+        check("a finished song leaves a scoreboard", model.lastPerformance != nil)
+        model.seekToLyricLine(2)
+        model.refreshNowPlaying()
+        check(
+            "and it goes when the next line is being sung",
+            model.lastPerformance == nil)
+
         // Pressing the source switch on a song no index answered for must do
         // nothing at all — not clear the words, not adopt another song's.
         let before = model.lyrics?.lines.count

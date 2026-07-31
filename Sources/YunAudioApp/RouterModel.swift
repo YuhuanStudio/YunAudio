@@ -1363,6 +1363,24 @@ final class RouterModel: ScriptTarget {
 
     func dismissPerformance() { lastPerformance = nil }
 
+    /// Puts a scoreboard up so the flow check can watch it go away again.
+    ///
+    /// The card's own trigger is a song ending, which a gate cannot arrange
+    /// without waiting out a song. What is being checked is not how it arrives
+    /// but that it leaves.
+    func showPerformanceForCheck(title: String, artist: String, percentage: Double) {
+        lastPerformance = Performance(
+            title: title, artist: artist,
+            singers: [
+                Singer(
+                    uid: "flow-check", name: title, hertz: 220,
+                    score: KaraokeScore(
+                        percentage: percentage, onPitchSeconds: percentage,
+                        nearPitchSeconds: 0, silentSeconds: 0, referenceSeconds: 100,
+                        sungSeconds: 100, meanErrorSemitones: nil, lines: []))
+            ])
+    }
+
     /// Keeps the scores of the song that has just ended, if they mean anything.
     ///
     /// Only on a real change of song, and only where a tune was actually being
@@ -2822,6 +2840,11 @@ final class RouterModel: ScriptTarget {
         }
         let heard = position + lyricNudge
         let index = lyrics.index(at: heard)
+        // The scoreboard belongs to the song that finished, and the moment the
+        // next one is actually being sung it is in the way. Documented as this
+        // behaviour when the card was written and not implemented: it stayed
+        // up over the following song until somebody clicked it.
+        if lastPerformance != nil, index != nil { lastPerformance = nil }
         let lineChanged = lyricLine != index
         if lineChanged { lyricLine = index }
         if reanchoringCompositor || lineChanged || lyricPlaybackAnchor?.lineIndex != index {

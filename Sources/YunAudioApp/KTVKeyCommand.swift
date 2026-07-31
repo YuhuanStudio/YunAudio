@@ -22,6 +22,8 @@ enum KTVKeyCommand: Equatable, Sendable {
     case nudgeLyrics(Double)
     /// Fill the screen, and leave it.
     case toggleFullScreen
+    /// Put away whatever is over the stage — today, the scoreboard.
+    case dismiss
 
     /// Five seconds, which is roughly a line: far enough to be worth a press
     /// and short enough that holding the key is a scrub rather than a jump.
@@ -57,6 +59,10 @@ enum KTVKeyCommand: Equatable, Sendable {
         case "[": return .nudgeLyrics(-nudgeStep)
         case "]": return .nudgeLyrics(nudgeStep)
         case "f", "F": return .toggleFullScreen
+        // Escape only means something when there is something over the stage,
+        // and the stage decides that — a key that is claimed here and then
+        // does nothing is a key the window will never get back.
+        case KeyEquivalent.escape.character: return .dismiss
         default: return nil
         }
     }
