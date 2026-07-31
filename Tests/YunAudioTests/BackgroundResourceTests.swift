@@ -804,7 +804,14 @@ struct BackgroundResourceTests {
         #expect(ktv.contains("window.isReleasedWhenClosed = false"))
         #expect(ktv.contains("window.collectionBehavior.insert(.fullScreenPrimary)"))
         #expect(ktv.contains("controller?.window?.toggleFullScreen(nil)"))
-        #expect(ktv.contains("window.setFrameAutosaveName(\"YunAudioKTVWindow\")"))
+        #expect(ktv.contains("let autosaveName = \"YunAudioKTVWindow\""))
+        #expect(ktv.contains("window.setFrameAutosaveName(autosaveName)"))
+        // And that the restored position is not thrown away again. `center()`
+        // used to run after the autosave name, so somebody could put the stage
+        // where they wanted it and find it back in the middle next launch.
+        #expect(!ktv.contains("window.center()"))
+        // The size comes from the screen rather than from a number typed once.
+        #expect(ktv.contains("KTVWindowSize.frame(") || ktv.contains("KTVWindowSize.frame("))
     }
 
     @Test("an unoptimised app cannot arm a meaningless allocation tripwire")

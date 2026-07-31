@@ -61,9 +61,34 @@ enum KTVWindow {
         window.isReleasedWhenClosed = false
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.contentView = makeHost(model: model)
-        window.minSize = NSSize(width: 720, height: 520)
-        window.setFrameAutosaveName("YunAudioKTVWindow")
-        window.center()
+        window.minSize = NSSize(
+            width: KTVWindowSize.minimum.width, height: KTVWindowSize.minimum.height)
+
+        // Two things were wrong here and they compounded.
+        //
+        // The size was 1080 by 720 whatever the screen was — a small tile in
+        // the middle of the 5K panel this is developed against, which is the
+        // opposite of what a stage is for. It now comes from the screen; see
+        // `KTVWindowSize`.
+        //
+        // And `center()` ran *after* the autosave name, so it overrode the
+        // restored position on every launch: somebody could move the stage
+        // wherever they liked and find it back in the middle next time. The
+        // frame is only placed when nobody has ever placed it, which is what
+        // the defaults key answers — `setFrameAutosaveName` reports whether the
+        // name was accepted, not whether a frame came back.
+        let autosaveName = "YunAudioKTVWindow"
+        let placedBefore =
+            UserDefaults.standard.string(
+                forKey: KTVWindowSize.autosaveDefaultsKey(for: autosaveName)) != nil
+        window.setFrameAutosaveName(autosaveName)
+        if !placedBefore {
+            let visible = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            window.setFrame(
+                KTVWindowSize.frame(
+                    inVisible: visible ?? NSRect(x: 0, y: 0, width: 1440, height: 900)),
+                display: false)
+        }
         return NSWindowController(window: window)
     }
 
