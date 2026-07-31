@@ -111,19 +111,26 @@ struct CompositedStageBackdrop: NSViewRepresentable {
 
         override func layout() {
             super.layout()
-            applyDrift()
-        }
-
-        private func applyDrift() {
             guard let layer else { return }
-            layer.removeAnimation(forKey: "drift")
             // Around the middle, so growing does not walk the picture towards
             // a corner. Set with the position, or the layer jumps by half its
             // own size the first time it is changed.
             layer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
             layer.position = CGPoint(x: bounds.midX, y: bounds.midY)
             layer.bounds = CGRect(origin: .zero, size: bounds.size)
+            // The drift is not rebuilt here. Layout runs on every frame of a
+            // window drag, and rebuilding the animation resets it to its first
+            // frame — which meant the background stood still for as long as
+            // somebody was resizing, and then started its nine seconds again
+            // from the beginning. The transform is a scale and a translation in
+            // points, so it is the same animation at any size; only the
+            // geometry above depends on the bounds.
+            if layer.animation(forKey: "drift") == nil { applyDrift() }
+        }
 
+        private func applyDrift() {
+            guard let layer else { return }
+            layer.removeAnimation(forKey: "drift")
             let resting = CATransform3DMakeScale(
                 CompositedStageBackdrop.scale.from, CompositedStageBackdrop.scale.from, 1)
             guard isDrifting, bounds.width > 0 else {

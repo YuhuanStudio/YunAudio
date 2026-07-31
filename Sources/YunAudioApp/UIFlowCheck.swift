@@ -4240,6 +4240,36 @@ enum UIFlowCheck {
         }
         check("nothing is counted in over a line being sung", counting == nil)
 
+        // And the positive case, through the whole chain: the intro is
+        // counted, and shifting the words moves the count with them. The
+        // count-in reads the offset and the live nudge, both of which reach it
+        // by different routes — one folded into the lyrics value, one a
+        // property of the model — and neither was ever checked end to end.
+        model.seekToLyricLine(0)
+        model.skipNowPlaying(by: -2)
+        model.refreshNowPlaying()
+        let countBefore = model.lyrics.flatMap {
+            KTVCountIn.secondsUntilWords(
+                in: $0, playing: model.lyricLine, position: Double(model.songSecond),
+                nudge: model.lyricNudge)
+        }
+        // The hand-run song's first line is at zero, so there is no intro to
+        // count — which is the 慢冷 shape, and the reason the count-in and the
+        // offset control were built in the same week.
+        check("a song whose words start at once has nothing to count", countBefore == nil)
+        // Holding the words back is the remedy, and it must create the intro
+        // the file never had, count included.
+        model.nudgeLyricOffset(by: -2)
+        let countAfter = model.lyrics.flatMap {
+            KTVCountIn.secondsUntilWords(
+                in: $0, playing: model.lyricLine, position: Double(model.songSecond),
+                nudge: model.lyricNudge)
+        }
+        check(
+            "holding the words back gives the intro a count",
+            (countAfter ?? 0) > 0)
+        model.clearLyricOffset()
+
         // The size of the words, which is a preference and therefore has to
         // come back to where it was.
         model.nudgeLyricScale(by: KTVKeyCommand.sizeStep)
