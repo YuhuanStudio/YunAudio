@@ -985,38 +985,72 @@ IINA 設定裡那個 `Core Audio / AVFoundation🧪` 是 **mpv 的 `--ao` 選擇
 （中位數 **241 ms**），對照組中位數 268 ms——差距落在展開度以內，**所以是「量不到成本」，
 不是「變快了」**。長行逐字版同一支程式是 247 / 276 / 247 ms。
 
-## `0x1e` 當機 —— **已修** [本機實測 2026-07-31]
+## 那個當機是 macOS 27 beta 的 Swift concurrency runtime 壞了，不是我們 [本機實測 2026-07-31]
 
-**症狀**：七份當機報告，全部 `EXC_BAD_ACCESS at 0x1e`，全部倒在
-`swift_task_isCurrentExecutorImpl`——**runtime 在做「現在是不是 main actor」這個動態檢查
-時自己爆掉**。位置幾乎都是 20 Hz 輪詢計時器的 `MainActor.assumeIsolated`，一份在
-`StatusItemController` 的 `@objc` timer selector（編譯器替 `@MainActor` 型別的 `@objc`
-方法插入的 thunk 做同一個檢查）。**時間點極其規律：啟動後 3:00 到 3:21 之間。**
+**十一份報告，全部在同一個地方**：
 
-**排除掉的**（每一項都花了時間，不要重做）：
+```
+libobjc.A.dylib             objc_opt_class
+libswiftCore.dylib          swift_getObjectType
+libswift_Concurrency.dylib  swift_task_isMainExecutorImpl
+libswift_Concurrency.dylib  swift::SerialExecutorRef::isMainExecutor() const
+libswift_Concurrency.dylib  swift_task_isCurrentExecutorWithFlagsImpl(...)
+YunAudioApp                 closure #1 in LoudnessReadout.body.getter + 404
+```
 
-- 不是「使用者開著的時候重建 bundle 把執行檔換掉」。那會產生一模一樣的症狀，所以
-  `build-app.sh` 現在會拒絕；但崩的幾份是同一個 binary UUID。
-- 不是 `AVAudioEngine`。第五次當機（15:22:29）發生在歌還沒開、引擎根本沒建出來的時候。
-- **不是那個檢查本身有問題。** 最小重現——純 AppKit、每秒二十次同樣的 `assumeIsolated`、
-  同一套工具鏈——跑滿 300 秒、6000 次檢查，沒事。
+`swift_getObjectType` 被傳進去的「物件」是 **`0x1e`（30）、`0x200`（512）、
+`0xffffffffffffffff`（−1）**——每次都不一樣的垃圾。有一份的 exception subtype 直接寫
+**`possible pointer authentication failure`**，而暫存器同時出現
+`type metadata for **CF**MainExecutor` 與 `protocol witness table for **Dispatch**MainExecutor`：
+**runtime 把兩種 main executor 的實作配錯了**，然後拿其中一個的整數欄位當指標解參考。
 
-**修法**：`onTheMainThread`（`Sources/YunDesign/MainThreadDirectly.swift`）。那個檢查
-在問「現在的 executor 是不是 main actor」，而**主 run loop 上的 `Timer` callback 依定義
-就在主執行緒**——這個事實 `Thread.isMainThread` 已經有了，它讀的是執行緒自己的身分，不是
-concurrency runtime 的簿記，所以不可能像那個檢查一樣爆掉。閉包的 isolation 不在它的表示
-法裡（都是函式指標＋context），所以重新詮釋不改變任何執行的東西，只是不再要求編譯器先
-證明——而 precondition 就是那個證明。順帶一個好處：計時器真的跑到別的執行緒去的話，現在
-會講一句話，而不是一個沒人查得動的 bad access。
+`isMainExecutor()` **只有在快速路徑失敗之後才會被呼叫**，所以每一次當機都是「執行時的
+executor 跟預期的對不上」之後，runtime 在處理這件事的路上自己爆掉。
 
-**被否決的另一條路**：常駐 `@MainActor` task 迴圈。靜態隔離、完全沒有動態檢查、也確實
-不當機——但**一次跑就打掛 27 條 flow 斷言**。原因很硬：巢狀 run loop（`WindowCapture`
-的 settle、每一個 modal）服務 `Timer`，**不**服務 continuation，所以輪詢整段停掉。
-**東西還在動但沒有人在看**，這個專案最不能接受的就是這種。
+### 排除掉的（每一項都是實驗，不是論證）
 
-**證據**：改之前七次沒有一次活過 3:30；改之後連續跑 **9 分 10 秒**（近三倍）無當機、
-無新報告。六支新單元測試蓋住那個 hop 本身：body 有跑、回傳值拿得回來、throw 會傳出去、
-裡面碰得到 main-actor 狀態、可以巢狀、十萬次呼叫 13 ms（每次 130 ns）。
+| 假設 | 怎麼測的 | 結果 |
+|---|---|---|
+| 我們寫壞記憶體 | `MallocScribble` ＋ `MallocPreScribble` ＋ `MallocGuardEdges` ＋ `MallocErrorAbort` | 位址不變 → 不是 |
+| 那個語法形狀 | 照爆掉那行寫的最小重現，8400 次檢查 | 活著 → 不是 |
+| `AVAudioEngine` | 最小重現＋檔案透過 time-pitch 播放 | 活著 → 不是 |
+| 反覆開歌／重接圖 | 最小重現，210 次 open、四種格式 | 活著 → 不是 |
+| 音訊執行緒建 Task | 最小重現，840 個 chunk 回呼 | 活著 → 不是 |
+| 純 SwiftUI | `@Observable` ＋ 20 Hz Timer ＋ 同樣的閉包轉換 | 活著 → 不是 |
+| **工具鏈** | 把兩個 macOS 27 符號改成條件編譯，改用 **Swift 6.3.3** 建同一份程式碼 | **同一行、同一位址** → 不是 |
+| 我們的 Now Playing | `YUNAUDIO_NO_NOW_PLAYING=1` | 照樣死 → 不是 |
+| 線上歌詞查詢 | `YUNAUDIO_NO_LYRIC_LOOKUP=1` | 照樣死 → 不是 |
+| runtime 的官方旋鈕 | `SWIFT_IS_CURRENT_EXECUTOR_LEGACY_MODE_OVERRIDE=legacy` | 照樣死 → 沒用 |
+| 從終端機當背景行程跑 | 改用 `open` 正常前景啟動 | 照樣死 → 不是 |
+| 行程裡有兩份 Swift runtime | 啟動時列出所有非系統路徑的 `libswift*` | 只有系統那份 → 不是 |
+| 逐點修呼叫端 | 把最熱的 `first(where:)`／`compactMap` 改成 `for` 迴圈 | **過了那一行**，當機跑到 SwiftUI 的 view body → **不能逐點修** |
+
+### 二分的結果
+
+用 `YUNAUDIO_FLOWCHECK_ONLY=<section>` ＋ `YUNAUDIO_SOAK_AFTER=420`：
+
+- **第 1–68 節，跑完再泡 420 秒：全部存活**，重複驗證過。
+- **第 69 節「the song is ours to play」：每次都在進去大約一分鐘內死。**
+
+但上面那五個「這一節做了什麼」的假設全部被最小重現否定了，所以觸發條件是這一節製造出來的
+某種**時序**，不是它用到的任何一個 API。
+
+### 結論與下一步
+
+**這是 macOS 27.0 (26A5388g) 內建 `libswift_Concurrency.dylib` 的缺陷。** 我們的程式沒有
+可以改的東西——十一份報告、十二個被實驗殺掉的假設，包含唯一能自己控制的變因（工具鏈）。
+
+要做的是：
+
+1. **回報給 Apple**（Feedback Assistant），附上任一份報告與這一節。
+2. 換到下一個 macOS 27 beta 或正式版之後**重跑第 69 節**——那是五分鐘的確定性重現，
+   是判斷它修好了沒有的最便宜方法。
+3. 在那之前，`onTheMainThread`（`Sources/YunDesign/MainThreadDirectly.swift`）與
+   `recognitionApplication` 裡的迴圈都**留著**：它們各自省掉一個不必要的動態檢查，比原本
+   便宜也比原本清楚，只是治不了根。
+
+**留在程式裡的三個二分開關**（`YUNAUDIO_NO_NOW_PLAYING`、`YUNAUDIO_NO_LYRIC_LOOKUP`、
+`YUNAUDIO_NO_SPEECH_ANALYZER`）不是功能旗標，是為了下一次還能做同樣的對照。
 
 ## flow check 那二十幾條紅的根因是「問不到」被當成「零」 —— **已修** [本機實測 2026-07-31]
 

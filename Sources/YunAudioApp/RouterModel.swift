@@ -2462,7 +2462,9 @@ final class RouterModel: ScriptTarget {
         }
         trackClock.adopt(
             songPlayer.position, isPlaying: songPlayer.isPlaying, trueAt: now)
-        tellTheSystemWhatIsPlaying()
+        if ProcessInfo.processInfo.environment["YUNAUDIO_NO_NOW_PLAYING"] == nil {
+            tellTheSystemWhatIsPlaying()
+        }
     }
 
     /// Starts the hand-run words from a moment on the song's clock.
@@ -3189,6 +3191,9 @@ final class RouterModel: ScriptTarget {
     /// times a second. `adopt` only runs when the player's track identity
     /// changes, so one song is one request and one cache file.
     private func startLyricsLookup(for track: NowPlaying.Track) {
+        // A switch for bisecting the `0x1e` crash, nothing else. See TODO.md.
+        guard ProcessInfo.processInfo.environment["YUNAUDIO_NO_LYRIC_LOOKUP"] == nil
+        else { return }
         let identity = Self.lyricsIdentity(for: track)
         let client = OnlineLyrics(
             musixmatch: OnlineLyrics.musixmatchAdapter(
