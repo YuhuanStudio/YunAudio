@@ -117,3 +117,50 @@ struct KTVWindowSizeTests {
                 == "NSWindow Frame YunAudioKTVWindow")
     }
 }
+
+/// The shapes the stage refuses.
+///
+/// The frame saved on this machine was 1180 × 520 — flatter than 2:1 — and it
+/// is what the stage opened as, because a saved frame beats any default. The
+/// artwork sits beside the words, so a strip leaves neither of them room.
+@Suite("the shape the stage refuses")
+struct KTVWindowShapeTests {
+
+    @Test("the shape that was actually saved is refused")
+    func theReportedShape() {
+        let clamped = KTVWindowSize.clamp(CGSize(width: 1180, height: 520))
+        #expect(clamped.width == 1180)
+        #expect(clamped.height > 520)
+        #expect(clamped.height / clamped.width >= KTVWindowSize.minimumAspect)
+    }
+
+    @Test("a drag can never produce a letterbox")
+    func draggingIsBounded() {
+        for width in stride(from: 820.0, through: 3000.0, by: 130.0) {
+            let clamped = KTVWindowSize.clamp(CGSize(width: width, height: 100))
+            #expect(clamped.height / clamped.width >= KTVWindowSize.minimumAspect - 0.001)
+            #expect(clamped.height >= KTVWindowSize.minimum.height)
+        }
+    }
+
+    @Test("but a taller window is left alone")
+    func tallIsFine() {
+        // The clamp is a floor on height, not a ratio the window is held to:
+        // somebody who wants a tall stage keeps it.
+        let tall = KTVWindowSize.clamp(CGSize(width: 1000, height: 1400))
+        #expect(tall.height == 1400)
+        #expect(tall.width == 1000)
+    }
+
+    @Test("and the default is never a shape it would refuse")
+    func theDefaultPassesItsOwnClamp() {
+        for visible in [
+            CGSize(width: 1512, height: 892), CGSize(width: 2560, height: 1415),
+            CGSize(width: 3440, height: 1375), CGSize(width: 1080, height: 1860),
+            CGSize(width: 640, height: 400),
+        ] {
+            let size = KTVWindowSize.size(forVisible: visible)
+            #expect(KTVWindowSize.clamp(size) == size, "\(visible)")
+        }
+    }
+}

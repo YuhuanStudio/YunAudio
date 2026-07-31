@@ -189,14 +189,35 @@ struct SingingPanel: View {
     }
 
     private var cardBackground: some View {
-        LinearGradient(
-            colors: [
-                Yun.Palette.accent.opacity(model.nowPlaying == nil ? 0.035 : 0.11),
-                Yun.Palette.elevated.opacity(0.32),
-                Yun.Palette.accent.opacity(0.025),
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing)
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Yun.Palette.accent.opacity(model.nowPlaying == nil ? 0.035 : 0.11),
+                    Yun.Palette.elevated.opacity(0.32),
+                    Yun.Palette.accent.opacity(0.025),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing)
+            // The cover behind the card, as the stage has had for some time and
+            // this did not. A gradient says a song is playing; the sleeve says
+            // *which* song, and it is the one thing the panel could show for
+            // free — the picture is already decoded for the header beside it.
+            //
+            // The same composited path the stage uses, so it is a transform on
+            // a picture drawn once on the render server rather than SwiftUI
+            // resampling the card every frame. See `CompositedStageBackdrop`.
+            // No drift here: the column is 380 points wide and a slow pan
+            // across it reads as the card wobbling rather than as depth.
+            if let url = model.nowPlaying?.artworkURL {
+                CompositedStageBackdrop(url: url, isMoving: false)
+                    .opacity(0.30)
+                    .allowsHitTesting(false)
+                // Dark enough to read against, judged the same way the stage's
+                // was: a bright sleeve is most of them, and words on top of a
+                // face in daylight stop being words.
+                Yun.Palette.card.opacity(0.62)
+            }
+        }
     }
 
     private func trackHeader(_ track: NowPlaying.Track) -> some View {
@@ -232,6 +253,13 @@ struct SingingPanel: View {
             }
 
             trackProgress(track)
+
+            // The row this panel never had. It could show the words for a song
+            // it had no way to pause, change the key of, or take the lead vocal
+            // out of — every one of which the stage grew and this did not. One
+            // construction for both; see `KTVTransportBar`.
+            KTVTransportBar(model: model, track: track, scale: .inspector)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             SongClock(model: model, track: track)
 
@@ -844,6 +872,16 @@ private struct SingingLyrics: View {
                             startPoint: .leading, endPoint: .trailing),
                         in: .rect(cornerRadius: Yun.Radius.card)
                     )
+                    // Clipped to its own card, which it was not.
+                    //
+                    // `CompositedLyricSurface` is layers, and the sweep carries
+                    // a glow — `shadowRadius` on the filled row — that is meant
+                    // to spill a little past the glyphs. Nothing bounded it, so
+                    // it spilled past the highlight too and printed a pale band
+                    // along the bottom edge of the card: the reported leak.
+                    // Clipping after the background keeps the glow inside the
+                    // shape that is supposed to contain it.
+                    .clipShape(.rect(cornerRadius: Yun.Radius.card))
                     // No line identity on this one, deliberately. It is an
                     // AppKit view behind a representable, so it never
                     // cross-fades two strings the way a `Text` does — it is

@@ -1163,6 +1163,20 @@ final class RouterModel: ScriptTarget {
     private(set) var lyricNudge: Double = 0
     /// Set while somebody is looking at the lyrics, so nothing is asked of the
     /// music players when nobody is.
+    /// Whether the stage has its own window on screen.
+    ///
+    /// Observable, which `KTVWindow.isVisible` cannot be — it reads an
+    /// `NSWindow`, and SwiftUI has no way to know when that changes. Without
+    /// this the panel inside the main window had no way to notice the stage had
+    /// been opened, so both drew the whole thing at once: two lyric layouts,
+    /// two backdrops, two sets of meters, for one song.
+    private(set) var isKTVWindowOpen = false
+
+    func setKTVWindowOpen(_ open: Bool) {
+        guard isKTVWindowOpen != open else { return }
+        isKTVWindowOpen = open
+    }
+
     var isSingingVisible = false {
         didSet {
             guard oldValue != isSingingVisible else { return }

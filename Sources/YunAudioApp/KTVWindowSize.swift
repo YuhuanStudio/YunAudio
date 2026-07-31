@@ -26,7 +26,20 @@ enum KTVWindowSize {
     /// words need vertical room more than the picture needs horizontal.
     static let aspect: CGFloat = 0.66
 
-    static let minimum = CGSize(width: 720, height: 520)
+    static let minimum = CGSize(width: 820, height: 620)
+
+    /// The flattest the stage is allowed to be, as height over width.
+    ///
+    /// The saved frame on this machine was **1180 × 520** — the old minimum
+    /// height, against a width nearly two and a quarter times it. That is a
+    /// letterbox, and it is what the stage opened as: the artwork on the left
+    /// and the words on the right both had to fit a strip, so the picture
+    /// shrank and the words lost every line but three.
+    ///
+    /// 0.52 is a shade flatter than 2:1, which leaves room for somebody who
+    /// genuinely wants a wide stage on an ultrawide while refusing the shape
+    /// that makes the layout meaningless.
+    static let minimumAspect: CGFloat = 0.52
     /// Beyond this the words stop reading as a column and start reading as a
     /// wall — the measure is limited inside the stage anyway, so extra width
     /// buys margin rather than content.
@@ -65,6 +78,18 @@ enum KTVWindowSize {
         let slack = visible.height - wanted.height
         let y = visible.minY + (slack * 0.55).rounded()
         return CGRect(x: x, y: y, width: wanted.width, height: wanted.height)
+    }
+
+    /// A size a drag is allowed to produce.
+    ///
+    /// Applied while resizing rather than after, so the window never passes
+    /// through a shape the layout cannot use — a clamp applied afterwards makes
+    /// the frame jump back under the pointer, which reads as the window
+    /// fighting you.
+    static func clamp(_ size: CGSize) -> CGSize {
+        let width = max(minimum.width, size.width)
+        let floor = max(minimum.height, width * minimumAspect)
+        return CGSize(width: width, height: max(floor, size.height))
     }
 
     /// The key AppKit stores an autosaved frame under.

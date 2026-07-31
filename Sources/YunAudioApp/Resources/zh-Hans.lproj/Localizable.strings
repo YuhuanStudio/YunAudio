@@ -487,6 +487,14 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"Lower the key" = "降 key";
+"Raise the key" = "升 key";
+"Take the lead vocal out" = "消原唱";
+"Bring the lead vocal back" = "回原唱";
+"The stage has its own window" = "演唱画面在独立窗口";
+"Nothing is drawn here while it is open, so it costs nothing." = "它开着的时候这里不画任何东西，所以不花性能。";
+"Bring it forward" = "把它叫到前面";
+"Put it back here" = "收回这里";
 "Full screen" = "全屏";
 "Looking for lyrics…" = "正在查找歌词…";
 "Play something, or choose the words in the Sing panel." = "请播放歌曲，或在唱歌面板中选择歌词。";

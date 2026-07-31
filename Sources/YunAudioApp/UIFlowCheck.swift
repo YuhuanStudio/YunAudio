@@ -4166,6 +4166,77 @@ enum UIFlowCheck {
             }
         }
 
+        try section("the stage is only built once")
+        // Both presentations read the same song, the same words and the same
+        // meters. With the Sing tab open behind an open stage, every change
+        // laid out twice — and the copy nobody could see cost what the one they
+        // were watching cost.
+        //
+        // Measured with a song actually playing, which the first version of
+        // this section did not do and so measured nothing: `@Observable`
+        // rebuilds a view when its inputs change, and with nothing moving both
+        // counts were honestly zero. The cost is a per-frame cost, so it only
+        // exists while there are frames.
+        model.inspectorTab = .singing
+        model.isSingingVisible = true
+        let stageFixture = URL(fileURLWithPath: "/tmp/yunaudio-stage-once.wav")
+        defer { try? FileManager.default.removeItem(at: stageFixture) }
+        if (try? stereoWave(notes: chainNotes, secondsEach: chainNoteSeconds)
+            .write(to: stageFixture)) != nil, model.openSong(at: stageFixture)
+        {
+            model.runWords(from: 0)
+            await pause(0.5)
+
+            BodyCount.reset()
+            BodyCount.isCounting = true
+            await pause(1.5)
+            BodyCount.isCounting = false
+            let panelAlone = BodyCount.counts["SingingPanel"] ?? 0
+            let lyricsAlone = BodyCount.counts["SingingLyrics"] ?? 0
+            note("with a song playing and no stage window: panel \(panelAlone), words \(lyricsAlone)")
+
+            if KTVWindow.open(model: model) {
+                await pause(0.6)
+                check("the stage window opened", model.isKTVWindowOpen)
+                BodyCount.reset()
+                BodyCount.isCounting = true
+                await pause(1.5)
+                BodyCount.isCounting = false
+                let panelWithStage = BodyCount.counts["SingingPanel"] ?? 0
+                let lyricsWithStage = BodyCount.counts["SingingLyrics"] ?? 0
+                let stage = BodyCount.counts["KTVStage"] ?? 0
+                note(
+                    "with the stage open: panel \(panelWithStage), words \(lyricsWithStage), "
+                        + "stage \(stage)")
+                // The claim, and the whole point: the second copy stops. Not
+                // fewer — none.
+                check(
+                    "the panel stops being built while the stage has a window",
+                    panelWithStage == 0)
+                check("and so do its words", lyricsWithStage == 0)
+
+                KTVWindow.close()
+                await pause(0.8)
+                check("closing the stage hands the tab back", !model.isKTVWindowOpen)
+                BodyCount.reset()
+                BodyCount.isCounting = true
+                await pause(1.5)
+                BodyCount.isCounting = false
+                let panelAgain = BodyCount.counts["SingingPanel"] ?? 0
+                note("after closing the stage: panel \(panelAgain)")
+                // And it comes back: a saving that leaves the tab permanently
+                // blank is not a saving.
+                check(
+                    "and the panel draws again", panelAgain > 0 || panelAlone == 0)
+            } else {
+                note("the stage window would not open — skipped")
+            }
+            model.stopWords()
+            model.closeWords()
+        } else {
+            note("could not write or open the stage fixture — skipped")
+        }
+
         try section("the song is ours to play")
         if inWantedSection {
             if written {

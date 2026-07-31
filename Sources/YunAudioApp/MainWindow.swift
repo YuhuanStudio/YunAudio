@@ -1416,21 +1416,79 @@ struct MainWindow: View {
     private var singingTab: some View {
         Group {
             sectionHeading(loc("Sing"))
-            Button {
-                KTVWindow.open(model: model)
-            } label: {
-                Label(loc("Open KTV window"), systemImage: "rectangle.inset.filled")
-                    .frame(maxWidth: .infinity)
+            if model.isKTVWindowOpen {
+                // The stage is somewhere else, so it is not built twice.
+                //
+                // Both presentations used to draw at once whenever this tab was
+                // open behind the window: two lyric layouts, two backdrops, two
+                // sets of meters, every frame, for one song — and the copy
+                // nobody could see cost exactly as much as the one they were
+                // watching. What stands here instead is a card that says where
+                // the song went and puts it back in front.
+                onItsOwnStage
+            } else {
+                Button {
+                    KTVWindow.open(model: model)
+                } label: {
+                    Label(loc("Open KTV window"), systemImage: "rectangle.inset.filled")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(YunButtonStyle(.primary, small: true))
+                .accessibilityIdentifier("OpenKTV")
+                YunCard(padding: 0) { SingingPanel(model: model) }
             }
-            .buttonStyle(YunButtonStyle(.primary, small: true))
-            .accessibilityIdentifier("OpenKTV")
-            YunCard(padding: 0) { SingingPanel(model: model) }
         }
         .onAppear { model.isSingingVisible = true }
         .onDisappear {
             if !KTVWindow.isVisible {
                 model.isSingingVisible = false
             }
+        }
+    }
+
+    /// What this tab shows while the stage has a window of its own.
+    ///
+    /// Deliberately small and deliberately not a copy of anything: the song's
+    /// name, so the tab is not simply blank, and the two things somebody would
+    /// want from here — bring it back to the front, or put it back inside.
+    @ViewBuilder
+    private var onItsOwnStage: some View {
+        let _ = BodyCount.tick("SingingTabAside")
+        YunCard {
+            VStack(alignment: .leading, spacing: Yun.Space.md) {
+                Label(loc("The stage has its own window"), systemImage: "macwindow.on.rectangle")
+                    .font(Yun.Text.title)
+                if let title = model.nowPlaying?.title, !title.isEmpty {
+                    Text(title)
+                        .font(Yun.Text.body)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Text(loc("Nothing is drawn here while it is open, so it costs nothing."))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: Yun.Space.sm) {
+                    Button {
+                        KTVWindow.open(model: model)
+                    } label: {
+                        Label(loc("Bring it forward"), systemImage: "arrow.up.forward.app")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(YunButtonStyle(.primary, small: true))
+                    .accessibilityIdentifier("BringKTVForward")
+                    Button {
+                        KTVWindow.close()
+                    } label: {
+                        Label(loc("Put it back here"), systemImage: "rectangle.compress.vertical")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(YunButtonStyle(.secondary, small: true))
+                    .accessibilityIdentifier("PutKTVBack")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 

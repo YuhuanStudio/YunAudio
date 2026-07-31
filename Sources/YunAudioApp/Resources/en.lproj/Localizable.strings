@@ -488,6 +488,14 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"Lower the key" = "Lower the key";
+"Raise the key" = "Raise the key";
+"Take the lead vocal out" = "Take the lead vocal out";
+"Bring the lead vocal back" = "Bring the lead vocal back";
+"The stage has its own window" = "The stage has its own window";
+"Nothing is drawn here while it is open, so it costs nothing." = "Nothing is drawn here while it is open, so it costs nothing.";
+"Bring it forward" = "Bring it forward";
+"Put it back here" = "Put it back here";
 "Full screen" = "Full screen";
 "Looking for lyrics…" = "Looking for lyrics…";
 "Play something, or choose the words in the Sing panel." = "Play something, or choose the words in the Sing panel.";

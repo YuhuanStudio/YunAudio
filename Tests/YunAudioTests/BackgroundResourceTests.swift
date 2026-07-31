@@ -804,7 +804,12 @@ struct BackgroundResourceTests {
         #expect(ktv.contains("window.isReleasedWhenClosed = false"))
         #expect(ktv.contains("window.collectionBehavior.insert(.fullScreenPrimary)"))
         #expect(ktv.contains("controller?.window?.toggleFullScreen(nil)"))
-        #expect(ktv.contains("let autosaveName = \"YunAudioKTVWindow\""))
+        // The prefix, not the whole name: the name carries a version so a bad
+        // saved frame can be retired — the first one saved 1180 × 520, a
+        // letterbox against the old minimum height, and a saved frame beats any
+        // default. Pinning the exact name here would make retiring the next one
+        // fail this test instead of fixing the window.
+        #expect(ktv.contains("let autosaveName = \"YunAudioKTVWindow"))
         #expect(ktv.contains("window.setFrameAutosaveName(autosaveName)"))
         // And that the restored position is not thrown away again. `center()`
         // used to run after the autosave name, so somebody could put the stage

@@ -25,6 +25,7 @@ enum KTVWindow {
             controller.window?.contentView = makeHost(model: model)
         }
         model.isSingingVisible = true
+        model.setKTVWindowOpen(true)
         NSApp.activate(ignoringOtherApps: true)
         controller.showWindow(nil)
         controller.window?.makeKeyAndOrderFront(nil)
@@ -32,6 +33,17 @@ enum KTVWindow {
             controller.window?.toggleFullScreen(nil)
         }
         return controller.window?.isVisible == true
+    }
+
+    /// Puts the stage back inside the main window.
+    ///
+    /// Closing rather than hiding, so the delegate runs and the content view is
+    /// released — the panel in the main window only starts drawing again once
+    /// this one has stopped.
+    static func close() {
+        guard let window = controller?.window else { return }
+        if window.styleMask.contains(.fullScreen) { window.toggleFullScreen(nil) }
+        window.close()
     }
 
     static func toggleFullScreen() {
@@ -77,7 +89,13 @@ enum KTVWindow {
         // frame is only placed when nobody has ever placed it, which is what
         // the defaults key answers — `setFrameAutosaveName` reports whether the
         // name was accepted, not whether a frame came back.
-        let autosaveName = "YunAudioKTVWindow"
+        // Version two of the name, and the version is the point. The frame
+        // saved under the first one on this machine was 1180 × 520 — a
+        // letterbox against the old 520-point minimum — and a saved frame wins
+        // over any default, so fixing the default alone changed nothing for
+        // anybody who had ever opened the stage. Changing the name retires the
+        // bad frame once; the good one is then saved under this.
+        let autosaveName = "YunAudioKTVWindow2"
         let placedBefore =
             UserDefaults.standard.string(
                 forKey: KTVWindowSize.autosaveDefaultsKey(for: autosaveName)) != nil
@@ -136,8 +154,19 @@ enum KTVWindow {
             self.model = model
         }
 
+        /// Refuses shapes the stage cannot be laid out in.
+        ///
+        /// The artwork sits beside the words, so a strip leaves neither of them
+        /// room: the picture shrinks to a thumbnail and the words lose every
+        /// line but the one being sung. See `KTVWindowSize.minimumAspect`.
+        func windowWillResize(_ sender: NSWindow, to size: NSSize) -> NSSize {
+            let clamped = KTVWindowSize.clamp(CGSize(width: size.width, height: size.height))
+            return NSSize(width: clamped.width, height: clamped.height)
+        }
+
         func windowWillClose(_ notification: Notification) {
             (notification.object as? NSWindow)?.contentView = nil
+            model.setKTVWindowOpen(false)
             if model.inspectorTab != .singing {
                 model.isSingingVisible = false
             }
@@ -861,21 +890,13 @@ struct KTVStage: View {
     /// knowing which one it has.
     @ViewBuilder
     private func transportControls(_ track: NowPlaying.Track) -> some View {
-        HStack(spacing: Yun.Space.sm) {
-            transportButton(
-                "backward.fill", label: loc("Previous track"), size: 26,
-                identifier: "KTVPreviousTrack"
-            ) { model.sendTransport(.previous) }
-            transportButton(
-                track.isPlaying ? "pause.fill" : "play.fill",
-                label: track.isPlaying ? loc("Pause") : loc("Play"), size: 32,
-                identifier: "KTVPlayPause"
-            ) { model.sendTransport(.playPause) }
-            transportButton(
-                "forward.fill", label: loc("Next track"), size: 26,
-                identifier: "KTVNextTrack"
-            ) { model.sendTransport(.next) }
-        }
+        // The stage's own copy of this used to live here. It is now shared with
+        // the panel in the main window, which had none of it — see
+        // `KTVTransportBar`. The key and 原唱／伴奏 stay off here because the
+        // stage offers them in their own row, beside the words, where there is
+        // room to label them.
+        KTVTransportBar(
+            model: model, track: track, scale: .stage, showsKaraokeControls: false)
     }
 
     private func transportButton(
