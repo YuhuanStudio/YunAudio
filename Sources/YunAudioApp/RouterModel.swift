@@ -1128,6 +1128,13 @@ final class RouterModel: ScriptTarget {
 
     /// Where the words came from, or what the one lookup is doing.
     private(set) var lyricsLookupStatus: LyricsLookupStatus = .idle
+
+    /// Whether the words carry their own timings.
+    ///
+    /// A plain lyric cannot sweep, and somebody watching a stage whose words
+    /// never light up is owed that sentence rather than left to conclude the
+    /// feature is broken. Both presentations show it now; only one used to.
+    var lyricsAreTimed: Bool { lyrics?.lines.contains { $0.time > 0 } ?? false }
     @ObservationIgnored private var lyricsLookupTask: Task<Void, Never>?
     /// Which line is being sung, and how far through it.
     private(set) var lyricLine: Int?

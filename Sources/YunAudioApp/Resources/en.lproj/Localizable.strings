@@ -488,6 +488,8 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"The lyric index is rate limiting us. It usually clears in a minute." = "The lyric index is rate limiting us. It usually clears in a minute.";
+"Try again" = "Try again";
 "Singing" = "Singing";
 "This song is in %@" = "This song is in %@";
 "Move it %@ for you" = "Move it %@ for you";

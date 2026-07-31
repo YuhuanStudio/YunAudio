@@ -65,6 +65,17 @@ struct StageAndPanelParityTests {
         }
     }
 
+    @Test("both say where the words came from, and why there are none")
+    func provenance() throws {
+        // The stage showed a bare source name: not whether the timing came from
+        // the file, not which catalogue answered, not the copyright the index
+        // asks to be shown, and — the one that matters when the stage is empty
+        // — not a line about why.
+        for file in ["KTVWindow.swift", "SingingPanel.swift"] {
+            #expect(try source(file).contains("KTVLyricsProvenance(model: model"), "\(file)")
+        }
+    }
+
     @Test("and the queue is reachable from the stage")
     func queue() throws {
         #expect(try source("KTVWindow.swift").contains("KTVQueueList(model: model"))

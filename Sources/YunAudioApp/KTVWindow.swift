@@ -1007,11 +1007,12 @@ struct KTVStage: View {
             // ends up at the top of the whole stage — two thousand points from
             // the thing it is attributing.
             VStack(alignment: .leading, spacing: 20) {
-                if let source = model.lyricsSourceName {
-                    Text(String(format: loc("Words from %@"), source))
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.40))
-                }
+                // The whole provenance, not just the name: whether the timing
+                // came from the file, which catalogue answered, the copyright
+                // the index asks to be shown, and — the one that matters when
+                // there are no words at all — why. All of it existed, in the
+                // column behind this window. See `KTVLyricsProvenance`.
+                KTVLyricsProvenance(model: model, scale: .stage)
                 lyricGroup(
                     lyrics, current: current, playing: playing, countIn: countIn,
                     voices: voices,

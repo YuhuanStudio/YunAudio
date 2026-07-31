@@ -488,6 +488,8 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "開啟 KTV 視窗";
+"The lyric index is rate limiting us. It usually clears in a minute." = "歌詞索引在限流。通常一分鐘內會恢復。";
+"Try again" = "再試一次";
 "Singing" = "唱歌";
 "This song is in %@" = "這首歌的調是 %@";
 "Move it %@ for you" = "幫你移 %@";

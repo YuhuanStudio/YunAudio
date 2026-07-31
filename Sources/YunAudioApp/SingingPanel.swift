@@ -182,11 +182,11 @@ struct SingingPanel: View {
             YunDivider()
 
             if let lyrics = model.lyrics {
-                lyricsSource(synchronised: true)
+                KTVLyricsProvenance(model: model, scale: .inspector)
                 SingingLyrics(model: model, lyrics: lyrics)
                 KTVWordsControls(model: model, scale: .inspector)
             } else if let plain = model.plainLyrics {
-                lyricsSource(synchronised: false)
+                KTVLyricsProvenance(model: model, scale: .inspector)
                 Text(plain)
                     .font(Yun.Text.body)
                     .foregroundStyle(Yun.Palette.textSecondary)
@@ -351,30 +351,6 @@ struct SingingPanel: View {
 
     private func trackProgress(_ track: NowPlaying.Track) -> some View {
         SongProgress(model: model, duration: track.duration)
-    }
-
-    @ViewBuilder
-    private func lyricsSource(synchronised: Bool) -> some View {
-        VStack(alignment: .leading, spacing: Yun.Space.xs) {
-            HStack(spacing: Yun.Space.xs) {
-                if let source = model.lyricsSourceName {
-                    Text(String(format: loc("Words from %@"), source))
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                }
-                YunBadge(synchronised ? loc("timed") : loc("plain words"))
-                if let region = model.lyricsRegion {
-                    YunBadge(String(format: loc("Catalogue region %@"), region))
-                }
-                Spacer(minLength: 0)
-            }
-            if let copyright = model.lyricsCopyright {
-                Text(copyright)
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
     }
 
     @ViewBuilder

@@ -487,6 +487,8 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"The lyric index is rate limiting us. It usually clears in a minute." = "歌词索引在限流。通常一分钟内会恢复。";
+"Try again" = "再试一次";
 "Singing" = "唱歌";
 "This song is in %@" = "这首歌的调是 %@";
 "Move it %@ for you" = "帮你移 %@";
