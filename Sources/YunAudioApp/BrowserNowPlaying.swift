@@ -18,9 +18,27 @@ import Foundation
 enum BrowserNowPlaying {
 
     /// The browsers asked, in order. Safari first: it is on every Mac.
+    ///
+    /// Everything after Chrome is a Chromium fork shipping Chrome's own
+    /// scripting dictionary, so `execute … javascript` reaches them unchanged —
+    /// see `script(forBrowser:javaScript:onlyTabAt:)`, which branches on Safari
+    /// and treats everything else as Chromium.
+    ///
+    /// **None of the forks is installed on this machine, so none has been
+    /// exercised here.** They are listed anyway because the cost of being wrong
+    /// about one is nothing: a browser that is not installed never appears in
+    /// `installedAutomationTargets`, one that is not running is skipped by
+    /// `isPlayerRunning` before any event is sent, and one that refuses the
+    /// script lands in the existing `javaScriptNotAllowed` path that names the
+    /// switch to turn on. The cost of leaving them out is somebody's music
+    /// being invisible for no reason.
     static let browsers: [(name: String, bundleID: String)] = [
         ("Safari", "com.apple.Safari"),
         ("Google Chrome", "com.google.Chrome"),
+        ("Microsoft Edge", "com.microsoft.edgemac"),
+        ("Brave Browser", "com.brave.Browser"),
+        ("Vivaldi", "com.vivaldi.Vivaldi"),
+        ("Opera", "com.operasoftware.Opera"),
     ]
 
     /// The shortest thing worth calling a song.

@@ -341,6 +341,37 @@ struct BrowserNowPlayingTests {
         #expect(NowPlaying.browserSweepInterval >= NowPlaying.browserAskInterval)
     }
 
+    @Test("every browser but Safari is spoken to in Chrome's dialect")
+    func chromiumForksShareOneScript() {
+        // The dispatch is "Safari or not Safari", so a fork only has to be in
+        // the list to be reached. That is the whole cost of supporting one, and
+        // it is why leaving Edge or Brave out was never a saving.
+        for browser in BrowserNowPlaying.browsers where browser.name != "Safari" {
+            let script = BrowserNowPlaying.script(
+                forBrowser: browser.name, javaScript: "1")
+            #expect(
+                script.contains("execute theTab javascript"),
+                Comment(rawValue: "\(browser.name) is not being asked in Chromium's dialect"))
+            #expect(!script.contains("do JavaScript"))
+        }
+        let safari = BrowserNowPlaying.script(forBrowser: "Safari", javaScript: "1")
+        #expect(safari.contains("do JavaScript theCode in theTab"))
+    }
+
+    @Test("no two browsers claim the same identity")
+    func browserIdentitiesAreDistinct() {
+        // A duplicated bundle identifier would make one browser answer for
+        // another's tabs, and a duplicated name would make the failure message
+        // point at the wrong application.
+        let identifiers = BrowserNowPlaying.browsers.map(\.bundleID)
+        #expect(Set(identifiers).count == identifiers.count)
+        let names = BrowserNowPlaying.browsers.map(\.name)
+        #expect(Set(names).count == names.count)
+        // Safari first: it is the one browser on every Mac, so it is the one
+        // most likely to answer, and the sweep stops at the first that does.
+        #expect(BrowserNowPlaying.browsers.first?.name == "Safari")
+    }
+
     @Test("the wider corpus of real titles YouTube answered with")
     func aWiderCorpusIsParsed() {
         // Five more, fetched the same way, chosen to be different shapes
