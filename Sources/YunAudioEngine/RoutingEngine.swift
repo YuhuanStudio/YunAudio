@@ -3168,15 +3168,36 @@ public final class RoutingEngine: @unchecked Sendable {
         return (0..<count).map { graph.pointee.peaks[$0] }
     }
 
-    /// Number of IO cycles completed. A stalled counter means the device is not
-    /// actually pulling audio.
-    public var cycleCount: UInt64 {
+    /// Number of IO cycles completed, or nil when nobody could answer.
+    ///
+    /// The distinction matters and cost a day of chasing a bug that was not
+    /// there. Zero means three different things here: the route is not running,
+    /// the cell has just been freed and its replacement has not counted a cycle
+    /// yet, and — the one that bites — the lock was held by the engine queue at
+    /// the moment of asking. It is taken with `try` rather than waited on
+    /// because the alternative is an interface that freezes for as long as
+    /// `coreaudiod` takes, so a contended read is normal rather than
+    /// exceptional.
+    ///
+    /// A meter can treat all three as "nothing to show". A check asking whether
+    /// audio survived a device change cannot: comparing a real count against a
+    /// non-answer is how a route that was running perfectly well, carrying a
+    /// tone the very next assertion measured at −6 dBFS, was reported as
+    /// stalled.
+    public var cycleCountIfKnown: UInt64? {
         // The cell too: `stop` frees it, and this is read from the interface
         // and from every check that asks whether audio is flowing.
-        guard stateLock.try() else { return 0 }
+        guard stateLock.try() else { return nil }
         defer { stateLock.unlock() }
-        return graphCell.map { yun_rt_cell_cycles($0) } ?? 0
+        return graphCell.map { yun_rt_cell_cycles($0) }
     }
+
+    /// Number of IO cycles completed. A stalled counter means the device is not
+    /// actually pulling audio.
+    ///
+    /// For anything that wants a number to show. Anything comparing two
+    /// readings wants `cycleCountIfKnown`.
+    public var cycleCount: UInt64 { cycleCountIfKnown ?? 0 }
 
     /// The clock master's most recent timestamp, read through the cycle counter
     /// as a sequence number so a half-updated pair is never published.

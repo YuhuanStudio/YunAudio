@@ -356,7 +356,7 @@ enum PreferencesStore {
             // NotificationCenter promised the main queue above. Flushing here
             // means a value changed just before Quit is not left behind in the
             // coalescing window.
-            MainActor.assumeIsolated { writer.flush() }
+            onTheMainThread { writer.flush() }
         }
     }
 }

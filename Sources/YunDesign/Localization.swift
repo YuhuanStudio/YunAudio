@@ -154,7 +154,7 @@ public enum YunStrings {
 /// lookup it always was.
 public func loc(_ key: String) -> String {
     if Thread.isMainThread {
-        MainActor.assumeIsolated { _ = YunTheme.shared.language }
+        onTheMainThread { _ = YunTheme.shared.language }
     }
     return YunStrings.lookUp(key)
 }

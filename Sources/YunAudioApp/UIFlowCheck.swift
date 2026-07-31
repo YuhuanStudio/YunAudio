@@ -923,13 +923,12 @@ enum UIFlowCheck {
         // The two controls anybody looks for first, and the app had neither —
         // only the per-route strips, which balance sources against each other
         // rather than answering "how loud is the microphone".
-        let cyclesBeforeLevels = model.cycleCountForDiagnostics
         model.inputDecibels = -6
         model.outputDecibels = -3
         model.isInputMuted = true
         await pause(0.5)
         check("the values read back", model.inputDecibels == -6 && model.outputDecibels == -3)
-        check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBeforeLevels)
+        await checkAudioIsFlowing(model)
         check("no rebuild was needed", model.isRunning && !model.isBusy)
 
         // Muting the input has to reach the meters, not just the samples.
@@ -1431,21 +1430,18 @@ enum UIFlowCheck {
             // The master is the level going to the far end. Muting it must not
             // take away the ability to hear yourself, which is the one thing
             // that would make monitoring useless exactly when it is needed.
-            let cyclesBeforeMute = model.cycleCountForDiagnostics
             model.isOutputMuted = true
             await pause(0.4)
             check("muting the master did not rebuild", model.isRunning && !model.isBusy)
-            check("audio kept flowing", model.cycleCountForDiagnostics > cyclesBeforeMute)
+            await checkAudioIsFlowing(model)
             model.isOutputMuted = false
 
             // And its own fader moves without a rebuild.
-            let cyclesBeforeGain = model.cycleCountForDiagnostics
             model.monitorDecibels = -18
             await pause(0.4)
             check("the monitor level reads back", model.monitorDecibels == -18)
-            check(
-                "changing it did not interrupt audio",
-                model.cycleCountForDiagnostics > cyclesBeforeGain && !model.isBusy)
+            await checkAudioIsFlowing(model, "changing it did not interrupt audio")
+            check("and did not rebuild", !model.isBusy)
 
             // A second mix, not a sidetone. Every source can go to it at its
             // own level — music loud in your ears and quiet on the stream —
@@ -1460,13 +1456,11 @@ enum UIFlowCheck {
                 check(
                     "the microphone is in the monitor by default",
                     before > RouterModel.minimumDecibels)
-                let cyclesBefore = model.cycleCountForDiagnostics
                 model.setMonitorSend(-15, for: group)
                 await pause(0.4)
                 check("its send moved", model.monitorSendDecibels(of: group) == -15)
-                check(
-                    "and moving it did not interrupt audio",
-                    model.cycleCountForDiagnostics > cyclesBefore && !model.isBusy)
+                await checkAudioIsFlowing(model, "and moving it did not interrupt audio")
+                check("nor rebuilt the route", !model.isBusy)
                 model.setMonitorSend(before, for: group)
                 await waitUntil("it settled", { !model.isBusy }, timeout: 12)
             }
@@ -1561,11 +1555,7 @@ enum UIFlowCheck {
                         note("the engine said: \(reason)")
                     }
                     if let error = model.lastError { note("the user is told: \(error)") }
-                    let cycles = model.cycleCountForDiagnostics
-                    await pause(0.4)
-                    check(
-                        "and audio is still flowing",
-                        model.cycleCountForDiagnostics > cycles)
+                    await checkAudioIsFlowing(model, "and audio is still flowing")
                 } else {
                     note("the decoy aggregate is not in the device list — skipped")
                 }
@@ -1673,11 +1663,7 @@ enum UIFlowCheck {
         check("the route set changed", model.activeRoutes.count != before || before > 0)
         // Audio flowing is then a claim about the new graph, which is the only
         // one worth making: the counter has to be advancing now.
-        let cyclesAfterRebuild = model.cycleCountForDiagnostics
-        await pause(0.4)
-        check(
-            "audio is flowing through the rebuilt graph",
-            model.cycleCountForDiagnostics > cyclesAfterRebuild)
+        await checkAudioIsFlowing(model, "audio is flowing through the rebuilt graph")
 
         try section("recording")
         check("recording is offered while routing", model.isRunning)
@@ -2017,7 +2003,6 @@ enum UIFlowCheck {
         // One restart per preset, not one per property. Every field a preset
         // sets restarts the route on its own, so this used to tear the audio
         // down and rebuild it three times for a single click.
-        let cyclesBeforePreset = model.cycleCountForDiagnostics
         model.apply(.recording)
         await pause(upTo: 8.0, until: { model.isRunning && !model.isBusy })
         check("still running after a preset", model.isRunning)
@@ -2037,12 +2022,7 @@ enum UIFlowCheck {
         // half of it: a preset that moves a sample rate is a real rebuild, and
         // one and a half seconds was not always enough for it, so the counter
         // was sometimes read at zero while the new graph was still being built.
-        let cyclesAfterPreset = model.cycleCountForDiagnostics
-        await pause(0.4)
-        check(
-            "audio came back",
-            model.cycleCountForDiagnostics > cyclesAfterPreset)
-        note("\(cyclesBeforePreset) cycles before the preset, \(cyclesAfterPreset) after it")
+        await checkAudioIsFlowing(model, "audio came back")
         check("the preset reads as active", model.matches(.recording))
 
         // Every preset has to be distinguishable from every other, or two of
@@ -2318,13 +2298,14 @@ enum UIFlowCheck {
         var stalledOn: [String] = []
         var missingFrom: [String] = []
         var stoppedOn: [String] = []
+        var unreadableOn: [String] = []
         var slowestInspectorRead = 0.0
         var slowestLiveControlWrite = 0.0
         let originalMaster = model.outputDecibels
         let swapsBegan = Date()
         for kind in EffectKind.allCases {
             for wanted in [true, false] {
-                let cyclesBefore = model.cycleCountForDiagnostics
+                let cyclesBefore = await cycleAnswer(model)
                 model.setEffect(kind, enabled: wanted)
                 // Let the engine queue enter the Audio Unit build, then ask the
                 // same question SwiftUI asks while drawing the processing
@@ -2352,14 +2333,21 @@ enum UIFlowCheck {
                     slowestInspectorRead,
                     Double(DispatchTime.now().uptimeNanoseconds - inspectorBegan) / 1_000_000)
                 await settle(model, timeout: 12)
-                let cyclesAfter = model.cycleCountForDiagnostics
+                let cyclesAfter = await cycleAnswer(model)
                 let label = "\(kind.rawValue) \(wanted ? "on" : "off")"
                 if !model.isRunning { stoppedOn.append(label) }
-                // Fewer cycles than before the change means the counter started
-                // again, which means the cell did, which means a restart.
-                if cyclesAfter < cyclesBefore { restartedOn.append(label) }
-                // And the same count means nothing is pulling audio at all.
-                if cyclesAfter <= cyclesBefore { stalledOn.append(label) }
+                if let cyclesBefore, let cyclesAfter {
+                    // Fewer cycles than before the change means the counter
+                    // started again, which means the cell did, which means a
+                    // restart.
+                    if cyclesAfter < cyclesBefore { restartedOn.append(label) }
+                    // And the same count means nothing is pulling audio at all.
+                    if cyclesAfter <= cyclesBefore { stalledOn.append(label) }
+                } else {
+                    // Neither conclusion is available, and guessing at one is
+                    // how a healthy route gets reported as restarting.
+                    unreadableOn.append(label)
+                }
                 if wanted, !model.activeEffectStages.contains(kind) {
                     missingFrom.append(label)
                 }
@@ -2391,6 +2379,10 @@ enum UIFlowCheck {
         check(
             "and never restarted: the cycle counter never went backwards", restartedOn.isEmpty)
         check("audio kept flowing across every change", stalledOn.isEmpty)
+        check("and the counter could be read across every change", unreadableOn.isEmpty)
+        if !unreadableOn.isEmpty {
+            note("counter unreadable on: " + unreadableOn.joined(separator: ", "))
+        }
         check("the chain that ran was the one asked for", missingFrom.isEmpty)
         if !restartedOn.isEmpty { note("restarted on: " + restartedOn.joined(separator: ", ")) }
         if !missingFrom.isEmpty {
@@ -2458,17 +2450,26 @@ enum UIFlowCheck {
             // restart would climb past the old value a moment later anyway.
             // What only a restart can produce is the counter going backwards,
             // because the cell it lives in is freed and made again.
-            var counts: [UInt64] = [model.cycleCountForDiagnostics]
+            //
+            // Answers only, on every reading. A contended lock produces no
+            // number, and a missing number folded in as zero is indexed here as
+            // the counter going backwards — which is precisely the restart this
+            // is looking for, reported on a route that never restarted.
+            var counts: [UInt64] = []
+            if let first = await cycleAnswer(model) { counts.append(first) }
             for value in [70, 80, 90] as [Float] {
                 model.voiceIsolationMix = value
                 try? await Task.sleep(for: .milliseconds(120))
-                counts.append(model.cycleCountForDiagnostics)
+                if let next = await cycleAnswer(model) { counts.append(next) }
             }
-            let neverBackwards = zip(counts, counts.dropFirst()).allSatisfy { $0 <= $1 }
-            check("and did it without restarting the route", neverBackwards)
-            // And audio was actually flowing throughout, or "never went
-            // backwards" would be satisfied by a route that had stopped.
-            check("with audio flowing the whole time", counts.last! > counts.first!)
+            check("the cycle counter could be read while the mix moved", counts.count >= 2)
+            if let first = counts.first, let last = counts.last, counts.count >= 2 {
+                let neverBackwards = zip(counts, counts.dropFirst()).allSatisfy { $0 <= $1 }
+                check("and did it without restarting the route", neverBackwards)
+                // And audio was actually flowing throughout, or "never went
+                // backwards" would be satisfied by a route that had stopped.
+                check("with audio flowing the whole time", last > first)
+            }
             model.voiceIsolationMix = 100
         }
 
@@ -2506,8 +2507,6 @@ enum UIFlowCheck {
 
         if let source = sourcePort, let newCable = free ?? occupied {
             let from = ChannelRef(deviceUID: source.uid, channel: source.channels[0])
-            let cyclesBefore = model.cycleCountForDiagnostics
-
             // Start from whichever end is available: pull it out first if it is
             // in use, otherwise put it in first. Both halves run either way.
             if free == nil {
@@ -2529,9 +2528,7 @@ enum UIFlowCheck {
                 check("the cable was pulled", model.activeRoutes.count == before)
             }
 
-            check(
-                "audio kept flowing while patching",
-                model.cycleCountForDiagnostics > cyclesBefore)
+            await checkAudioIsFlowing(model, "audio kept flowing while patching")
             check("still running after patching", model.isRunning)
 
             // Pulling one cable rather than everything reaching a port. The
@@ -2600,7 +2597,7 @@ enum UIFlowCheck {
         // second aggregate, the route rebuilt, and the check called that "audio
         // stopped". Measured, twice in three runs: the cycle counter went to 0
         // and the audio was flowing perfectly well a moment later.
-        let cyclesBeforeChange = model.cycleCountForDiagnostics
+        let cyclesBeforeChange = await cycleAnswer(model)
         let deviceCountBefore = model.outputDevices.count
         let inUse = Set(
             [model.selectedDestinationUID, model.selectedSourceUID, model.monitorDeviceUID]
@@ -2631,14 +2628,9 @@ enum UIFlowCheck {
             // first is a failure. Whether an unrelated aggregate over the same
             // destination ought to perturb this route is a real question, and
             // it is not answered by a check that cannot tell the two apart.
-            let afterChange = model.cycleCountForDiagnostics
-            await pause(0.5)
-            let flowing = model.cycleCountForDiagnostics
-            note(
-                "cycles \(cyclesBeforeChange) before the change, \(afterChange) after, "
-                    + "\(flowing) half a second later")
-            check("audio kept flowing across the change", flowing > afterChange)
-            if afterChange < cyclesBeforeChange {
+            let afterChange = await cycleAnswer(model)
+            await checkAudioIsFlowing(model, "audio kept flowing across the change")
+            if let afterChange, let cyclesBeforeChange, afterChange < cyclesBeforeChange {
                 note(
                     "the counter restarted, so the route was rebuilt by the new device "
                         + "appearing — worth knowing, and not the same as audio stopping")
@@ -2699,8 +2691,7 @@ enum UIFlowCheck {
                 check("it does not claim to be bit-exact", !quality.isBitExact)
                 check("and it names the mismatch", quality.hasSampleRateMismatch)
             }
-            await pause(upTo: 1.0, until: { model.cycleCountForDiagnostics > 0 })
-            check("audio is flowing", model.cycleCountForDiagnostics > 0)
+            await checkAudioIsFlowing(model, "audio is flowing")
             model.selectedDestinationUID = previous
             await waitUntil("and it went back", { model.isRunning }, timeout: 15)
         } else {
@@ -2829,13 +2820,7 @@ enum UIFlowCheck {
                     }
                 }, timeout: 15)
         }
-        let cyclesBeforeSinging = model.cycleCountForDiagnostics
-        await pause(
-            upTo: 1.0,
-            until: { model.cycleCountForDiagnostics > cyclesBeforeSinging })
-        check(
-            "the route is producing before KTV reads it",
-            model.cycleCountForDiagnostics > cyclesBeforeSinging)
+        await checkAudioIsFlowing(model, "the route is producing before KTV reads it")
         model.isSingingVisible = true
         await pause(
             upTo: 3.0,
@@ -3293,8 +3278,7 @@ enum UIFlowCheck {
             // Waited for rather than read: the counter starts again with the
             // new aggregate, so reading it the instant the route reports itself
             // up is reading it before the first cycle has run.
-            await waitUntil(
-                "audio is flowing again", { model.cycleCountForDiagnostics > 0 }, timeout: 5)
+            await checkAudioIsFlowing(model, "audio is flowing again", over: 5)
             // Nothing beyond half a second is alignment any more, and a value
             // set by accident must not be able to make the app look broken.
             model.setOutputDelay(99_999, for: output.uid)
@@ -3970,14 +3954,13 @@ enum UIFlowCheck {
 
         // Then until there is an answer at all, which now means until enough of
         // the piece has been heard for one to be offered.
-        let cyclesBeforeTheKey = model.cycleCountForDiagnostics
         await pause(upTo: 10.0, until: { model.songKey != nil })
         // Whether anything was measured at all, which is a different question
         // from what was measured and has to be asked first. A route can be up,
         // report no error and carry nothing: `AudioDeviceStart` returns noErr
         // and the IO proc is then simply never called, and every meter in the
         // application reads a truthful zero.
-        let flowed = model.cycleCountForDiagnostics > cyclesBeforeTheKey
+        let flowed = await sawCyclesAdvance(model) ?? false
         check("audio was flowing while the key was measured", flowed)
 
         if let key = model.songKey {
@@ -6447,6 +6430,82 @@ enum UIFlowCheck {
     /// windows — "how much audio did the analyser count in two seconds of wall
     /// clock", "what does one poll cost averaged over four seconds" — and a
     /// window that ends early measures something else. Those stay.
+    /// Whether the IO cycle counter can be seen counting up, right now.
+    ///
+    /// Sixteen places in this file used to ask this the same wrong way: take a
+    /// number before the change, take one after it, assert the second is
+    /// larger. That reading is wrong twice over.
+    ///
+    /// It is wrong because a rebuild frees the RCU cell the counter lives in
+    /// and makes another, so the count legitimately starts again from zero and
+    /// "smaller" means "it rebuilt", not "the audio stopped" — a trap three
+    /// separate comments in this file record falling into. And it is wrong
+    /// because the counter is read under a lock taken with `try`, so a reading
+    /// that lands while the engine queue holds it is not a small number, it is
+    /// no number at all, and comparing against it reports a stalled route on a
+    /// route carrying a tone the very next assertion measures at −6 dBFS.
+    ///
+    /// What actually answers "is the IOProc being called" is neither of those:
+    /// it is two *consecutive answers* that increase. That is immune to the
+    /// rebuild, because the new cell counts up from zero like the old one, and
+    /// immune to the contended read, because a non-answer is skipped rather
+    /// than compared. It also needs nothing sampled before the change, so the
+    /// call sites lose a variable each.
+    ///
+    /// - Returns: True as soon as two answers increase; false when the window
+    ///   ran out with answers that never did; nil when fewer than two answers
+    ///   could be got at all, which is a different fault and must not be
+    ///   reported as a stalled route.
+    private static func sawCyclesAdvance(
+        _ model: RouterModel, over seconds: TimeInterval = 1.5
+    ) async -> Bool? {
+        let ceiling = inWantedSection ? seconds : min(seconds, 0.05)
+        let deadline = Date().addingTimeInterval(ceiling)
+        var last: UInt64? = nil
+        var answers = 0
+        while true {
+            if let now = model.cycleCountIfKnownForDiagnostics {
+                answers += 1
+                if let last, now > last { return true }
+                last = now
+            }
+            guard Date() < deadline else { break }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return answers >= 2 ? false : nil
+    }
+
+    /// One reading of the cycle counter, waiting briefly for one that is an
+    /// answer rather than a contended lock.
+    ///
+    /// For the two places that need the number itself rather than "did it move"
+    /// — both of them detecting a *restart*, which shows as the count going
+    /// backwards. There a non-answer read as zero is the worst possible
+    /// outcome: it looks exactly like the restart being hunted.
+    private static func cycleAnswer(_ model: RouterModel, tries: Int = 8) async -> UInt64? {
+        for _ in 0..<tries {
+            if let now = model.cycleCountIfKnownForDiagnostics { return now }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
+    }
+
+    /// Asserts that audio is flowing, from the counter rather than from
+    /// `isRunning` — which a route that rebuilt itself into silence satisfies
+    /// perfectly.
+    private static func checkAudioIsFlowing(
+        _ model: RouterModel, _ label: String = "audio kept flowing",
+        over seconds: TimeInterval = 1.5
+    ) async {
+        guard let advanced = await sawCyclesAdvance(model, over: seconds) else {
+            // Not the same failure, and fixing it is not the same work: this
+            // says the counter could not be read, not that it stood still.
+            check("\(label) — the IO cycle counter could be read at all", false)
+            return
+        }
+        check(label, advanced)
+    }
+
     private static func pause(
         upTo seconds: TimeInterval, until condition: () -> Bool
     ) async {
@@ -7095,24 +7154,46 @@ enum UIFlowCheck {
         if let error = model.lastError { note("the route said: \(error)") }
         check("no error was reported after the \(end) changed", model.lastError == nil)
 
-        // The highest of several reads rather than one. `cycleCount` is taken
-        // under a lock it will not wait for — the alternative being an
-        // interface that freezes for as long as `coreaudiod` takes — so a
-        // single read lands on zero whenever the engine queue happens to hold
-        // it, and a baseline of zero read that way made this fail on a route
-        // that was running perfectly well.
-        var cyclesAfter: UInt64 = 0
+        // Answers only, on both sides. The counter is read under a lock taken
+        // with `try` — the alternative being an interface that freezes for as
+        // long as `coreaudiod` takes — so a read that lands while the engine
+        // queue holds it produces no number at all. The first version of this
+        // took the highest of five reads as the baseline, which dealt with the
+        // non-answer on that side, and then compared it against a *single*
+        // fresh read. That read is the one that fails: this section changes
+        // twenty-two devices, the engine queue is busy throughout, and the
+        // assertion reported a stalled route while the very next line measured
+        // the tone arriving at −6 dBFS.
+        //
+        // So both sides are the highest answer over a window, and a window that
+        // produced no answer at all is reported as that rather than as a
+        // stalled counter — those need different fixes and must not read the
+        // same.
+        var cyclesAfter: UInt64? = nil
         for _ in 0..<5 {
-            cyclesAfter = max(cyclesAfter, model.cycleCountForDiagnostics)
+            cyclesAfter = higher(cyclesAfter, model.cycleCountIfKnownForDiagnostics)
             await pause(0.02)
         }
-        await pause(upTo: 2.0, until: { model.cycleCountForDiagnostics > cyclesAfter })
+        var cyclesLater = cyclesAfter
+        await pause(
+            upTo: 2.0,
+            until: {
+                cyclesLater = higher(cyclesLater, model.cycleCountIfKnownForDiagnostics)
+                guard let cyclesAfter, let cyclesLater else { return false }
+                return cyclesLater > cyclesAfter
+            })
         note(
-            "cycles \(cyclesAfter) just after the \(end) changed, "
-                + "\(model.cycleCountForDiagnostics) a moment later")
-        check(
-            "the IO cycle counter advances after the \(end) changed",
-            model.cycleCountForDiagnostics > cyclesAfter)
+            "cycles \(describe(cyclesAfter)) just after the \(end) changed, "
+                + "\(describe(cyclesLater)) a moment later")
+        if let cyclesAfter, let cyclesLater {
+            check(
+                "the IO cycle counter advances after the \(end) changed",
+                cyclesLater > cyclesAfter)
+        } else {
+            check(
+                "the IO cycle counter could be read at all after the \(end) changed",
+                false)
+        }
 
         // The counter says the IOProc is being called. It says nothing about
         // whether anything is being carried, which is exactly the failure being
@@ -7126,6 +7207,20 @@ enum UIFlowCheck {
         check(
             "the tone still reaches the destination bus after the \(end) changed",
             after > toneFloor)
+    }
+
+    /// The higher of two readings, where either may be no reading.
+    ///
+    /// `max` cannot be used because nil here is "nobody answered", not zero,
+    /// and treating it as zero is the whole defect this replaced.
+    private static func higher(_ a: UInt64?, _ b: UInt64?) -> UInt64? {
+        guard let a else { return b }
+        guard let b else { return a }
+        return Swift.max(a, b)
+    }
+
+    private static func describe(_ count: UInt64?) -> String {
+        count.map(String.init) ?? "unreadable"
     }
 
     /// The loudest the destination bus gets over a window.

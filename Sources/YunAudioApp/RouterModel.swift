@@ -6862,16 +6862,16 @@ final class RouterModel: ScriptTarget {
             case .toggleRouting:
                 handler = { [weak self] isPressed in
                     guard isPressed else { return }
-                    MainActor.assumeIsolated { self?.toggle() }
+                    onTheMainThread { self?.toggle() }
                 }
             case .toggleMute:
                 handler = { [weak self] isPressed in
                     guard isPressed else { return }
-                    MainActor.assumeIsolated { self?.toggleMute() }
+                    onTheMainThread { self?.toggleMute() }
                 }
             case .pushToTalk:
                 handler = { [weak self] isPressed in
-                    MainActor.assumeIsolated { self?.setPushToTalk(held: isPressed) }
+                    onTheMainThread { self?.setPushToTalk(held: isPressed) }
                 }
             }
             // Work down the candidates until one is free. Another application
@@ -9252,10 +9252,12 @@ final class RouterModel: ScriptTarget {
         // flow check, six minutes, every device switch — did not fault once.
         // `TODO.md` says so rather than pretending either way.
         let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
-            // Registered on the main run loop below, so this is the main thread
-            // by construction and another task per meter frame would be
-            // allocation and scheduling with no hop.
-            MainActor.assumeIsolated { self?.poll() }
+            // Registered on the main run loop below, so this is the main
+            // thread by construction and another task per meter frame would be
+            // allocation and scheduling with no hop. `onTheMainThread` rather
+            // than `MainActor.assumeIsolated` because this exact line is where
+            // seven crash reports land — see the note there.
+            onTheMainThread { self?.poll() }
         }
         RunLoop.main.add(timer, forMode: .common)
         levelTimer = timer
@@ -10125,7 +10127,7 @@ final class RouterModel: ScriptTarget {
     private func scheduleCalibrationTick() {
         calibrationTimer?.invalidate()
         let timer = Timer(timeInterval: 0.1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.calibrationTick() }
+            onTheMainThread { self?.calibrationTick() }
         }
         RunLoop.main.add(timer, forMode: .common)
         calibrationTimer = timer
@@ -10670,6 +10672,13 @@ final class RouterModel: ScriptTarget {
     /// whether audio survived a change rather than merely whether the model
     /// still says it is running.
     var cycleCountForDiagnostics: UInt64 { engine.cycleCount }
+
+    /// The same counter, but able to say it does not know.
+    ///
+    /// The flow check compares two readings taken seconds apart, and a reading
+    /// that failed to take the lock is not a smaller number — it is no number.
+    /// See `RoutingEngine.cycleCountIfKnown`.
+    var cycleCountIfKnownForDiagnostics: UInt64? { engine.cycleCountIfKnown }
 
     /// Loudest route, for the menu bar icon and the signal path graphic.
     var peakLevel: Float { levels.max() ?? 0 }

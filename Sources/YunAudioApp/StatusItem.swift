@@ -279,12 +279,18 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// menu rebuild so the check cannot pass for that old, wasteful reason.
     private(set) static var configNameSnapshots = 0
 
-    @objc private func refreshImageOnTimer() {
-        // A target/selector timer calls us directly on the main run loop.
-        // Wrapping every tick in `Task { @MainActor }` allocated and enqueued
-        // another job twice a second merely to get back to the executor the
-        // timer was already running on.
-        refreshImage()
+    /// Nonisolated so that the `@objc` thunk does not insert one.
+    ///
+    /// A target/selector timer calls us directly on the main run loop, and
+    /// wrapping every tick in `Task { @MainActor }` allocated and enqueued
+    /// another job twice a second merely to get back to the executor the timer
+    /// was already running on. But an `@objc` method on a `@MainActor` type
+    /// gets a compiler-written thunk that performs the same dynamic executor
+    /// check `MainActor.assumeIsolated` does — and one of the crash reports is
+    /// from this timer rather than the poll. `onTheMainThread` is the check
+    /// that cannot fault.
+    @objc nonisolated private func refreshImageOnTimer() {
+        onTheMainThread { self.refreshImage() }
     }
 
     private func refreshImage() {

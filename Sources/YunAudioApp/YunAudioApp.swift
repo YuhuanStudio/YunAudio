@@ -223,7 +223,7 @@ struct YunAudioApp: App {
         // the `@State` above runs before `App.init()`, which let a second copy
         // enumerate every device, open MIDI and even honour auto-start before
         // the single-instance claim told it to exit.
-        let startup = MainActor.assumeIsolated {
+        let startup = onTheMainThread {
             AppStartup.prepare(
                 environment: environment,
                 claimSingleInstance: { SingleInstance.claim() },
@@ -244,7 +244,7 @@ struct YunAudioApp: App {
             // the mark's ink is, which is in this binary. See `YunIconBadge`.
             guard let directory = environment["YUNAUDIO_ICON"] else { exit(1) }
             let style = YunIconBadge.style(named: environment["YUNAUDIO_ICON_STYLE"])
-            let wrote = MainActor.assumeIsolated {
+            let wrote = onTheMainThread {
                 YunIconBadge.writeIconset(to: directory, style: style)
             }
             exit(wrote ? 0 : 1)
@@ -254,12 +254,12 @@ struct YunAudioApp: App {
             // in both appearances, which is the only way to catch a colour that
             // works in one theme and vanishes in the other.
             guard let directory = environment["YUNAUDIO_RENDER"] else { exit(1) }
-            MainActor.assumeIsolated {
+            onTheMainThread {
                 PanelRenderer.write(to: directory, model: model)
             }
             // Non-zero when anything could not be written. A design check whose
             // output is missing must not look like one that passed.
-            exit(MainActor.assumeIsolated { PanelRenderer.wroteEverything } ? 0 : 1)
+            exit(onTheMainThread { PanelRenderer.wroteEverything } ? 0 : 1)
         }
 
     }
