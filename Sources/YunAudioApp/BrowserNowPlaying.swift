@@ -157,6 +157,16 @@ enum BrowserNowPlaying {
     /// hyphen, and in a quoted line of the lyric itself. What they have in
     /// common is not a shape, so this is a sequence of removals ending in one
     /// preference, and each step is pinned to one of those three strings.
+    ///
+    /// **The strings it produces were then put to a real index.** All three
+    /// find their song by name as the top answer. The second is the warning:
+    /// 「稻香 / 周杰倫」 returns a 184-second upload by a re-poster before the
+    /// 223-second original, so a title that matches is not a match — which is
+    /// what the duration test in `OnlineLyrics.strongest` is for, and why a
+    /// browser track carries the tab's own `duration` rather than only a name.
+    /// It also crosses the scripts without anybody arranging it: the tab says
+    /// 周杰倫 and the index holds 周杰伦, folded by the `Hant-Hans` transform
+    /// added earlier for 「來不及愛你」.
     static func splitTitle(_ title: String, channel: String) -> (title: String, artist: String) {
         let cleaned = strippedDecoration(title)
         // The name in brackets wins where there is one: an uploader who writes
