@@ -877,6 +877,30 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 
 ---
 
+## 下一件事：唱歌的變調（KTV 最常按的那顆鍵）
+
+**引擎已經有了，介面沒有。** `EffectChain` 有 `.pitch`（以**音分**為單位，註解寫得很清楚：
+「一個像樣的移調很少是整數個半音」）、`.reverb`、`.echo`，還有自製的 `FormantShifter`
+——移動共振峰而不動音高，那是「變調不變成花栗鼠」的另一半。`RoutingEngine:1120`
+的 `sourceEffects` 就是每個來源自己的效果鏈。
+
+**缺的是把它接到唱歌上**：每台 KTV 機在播放／暫停之後最常被按的就是升降調，而這裡
+沒有任何地方可以按。要做的是：
+
+1. `RouterModel` 上一個 `songKey`（半音，−6…+6），**按歌記住**，做法照
+   `LyricOffsets` 那一套（同一個理由：那是這個檔案／這個人的調，不是這首歌的）。
+2. 套用時把 `semitones * 100` 送進**伴奏那一路**的 `.pitch`，人聲那一路不動——
+   變的是伴奏的調，不是唱的人。
+3. 舞台上一組「調 −／＋」控制項，跟現有的歌詞偏移箭頭並排（`lyricAlignment` 已經
+   是這個形狀），並且**顯示目前調性**——`KeyDetector` 已經會偵測調，所以可以顯示
+   「原調 G → 現在 A」而不是只有一個數字。
+4. 量它：`.pitch` 是 `kAudioUnitSubType_NewTimePitch`，會加延遲，而
+   `ProcessingLatency` 已經在管這件事——**移調之後對嘴會不會偏，要有數字**。
+
+**不需要 AVFoundation 的新東西**：`AVAudioUnitTimePitch` 包的就是同一顆 AudioUnit，
+而 `AVAudioEngine` 會在即時路徑上多一層它自己的 graph，這條路徑刻意不要。已經用到的
+更底層：`AudioObjectID`／process taps／`AUVoiceProcessingIO`／`kAudioUnitSubType_*`。
+
 ## KTV 這一輪量到的數字（2026-07-31）
 
 留在這裡是因為它們是**下一次改動的基準線**：任何一項變差都代表某個東西被弄壞了，
