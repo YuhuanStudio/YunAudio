@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 
 /// Type size, line spacing, how many lines are shown, and how wide a line may
@@ -35,6 +36,29 @@ struct KTVLyricMetrics: Equatable, Sendable {
     /// in. Chinese sets one character per em, so the measure is this many times
     /// the point size.
     static let charactersPerLine: CGFloat = 22
+
+    /// The height one drawn row occupies, as a multiple of its point size.
+    ///
+    /// Measured from the font the stage actually draws with, rather than
+    /// guessed. The budget used to fold this together with an allowance for
+    /// wrapping into a single 1.35, which could only ever be checked against
+    /// itself — the invariant test asserting the column fits was computed from
+    /// the same number it was testing. Split apart, each half can be wrong on
+    /// its own and be seen to be.
+    static let rowHeight: CGFloat = {
+        let font = NSFont.systemFont(ofSize: 100, weight: .bold)
+        return (font.ascender - font.descender + font.leading) / 100
+    }()
+
+    /// Rows a line of words takes, on average, at the measure above.
+    ///
+    /// An allowance, and named as one. A line is one row until it passes
+    /// `charactersPerLine` and two after that, and which it is depends on the
+    /// words — knowledge the column does not have when it decides how many
+    /// lines to make room for. 1.14 is what 年少心動雨季 and 往事只能回味 come
+    /// to between them: one line in seven wraps. Being wrong here costs a line
+    /// of slack, not a line cut off — the floors below are exact.
+    static let rowsPerLine: CGFloat = 1.14
 
     /// The smallest the stage type may become before it stops being a stage.
     static let smallestCurrent: CGFloat = 19
@@ -80,12 +104,15 @@ struct KTVLyricMetrics: Equatable, Sendable {
         // how many fit in the half of the column above the centre line, and the
         // same below — the current line is anchored at the centre, so the two
         // halves are budgeted separately.
+        // Every row is `rowHeight` times its own point size, the extra rows
+        // included: pronunciation at 0.68 of the neighbour size occupies 0.68
+        // × `rowHeight`, not 0.68.
         let extra = max(0, extraRowsPerLine)
-        let perNeighbour = neighbour * (1.35 + extra) + spacing
+        let perNeighbour = neighbour * rowHeight * (rowsPerLine + extra) + spacing
         // Less the two gaps the stage puts either side of the sung line: they
         // are drawn, so they are spent, and a budget that ignores them is a
         // budget that overflows by exactly that much.
-        let half = max(0, (height - current * (1.4 + extra) - spacing * 2) / 2)
+        let half = max(0, (height - current * rowHeight * (rowsPerLine + extra) - spacing * 2) / 2)
         let fit = Int((half / perNeighbour).rounded(.down))
 
         // At least one either side while there is room for it — and the room
@@ -98,7 +125,7 @@ struct KTVLyricMetrics: Equatable, Sendable {
         //
         // The line after is worth more than the line before — it is the one
         // being read — so it is the one that survives to the last.
-        let lineBlock = current * (1.4 + extra)
+        let lineBlock = current * rowHeight * (rowsPerLine + extra)
         // The same count each way, capped differently. `fit + 1` ahead was the
         // other half of the overflow: the two halves are budgeted separately
         // and each holds `fit`, so the extra line ahead was one nobody had

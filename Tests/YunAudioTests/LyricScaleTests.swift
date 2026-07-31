@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import Testing
@@ -71,6 +72,25 @@ struct LyricScaleTests {
         }
     }
 
+    @Test("the row height is the font's own, and two routes agree on it")
+    func rowHeightIsMeasuredRatherThanGuessed() {
+        // SF Bold at 100 points on this platform: ascender 96.68, descender
+        // −21.09, leading 0 — so one row is 1.178 times its point size. The
+        // budget used to say 1.35, which was that number multiplied by an
+        // unstated allowance for wrapping.
+        #expect(abs(KTVLyricMetrics.rowHeight - 1.1777) < 0.005)
+        // The same number by a different route. One measurement can be a
+        // mistake repeated; two that agree are a fact about the font.
+        let byLayout =
+            NSLayoutManager().defaultLineHeight(
+                for: NSFont.systemFont(ofSize: 100, weight: .bold)) / 100
+        #expect(abs(KTVLyricMetrics.rowHeight - byLayout) < 0.01)
+        // And the two halves still multiply out to roughly what the single
+        // folded constant was, which is why this change moves no line on a
+        // stage that was already correct.
+        #expect(abs(KTVLyricMetrics.rowHeight * KTVLyricMetrics.rowsPerLine - 1.35) < 0.02)
+    }
+
     @Test("the column never asks for more height than it has")
     func theColumnFitsWhatItIsGiven() {
         // The invariant the overflow broke, at every combination the stage can
@@ -86,12 +106,14 @@ struct LyricScaleTests {
                             width: width, height: height, scale: scale,
                             extraRowsPerLine: extra)
                         let perNeighbour =
-                            metrics.neighbourSize * (1.35 + extra) + metrics.spacing
+                            metrics.neighbourSize * KTVLyricMetrics.rowHeight
+                            * (KTVLyricMetrics.rowsPerLine + extra) + metrics.spacing
                         // The two gaps the stage puts either side of the sung
                         // line count against the height like anything else
                         // drawn.
                         let drawn =
-                            metrics.currentSize * (1.4 + extra) + metrics.spacing * 2
+                            metrics.currentSize * KTVLyricMetrics.rowHeight
+                            * (KTVLyricMetrics.rowsPerLine + extra) + metrics.spacing * 2
                             + CGFloat(metrics.linesBehind + metrics.linesAhead) * perNeighbour
                         // A stage too short for even the line being sung is
                         // clipped on purpose — some of the words beats none —
