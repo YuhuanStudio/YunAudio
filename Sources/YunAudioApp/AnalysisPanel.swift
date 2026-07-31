@@ -281,28 +281,29 @@ struct LoudnessReadout: View {
     /// on its verdict. Merely opening the window no longer loads CoreML for a
     /// label somebody may not want.
     private var soundIdentification: some View {
-        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+        // Which of the three things that can want the model actually does. The
+        // switch is not a master switch and the caption used to imply it was —
+        // see `SoundModelUse`.
+        let use = SoundModelUse.of(
+            identifying: model.isSoundIdentificationEnabled,
+            levelling: model.isAutoLevelling,
+            ducking: model.isDucking)
+        return VStack(alignment: .leading, spacing: Yun.Space.sm) {
             HStack(spacing: Yun.Space.sm) {
                 YunSwitch(isOn: $model.isSoundIdentificationEnabled)
                 VStack(alignment: .leading, spacing: 1) {
                     Text(loc("Identify sounds"))
                         .font(Yun.Text.label)
                         .foregroundStyle(Yun.Palette.textPrimary)
-                    Text(
-                        loc(
-                            "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it."
-                        )
-                    )
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    Text(use.caption)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
 
-            if !YunUIBenchmarkConfiguration.process.isEnabled,
-                model.isSoundIdentificationEnabled || model.isAutoLevelling || model.isDucking
-            {
+            if !YunUIBenchmarkConfiguration.process.isEnabled, use.isLoaded {
                 heardBadge
             }
         }

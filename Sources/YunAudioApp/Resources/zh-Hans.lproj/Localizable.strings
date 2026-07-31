@@ -492,6 +492,7 @@
 "Play something, or choose the words in the Sing panel." = "请播放歌曲，或在唱歌面板中选择歌词。";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "这首没有歌词。把 .lrc 放进下面的文件夹，会按文件名自动匹配。";
 "Local file" = "本地文件";
+"Already loaded, because automatic levelling or ducking is using it. This switch only keeps the readout up." = "已经载入了，因为自动响度或闪避正在用它。这个开关只决定要不要一直显示读数。";
 "Key" = "原调";
 "Take the song down a semitone" = "降半音";
 "Take the song up a semitone" = "升半音";

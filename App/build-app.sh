@@ -93,11 +93,51 @@ cat >build/yunaudio.entitlements <<'PLIST'
 </plist>
 PLIST
 
+# Signed with a stable identity where there is one, ad-hoc where there is not.
+#
+# **This is why the microphone is asked for again after every build.** TCC does
+# not remember an application by its bundle identifier; it remembers the code
+# requirement it was granted to. For an ad-hoc signature that requirement pins
+# the cdhash — which changes with every byte of the binary — so each build is a
+# different program as far as the permission database is concerned, and the
+# grant from the last one cannot apply. Nothing is being forgotten; the thing
+# that was granted no longer exists.
+#
+# A self-signed certificate fixes it because the requirement becomes "this
+# bundle identifier, signed by this certificate", and that survives rebuilding.
+# Making one needs Keychain Access, which needs a person — see `YUNAUDIO_SIGN`
+# below and the note printed when there is no identity.
+SIGN_IDENTITY="${YUNAUDIO_SIGN:-}"
+if [[ -z "${SIGN_IDENTITY}" ]] &&
+	security find-identity -v -p codesigning 2>/dev/null | grep -q "YunAudio Dev"; then
+	SIGN_IDENTITY="YunAudio Dev"
+fi
+
 echo "signing…"
-codesign --force --sign - \
+codesign --force --sign "${SIGN_IDENTITY:--}" \
 	--entitlements build/yunaudio.entitlements \
 	--options runtime \
 	"${BUNDLE}"
+
+if [[ -z "${SIGN_IDENTITY}" ]]; then
+	cat <<'ADHOC'
+
+signed ad-hoc, so macOS will ask for the microphone again after every build.
+That is not a bug in the application: an ad-hoc signature identifies a build by
+its hash, and every build has a different one, so the permission granted to the
+last build does not describe this one.
+
+To stop being asked, make a self-signed certificate once — Keychain Access is
+the only way, so this is yours to do:
+
+  1. Keychain Access → Certificate Assistant → Create a Certificate…
+  2. Name: YunAudio Dev   Identity Type: Self Signed Root
+     Certificate Type: Code Signing        (tick "Let me override defaults"
+     only if you want to change the expiry)
+  3. Build again. This script picks it up by name; `YUNAUDIO_SIGN` overrides.
+
+ADHOC
+fi
 
 echo "built ${BUNDLE}"
 echo "Shazam catalogue: unavailable in this ad-hoc build."
