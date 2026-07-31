@@ -50,7 +50,7 @@ struct CompositedStageBackdrop: NSViewRepresentable {
     /// no cover visible at all, because `CIGaussianBlur` takes a far wider
     /// kernel for the same number. 0.014 — three and a half pixels on a
     /// 256-point cover — is the picture the stage had before.
-    static let blurFraction: CGFloat = 0.014
+    nonisolated static let blurFraction: CGFloat = 0.014
 
     func makeNSView(context: Context) -> BackdropView {
         let view = BackdropView()

@@ -1121,7 +1121,9 @@ struct KTVStage: View {
     /// One band of the column: the lines behind, the line being sung, or the
     /// lines ahead. The first and last expand to fill what is left, so the
     /// middle one stays on the centre line whatever they contain.
-    @ViewBuilder
+    ///
+    /// No `@ViewBuilder`: the body builds `band` and then returns one modified
+    /// expression, so the attribute was inert and the compiler said so.
     private func lyricGroup(
         _ lyrics: Lyrics, current: Int, playing: Int?, countIn: Bool,
         voices: KTVSingerVoices, offsets: [Int],

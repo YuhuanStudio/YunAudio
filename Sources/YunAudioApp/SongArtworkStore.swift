@@ -193,7 +193,7 @@ actor SingleFlightResourceStore<Value: Sendable> {
             flights[url] = flight
             Task { [grace = abandonedFlightGrace] in
                 try? await Task.sleep(for: .seconds(grace))
-                await self.cancelIfStillAbandoned(
+                self.cancelIfStillAbandoned(
                     url: url, flightIdentifier: flightIdentifier)
             }
         } else {
