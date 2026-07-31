@@ -15,6 +15,23 @@ import Foundation
 /// What it costs is a permission prompt the first time — "YunAudio wants to
 /// control Music" — and that prompt is honest about what is happening, which a
 /// private framework would not have been.
+///
+/// **Measured, on this machine, 2026-07-31.** The above was a judgement when it
+/// was written; it is now a fact. `MediaRemote.framework` still opens and every
+/// symbol still resolves — `MRMediaRemoteGetNowPlayingInfo`,
+/// `MRMediaRemoteSendCommand`, `MRMediaRemoteSetElapsedTime` and the rest are
+/// all present — so a build against it would compile, launch, and look correct.
+/// It then answers an **empty dictionary**, for a player this file reads title,
+/// artist, position and duration out of at the same moment through Apple
+/// events. The restriction Apple introduced in 15.4 is total here: not an
+/// error, not a refusal, nothing to detect — the callback arrives with no keys
+/// and the feature is simply blank.
+///
+/// So the reach of this file is the reach of the players that publish a
+/// scripting dictionary, and widening it means another dictionary rather than
+/// another framework. A browser tab is not reachable by any route we are
+/// allowed to take, and shipping something that reports nothing on a point
+/// release is the outcome this decision was made to avoid.
 @MainActor
 enum NowPlaying {
 

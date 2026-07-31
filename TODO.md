@@ -894,6 +894,18 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 - **MLX** 在命令列的 SwiftPM 下建不出它的 Metal shader，而且不會退回 CPU —— 它會載
   不到 metallib 然後把整個行程帶走，在一個三元素的乘法上。另外 2048 點的轉換是一個
   「啟動與同步比算術貴」的尺寸。MLX 要有一個訓練好的模型要跑，才輪得到它。
+- **MediaRemote 在這台機器上什麼都不回** [本機實測 2026-07-31]。
+  `MediaRemote.framework` 仍然 `dlopen` 得開，`MRMediaRemoteGetNowPlayingInfo`、
+  `MRMediaRemoteSendCommand`、`MRMediaRemoteSetElapsedTime`、
+  `MRMediaRemoteGetNowPlayingApplicationIsPlaying`、
+  `MRMediaRemoteRegisterForNowPlayingNotifications` **每一個符號都還在**——所以照著
+  它寫的東西會編譯、會啟動、看起來會是對的。實際呼叫下去拿到的是**空字典**，而同一
+  時刻 `NowPlaying.swift` 走 Apple Event 把同一個播放器的曲名、演出者、位置、長度
+  全部讀得出來。15.4 開始的限制在這裡是**完全的**：不是錯誤、不是拒絕，沒有任何東
+  西可以偵測——callback 帶著零個 key 回來，功能就是一片空白。
+  **結論：播放控制的涵蓋範圍等於「有 scripting dictionary 的播放器」的範圍**，要擴
+  大就是再接一本字典，不是再接一個 framework。瀏覽器分頁沒有任何我們被允許走的路徑
+  構得到。
 - **App Intents** 會編譯、會執行、而且永遠不會出現在任何人用得到的地方：Shortcuts
   資料庫裡的項目是靠 Xcode 自己的 build phase 抽出的 metadata 被發現的，而用 shell
   script 包 SwiftPM binary 組出來的 app 產生不了那份 metadata。URL scheme 是答案，
