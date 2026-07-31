@@ -230,8 +230,12 @@ enum UIFlowCheck {
         do {
             try await runSections(model: model)
         } catch {
-            summarise()
+            // A filtered run throws out of the last section anybody asked for.
+            // Nothing to report: the summary below says what was found either
+            // way.
         }
+        await soakAfterTheRun()
+        summarise()
     }
 
     private static func runSections(model: RouterModel) async throws {
@@ -7607,6 +7611,27 @@ enum UIFlowCheck {
         }
         await waitUntil("the chain went back", { !model.isBusy }, timeout: 20)
         check("switching it off stops holding anything back", model.chainAlignment.applied == 0)
+    }
+
+    /// Holds the process open with whatever the run left running.
+    ///
+    /// Separate from the soak inside the KTV section, and for a different
+    /// question: that one asks "does a song playing survive", this one asks
+    /// "does the *application* survive, with audio started and nothing else
+    /// happening". `YUNAUDIO_SOAK_AFTER=<seconds>`; a crash takes the process
+    /// with it, so reaching the end is the answer.
+    private static func soakAfterTheRun() async {
+        guard let seconds = ProcessInfo.processInfo.environment["YUNAUDIO_SOAK_AFTER"]
+            .flatMap(Double.init), seconds > 0
+        else { return }
+        print("\nsoaking for \(Int(seconds)) s with whatever is still running…")
+        let started = Date()
+        while Date().timeIntervalSince(started) < seconds {
+            try? await Task.sleep(for: .seconds(10))
+            print(String(format: "  %.0f s", Date().timeIntervalSince(started)))
+            fflush(stdout)
+        }
+        print(String(format: "survived %.0f s after the run", seconds))
     }
 
     private static func summarise() {
