@@ -11,6 +11,11 @@ import YunDesign
 /// their Observation reads in this view prevents one moving mask from
 /// invalidating the header, device pickers, patchbay and the other columns.
 struct SingingPanel: View {
+    /// The offscreen gate renders through `ImageRenderer`, which cannot
+    /// rasterise an AppKit view. See `cardBackground`.
+    static let isOffscreenRender =
+        ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] != nil
+
     @Bindable var model: RouterModel
     @State private var isTitleLookupExpanded = false
     @State private var handTitle = ""
@@ -209,9 +214,26 @@ struct SingingPanel: View {
             // No drift here: the column is 380 points wide and a slow pan
             // across it reads as the card wobbling rather than as depth.
             if let url = model.nowPlaying?.artworkURL {
-                CompositedStageBackdrop(url: url, isMoving: false)
-                    .opacity(0.30)
-                    .allowsHitTesting(false)
+                if Self.isOffscreenRender {
+                    // `ImageRenderer` cannot rasterise an `NSViewRepresentable`
+                    // — it draws a red prohibition sign across whatever asked
+                    // for one. The stage has carried this branch for some time
+                    // and this did not, so adding the cover here put that sign
+                    // over the whole panel in every offscreen image, and the
+                    // gate that exists to catch colour and layout mistakes
+                    // stopped being able to see either. Caught by running the
+                    // render, which is the point of having it.
+                    SongArtwork(url: url, title: "", contentMode: .fill)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .clipped()
+                        .blur(radius: 42)
+                        .opacity(0.30)
+                        .allowsHitTesting(false)
+                } else {
+                    CompositedStageBackdrop(url: url, isMoving: false)
+                        .opacity(0.30)
+                        .allowsHitTesting(false)
+                }
                 // Dark enough to read against, judged the same way the stage's
                 // was: a bright sleeve is most of them, and words on top of a
                 // face in daylight stop being words.
