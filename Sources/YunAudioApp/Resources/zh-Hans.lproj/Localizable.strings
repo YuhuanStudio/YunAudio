@@ -487,6 +487,12 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"Songs on" = "点歌单";
+"Sing it again" = "重唱";
+"Add songs…" = "点歌…";
+"插播" = "插播";
+"Take it off" = "移除";
+"Nothing is on yet. Put a song on and it starts; put more on and they wait." = "还没点歌。点一首就开始唱，再点就排队等。";
 "Lower the key" = "降 key";
 "Raise the key" = "升 key";
 "Take the lead vocal out" = "消原唱";

@@ -287,3 +287,99 @@ struct CompositedLyricFillTests {
         #expect(compositor.contains("model.lyricPlaybackAnchor"))
     }
 }
+
+/// The pale block at the start of a wrapped line.
+///
+/// Reported twice. The first fix clipped the highlight card, on the theory that
+/// the sweep's glow was spilling out of it — it was not outside the card at all.
+/// The mask for a row that had not been reached was `feather / 2` points wide,
+/// and the leading pixels of that mask are the bright end of the fade, so the
+/// second visual row of a wrapped line carried a lit stub under a word nobody
+/// had sung yet.
+@Suite("a row nobody has reached shows nothing")
+struct UnstartedLyricRowTests {
+
+    @Test("the second row of a wrapped line is empty at the start of the first")
+    @MainActor
+    func wrappedRowStartsEmpty() throws {
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 160))
+        let size: CGFloat = 27
+        // Long enough at 300 points to wrap, and the reported line: the block
+        // appeared under 的 at the head of the second row.
+        view.configure(
+            text: "我懷念那個你我深愛的你我真的好想你",
+            font: .systemFont(ofSize: size, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: nil,
+            reduceMotion: true,
+            // Nothing sung yet: every row must be empty, including the first.
+            frozenProgress: 0)
+        view.layoutSubtreeIfNeeded()
+
+        let rows = view.revealRowsForCheck()
+        #expect(rows.count >= 2, "the fixture has to wrap for this to mean anything")
+        for (index, row) in rows.enumerated() {
+            #expect(row.bounds.width == 0, "row \(index) was \(row.bounds.width) wide")
+        }
+    }
+
+    @Test("and a row still shows nothing when an earlier one is part way through")
+    @MainActor
+    func laterRowsStayEmpty() throws {
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 160))
+        view.configure(
+            text: "我懷念那個你我深愛的你我真的好想你",
+            font: .systemFont(ofSize: 27, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: nil,
+            reduceMotion: true,
+            // A quarter through: inside the first row on a two-row wrap, so
+            // every row after it has not been reached.
+            frozenProgress: 0.25)
+        view.layoutSubtreeIfNeeded()
+
+        let rows = view.revealRowsForCheck()
+        #expect(rows.count >= 2)
+        #expect(rows[0].bounds.width > 0, "the row being sung has to be lit")
+        for index in 1..<rows.count {
+            #expect(rows[index].bounds.width == 0, "row \(index) leaked")
+        }
+    }
+}
+
+/// The switch, the sentence under it, and the reading beside them.
+@Suite("what the sound model switch actually controls")
+struct SoundModelReadoutTests {
+
+    @Test("the reading is shown only when somebody asked for it")
+    func readoutFollowsTheSwitch() {
+        #expect(
+            SoundModelUse.of(identifying: true, levelling: false, ducking: false)
+                .showsReadout)
+        // The reported contradiction: switch off, ducking on, reading on screen
+        // above a sentence saying the switch controls the reading.
+        #expect(
+            !SoundModelUse.of(identifying: false, levelling: false, ducking: true)
+                .showsReadout)
+        #expect(
+            !SoundModelUse.of(identifying: false, levelling: true, ducking: false)
+                .showsReadout)
+        #expect(
+            !SoundModelUse.of(identifying: false, levelling: false, ducking: false)
+                .showsReadout)
+    }
+
+    @Test("but the model is still loaded for whoever needed it")
+    func loadingIsUnchanged() {
+        // The reading going away must not take the model with it: levelling and
+        // ducking act on its verdict whether or not anybody is watching.
+        let forDucking = SoundModelUse.of(identifying: false, levelling: false, ducking: true)
+        #expect(forDucking.isLoaded)
+        #expect(!forDucking.showsReadout)
+        #expect(forDucking == .forSomethingElse)
+    }
+}

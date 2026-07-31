@@ -2217,6 +2217,48 @@ final class RouterModel: ScriptTarget {
         settingsRevision &+= 1
     }
 
+    /// The songs still to come, for a list somebody can look at.
+    ///
+    /// The queue was built, tested to death and wired into the transport, and
+    /// then had no interface at all — not one button for 點歌, 插播 or 重唱. A
+    /// feature nobody can reach is a feature that was not delivered, so these
+    /// are the accessors the list needs.
+    var upcomingSongs: [URL] { songQueue.upcoming }
+
+    /// Every song put on, so a list can show what has already been sung as well
+    /// as what is coming.
+    var allQueuedSongs: [URL] { songQueue.songs }
+
+    /// Which line of that list is being sung.
+    var currentQueueIndex: Int? { songQueue.index }
+
+    /// Somebody pointing at a line: play that one now.
+    func chooseQueuedSong(at position: Int) {
+        guard let chosen = songQueue.choose(position) else { return }
+        openSong(at: chosen, keepingQueue: true)
+        runWords(from: 0)
+        settingsRevision &+= 1
+    }
+
+    /// Taking a song out of the list.
+    func removeQueuedSong(at position: Int) {
+        // The queue answers with a song only when the removal disturbed the one
+        // being sung; otherwise the evening carries on where it was.
+        if let nowPlay = songQueue.remove(at: position) {
+            openSong(at: nowPlay, keepingQueue: true)
+            runWords(from: 0)
+        } else if songQueue.current == nil {
+            closeWords()
+        }
+        settingsRevision &+= 1
+    }
+
+    func clearSongQueue() {
+        songQueue.clear()
+        closeWords()
+        settingsRevision &+= 1
+    }
+
     /// ⏭ when there is a queue: the next song rather than ten seconds on.
     func skipToNextSong() {
         guard let next = songQueue.advance() else { return }

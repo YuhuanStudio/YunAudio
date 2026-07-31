@@ -29,6 +29,16 @@ enum SoundModelUse: Equatable, Sendable {
     /// True whenever the model is in memory, whatever the switch says.
     var isLoaded: Bool { self != .notLoaded }
 
+    /// Whether the reading is put on screen.
+    ///
+    /// Only when somebody asked for it, which is what the caption beside the
+    /// switch promises: "this switch only keeps the readout up". The panel used
+    /// `isLoaded` here, so with the switch off and ducking on the reading was
+    /// shown anyway — a switch that is off, above a sentence saying it controls
+    /// the readout, above a readout. Whichever of those three a reader believes,
+    /// one of the others is lying to them.
+    var showsReadout: Bool { self == .forTheReadout }
+
     /// What to say under the switch.
     @MainActor var caption: String {
         switch self {

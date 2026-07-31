@@ -303,7 +303,7 @@ struct LoudnessReadout: View {
                 Spacer(minLength: 0)
             }
 
-            if !YunUIBenchmarkConfiguration.process.isEnabled, use.isLoaded {
+            if !YunUIBenchmarkConfiguration.process.isEnabled, use.showsReadout {
                 heardBadge
             }
         }

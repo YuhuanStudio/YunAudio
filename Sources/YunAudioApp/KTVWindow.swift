@@ -178,6 +178,7 @@ struct KTVStage: View {
     @Bindable var model: RouterModel
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var isRendering = false
+    @State private var isQueueShowing = false
 
     /// Seeds the browsed state for a capture.
     ///
@@ -870,6 +871,7 @@ struct KTVStage: View {
     ) -> some View {
         HStack(spacing: Yun.Space.sm) {
             transportControls(track)
+            queueButton
             if showsAlignment { lyricAlignment }
             if showsName {
                 Text(track.application)
@@ -897,6 +899,43 @@ struct KTVStage: View {
         // room to label them.
         KTVTransportBar(
             model: model, track: track, scale: .stage, showsKaraokeControls: false)
+    }
+
+    /// 點歌單, which the stage had no way to reach.
+    ///
+    /// A popover rather than a column: the queue is looked at between songs and
+    /// then dismissed, and giving it permanent width would take it from the
+    /// words, which are what somebody is actually reading.
+    @ViewBuilder
+    private var queueButton: some View {
+        Button {
+            isQueueShowing.toggle()
+        } label: {
+            Image(systemName: "list.bullet")
+                .font(.system(size: 26 * 0.44, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 26, height: 26)
+                .background(.white.opacity(model.hasAnotherSongQueued ? 0.22 : 0.10), in: Circle())
+                .overlay(alignment: .topTrailing) {
+                    // A dot rather than a count: the number is in the popover,
+                    // and a badge on a 26-point circle is unreadable anyway.
+                    if model.hasAnotherSongQueued {
+                        Circle()
+                            .fill(Yun.Palette.accent)
+                            .frame(width: 6, height: 6)
+                            .offset(x: 1, y: -1)
+                    }
+                }
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(loc("Songs on"))
+        .accessibilityIdentifier("KTVQueueButton")
+        .popover(isPresented: $isQueueShowing, arrowEdge: .top) {
+            KTVQueueList(model: model, onDarkStage: false)
+                .padding(Yun.Space.lg)
+                .frame(width: 340)
+        }
     }
 
     private func transportButton(

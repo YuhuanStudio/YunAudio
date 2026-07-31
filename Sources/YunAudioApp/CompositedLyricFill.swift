@@ -600,7 +600,18 @@ final class CompositedLyricView: NSView {
             // word is fully lit is still the moment it is fully sung.
             let rowWidth = lyricLayout?.rows[index].rect.width ?? 0
             func edge(_ fraction: Double) -> Double {
-                max(0, min(rowWidth, fraction * rowWidth + feather / 2))
+                // Nothing at all before the row starts, and this is the whole
+                // of a defect that survived one wrong fix. The half-feather
+                // centres the fade on the syllable boundary, which is right
+                // while a row is being sung — but a row that has not begun was
+                // getting `feather / 2` points of mask, and the mask's leading
+                // pixels are the bright edge of the fade. On a wrapped line
+                // that is a pale block sitting at the start of the second row,
+                // under a word nobody has reached: reported as a leak, and
+                // first "fixed" by clipping the card, which it was never
+                // outside of.
+                guard fraction > 0 else { return 0 }
+                return max(0, min(rowWidth, fraction * rowWidth + feather / 2))
             }
             if timing.duration == 0 {
                 rowLayer.bounds.size.width = edge(timing.initialScale)
