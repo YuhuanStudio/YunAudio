@@ -2184,6 +2184,11 @@ final class RouterModel: ScriptTarget {
             .lazy
             .map { url.deletingPathExtension().appendingPathExtension($0) }
             .first { FileManager.default.fileExists(atPath: $0.path) }
+        // The key this person sings this song in, from the last time. Applied
+        // before a note is played, so nobody hears the original key and then
+        // the transpose arriving a beat later.
+        songPlayer.pitchCents = SongKeys.cents(
+            forSemitones: SongKeys.semitones(for: track.identity))
         if let words {
             adoptWordsBeside(words, keepingDuration: song.duration)
         } else {
@@ -2233,6 +2238,45 @@ final class RouterModel: ScriptTarget {
             at: directory, withIntermediateDirectories: true)
         guard (try? data.write(to: file)) != nil else { return nil }
         return file
+    }
+
+    /// How far the song has been transposed, in semitones.
+    ///
+    /// The button every KTV machine has and this application could not offer:
+    /// nothing in a scripting dictionary transposes anything, so it exists for
+    /// a song we are playing and for no other source. Remembered per song —
+    /// somebody who takes a song down two takes it down two every time.
+    var songKeySemitones: Int {
+        _ = settingsRevision
+        guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return 0 }
+        return SongKeys.semitones(for: identity)
+    }
+
+    /// Whether the two key buttons mean anything for what is on the stage.
+    var canTransposeSong: Bool { isPlayingOwnSong || ownsSongForRendering }
+
+    /// Renderer only, so the key control appears in a picture.
+    ///
+    /// The control exists only while a file is open in our own player, and no
+    /// offscreen render opens one — decoding an audio file to draw a stage is a
+    /// dependency a picture should not have. Set by the render fixture; the
+    /// running application never assigns it, and `songKeySemitones` still comes
+    /// from the store, so what is drawn is what a real song would show.
+    private(set) var ownsSongForRendering = false
+
+    /// Moves the key, and hands it to the unit that does the work.
+    func shiftSongKey(by delta: Int) {
+        guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return }
+        let updated = SongKeys.shift(identity, by: delta)
+        songPlayer.pitchCents = SongKeys.cents(forSemitones: updated)
+        settingsRevision &+= 1
+    }
+
+    func resetSongKey() {
+        guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return }
+        SongKeys.clear(identity)
+        songPlayer.pitchCents = 0
+        settingsRevision &+= 1
     }
 
     /// Takes the exact position from the player we are running.
@@ -4819,6 +4863,10 @@ final class RouterModel: ScriptTarget {
     /// captures. Not called by the running app.
     func prepareForRendering(refreshesApplications: Bool = true) {
         if refreshesApplications { refreshAppsForVerification() }
+        // So the two key buttons are in a picture. Every other control on that
+        // row is, and a control nobody has ever looked at is the one that comes
+        // out cut off at the window edge.
+        ownsSongForRendering = true
         // A finite live reading alongside a stopped route is not a state the
         // application can reach. This fixture is used only by the two design
         // harnesses, so make the synthetic signal and its transport state agree.

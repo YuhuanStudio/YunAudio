@@ -1014,6 +1014,29 @@ IINA 設定裡那個 `Core Audio / AVFoundation🧪` 是 **mpv 的 `--ao` 選擇
   **結論：播放控制的涵蓋範圍等於「有 scripting dictionary 的播放器」的範圍**，要擴
   大就是再接一本字典，不是再接一個 framework。瀏覽器分頁沒有任何我們被允許走的路徑
   構得到。
+- **macOS 26／27 的「圖示外面那層框」不是我們畫的，而且改不掉** [本機實測
+  2026-07-31]。清單裡每個 app 的圖示都被套在一個圓角容器裡、logo 縮小放在中間，看起來
+  像是我們多畫了一層——不是。`NSWorkspace.shared.icon(forFile:)` 拿到的 `NSImage` 一個
+  像素都沒動直接存成 PNG，白底圓角框與那圈灰邊**本來就在系統給的圖裡**（Chrome 那張最
+  明顯）。`AppIconView` 只有 `Image(nsImage:).resizable()`，唯一畫背景的是連 bundle 都
+  沒有的常駐程序用的齒輪備用圖示。
+  **我們自己的圖示也一樣，而且試過了改不掉。** 把 `AppIcon.bodyInset` 從 100 改成 0
+  重新產生 icns：**原始檔確實變成滿版**（`build/YunAudio.icns` 直接畫出來，本體撐到畫布
+  邊緣、標記明顯變大），但 `NSWorkspace.icon(forFile:)` 給的**完全沒變**——而且是把
+  bundle 複製到另一個路徑之後才量的，所以不是圖示快取。結論：系統會把舊格式的圖重新合
+  成進它自己的容器，我們畫多大都會被縮回去。`bodyInset` 已經改回 100，因為滿版只會讓
+  「直接用 icns 而不經過系統合成」的地方變成硬角方塊，而系統合成的地方一點差別都沒有。
+  **「那為什麼不用 Xcode 的資產編譯」——試了，不是那個原因。** `xcrun actool` 就在命令
+  列上（26.6），從 shell script 呼叫得到：把 iconset 的 PNG 包成 `AppIcon.appiconset`
+  編出 `Assets.car` 與帶著 `CFBundleIconName` 的 partial plist，塞進 bundle、重新簽章、
+  從新路徑量——**跟 icns 給的一模一樣**。所以資產目錄不是缺的那一塊。
+  缺的是 **Icon Composer 的新 `.icon` 格式**（Xcode 26 自己帶著，在
+  `/Applications/Xcode.app/Contents/Applications/Icon Composer.app`）：那是分層的文件，
+  系統靠它才知道這個圖示是為新系統畫的、由系統自己上玻璃與陰影。命令列這一半是通的
+  ——把一個 `AppIcon.icon` 放進 `.xcassets` 再交給 `actool`，它接受、不報錯。**卡住的
+  只有那份 `.icon` 要有人用 Icon Composer 產一次**（這台機器上沒有任何 `.icon` 樣本可
+  以照抄，硬逆向 `icon.json` 是沒有底的）。也就是說這件事跟裝驅動程式同一類：**需要一
+  個人做一次 GUI 動作**，之後 `build-app.sh` 接上 `actool` 就好。
 - **App Intents** 會編譯、會執行、而且永遠不會出現在任何人用得到的地方：Shortcuts
   資料庫裡的項目是靠 Xcode 自己的 build phase 抽出的 metadata 被發現的，而用 shell
   script 包 SwiftPM binary 組出來的 app 產生不了那份 metadata。URL scheme 是答案，

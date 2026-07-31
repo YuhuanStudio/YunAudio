@@ -492,6 +492,10 @@
 "Play something, or choose the words in the Sing panel." = "请播放歌曲，或在唱歌面板中选择歌词。";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "这首没有歌词。把 .lrc 放进下面的文件夹，会按文件名自动匹配。";
 "Local file" = "本地文件";
+"Key" = "原调";
+"Take the song down a semitone" = "降半音";
+"Take the song up a semitone" = "升半音";
+"Put the song back in its own key" = "把歌放回原本的调";
 "This song" = "这首歌";
 "Open a song…" = "打开歌曲…";
 "Plays an audio file here, so the words follow the samples instead of asking another application where it is." = "直接在这里播放音频文件，歌词跟着采样数走，不必去问别的应用程序播到哪里。";

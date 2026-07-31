@@ -428,56 +428,57 @@ struct KTVStage: View {
             trackColumn(
                 track, width: columnWidth,
                 artwork: Self.artworkSide(
-                    columnWidth: columnWidth, stageHeight: stageHeight))
-                // What the column actually comes out as, against the stage it
-                // has. Adjusting the metadata constant by eye is what put the
-                // transport row outside the window twice; this reports the
-                // number instead.
-                .background {
-                    GeometryReader { column in
-                        // Every layout, not the first one. `onAppear` fires
-                        // once, so six rounds of measurement described a stage
-                        // whose lyrics and cover had not arrived and never
-                        // reported it again — a stage laid out correctly once,
-                        // read as a stage laid out correctly. Evaluating a
-                        // closure in the reader's body runs whenever the
-                        // geometry is recomputed, which is the question.
-                        let _ = {
-                            guard SongArtwork.isProbing else { return }
-                            let frame = column.frame(in: .named("ktv-stage"))
-                            let now = "\(Int(column.size.height))@\(Int(frame.minY))"
-                            if now != Self.lastColumnPlacement {
-                                Self.lastColumnPlacement = now
-                                SongArtwork.record("column \(now) in stage \(Int(stageHeight))")
-                            }
-                        }()
-                        Color.clear.onAppear {
-                            // Where, as well as how big. Four rounds measured
-                            // the column's size — 496 in a 619-point stage,
-                            // which fits — and concluded the photograph showing
-                            // it clipped must be a timing artefact. It is not:
-                            // an extra 400 ms of real suspension changed
-                            // nothing. The size was never the question.
-                            // Relative to the stage, which is named for the
-                            // purpose. `.global` gave -88, a number in a space
-                            // whose origin was never established — and a
-                            // measurement whose frame of reference is unknown
-                            // is not a measurement.
-                            let frame = column.frame(in: .named("ktv-stage"))
-                            SongArtwork.record(
-                                "column \(Int(column.size.height)) at"
-                                    + " y=\(Int(frame.minY)) in stage"
-                                    + " \(Int(stageHeight))")
+                    columnWidth: columnWidth, stageHeight: stageHeight)
+            )
+            // What the column actually comes out as, against the stage it
+            // has. Adjusting the metadata constant by eye is what put the
+            // transport row outside the window twice; this reports the
+            // number instead.
+            .background {
+                GeometryReader { column in
+                    // Every layout, not the first one. `onAppear` fires
+                    // once, so six rounds of measurement described a stage
+                    // whose lyrics and cover had not arrived and never
+                    // reported it again — a stage laid out correctly once,
+                    // read as a stage laid out correctly. Evaluating a
+                    // closure in the reader's body runs whenever the
+                    // geometry is recomputed, which is the question.
+                    let _ = {
+                        guard SongArtwork.isProbing else { return }
+                        let frame = column.frame(in: .named("ktv-stage"))
+                        let now = "\(Int(column.size.height))@\(Int(frame.minY))"
+                        if now != Self.lastColumnPlacement {
+                            Self.lastColumnPlacement = now
+                            SongArtwork.record("column \(now) in stage \(Int(stageHeight))")
                         }
+                    }()
+                    Color.clear.onAppear {
+                        // Where, as well as how big. Four rounds measured
+                        // the column's size — 496 in a 619-point stage,
+                        // which fits — and concluded the photograph showing
+                        // it clipped must be a timing artefact. It is not:
+                        // an extra 400 ms of real suspension changed
+                        // nothing. The size was never the question.
+                        // Relative to the stage, which is named for the
+                        // purpose. `.global` gave -88, a number in a space
+                        // whose origin was never established — and a
+                        // measurement whose frame of reference is unknown
+                        // is not a measurement.
+                        let frame = column.frame(in: .named("ktv-stage"))
+                        SongArtwork.record(
+                            "column \(Int(column.size.height)) at"
+                                + " y=\(Int(frame.minY)) in stage"
+                                + " \(Int(stageHeight))")
                     }
                 }
-                // `maxHeight`, not a fixed height with an alignment. Given an
-                // exact height the column was placed 302 points down a
-                // 619-point stage where centring predicts 92 — the fixed frame
-                // was being satisfied by the row rather than positioning the
-                // column inside it. Filling the row and centring within it is
-                // the arrangement that actually holds.
-                .frame(maxHeight: .infinity, alignment: .center)
+            }
+            // `maxHeight`, not a fixed height with an alignment. Given an
+            // exact height the column was placed 302 points down a
+            // 619-point stage where centring predicts 92 — the fixed frame
+            // was being satisfied by the row rather than positioning the
+            // column inside it. Filling the row and centring within it is
+            // the arrangement that actually holds.
+            .frame(maxHeight: .infinity, alignment: .center)
             // A fixed height, not a maximum. A stack whose own minimum exceeds
             // the proposal is laid out at that minimum and overflows, and
             // `maxHeight` does not stop it: six lyric lines, of which the
@@ -492,7 +493,8 @@ struct KTVStage: View {
                     - 2 * max(32, size.width * 0.055))
             lyricsColumn(
                 KTVLyricMetrics.resolve(
-                    width: available, height: stageHeight, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
+                    width: available, height: stageHeight, scale: lyricScale,
+                    extraRowsPerLine: lyricBudget.extraRows,
                     rowsPerLine: lyricBudget.rowsPerLine,
                     reservedHeight: reservedLyricHeight)
             )
@@ -689,6 +691,15 @@ struct KTVStage: View {
                 .accessibilityLabel(loc("Show pronunciation"))
                 .accessibilityIdentifier("KTVRomanisation")
 
+                // The key, and only where there is something that can change
+                // it. Every other source on this stage is somebody else's
+                // player, and no scripting dictionary transposes anything —
+                // offering the buttons there would be offering a control that
+                // does nothing, which is worse than not offering one.
+                if model.canTransposeSong {
+                    songKey
+                }
+
                 // Only when another index actually answered for this song.
                 // A control that does nothing is worse than no control.
                 if model.lyricAlternatives.count > 1 {
@@ -706,6 +717,61 @@ struct KTVStage: View {
                     .accessibilityIdentifier("KTVNextLyricSource")
                 }
             }
+        }
+    }
+
+    /// Up and down a semitone, and what key it is in now.
+    ///
+    /// Beside the lyric offset rather than anywhere else, because the two are
+    /// the same kind of thing: adjustments to the song a person makes for
+    /// themselves, once, and then never thinks about again. Both are remembered
+    /// per song for that reason.
+    @ViewBuilder
+    private var songKey: some View {
+        let semitones = model.songKeySemitones
+        HStack(spacing: 4) {
+            Button {
+                model.shiftSongKey(by: -1)
+            } label: {
+                Image(systemName: "minus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .frame(width: 24, height: 24)
+                    .background(.white.opacity(0.10), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(loc("Take the song down a semitone"))
+            .accessibilityIdentifier("KTVKeyDown")
+
+            // Tapping the number puts the song back in its own key, which is
+            // the same gesture the lyric offset uses for the same thing.
+            Button {
+                model.resetSongKey()
+            } label: {
+                Text(SongKeys.title(semitones, original: loc("Key")))
+                    .font(.system(size: 11, weight: .semibold).monospacedDigit())
+                    .foregroundStyle(
+                        semitones == 0
+                            ? .white.opacity(0.55) : Yun.Palette.accent.opacity(0.92)
+                    )
+                    .frame(minWidth: 26)
+            }
+            .buttonStyle(.plain)
+            .help(loc("Put the song back in its own key"))
+            .accessibilityIdentifier("KTVKeyReset")
+
+            Button {
+                model.shiftSongKey(by: 1)
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .frame(width: 24, height: 24)
+                    .background(.white.opacity(0.10), in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(loc("Take the song up a semitone"))
+            .accessibilityIdentifier("KTVKeyUp")
         }
     }
 
@@ -910,7 +976,9 @@ struct KTVStage: View {
         // looked through: a cue is for the line the music is on.
         let countIn =
             !browse.isBrowsing
-            && (playing.map { lyrics.lines.indices.contains($0) && lyrics.lines[$0].isInterlude }
+            && (playing.map {
+                lyrics.lines.indices.contains($0) && lyrics.lines[$0].isInterlude
+            }
                 ?? true)
         let behind = Array(metrics.offsets.filter { $0 < 0 })
         let ahead = Array(metrics.offsets.filter { $0 > 0 })
@@ -932,7 +1000,8 @@ struct KTVStage: View {
                         .foregroundStyle(.white.opacity(0.40))
                 }
                 lyricGroup(
-                    lyrics, current: current, playing: playing, countIn: countIn, voices: voices,
+                    lyrics, current: current, playing: playing, countIn: countIn,
+                    voices: voices,
                     offsets: behind, metrics: metrics, alignment: .leading)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
@@ -1105,7 +1174,8 @@ struct KTVStage: View {
                                 .frame(
                                     maxWidth: metrics.balancedWidth(
                                         for: latin, pointSize: size),
-                                    alignment: .leading)
+                                    alignment: .leading
+                                )
                                 .foregroundStyle(
                                     Yun.Palette.accent.opacity(offset == 0 ? 0.78 : 0.42)
                                 )
@@ -1123,10 +1193,12 @@ struct KTVStage: View {
                                 .frame(
                                     maxWidth: metrics.balancedWidth(
                                         for: translation, pointSize: size),
-                                    alignment: .leading)
+                                    alignment: .leading
+                                )
                                 .foregroundStyle(
                                     .white.opacity(
-                                        offset == 0 ? 0.68 : Self.lyricOpacity(for: offset) * 0.7)
+                                        offset == 0
+                                            ? 0.68 : Self.lyricOpacity(for: offset) * 0.7)
                                 )
                                 .fixedSize(horizontal: false, vertical: true)
                         }
@@ -1390,7 +1462,8 @@ private struct SeekableLine<Content: View>: View {
             .onHover { isPointedAt = $0 }
             .animation(
                 reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.7),
-                value: isPointedAt)
+                value: isPointedAt
+            )
             .onTapGesture(perform: seek)
             .help(loc("Play from this line"))
     }
@@ -1452,4 +1525,3 @@ private struct KTVSongProgress: View {
         }
     }
 }
-

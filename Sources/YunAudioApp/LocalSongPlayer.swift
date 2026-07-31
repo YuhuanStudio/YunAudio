@@ -80,6 +80,16 @@ final class LocalSongPlayer {
 
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
+    /// The transpose, which only exists because the song is ours.
+    ///
+    /// `AVAudioUnitTimePitch` wraps `kAudioUnitSubType_NewTimePitch` — the same
+    /// unit `EffectChain` uses for the voice changer, and the reason the
+    /// accompaniment could not be transposed until now was never the unit. It
+    /// was that the only chain in this application is the microphone's, one set
+    /// of effects with one set of parameters, so raising the key would have
+    /// raised the singer and left the backing track where it was. This chain has
+    /// exactly one thing in it and the microphone is not in it.
+    private let transpose = AVAudioUnitTimePitch()
     private var file: AVAudioFile?
     private var clock = LocalSongClock()
     /// Where the song was when it was paused. A node that is not running has no
@@ -91,6 +101,27 @@ final class LocalSongPlayer {
 
     init() {
         engine.attach(node)
+        engine.attach(transpose)
+    }
+
+    /// The transpose in cents, positive up. Takes effect on the next buffer.
+    var pitchCents: Float {
+        get { transpose.pitch }
+        set { transpose.pitch = newValue }
+    }
+
+    /// What the transpose costs in seconds, from the unit rather than assumed.
+    ///
+    /// It is not zero and it is not free to ignore: a time-pitch unit holds a
+    /// window of audio to work on, so what reaches the speakers is behind the
+    /// count of samples the player node has handed over. Left uncorrected, the
+    /// words would run ahead of the music by exactly this, which is the same
+    /// defect a wrong `.lrc` offset causes and would be blamed on the file.
+    var transposeLatency: Double {
+        // Only while it is doing something. The unit reports its window
+        // whether or not the pitch is being moved, and a stage set to the
+        // original key must not be corrected for work nobody asked for.
+        transpose.pitch == 0 ? 0 : transpose.latency
     }
 
     /// Reads a file and makes it the song, without playing it.
@@ -110,7 +141,8 @@ final class LocalSongPlayer {
         // Connected per file rather than once: two files rarely share a
         // processing format, and a graph connected at the last file's rate
         // resamples the next one for no reason.
-        engine.connect(node, to: engine.mainMixerNode, format: format)
+        engine.connect(node, to: transpose, format: format)
+        engine.connect(transpose, to: engine.mainMixerNode, format: format)
         let tags = Self.metadata(of: url)
         let song = Song(
             url: url,
@@ -195,12 +227,19 @@ final class LocalSongPlayer {
     }
 
     /// Seconds into the song, from the samples the output has consumed.
+    ///
+    /// Less whatever the transpose is holding: the player node's count is what
+    /// it has handed *to* the unit, and the unit is a window behind that. The
+    /// words follow this number, so leaving the correction out would put them
+    /// ahead of the music by the unit's latency the moment somebody changed
+    /// key — and it would read as the lyric file being wrong.
     var position: Double {
         guard isPlaying,
             let nodeTime = node.lastRenderTime,
             let played = node.playerTime(forNodeTime: nodeTime)
         else { return restingPosition }
-        return clock.position(playedFrames: played.sampleTime)
+        let counted = clock.position(playedFrames: played.sampleTime)
+        return max(0, counted - transposeLatency)
     }
 
     /// Whether the song has reached its end, so the caller can stop the words.

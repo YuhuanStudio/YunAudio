@@ -4264,6 +4264,33 @@ enum UIFlowCheck {
         check(
             "and a stopped song stays where it was stopped",
             abs(model.songPosition - held) < 0.05)
+
+        // The button every KTV machine has, on the one source that can have it.
+        check("the key can be changed on our own song", model.canTransposeSong)
+        model.shiftSongKey(by: 2)
+        check("the key moves by a semitone a press", model.songKeySemitones == 2)
+        check("and the unit is given it in cents", model.songPlayer.pitchCents == 200)
+        // What the transpose costs, from the unit rather than assumed. It is
+        // held out of the reported position, so the words do not run ahead of
+        // the music the moment somebody changes key — which would read as the
+        // lyric file being wrong and be corrected in the wrong place.
+        let latency = model.songPlayer.transposeLatency
+        note("transpose latency \(latency * 1000) ms at +2 semitones")
+        check("the transpose reports what it is holding", latency > 0)
+        model.runWords(from: 1)
+        try? await Task.sleep(for: .milliseconds(400))
+        model.refreshNowPlaying()
+        note("position \(model.songPosition) s, 400 ms after starting at 1 s, key +2")
+        check(
+            "and the words still follow the music through it",
+            abs(model.lyricClockCorrection) < 0.05)
+        model.stopWords()
+        // Left as it was found: this writes to the real preference domain, and
+        // a gate that leaves somebody's song two semitones up has broken their
+        // application to test itself.
+        model.resetSongKey()
+        check("the song goes back to its own key", model.songKeySemitones == 0)
+        check("and the unit with it", model.songPlayer.pitchCents == 0)
     }
 
     private static func checkDrivingTheWords(model: RouterModel, words: URL) async {

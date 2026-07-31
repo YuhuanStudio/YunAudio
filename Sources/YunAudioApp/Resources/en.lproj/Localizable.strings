@@ -493,6 +493,10 @@
 "Play something, or choose the words in the Sing panel." = "Play something, or choose the words in the Sing panel.";
 "No words for this one. Drop an .lrc into the folder below and it will be found by name." = "No words for this one. Drop an .lrc into the folder below and it will be found by name.";
 "Local file" = "Local file";
+"Key" = "Key";
+"Take the song down a semitone" = "Take the song down a semitone";
+"Take the song up a semitone" = "Take the song up a semitone";
+"Put the song back in its own key" = "Put the song back in its own key";
 "This song" = "This song";
 "Open a song…" = "Open a song…";
 "Plays an audio file here, so the words follow the samples instead of asking another application where it is." = "Plays an audio file here, so the words follow the samples instead of asking another application where it is.";
