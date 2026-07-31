@@ -218,6 +218,14 @@ enum PanelRenderer {
             basename: "ktv-duet\(suffix)",
             directory: directory,
             size: CGSize(width: 1080, height: 720))
+        // The floating words, which had never been rendered at all — the one
+        // presentation with no image of it, and so the one that quietly fell
+        // behind the stage on every feature the stage gained.
+        render(
+            DesktopLyrics(model: model),
+            basename: "desktop-lyrics\(suffix)",
+            directory: directory,
+            size: CGSize(width: 760, height: 150))
         model.prepareForRendering()
 
         for section in PreferencesWindow.Section.allCases {

@@ -74,34 +74,53 @@ enum DesktopLyricsWindow {
 }
 
 /// What the floating window draws.
-private struct DesktopLyrics: View {
+struct DesktopLyrics: View {
     @Bindable var model: RouterModel
 
     var body: some View {
         let _ = BodyCount.tick("DesktopLyrics")
+        // The same size the stage was asked for. Somebody who made the words
+        // larger because the screen is across the room did not mean "except
+        // this window".
+        let size = 30 * model.lyricScale
+        // And the same voices. A duet is a duet in either presentation; the
+        // colour is what says whose line is coming.
+        let voice = KTVSingerVoices(model.lyrics).colour(for: currentLine?.singer)
         VStack(spacing: 6) {
             if let line = currentLine {
                 // The same compositor as the stage, so the fill follows the
                 // words here too. It reads the line's own timings from the
                 // model rather than being handed them.
                 CompositedLyricSurface(
-                    model: model, text: line.text, style: .stage(30))
+                    model: model,
+                    // A rest has no words. Drawn as it stands it is an empty
+                    // window that looks like a fault; the stage has always
+                    // drawn the three notes here and this never did.
+                    text: line.isInterlude ? KTVStage.interludeMark : line.text,
+                    style: .stage(size), voice: voice
+                )
                 .contentTransition(.opacity)
-                if model.showsRomanisation, let latin = LyricRomanisation.of(line.text) {
+                if model.showsRomanisation, !line.isInterlude,
+                    let latin = LyricRomanisation.of(line.text)
+                {
                     Text(latin)
-                        .font(.system(size: 15, weight: .medium))
+                        .font(.system(size: size * 0.5, weight: .medium))
                         .foregroundStyle(Yun.Palette.accent.opacity(0.86))
                 }
                 if let translation = line.translation {
                     Text(translation)
-                        .font(.system(size: 16, weight: .medium))
+                        .font(.system(size: size * 0.53, weight: .medium))
                         .foregroundStyle(.white.opacity(0.72))
                 }
             } else {
                 Text(model.nowPlaying?.title ?? loc("Nothing is playing"))
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: size * 0.67, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.62))
             }
+            // Before the first line and on the way back from a break — the two
+            // moments this window is most useful, because it is the one on
+            // screen while somebody is doing something else.
+            KTVCountInDots(model: model, size: size * 0.6, reservesSpace: false)
         }
         .padding(.horizontal, Yun.Space.xl)
         .padding(.vertical, Yun.Space.lg)

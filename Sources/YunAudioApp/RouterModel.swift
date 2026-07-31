@@ -2416,12 +2416,14 @@ final class RouterModel: ScriptTarget {
     /// somebody who sings at a distance sings at a distance every time.
     var lyricScale: Double {
         get {
+            _ = settingsRevision
             let stored = UserDefaults.standard.double(forKey: Self.lyricScaleKey)
             return stored == 0 ? 1 : Self.boundedLyricScale(stored)
         }
         set {
             UserDefaults.standard.set(
                 Self.boundedLyricScale(newValue), forKey: Self.lyricScaleKey)
+            settingsRevision &+= 1
         }
     }
 
@@ -2443,9 +2445,13 @@ final class RouterModel: ScriptTarget {
 
     /// Whether the floating desktop lyric is showing.
     var showsDesktopLyrics: Bool {
-        get { UserDefaults.standard.bool(forKey: "YunAudioShowsDesktopLyrics") }
+        get {
+            _ = settingsRevision
+            return UserDefaults.standard.bool(forKey: "YunAudioShowsDesktopLyrics")
+        }
         set {
             UserDefaults.standard.set(newValue, forKey: "YunAudioShowsDesktopLyrics")
+            settingsRevision &+= 1
         }
     }
 
@@ -2455,11 +2461,26 @@ final class RouterModel: ScriptTarget {
     /// want the characters and nothing else, and a second row under every line
     /// costs the stage real height. The people who need it need it every time.
     var showsRomanisation: Bool {
-        get { UserDefaults.standard.bool(forKey: "YunAudioShowsRomanisation") }
+        get {
+            _ = settingsRevision
+            return UserDefaults.standard.bool(forKey: "YunAudioShowsRomanisation")
+        }
         set {
             UserDefaults.standard.set(newValue, forKey: "YunAudioShowsRomanisation")
+            settingsRevision &+= 1
         }
     }
+
+    /// Bumped by every setting that lives in `UserDefaults`, and read by every
+    /// getter that returns one.
+    ///
+    /// Observation instruments stored properties. A computed property backed by
+    /// defaults is invisible to it, so changing one notified nothing and the
+    /// view that drew it kept drawing the old value until something else
+    /// happened to invalidate it — which, on the stage, is the next lyric line.
+    /// Reading this stored value in the getter is what puts the dependency
+    /// back.
+    private var settingsRevision = 0
 
     /// Seconds this song's words have been nudged. Negative holds them back.
     var lyricOffsetSeconds: Double {
