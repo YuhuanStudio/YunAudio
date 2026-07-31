@@ -2443,6 +2443,38 @@ final class RouterModel: ScriptTarget {
 
     func resetLyricScale() { lyricScale = 1 }
 
+    /// What one line of the song now loaded costs the column, in point-size
+    /// multiples, counted from the words themselves.
+    ///
+    /// Cached on the song and the pronunciation setting: the count walks every
+    /// line and, when pronunciation is on, romanises each of them — cheap once,
+    /// and not something to do inside a view body that runs whenever the line
+    /// being sung changes.
+    var lyricRowBudget: (rowsPerLine: CGFloat, extraRows: CGFloat) {
+        let romanised = showsRomanisation
+        let stamp = "\(lyrics?.lines.count ?? 0)|\(lyrics?.lines.first?.text ?? "")|\(romanised)"
+        if let cached = rowBudgetCache, cached.stamp == stamp {
+            return (cached.rowsPerLine, cached.extraRows)
+        }
+        guard let lyrics, !lyrics.lines.isEmpty else {
+            return (KTVLyricMetrics.rowsPerLine, 0)
+        }
+        let budget = KTVLyricMetrics.budget(
+            for: lyrics.lines.map { line in
+                (
+                    words: line.isInterlude ? KTVStage.interludeMark : line.text,
+                    romanisation: romanised && !line.isInterlude
+                        ? LyricRomanisation.of(line.text) : nil,
+                    translation: line.translation
+                )
+            })
+        rowBudgetCache = (stamp, budget.rowsPerLine, budget.extraRows)
+        return budget
+    }
+
+    private var rowBudgetCache:
+        (stamp: String, rowsPerLine: CGFloat, extraRows: CGFloat)?
+
     /// Whether the floating desktop lyric is showing.
     var showsDesktopLyrics: Bool {
         get {

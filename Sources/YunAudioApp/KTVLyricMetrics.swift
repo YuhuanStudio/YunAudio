@@ -50,15 +50,83 @@ struct KTVLyricMetrics: Equatable, Sendable {
         return (font.ascender - font.descender + font.leading) / 100
     }()
 
-    /// Rows a line of words takes, on average, at the measure above.
+    /// Rows a line of words takes, on average, when the song is not known.
     ///
-    /// An allowance, and named as one. A line is one row until it passes
-    /// `charactersPerLine` and two after that, and which it is depends on the
-    /// words — knowledge the column does not have when it decides how many
-    /// lines to make room for. 1.14 is what 年少心動雨季 and 往事只能回味 come
-    /// to between them: one line in seven wraps. Being wrong here costs a line
-    /// of slack, not a line cut off — the floors below are exact.
+    /// The fallback, not the answer. `budget(for:)` measures the song that is
+    /// actually loaded; this is what the column uses before one is. 1.14 is
+    /// what 年少心動雨季 and 往事只能回味 come to between them — one line in
+    /// seven wraps.
     static let rowsPerLine: CGFloat = 1.14
+
+    /// Width of a string in ems, near enough to decide whether it wraps.
+    ///
+    /// Chinese, Japanese and Korean set one character to the em, which is what
+    /// makes `charactersPerLine` a measure at all. Latin does not: a
+    /// pronunciation row is three or four times as many characters as the line
+    /// it transcribes and would otherwise be counted as three or four times as
+    /// wide. 0.5 is the average advance of lower-case Latin in this family,
+    /// and a space is narrower again.
+    static func ems(_ text: String) -> CGFloat {
+        var total: CGFloat = 0
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x20, 0xA0: total += 0.26
+            case 0x1100...0x11FF, 0x2E80...0xA4CF, 0xA960...0xA97F,
+                0xAC00...0xD7FF, 0xF900...0xFAFF, 0xFE30...0xFE4F,
+                0xFF00...0xFF60, 0xFFE0...0xFFE6:
+                total += 1
+            default: total += 0.5
+            }
+        }
+        return total
+    }
+
+    /// Rows a string takes at a measure this many ems wide. Never fewer than one.
+    static func rows(_ text: String, measureInEms: CGFloat) -> CGFloat {
+        guard measureInEms > 0 else { return 1 }
+        return max(1, (ems(text) / measureInEms).rounded(.up))
+    }
+
+    /// What one line of a particular song really costs, in point-size multiples.
+    ///
+    /// The last allowance in this file turned into a measurement. Which lines
+    /// wrap is a fact about the words, and the words are loaded — so the column
+    /// can count instead of assuming, and a song of long lines gets a budget
+    /// for long lines rather than for the average of two songs somebody once
+    /// looked at.
+    ///
+    /// The extra rows wrap too, and that is the part an allowance was always
+    /// going to miss: a pronunciation row is roughly three Latin characters per
+    /// Chinese one, so at 0.68 of the size it passes the measure on any line
+    /// over about fourteen characters and takes two rows, not one.
+    static func budget(
+        for lines: [(words: String, romanisation: String?, translation: String?)]
+    ) -> (rowsPerLine: CGFloat, extraRows: CGFloat) {
+        guard !lines.isEmpty else { return (rowsPerLine, 0) }
+        var words: CGFloat = 0
+        var extras: CGFloat = 0
+        for line in lines {
+            words += rows(line.words, measureInEms: charactersPerLine)
+            if let romanisation = line.romanisation {
+                // Its own rows are its own size: two rows of 0.68 type is 1.36
+                // point-size multiples, not two.
+                extras += rows(
+                    romanisation, measureInEms: charactersPerLine / romanisationScale)
+                    * romanisationScale
+            }
+            if let translation = line.translation {
+                extras += rows(
+                    translation, measureInEms: charactersPerLine / translationScale)
+                    * translationScale
+            }
+        }
+        let count = CGFloat(lines.count)
+        return (words / count, extras / count)
+    }
+
+    /// The sizes the stage draws the two sub-rows at, relative to a line.
+    static let romanisationScale: CGFloat = 0.68
+    static let translationScale: CGFloat = 0.78
 
     /// The smallest the stage type may become before it stops being a stage.
     static let smallestCurrent: CGFloat = 19
@@ -80,9 +148,10 @@ struct KTVLyricMetrics: Equatable, Sendable {
     ///     and therefore take height: without them the column budgeted six
     ///     lines and drew eighteen rows, and at any size where the slack ran
     ///     out the first and last were cut off by the window edge.
+    ///   - rowsPerLine: Rows a line of *this* song takes, from `budget(for:)`.
     static func resolve(
         width: CGFloat, height: CGFloat, scale: CGFloat = 1,
-        extraRowsPerLine: CGFloat = 0
+        extraRowsPerLine: CGFloat = 0, rowsPerLine: CGFloat = rowsPerLine
     ) -> KTVLyricMetrics {
         // Width decides the type size: the measure is the size times the
         // characters that fit on a line, so inverting that gives the size at
@@ -108,11 +177,11 @@ struct KTVLyricMetrics: Equatable, Sendable {
         // included: pronunciation at 0.68 of the neighbour size occupies 0.68
         // × `rowHeight`, not 0.68.
         let extra = max(0, extraRowsPerLine)
-        let perNeighbour = neighbour * rowHeight * (rowsPerLine + extra) + spacing
+        let perNeighbour = neighbour * rowHeight * (max(1, rowsPerLine) + extra) + spacing
         // Less the two gaps the stage puts either side of the sung line: they
         // are drawn, so they are spent, and a budget that ignores them is a
         // budget that overflows by exactly that much.
-        let half = max(0, (height - current * rowHeight * (rowsPerLine + extra) - spacing * 2) / 2)
+        let half = max(0, (height - current * rowHeight * (max(1, rowsPerLine) + extra) - spacing * 2) / 2)
         let fit = Int((half / perNeighbour).rounded(.down))
 
         // At least one either side while there is room for it — and the room
@@ -125,7 +194,7 @@ struct KTVLyricMetrics: Equatable, Sendable {
         //
         // The line after is worth more than the line before — it is the one
         // being read — so it is the one that survives to the last.
-        let lineBlock = current * rowHeight * (rowsPerLine + extra)
+        let lineBlock = current * rowHeight * (max(1, rowsPerLine) + extra)
         // The same count each way, capped differently. `fit + 1` ahead was the
         // other half of the overflow: the two halves are budgeted separately
         // and each holds `fit`, so the extra line ahead was one nobody had

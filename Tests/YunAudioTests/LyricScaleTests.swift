@@ -91,6 +91,61 @@ struct LyricScaleTests {
         #expect(abs(KTVLyricMetrics.rowHeight * KTVLyricMetrics.rowsPerLine - 1.35) < 0.02)
     }
 
+    @Test("a line's width is counted by script, not by character")
+    func emsFollowTheScript() {
+        // The measure is twenty-two Chinese characters, and Chinese sets one
+        // to the em — which is the only reason a character count is a width at
+        // all. Counting a pronunciation row the same way would make it three
+        // times too wide and cost the column lines it did not need to lose.
+        #expect(abs(KTVLyricMetrics.ems("可偏偏时光的橡皮") - 8) < 0.01)
+        #expect(KTVLyricMetrics.ems("ke pian pian") < KTVLyricMetrics.ems("可偏偏时光的橡皮"))
+        #expect(KTVLyricMetrics.ems("") == 0)
+    }
+
+    @Test("a song of short lines gets a budget for short lines")
+    func theBudgetFollowsTheSong() {
+        let short = KTVLyricMetrics.budget(
+            for: (0..<8).map { _ in (words: "痛快的离开", romanisation: nil, translation: nil) })
+        #expect(short.rowsPerLine == 1)
+        #expect(short.extraRows == 0)
+
+        // Twenty-seven characters is two rows at a twenty-two character
+        // measure, every line, and no allowance averaged over two other songs
+        // would have said so.
+        let long = KTVLyricMetrics.budget(
+            for: (0..<8).map { _ in
+                (
+                    words: "原来年少心动是逆行在一场雨季注定了无法走进同一个晴天里",
+                    romanisation: nil, translation: nil
+                )
+            })
+        #expect(long.rowsPerLine == 2)
+    }
+
+    @Test("the pronunciation row's own wrapping is counted")
+    func extraRowsWrapToo() {
+        // Nineteen Chinese characters romanise to seventy-odd Latin ones. At
+        // 0.68 of the size that is past the measure, so it is two rows of 0.68
+        // — 1.36 — not the 0.68 an allowance assumed.
+        let budget = KTVLyricMetrics.budget(for: [
+            (
+                words: "原来年少心动是逆行在一场雨季注定了无法",
+                romanisation:
+                    "yuan lai nian shao xin dong shi ni xing zai yi chang yu ji zhu ding le wu fa",
+                translation: nil
+            )
+        ])
+        #expect(budget.extraRows > 0.68)
+        #expect(abs(budget.extraRows - 1.36) < 0.01)
+    }
+
+    @Test("a song with no words falls back rather than dividing by nothing")
+    func anEmptySongUsesTheAllowance() {
+        let budget = KTVLyricMetrics.budget(for: [])
+        #expect(budget.rowsPerLine == KTVLyricMetrics.rowsPerLine)
+        #expect(budget.extraRows == 0)
+    }
+
     @Test("the column never asks for more height than it has")
     func theColumnFitsWhatItIsGiven() {
         // The invariant the overflow broke, at every combination the stage can
@@ -101,19 +156,20 @@ struct LyricScaleTests {
         for width in [420.0, 720.0, 1_080.0, 1_600.0] as [CGFloat] {
             for height in [300.0, 420.0, 620.0, 900.0] as [CGFloat] {
                 for scale in [0.7, 1.0, 1.3, 1.8] as [CGFloat] {
-                    for extra in [0.0, 0.68, 1.46] as [CGFloat] {
+                    for extra in [0.0, 0.68, 1.46, 2.14] as [CGFloat] {
+                      for rows in [1.0, 1.14, 2.0] as [CGFloat] {
                         let metrics = KTVLyricMetrics.resolve(
                             width: width, height: height, scale: scale,
-                            extraRowsPerLine: extra)
+                            extraRowsPerLine: extra, rowsPerLine: rows)
                         let perNeighbour =
                             metrics.neighbourSize * KTVLyricMetrics.rowHeight
-                            * (KTVLyricMetrics.rowsPerLine + extra) + metrics.spacing
+                            * (rows + extra) + metrics.spacing
                         // The two gaps the stage puts either side of the sung
                         // line count against the height like anything else
                         // drawn.
                         let drawn =
                             metrics.currentSize * KTVLyricMetrics.rowHeight
-                            * (KTVLyricMetrics.rowsPerLine + extra) + metrics.spacing * 2
+                            * (rows + extra) + metrics.spacing * 2
                             + CGFloat(metrics.linesBehind + metrics.linesAhead) * perNeighbour
                         // A stage too short for even the line being sung is
                         // clipped on purpose — some of the words beats none —
@@ -125,8 +181,9 @@ struct LyricScaleTests {
                                 Comment(
                                     rawValue:
                                         "\(Int(width))×\(Int(height)) at \(scale)×, "
-                                        + "\(extra) extra rows: drew \(Int(drawn))"))
+                                        + "\(rows) rows + \(extra) extra: drew \(Int(drawn))"))
                         }
+                      }
                     }
                 }
             }

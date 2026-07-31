@@ -142,15 +142,15 @@ struct KTVStage: View {
     /// What the words are drawn at.
     private var lyricScale: Double { Self.lyricScaleForRendering ?? model.lyricScale }
 
-    /// Rows a line carries besides the words: pronunciation, and a
-    /// translation where the index supplied one. Both are drawn, so both cost
-    /// height, and the column has to be budgeted for what it draws.
-    private var extraLyricRows: CGFloat {
-        var rows: CGFloat = model.showsRomanisation ? 0.68 : 0
-        if model.lyrics?.lines.contains(where: { $0.translation != nil }) == true {
-            rows += 0.78
-        }
-        return rows
+    /// What one line of this song really costs, counted rather than allowed for.
+    ///
+    /// Measured on the song that is loaded, including the wrapping of the
+    /// pronunciation and translation rows, which an allowance could never have
+    /// caught: a pronunciation row is three Latin characters to the Chinese
+    /// one, so it passes the measure and takes two rows on any line over about
+    /// fourteen characters.
+    private var lyricBudget: (rowsPerLine: CGFloat, extraRows: CGFloat) {
+        model.lyricRowBudget
     }
 
     /// Where the column is looking, when that is not where the song is.
@@ -461,7 +461,8 @@ struct KTVStage: View {
                     - 2 * max(32, size.width * 0.055))
             lyricsColumn(
                 KTVLyricMetrics.resolve(
-                    width: available, height: stageHeight, scale: lyricScale, extraRowsPerLine: extraLyricRows)
+                    width: available, height: stageHeight, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
+                    rowsPerLine: lyricBudget.rowsPerLine)
             )
             .frame(maxWidth: .infinity)
             .frame(height: stageHeight)
@@ -504,7 +505,8 @@ struct KTVStage: View {
             lyricsColumn(
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
-                    height: band, scale: lyricScale, extraRowsPerLine: extraLyricRows)
+                    height: band, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
+                    rowsPerLine: lyricBudget.rowsPerLine)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
@@ -533,7 +535,8 @@ struct KTVStage: View {
             lyricsColumn(
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
-                    height: band, scale: lyricScale, extraRowsPerLine: extraLyricRows)
+                    height: band, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
+                    rowsPerLine: lyricBudget.rowsPerLine)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
