@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import YunAudioEngine
 
@@ -27,12 +28,33 @@ struct KTVSingerVoices: Equatable, Sendable {
     /// bright sleeve. Four, because a file with five distinct soloists is a
     /// concert recording and cycling is a better answer there than inventing
     /// colours nobody can tell apart.
+    ///
+    /// Adaptive, because the same mapping now serves the compact inspector,
+    /// which is white in the light appearance: pastels chosen to glow on black
+    /// are illegible there, so the light side is the same four hues taken down
+    /// to where they read as ink.
     static let palette: [Color] = [
-        Color(red: 1.00, green: 0.76, blue: 0.42),
-        Color(red: 0.56, green: 0.81, blue: 1.00),
-        Color(red: 0.66, green: 0.94, blue: 0.73),
-        Color(red: 0.96, green: 0.68, blue: 0.90),
+        adaptive(
+            light: Color(red: 0.62, green: 0.36, blue: 0.02),
+            dark: Color(red: 1.00, green: 0.76, blue: 0.42)),
+        adaptive(
+            light: Color(red: 0.08, green: 0.36, blue: 0.66),
+            dark: Color(red: 0.56, green: 0.81, blue: 1.00)),
+        adaptive(
+            light: Color(red: 0.10, green: 0.45, blue: 0.22),
+            dark: Color(red: 0.66, green: 0.94, blue: 0.73)),
+        adaptive(
+            light: Color(red: 0.58, green: 0.20, blue: 0.52),
+            dark: Color(red: 0.96, green: 0.68, blue: 0.90)),
     ]
+
+    private static func adaptive(light: Color, dark: Color) -> Color {
+        Color(
+            nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(dark) : NSColor(light)
+            })
+    }
 
     /// Names a file uses for "everybody", which take no colour at all.
     ///

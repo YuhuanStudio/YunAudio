@@ -705,7 +705,13 @@ private struct SingingLyrics: View {
     var body: some View {
         let _ = BodyCount.tick("SingingLyrics")
         let current = model.lyricLine ?? 0
+        // The same voices as the stage. Two presentations of one song that
+        // disagree about who is singing is worse than neither of them saying.
+        let voices = KTVSingerVoices(lyrics)
         VStack(alignment: .leading, spacing: Yun.Space.md) {
+            // Collapsed when there is nothing to count: this is a column that
+            // scrolls, not a stage holding a line on a centre line.
+            KTVCountInDots(model: model, size: 22, reservesSpace: false)
             ForEach(-1...1, id: \.self) { offset in
                 let index = current + offset
                 let line =
@@ -715,6 +721,7 @@ private struct SingingLyrics: View {
                 // an empty row says none of that. The same mark, so the two
                 // presentations of the same song do not disagree.
                 let text = line.map { $0.isInterlude ? KTVStage.interludeMark : $0.text } ?? ""
+                let voice = voices.colour(for: line?.singer)
                 if offset == 0 {
                     // The sweep is the point: a line that lights up all at
                     // once tells you which line, and a line that fills tells
@@ -723,7 +730,8 @@ private struct SingingLyrics: View {
                     CompositedLyricSurface(
                         model: model,
                         text: text.isEmpty ? " " : text,
-                        style: .inspector
+                        style: .inspector,
+                        voice: voice
                     )
                     .contentTransition(.opacity)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -743,8 +751,9 @@ private struct SingingLyrics: View {
                     Text(text)
                         .font(.system(size: offset < 0 ? 15 : 18, weight: .medium))
                         .foregroundStyle(
-                            offset < 0
-                                ? Yun.Palette.textMuted : Yun.Palette.textTertiary
+                            voice
+                                ?? (offset < 0
+                                    ? Yun.Palette.textMuted : Yun.Palette.textTertiary)
                         )
                         .contentTransition(.opacity)
                         .fixedSize(horizontal: false, vertical: true)

@@ -218,6 +218,16 @@ enum PanelRenderer {
             basename: "ktv-duet\(suffix)",
             directory: directory,
             size: CGSize(width: 1080, height: 720))
+        // The same duet in the compact inspector, which is the other place
+        // the same song is drawn — and, in the light appearance, the place the
+        // stage's dark palette would have been illegible.
+        render(
+            SingingPanel(model: model)
+                .frame(width: 380)
+                .background(Yun.Palette.background),
+            basename: "singing-duet\(suffix)",
+            directory: directory,
+            size: CGSize(width: 380, height: 1_100))
         // The floating words, which had never been rendered at all — the one
         // presentation with no image of it, and so the one that quietly fell
         // behind the stage on every feature the stage gained.
