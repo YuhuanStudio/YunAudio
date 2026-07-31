@@ -377,7 +377,7 @@ enum WindowCapture {
                 for attempt in 0..<4 {
                     NSApp.appearance = NSAppearance(named: scheme)
                     window.appearance = NSAppearance(named: scheme)
-                    settle(turns: 8 + attempt * 8)
+                    settle(turns: settledTurns + attempt * 8)
                     png = capture(window)
                     if let png, matches(png, isLight: isLight) { break }
                     png = nil
@@ -455,7 +455,18 @@ enum WindowCapture {
     ///
     /// A capture taken in the same turn as `setContentSize` photographs the old
     /// layout, which is a subtle enough lie to be worse than a failure.
-    private static func settle(turns: Int = 8) {
+    ///
+    /// Long enough for the interface's own animations to finish, too, which
+    /// eight turns was not. Eight turns is 160 ms and the lyric column's
+    /// transition is 240 — so every photograph of the singing tab caught it two
+    /// thirds of the way through a cross-fade, with the outgoing line and the
+    /// incoming one printed on top of each other. It is indistinguishable from
+    /// a layout fault in the picture, and it cost a full round of chasing one.
+    /// The longest thing the interface animates is the stage's staggered line
+    /// advance at 550 ms plus 120 of stagger; 40 turns is 800.
+    private static let settledTurns = 40
+
+    private static func settle(turns: Int = settledTurns) {
         for _ in 0..<turns {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }

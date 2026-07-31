@@ -769,6 +769,16 @@ private struct SingingLyrics: View {
             // Collapsed when there is nothing to count: this is a column that
             // scrolls, not a stage holding a line on a centre line.
             KTVCountInDots(model: model, size: 22, reservesSpace: false)
+            // Identified by the line, not by the slot it occupies — the same
+            // correction the stage carries, and for the same reason. With the
+            // offset as the identity a slot is "the same view with different
+            // words" from one line to the next, and `contentTransition(.opacity)`
+            // cross-fades them *in place*: for the length of the transition the
+            // outgoing line and the incoming one are drawn on top of each other.
+            // The photograph gate caught it — 「可偏偏时光的橡皮」 superimposed on
+            // 「一个晴天里」 in the row above the sung line — after the stage had
+            // already been fixed and this had not. Identified by the line, a
+            // slot's contents never change: lines arrive and leave.
             ForEach(-1...1, id: \.self) { offset in
                 let index = current + offset
                 let line =
@@ -803,6 +813,12 @@ private struct SingingLyrics: View {
                             startPoint: .leading, endPoint: .trailing),
                         in: .rect(cornerRadius: Yun.Radius.card)
                     )
+                    // No line identity on this one, deliberately. It is an
+                    // AppKit view behind a representable, so it never
+                    // cross-fades two strings the way a `Text` does — it is
+                    // reconfigured and redraws. Identifying it by the line
+                    // would tear down the layer tree and rebuild the CoreText
+                    // frame once a line for no visible difference.
                     .fixedSize(horizontal: false, vertical: true)
                 } else {
                     Text(text)
@@ -812,14 +828,26 @@ private struct SingingLyrics: View {
                                 ?? (offset < 0
                                     ? Yun.Palette.textMuted : Yun.Palette.textTertiary)
                         )
-                        .contentTransition(.opacity)
                         .fixedSize(horizontal: false, vertical: true)
                         .opacity(offset < 0 ? 0.65 : 1)
+                        .id(index)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.24), value: model.lyricLine)
+        // The words swap; they do not cross-fade.
+        //
+        // A cross-fade between two lines *is* both lines at once for as long as
+        // it lasts — that is what the effect is — and in a column three hundred
+        // points wide the two sentences land on the same baseline and print
+        // over each other. Moving them apart instead only relocates the
+        // collision: nothing here clips a row, so the line arriving from below
+        // travels up through the card above it.
+        //
+        // The stage can afford the motion because it has the room to move
+        // lines past one another. This column does not, and it already has the
+        // one piece of motion that says the song is moving — the sweep across
+        // the line in the middle of it. See `KTVLyricMotion` for the stage's.
     }
 }
 

@@ -41,4 +41,25 @@ struct CompactSingingActionsTests {
         #expect(actionRows.ranges(of: "YunWrap(").count == 2)
         #expect(actionRows.ranges(of: "HStack(").isEmpty)
     }
+
+    @Test("both presentations identify a lyric row by its line, not its slot")
+    func lyricRowsAreIdentifiedByLine() throws {
+        // A slot identified by its offset is "the same view with different
+        // words" from one line to the next, so `contentTransition(.opacity)`
+        // cross-fades them in place and both lines are drawn at once for the
+        // length of the transition. The stage was corrected; this panel was
+        // not, and the photograph gate caught it superimposing the line above
+        // the sung one on the line before that. Held here because nothing else
+        // can: the overlap only exists mid-animation, so a still frame catches
+        // it by luck and a test cannot catch it at all.
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        for file in ["SingingPanel.swift", "KTVWindow.swift"] {
+            let source = try String(
+                contentsOfFile: root + "Sources/YunAudioApp/" + file,
+                encoding: .utf8)
+            #expect(
+                source.contains(".id(index)"),
+                Comment(rawValue: "\(file) draws lyric rows without a line identity"))
+        }
+    }
 }
