@@ -99,6 +99,12 @@ struct KTVQueue: Equatable, Sendable {
         return songs[previous]
     }
 
+    /// Whether ⏮ has a song to go back to rather than only the top of this one.
+    var hasSongBefore: Bool {
+        guard let index else { return false }
+        return songs.indices.contains(index - 1)
+    }
+
     /// Somebody pointing at a line in the list.
     @discardableResult
     mutating func choose(_ position: Int) -> URL? {

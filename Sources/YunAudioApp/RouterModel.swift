@@ -2213,6 +2213,74 @@ final class RouterModel: ScriptTarget {
     /// True while the song on the stage is a file this application is playing.
     var isPlayingOwnSong: Bool { madeSongPlayer?.song != nil }
 
+    /// Where the media keys, Control Centre and the button on a pair of AirPods
+    /// go. Built on the first song rather than at launch: claiming the now
+    /// playing application is system-wide, and an application that has never
+    /// played anything has no business holding it.
+    private var madeNowPlayingStage: NowPlayingStage?
+
+    /// Tells the system what is on this stage, or gives the keys back.
+    ///
+    /// Called from the poll, so the gate matters: `needsPublishing` compares
+    /// everything but the playhead exactly and the playhead against a tolerance,
+    /// because the system moves the playhead itself from the rate. A song
+    /// playing steadily therefore publishes about once a second rather than
+    /// twenty times.
+    private func tellTheSystemWhatIsPlaying() {
+        guard isPlayingOwnSong, let player = madeNowPlayingSong else {
+            // Only when something was claimed. Resigning on every poll would
+            // tell the system to forget a song it was never told about.
+            madeNowPlayingStage?.resign()
+            return
+        }
+        let stage = nowPlayingStage
+        stage.publish(
+            NowPlayingBroadcast.forOurOwnSong(
+                title: player.title, artist: player.artist, album: player.album,
+                duration: player.duration, elapsed: songPosition,
+                isPlaying: madeSongPlayer?.isPlaying ?? false,
+                hasQueuedSong: hasAnotherSongQueued, repeatsOne: songQueue.repeatsOne,
+                hasPreviousSong: songQueue.hasSongBefore,
+                hasArtwork: player.artwork?.isEmpty == false),
+            artwork: player.artwork,
+            identity: player.url.path)
+    }
+
+    private var madeNowPlayingSong: LocalSongPlayer.Song? { madeSongPlayer?.song }
+
+    private var nowPlayingStage: NowPlayingStage {
+        if let stage = madeNowPlayingStage { return stage }
+        let stage = NowPlayingStage()
+        stage.takeCommands(
+            NowPlayingStage.Commands(
+                play: { [weak self] in self?.runWords(from: self?.songPosition ?? 0) },
+                pause: { [weak self] in self?.stopWords() },
+                next: { [weak self] in self?.skipToNextSong() },
+                previous: { [weak self] in self?.goBackASong() },
+                seek: { [weak self] seconds in self?.seekNowPlaying(toSeconds: seconds) }))
+        madeNowPlayingStage = stage
+        return stage
+    }
+
+    /// ⏮: the song before, or the top of this one.
+    ///
+    /// Restarting rather than doing nothing at the front of the list, because
+    /// that is what every transport control ever built does and somebody who
+    /// wanted the beginning of the first song would otherwise have to drag the
+    /// bar.
+    func goBackASong() {
+        guard let previous = songQueue.goBack() else {
+            runWords(from: 0)
+            return
+        }
+        if previous == madeSongPlayer?.song?.url {
+            runWords(from: 0)
+        } else {
+            openSong(at: previous, keepingQueue: true)
+            runWords(from: 0)
+        }
+    }
+
     /// Opens an audio file and makes it the song.
     ///
     /// Words are looked for beside the file first — `慢冷.mp3` next to
@@ -2394,6 +2462,7 @@ final class RouterModel: ScriptTarget {
         }
         trackClock.adopt(
             songPlayer.position, isPlaying: songPlayer.isPlaying, trueAt: now)
+        tellTheSystemWhatIsPlaying()
     }
 
     /// Starts the hand-run words from a moment on the song's clock.
@@ -2438,6 +2507,10 @@ final class RouterModel: ScriptTarget {
         // output device running, and handing the panel back to somebody else's
         // player while still playing our own would put two songs in the room.
         madeSongPlayer?.stop()
+        // Before anything else clears: the keys go back the moment the song
+        // stops being ours, or pressing pause would pause a player we are only
+        // watching.
+        madeNowPlayingStage?.resign()
         isHandRun = false
         trackClock.stop()
         nowPlaying = nil

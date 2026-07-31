@@ -84,6 +84,20 @@ struct KTVQueueTests {
         #expect(queue.goBack() == song("a"))
     }
 
+    @Test("⏮ knows whether there is a song behind this one")
+    func knowsWhatIsBehind() {
+        var queue = KTVQueue()
+        queue.append([song("a"), song("b")])
+        // At the first song there is nothing behind it, and ⏮ restarts this one
+        // rather than being offered as a jump to nowhere.
+        #expect(!queue.hasSongBefore)
+        queue.advance()
+        #expect(queue.hasSongBefore)
+        // And after the last song ends, nothing is being sung at all.
+        queue.advance()
+        #expect(!queue.hasSongBefore)
+    }
+
     @Test("taking out the song being sung plays whatever moved up")
     func removingTheCurrentSong() {
         var queue = KTVQueue()

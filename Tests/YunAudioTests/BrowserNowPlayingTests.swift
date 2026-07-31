@@ -275,9 +275,11 @@ struct BrowserNowPlayingTests {
         #expect(!BrowserNowPlaying.positionScript.contains("querySelector('ytd"))
         #expect(BrowserNowPlaying.positionScript.count < BrowserNowPlaying.readingScript.count)
 
-        let answer = try? #require(
-            BrowserNowPlaying.parsePosition(
-                reply("https://y/watch?v=abc", "61.25", "playing")))
+        // Not `#require`: `parsePosition` returns a non-optional here, so the
+        // macro was checking against nil for a value that cannot be one, and
+        // said so.
+        let answer = BrowserNowPlaying.parsePosition(
+            reply("https://y/watch?v=abc", "61.25", "playing"))
         #expect(answer?.identity == "https://y/watch?v=abc")
         #expect(abs((answer?.seconds ?? 0) - 61.25) < 0.001)
         #expect(answer?.isPlaying == true)

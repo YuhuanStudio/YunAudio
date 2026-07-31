@@ -3,6 +3,7 @@ import AVFoundation
 import AudioToolbox
 import CoreAudio
 import Foundation
+import MediaPlayer
 import YunAudioControl
 import YunAudioEngine
 import YunAudioHAL
@@ -4341,6 +4342,49 @@ enum UIFlowCheck {
             check("the next song starts when this one ends", handedOver)
             check("and nothing is left queued after the last", !model.hasAnotherSongQueued)
             model.stopWords()
+        }
+
+        // What the rest of the system was told, read back out of the system
+        // rather than off our own copy of it. The application spends 73 ms an
+        // Apple event asking *other* players what they are playing; until now
+        // nothing told macOS that these songs were ours, so the media keys,
+        // Control Centre and the button on a pair of AirPods all went to
+        // whichever application had said so — usually one making no sound.
+        //
+        // Read through `MPNowPlayingInfoCenter` because that is where a media
+        // key looks. Asserting our own broadcast value would pass on an
+        // application that never published it.
+        if model.isPlayingOwnSong {
+            await pause(upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo != nil })
+            let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
+            check("the system was told what is playing", info != nil)
+            let title = info?[MPMediaItemPropertyTitle] as? String
+            note("the system says: \(title ?? "nothing")")
+            check("and told the song's own title", title?.isEmpty == false)
+            check(
+                "with a length it can draw a scrubber against",
+                (info?[MPMediaItemPropertyPlaybackDuration] as? Double ?? 0) > 0)
+            // The rate is what stops a lock screen counting on through a paused
+            // song, and it is the field a published dictionary most easily
+            // leaves stale.
+            model.stopWords()
+            await pause(upTo: 2.0, until: {
+                (MPNowPlayingInfoCenter.default().nowPlayingInfo?[
+                    MPNowPlayingInfoPropertyPlaybackRate] as? Double) == 0
+            })
+            check(
+                "pausing the song stops the system's clock too",
+                (MPNowPlayingInfoCenter.default().nowPlayingInfo?[
+                    MPNowPlayingInfoPropertyPlaybackRate] as? Double) == 0)
+
+            // And handed straight back. Holding the now playing application
+            // while showing the words for somebody else's song would mean
+            // pressing pause paused nothing anybody could hear.
+            model.closeWords()
+            await pause(upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo == nil })
+            check(
+                "closing the song gives the media keys back",
+                MPNowPlayingInfoCenter.default().nowPlayingInfo == nil)
         } else {
             note("could not write or open the queue fixtures — skipped")
         }

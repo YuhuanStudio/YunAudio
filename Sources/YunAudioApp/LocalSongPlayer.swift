@@ -353,11 +353,19 @@ final class LocalSongPlayer {
     ) -> (
         title: String?, artist: String?, album: String?, artwork: Data?
     ) {
-        // The synchronous accessor, deliberately. It is deprecated in favour of
-        // an async load, and every call site here is a file the user has just
-        // chosen in an open panel — a local read of a tag block, on a path the
-        // person is waiting on anyway. An await here would make opening a song
-        // asynchronous for tens of microseconds of work.
+        // The synchronous accessor, deliberately, and the deprecation warnings
+        // it leaves in the build are the price of that. It is deprecated in
+        // favour of an async load; what it buys by staying synchronous is that
+        // `open(_:)` returns a song with its title already in it, so the words
+        // and the lyric lookup have a name to work from at the moment the song
+        // starts rather than a filename that changes under them a beat later.
+        //
+        // The cost is what makes that defensible, and it is now measured rather
+        // than asserted: **0.300 ms** per song on this machine, warm — see
+        // `SongMetadataCostTests`. The comment here used to say "tens of
+        // microseconds", which was an order of magnitude out and nobody had
+        // checked. Against a queue advancing between songs it is still nothing;
+        // against a claim made up, it is the difference the test exists for.
         let asset = AVURLAsset(url: url)
         let items = asset.commonMetadata
         func string(_ key: AVMetadataKey) -> String? {
