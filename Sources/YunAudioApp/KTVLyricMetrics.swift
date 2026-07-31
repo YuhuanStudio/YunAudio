@@ -124,6 +124,36 @@ struct KTVLyricMetrics: Equatable, Sendable {
         return (words / count, extras / count)
     }
 
+    /// A width that splits a row evenly instead of leaving a short last one.
+    ///
+    /// Measured before it was built, which is why it is this small. Across
+    /// 年少心動雨季 and 往事只能回味 — eighteen lines — **no Chinese line reaches
+    /// the twenty-two-character measure at all**, and no pronunciation row
+    /// passes its own. The reading-width cap is simply wider than song lyrics
+    /// are. So the elaborate thing this was going to be — a `NSAttributedString`
+    /// layout path breaking on punctuation and word boundaries — would have
+    /// been built for a case that does not occur, and is not here.
+    ///
+    /// What does occur, once in four: an English translation of 32 ems against
+    /// a 28-em measure, leaving 「of rain」 alone on a row. Giving that row a
+    /// 16-em width instead splits it in half. Arithmetic, no layout engine, and
+    /// a no-op for every row that already fits.
+    static func balancedMeasure(ems: CGFloat, measureInEms: CGFloat) -> CGFloat {
+        guard measureInEms > 0, ems > measureInEms else { return measureInEms }
+        let rows = (ems / measureInEms).rounded(.up)
+        // Never below half the measure: a row narrowed past that is no longer
+        // being balanced, it is being turned into a column.
+        return max(measureInEms / 2, (ems / rows).rounded(.up))
+    }
+
+    /// The same, in points, for a row drawn at this size inside this column.
+    func balancedWidth(for text: String, pointSize: CGFloat) -> CGFloat {
+        guard pointSize > 0 else { return measure }
+        let inEms = Self.balancedMeasure(
+            ems: Self.ems(text), measureInEms: measure / pointSize)
+        return min(measure, (inEms * pointSize).rounded())
+    }
+
     /// The sizes the stage draws the two sub-rows at, relative to a line.
     static let romanisationScale: CGFloat = 0.68
     static let translationScale: CGFloat = 0.78
@@ -149,10 +179,17 @@ struct KTVLyricMetrics: Equatable, Sendable {
     ///     lines and drew eighteen rows, and at any size where the slack ran
     ///     out the first and last were cut off by the window edge.
     ///   - rowsPerLine: Rows a line of *this* song takes, from `budget(for:)`.
+    ///   - reservedHeight: Height the column has already promised to something
+    ///     that is not a line — the attribution above the words. Budgeted
+    ///     because it is drawn: without it the band above the sung line was one
+    ///     label taller than its share, and at a large word size the label went
+    ///     off the top of the window.
     static func resolve(
-        width: CGFloat, height: CGFloat, scale: CGFloat = 1,
-        extraRowsPerLine: CGFloat = 0, rowsPerLine: CGFloat = rowsPerLine
+        width: CGFloat, height fullHeight: CGFloat, scale: CGFloat = 1,
+        extraRowsPerLine: CGFloat = 0, rowsPerLine: CGFloat = rowsPerLine,
+        reservedHeight: CGFloat = 0
     ) -> KTVLyricMetrics {
+        let height = max(0, fullHeight - max(0, reservedHeight))
         // Width decides the type size: the measure is the size times the
         // characters that fit on a line, so inverting that gives the size at
         // which a full line exactly fills the column. Height then caps it, so a

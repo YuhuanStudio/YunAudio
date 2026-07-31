@@ -153,6 +153,16 @@ struct KTVStage: View {
         model.lyricRowBudget
     }
 
+    /// Height the attribution above the words takes, when there is one.
+    ///
+    /// A 12-point row and the 20-point gap under it. Drawn, therefore budgeted:
+    /// the band above the sung line is otherwise one label taller than its
+    /// share, which is invisible until the words are large and then puts the
+    /// label off the top of the window.
+    private var reservedLyricHeight: CGFloat {
+        model.lyricsSourceName == nil ? 0 : 12 * KTVLyricMetrics.rowHeight + 20
+    }
+
     /// Where the column is looking, when that is not where the song is.
     @State private var browse = KTVLyricBrowse(line: KTVStage.browsedLineForRendering)
     @State private var returnToTheSong: Task<Void, Never>?
@@ -462,7 +472,8 @@ struct KTVStage: View {
             lyricsColumn(
                 KTVLyricMetrics.resolve(
                     width: available, height: stageHeight, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
-                    rowsPerLine: lyricBudget.rowsPerLine)
+                    rowsPerLine: lyricBudget.rowsPerLine,
+                    reservedHeight: reservedLyricHeight)
             )
             .frame(maxWidth: .infinity)
             .frame(height: stageHeight)
@@ -506,7 +517,8 @@ struct KTVStage: View {
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
                     height: band, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
-                    rowsPerLine: lyricBudget.rowsPerLine)
+                    rowsPerLine: lyricBudget.rowsPerLine,
+                    reservedHeight: reservedLyricHeight)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
@@ -536,7 +548,8 @@ struct KTVStage: View {
                 KTVLyricMetrics.resolve(
                     width: max(120, size.width - 2 * max(32, size.width * 0.055)),
                     height: band, scale: lyricScale, extraRowsPerLine: lyricBudget.extraRows,
-                    rowsPerLine: lyricBudget.rowsPerLine)
+                    rowsPerLine: lyricBudget.rowsPerLine,
+                    reservedHeight: reservedLyricHeight)
             )
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
@@ -1054,12 +1067,16 @@ struct KTVStage: View {
                             !line.isInterlude,
                             let latin = LyricRomanisation.of(line.text)
                         {
+                            let size = metrics.neighbourSize * KTVLyricMetrics.romanisationScale
                             Text(latin)
-                                .font(
-                                    .system(
-                                        size: metrics.neighbourSize * 0.68,
-                                        weight: .medium)
-                                )
+                                .font(.system(size: size, weight: .medium))
+                                // Split evenly rather than left with a word on
+                                // its own. A no-op for a row that already fits,
+                                // which on real songs is every pronunciation row.
+                                .frame(
+                                    maxWidth: metrics.balancedWidth(
+                                        for: latin, pointSize: size),
+                                    alignment: .leading)
                                 .foregroundStyle(
                                     Yun.Palette.accent.opacity(offset == 0 ? 0.78 : 0.42)
                                 )
@@ -1071,12 +1088,13 @@ struct KTVStage: View {
                         // one — most do not, and a blank row under every line
                         // would halve the stage for nothing.
                         if let translation = line.translation {
+                            let size = metrics.neighbourSize * KTVLyricMetrics.translationScale
                             Text(translation)
-                                .font(
-                                    .system(
-                                        size: metrics.neighbourSize * 0.78,
-                                        weight: .medium)
-                                )
+                                .font(.system(size: size, weight: .medium))
+                                .frame(
+                                    maxWidth: metrics.balancedWidth(
+                                        for: translation, pointSize: size),
+                                    alignment: .leading)
                                 .foregroundStyle(
                                     .white.opacity(
                                         offset == 0 ? 0.68 : Self.lyricOpacity(for: offset) * 0.7)

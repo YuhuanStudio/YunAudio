@@ -877,6 +877,15 @@ notes 全部是功能與修 bug。**也沒有 OBS 對接。**
 
 ---
 
+## 已知會偶發失敗的測試
+
+- **「a complete exact timeline wins within a bounded quality grace」**
+  （`OnlineLyricsTests`）在整包測試同時跑時偶發失敗一次：它用真實的時間差
+  ——快的來源 100 ms、慢的 6 s、寬限 225 ms——而整包測試會把 cooperative
+  executor 塞滿，慢的那個就贏了。**測試自己的註解已經寫了這個危險**，容忍值
+  也已經放寬過一次。真正的解是把時間換成注入的 clock，而不是再放寬一次；放寬
+  只會讓它有一天不再抓得到真正的回歸。單獨跑穩定通過。
+
 ## 已定案 —— 沒有新證據就不要再試
 
 每一項都花掉了真實的時間。`README.md` 與 `DEVICES.md` 有完整的寫法；這裡是索引。

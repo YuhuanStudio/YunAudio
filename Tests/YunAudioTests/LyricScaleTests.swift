@@ -139,6 +139,44 @@ struct LyricScaleTests {
         #expect(abs(budget.extraRows - 1.36) < 0.01)
     }
 
+    @Test("a row that fits is left exactly as it was")
+    func balancingIsANoOpWhenItFits() {
+        // Which, on real songs, is every Chinese line and every pronunciation
+        // row: across 年少心動雨季 and 往事只能回味 not one line reaches the
+        // twenty-two-character measure. This must cost them nothing.
+        #expect(KTVLyricMetrics.balancedMeasure(ems: 8, measureInEms: 22) == 22)
+        #expect(KTVLyricMetrics.balancedMeasure(ems: 22, measureInEms: 22) == 22)
+    }
+
+    @Test("a row with a word left over is split in half instead")
+    func balancingEvensTheRows() {
+        // The one case that does occur: an English translation of 32 ems
+        // against a 28-em measure leaves 「of rain」 alone on a second row.
+        let width = KTVLyricMetrics.balancedMeasure(ems: 32, measureInEms: 28)
+        #expect(width == 16)
+        // Still two rows, and now they are the same length.
+        #expect((32 / width).rounded(.up) == 2)
+    }
+
+    @Test("balancing never narrows a row into a column")
+    func balancingHasAFloor() {
+        // A pathological row — one very long unbroken token — must not be
+        // squeezed to a sliver in pursuit of even rows.
+        #expect(KTVLyricMetrics.balancedMeasure(ems: 900, measureInEms: 22) >= 11)
+        #expect(KTVLyricMetrics.balancedMeasure(ems: 1, measureInEms: 0) == 0)
+    }
+
+    @Test("balanced widths stay inside the column")
+    func balancedWidthsNeverExceedTheMeasure() {
+        let metrics = KTVLyricMetrics.resolve(width: 720, height: 620)
+        for text in ["短", "So a young heart moving was walking backwards through a season of rain"] {
+            let width = metrics.balancedWidth(
+                for: text, pointSize: metrics.neighbourSize * KTVLyricMetrics.translationScale)
+            #expect(width <= metrics.measure)
+            #expect(width > 0)
+        }
+    }
+
     @Test("a song with no words falls back rather than dividing by nothing")
     func anEmptySongUsesTheAllowance() {
         let budget = KTVLyricMetrics.budget(for: [])
