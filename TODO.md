@@ -1017,7 +1017,8 @@ UUID、同一個位置、都在啟動後約兩分鐘**，所以是可重現的�
 **結果：拿掉那一行沒有修好，而且答案比修好更有價值——當機換了地方。** 第六次
 （15:29:45）倒在 `StatusItemController.refreshImageOnTimer()`，**另一個計時器、另一個
 `@objc` 方法**，一樣的位址、一樣的 `swift_task_isCurrentExecutor`。而且時間幾乎一模一樣：
-啟動後 **3:21**，跟上一次（3:21）到秒都對得上。
+啟動後 **3:21**，跟上一次（3:21）到秒都對得上——**兩次不同的呼叫點、同一個秒數**，這本身
+就說明它是時間驅動的行程層級狀態，不是哪一段程式碼的錯。
 
 **所以這不是某一個呼叫點的問題。** 是**整個 process 裡任何一次動態 main-actor 檢查**，在啟動
 約三分二十秒之後開始爆——runtime 對「主執行器是什麼」的認知變成了垃圾（讀到 `0x1e` 這種小
@@ -1026,10 +1027,12 @@ UUID、同一個位置、都在啟動後約兩分鐘**，所以是可重現的�
 
 **下一步（還沒做）**，照可能性排：
 
-1. **換工具鏈重建再 soak。** 現在是用 Xcode-beta 的 Swift 6.4 建、跑在 macOS 27 beta 的
-   `libswift_Concurrency` 上。beta 工具鏈與 beta OS 之間的 concurrency ABI 對不上，正好會長
-   成這樣。這是最便宜也最有可能的一刀：`./App/toolchain.sh` 換成系統工具鏈，重建，跑同一個
-   soak，看 3:21 還在不在。
+1. **換工具鏈重建再 soak —— 試了，被擋住了。** 用 `/Applications/Xcode.app`（正式版，
+   Swift 6.3.3）建會編不過：`kAudioDevicePropertySuggestedReferenceDevice` 在那個 SDK 裡不
+   存在（那是 CoreAudio 語音活動偵測那一段用的 macOS 27 符號）。所以要做這個對照，得先把那
+   一處用 `#if canImport` 之類的方式條件化，或者暫時拿掉那個功能再建。**這仍然是最可能的
+   方向**——beta 工具鏈的 Swift 6.4 對上 beta OS 的 `libswift_Concurrency`，concurrency ABI
+   對不上正好會長成這樣——只是它不是一行指令的事。
 2. **時間點本身是線索**：兩次都是 3:21。找出這個 process 裡什麼東西在三分二十秒左右做一次
    ——如果有，那它就是嫌犯。
 3. 最小重現：一個空的 SwiftUI app、一個 20 Hz 計時器、一個 `MainActor.assumeIsolated`，同樣
