@@ -4251,6 +4251,24 @@ enum UIFlowCheck {
         model.resetLyricScale()
         check("and go back to the size the window implies", model.lyricScale == 1)
 
+        // A song whose length has not arrived. Spotify answers 0 until the
+        // track settles and this model fills the gap from the lyric match,
+        // which lands later still — while the words are already on screen and
+        // already clickable. Treating length as a precondition for seeking
+        // made clicking a line do nothing at all, silently, in the window
+        // where somebody is most likely to click one.
+        model.forgetDurationForCheck()
+        model.seekToLyricLine(4)
+        model.refreshNowPlaying()
+        check(
+            "a line can be played from before the song's length is known",
+            model.lyricLine == 4)
+        model.skipNowPlaying(by: -2)
+        model.refreshNowPlaying()
+        check(
+            "and moving back still stops at the start",
+            model.songSecond == Int(max(0, 4 * chainNoteSeconds - 2)))
+
         // The scoreboard, and the thing it got wrong: it was documented as
         // going away when the next song reaches a line of its own, and did
         // not — it stayed over the following song until somebody clicked it.

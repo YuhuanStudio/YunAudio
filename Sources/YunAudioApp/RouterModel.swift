@@ -1382,6 +1382,13 @@ final class RouterModel: ScriptTarget {
 
     func dismissPerformance() { lastPerformance = nil }
 
+    /// Forgets the song's length, so a gate can check what still works without
+    /// one. Only the flow check calls this.
+    func forgetDurationForCheck() {
+        nowPlaying?.duration = 0
+        trackClock.duration = 0
+    }
+
     /// Puts a scoreboard up so the flow check can watch it go away again.
     ///
     /// The card's own trigger is a song ending, which a gate cannot arrange
@@ -2396,7 +2403,23 @@ final class RouterModel: ScriptTarget {
     /// the difference between a control and a request.
     func seekNowPlaying(toFraction fraction: Double) {
         guard let track = nowPlaying, track.duration > 0 else { return }
-        let seconds = max(0, min(track.duration, track.duration * fraction))
+        seekNowPlaying(toSeconds: track.duration * fraction)
+    }
+
+    /// Moves the music to a moment, whether or not the song's length is known.
+    ///
+    /// Length is not a precondition for seeking, and treating it as one made
+    /// clicking a lyric line do nothing at all on a song whose duration had
+    /// not arrived yet — Spotify answers 0 until the track settles, and this
+    /// model fills the gap from the lyric match, which lands later still. The
+    /// words are on screen and clickable before either. Without a length there
+    /// is nothing to clamp against and the floor at zero is the whole check.
+    func seekNowPlaying(toSeconds target: Double) {
+        guard let track = nowPlaying, target.isFinite else { return }
+        let seconds =
+            track.duration > 0
+            ? max(0, min(track.duration, target))
+            : max(0, target)
         nowPlaying?.position = seconds
         trackClock.adopt(
             seconds, isPlaying: track.isPlaying,
@@ -2420,19 +2443,16 @@ final class RouterModel: ScriptTarget {
     /// seconds off — the correction would fight the seek exactly as far as
     /// somebody had corrected it.
     func seekToLyricLine(_ index: Int) {
-        guard let lyrics, lyrics.lines.indices.contains(index),
-            let track = nowPlaying, track.duration > 0
-        else { return }
-        let seconds = max(0, lyrics.lines[index].time - lyrics.offset - lyricNudge)
-        seekNowPlaying(toFraction: seconds / track.duration)
+        guard let lyrics, lyrics.lines.indices.contains(index) else { return }
+        seekNowPlaying(
+            toSeconds: max(0, lyrics.lines[index].time - lyrics.offset - lyricNudge))
     }
 
     /// Moves the music by a few seconds, keeping it inside the song.
     func skipNowPlaying(by seconds: Double) {
-        guard let track = nowPlaying, track.duration > 0 else { return }
+        guard nowPlaying != nil else { return }
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
-        let target = trackClock.position(at: now) + seconds
-        seekNowPlaying(toFraction: max(0, min(track.duration, target)) / track.duration)
+        seekNowPlaying(toSeconds: trackClock.position(at: now) + seconds)
     }
 
     /// Bumped whenever the words are replaced under the same song.
