@@ -31,6 +31,52 @@ struct SingingPanel: View {
             }
     }
 
+    /// Voice isolation is on, and it is about to delete the song.
+    ///
+    /// Apple's model keeps one person speaking and removes everything else — so
+    /// on a stage it treats the backing track and the singing as the noise it
+    /// exists to delete, and adds 56 ms doing it. 「語音通話」and 「吵雜環境」both
+    /// switch it on, because both are about a phone call, and somebody who set
+    /// one up months ago has no reason to connect the two.
+    ///
+    /// Said rather than overridden: it is a setting somebody chose, and an
+    /// application that silently undoes choices is worse than one that explains
+    /// them. The button is there because being told without being able to act
+    /// is only half of it.
+    @ViewBuilder
+    private var voiceIsolationWarning: some View {
+        if model.voiceIsolationWillHurtSinging {
+            VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                Label(
+                    loc("Voice isolation is on, and it will treat the song as noise."),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(Yun.Text.label)
+                .foregroundStyle(Yun.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    loc(
+                        "Apple's model keeps one person speaking and removes everything else, which is the backing track and the singing. It also adds about 56 ms."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                Button(loc("Turn it off while singing")) {
+                    model.voiceIsolationEnabled = false
+                }
+                .buttonStyle(YunButtonStyle(.primary, small: true))
+                .accessibilityIdentifier("SingingDisableVoiceIsolation")
+            }
+            .padding(Yun.Space.md)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Yun.Palette.warning.opacity(0.10), in: .rect(cornerRadius: Yun.Radius.card)
+            )
+            .accessibilityIdentifier("SingingVoiceIsolationWarning")
+        }
+    }
+
     /// How the song that just finished went, in the width of an inspector.
     ///
     /// The stage version can afford a best line and a sentence of advice per
@@ -91,6 +137,7 @@ struct SingingPanel: View {
             // open and the stage closed was having their score thrown away
             // exactly as everybody was before the card existed.
             finishedPerformance
+            voiceIsolationWarning
             if let track = model.nowPlaying {
                 trackHeader(track)
             } else if let problem = model.musicRecognitionProblem {

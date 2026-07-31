@@ -4132,6 +4132,26 @@ final class RouterModel: ScriptTarget {
     /// the drag passed through — seconds of silence to move a knob, on the one
     /// control somebody would want to move *while listening* to decide where it
     /// belongs.
+    /// Whether voice isolation is going to ruin the singing.
+    ///
+    /// Apple's model keeps one person speaking and removes everything else. On
+    /// a call that is the whole point; on a KTV stage it treats the backing
+    /// track and the singing as the noise it exists to delete, and adds 56 ms
+    /// while doing it.
+    ///
+    /// Two of the presets turn it on — 「語音通話」and 「吵雜環境」— because both
+    /// of them are about a phone call, and somebody who set one up in February
+    /// and opened the stage in July has no reason to connect the two. So the
+    /// stage says it, rather than either staying quiet or overriding a setting
+    /// somebody chose on purpose.
+    ///
+    /// The threshold is not zero: a little isolation on a noisy room is a
+    /// judgement somebody may have made deliberately, and warning about 5% would
+    /// train people to ignore the line that matters at 100%.
+    var voiceIsolationWillHurtSinging: Bool {
+        isSingingVisible && voiceIsolationEnabled && voiceIsolationMix >= 40
+    }
+
     var voiceIsolationMix: Float = 100 {
         didSet {
             guard oldValue != voiceIsolationMix else { return }
