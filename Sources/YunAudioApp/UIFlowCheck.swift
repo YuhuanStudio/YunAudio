@@ -4324,6 +4324,36 @@ enum UIFlowCheck {
         let after = model.songPosition
         note("position \(before) → \(after) s across 700 ms with the vocal out")
         check("and the song keeps playing through it", after > before + 0.3)
+
+        // The soak, which is off unless asked for.
+        //
+        // Four crash reports put the process down at about two minutes with an
+        // `AVAudioEngine` in it, always inside the runtime's dynamic main-actor
+        // check. Building the engine on the first song rather than at launch
+        // took a session past four minutes — but that session never opened a
+        // song, so it proved "no engine, no crash" and nothing about the case
+        // the engine actually exists in. This is that case: a song open and
+        // playing for as long as somebody asks.
+        //
+        // The assertion is arriving at the end. A crash takes the process with
+        // it, so a section that finishes is a section that did not crash.
+        if let seconds = ProcessInfo.processInfo.environment["YUNAUDIO_SOAK_SECONDS"]
+            .flatMap(Double.init), seconds > 0
+        {
+            note("soaking with the song playing for \(Int(seconds)) s…")
+            let started = Date()
+            while Date().timeIntervalSince(started) < seconds {
+                try? await Task.sleep(for: .milliseconds(500))
+                model.refreshNowPlaying()
+                // Round and round, so the file's own length does not end it.
+                if model.songPosition >= max(1, model.nowPlaying?.duration ?? 1) - 0.2 {
+                    model.seekNowPlaying(toSeconds: 0)
+                }
+            }
+            let lasted = Date().timeIntervalSince(started)
+            note("survived \(String(format: "%.0f", lasted)) s with a song playing")
+            check("the process is still here after the soak", lasted >= seconds)
+        }
         model.stopWords()
     }
 

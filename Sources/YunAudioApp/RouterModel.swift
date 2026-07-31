@@ -6537,6 +6537,9 @@ final class RouterModel: ScriptTarget {
     /// twice into a half-built route.
     private(set) var isBusy = false
     private var levelTimer: Timer?
+    /// The polling loop, which is a task rather than a timer. See
+    /// `startPolling()` for the crash that made it one.
+    private var pollLoop: Task<Void, Never>?
     private var deviceWatcher: DeviceChangeWatcher?
     @ObservationIgnored private var deviceRefreshGate = LatestRefreshGate()
     @ObservationIgnored private var deviceHydrationGate = LatestRefreshGate()
@@ -9162,16 +9165,38 @@ final class RouterModel: ScriptTarget {
         stopPolling()
         // Twenty hertz: fast enough that a meter reads as live, slow enough that
         // an idle menu bar app is not waking the CPU sixty times a second.
-        let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
-            // Registered on the main run loop below, so another main-actor task
-            // for every meter frame is allocation and scheduling with no hop.
-            MainActor.assumeIsolated { self?.poll() }
+        //
+        // **A task rather than a timer, and the reason is a crash.** This was a
+        // `Timer` whose block called `MainActor.assumeIsolated` — correct by
+        // construction, since the timer was registered on the main run loop, and
+        // cheaper than a `Task` per frame. It also put the process down five
+        // times: `EXC_BAD_ACCESS` reading address `0x1e` inside
+        // `swift_task_isCurrentExecutor`, which is the runtime's *dynamic* check
+        // for "am I on the main actor", between two and three and a half minutes
+        // after launch, every time.
+        //
+        // The last of the five is the one that settled it. It came from a run
+        // that never opened a song, so no `AVAudioEngine` existed — which had
+        // been the working theory and was wrong. What every one of the five had
+        // in common was this line: a dynamic executor check, performed twenty
+        // times a second, forever.
+        //
+        // A task declared `@MainActor` is isolated *statically*. There is no
+        // check to perform, so there is nothing to fault. It is also one task
+        // that suspends and resumes rather than one allocated per frame, which
+        // was the objection to a task in the first place.
+        pollLoop = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard !Task.isCancelled, let self else { return }
+                self.poll()
+            }
         }
-        RunLoop.main.add(timer, forMode: .common)
-        levelTimer = timer
     }
 
     private func stopPolling() {
+        pollLoop?.cancel()
+        pollLoop = nil
         levelTimer?.invalidate()
         levelTimer = nil
     }
