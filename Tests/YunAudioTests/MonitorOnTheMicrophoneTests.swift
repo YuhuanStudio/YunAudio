@@ -24,7 +24,7 @@ struct MonitorOnTheMicrophoneTests {
         #expect(
             RouterModel.canMonitor(
                 uid: mic, name: "Razer Seiren V3 Pro", hasOutput: true,
-                destinationUID: blackHole))
+                destinationUID: blackHole, sourceUID: mic))
     }
 
     @Test("but the destination never can, because the mix is already there")
@@ -32,7 +32,7 @@ struct MonitorOnTheMicrophoneTests {
         #expect(
             !RouterModel.canMonitor(
                 uid: blackHole, name: "BlackHole 16ch", hasOutput: true,
-                destinationUID: blackHole))
+                destinationUID: blackHole, sourceUID: mic))
     }
 
     @Test("nor our own device, which is what the far end is listening to")
@@ -40,7 +40,7 @@ struct MonitorOnTheMicrophoneTests {
         #expect(
             !RouterModel.canMonitor(
                 uid: "YunAudioDevice_UID", name: "YunAudio", hasOutput: true,
-                destinationUID: blackHole))
+                destinationUID: blackHole, sourceUID: mic))
     }
 
     @Test("and something with no output is not an output")
@@ -48,6 +48,21 @@ struct MonitorOnTheMicrophoneTests {
         #expect(
             !RouterModel.canMonitor(
                 uid: mic, name: "Razer Seiren V3 Pro", hasOutput: false,
-                destinationUID: blackHole))
+                destinationUID: blackHole, sourceUID: mic))
+    }
+
+    @Test("a device set as both ends is still offered, because that pair cannot start")
+    func theDeadEndIsOpened() {
+        // Somebody trying to hear themselves sets the microphone as the output
+        // first — it is the obvious control, and the picker offers it. That
+        // pair is refused at start, and hiding the device from the monitor for
+        // being a destination it can never actually be locked them out of both
+        // controls at once: the output will not take it, and the monitor would
+        // not list it until the output had been changed back to something they
+        // were not thinking about.
+        #expect(
+            RouterModel.canMonitor(
+                uid: mic, name: "Razer Seiren V3 Pro", hasOutput: true,
+                destinationUID: mic, sourceUID: mic))
     }
 }

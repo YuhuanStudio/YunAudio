@@ -488,6 +488,7 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "開啟 KTV 視窗";
+"To hear yourself in this microphone's own headphone socket, choose it under Monitor instead." = "要在這支麥克風自己的耳機孔聽自己，請在下面的「監聽」選它，不是輸出。";
 "As written" = "照原文";
 "Simplified" = "轉簡體";
 "Traditional" = "轉繁體";

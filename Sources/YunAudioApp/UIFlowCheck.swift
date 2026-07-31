@@ -4166,6 +4166,91 @@ enum UIFlowCheck {
             }
         }
 
+        try section("monitoring on the microphone's own socket")
+        // Every studio microphone with a headphone jack presents as one
+        // CoreAudio device carrying the microphone's input and the socket's
+        // output. The picker excluded the source device outright, so the socket
+        // people buy those microphones for was the one output it would not
+        // offer — and the destination refuses it, correctly. There was no way
+        // in at all.
+        //
+        // Asserted against the machine rather than against the rule: a list
+        // that offers it and an engine that then refuses is the same failure.
+        if let bothWays = model.inputDevices.first(where: { device in
+            device.hasInput && device.hasOutput
+                && !device.name.localizedCaseInsensitiveContains("YunAudio")
+                && device.uid != model.selectedDestinationUID
+        }) {
+            note("using \(bothWays.name) — \(bothWays.inputChannels) in, \(bothWays.outputChannels) out")
+            let originalSource = model.selectedSourceUID
+            let originalMonitor = model.monitorDeviceUID
+            model.selectedSourceUID = bothWays.uid
+            await settle(model, timeout: 15)
+            check(
+                "the microphone's own output is offered as a monitor",
+                model.monitorOptions.contains { $0.uid == bothWays.uid })
+
+            model.monitorDeviceUID = bothWays.uid
+            await settle(model, timeout: 20)
+            await waitUntil(
+                "the route came up with the microphone monitoring itself",
+                { model.isRunning && !model.isBusy }, timeout: 20)
+            // The picker going quietly back to "Off" is the failure this is
+            // really hunting: a list that offers a device the engine then drops
+            // is worse than a list that never offered it.
+            if let dropped = model.droppedMonitorName, let reason = model.droppedMonitorReason {
+                note("the engine gave it up: \(dropped) — \(reason)")
+            }
+            check("and the engine kept it", model.droppedMonitorName == nil)
+            check("the monitor is still the microphone", model.monitorDeviceUID == bothWays.uid)
+            await checkAudioIsFlowing(model, "audio is flowing with the socket monitoring")
+
+            model.monitorDeviceUID = originalMonitor
+            model.selectedSourceUID = originalSource
+            await settle(model, timeout: 20)
+            await bringRoutingBack(model)
+        } else {
+            note("no device on this machine has both an input and an output — skipped")
+        }
+
+        try section("the words move with nothing routed")
+        // Reported twice, and the first fix was half of one. `poll()` opened
+        // with `guard isRunning`, so the words did not move without a route;
+        // the branch added for that case was never reached, because
+        // `startPolling` was only ever called from the completion of a
+        // successful route start. There was no timer at all.
+        //
+        // So this stops the route on purpose and asserts the one thing that
+        // matters: the position of the song advances anyway.
+        let wasRunning = model.isRunning
+        model.stop()
+        await waitUntil("the route stopped", { !model.isRunning }, timeout: 15)
+        model.isSingingVisible = true
+        let unrouted = URL(fileURLWithPath: "/tmp/yunaudio-unrouted.wav")
+        defer { try? FileManager.default.removeItem(at: unrouted) }
+        if (try? stereoWave(notes: chainNotes, secondsEach: chainNoteSeconds)
+            .write(to: unrouted)) != nil, model.openSong(at: unrouted)
+        {
+            model.runWords(from: 0)
+            await pause(0.4)
+            let before = model.songPosition
+            await pause(1.0)
+            let after = model.songPosition
+            note(
+                String(
+                    format: "position %.3f → %.3f s with the route stopped", before, after))
+            check("the song's clock advances with nothing routed", after > before + 0.5)
+            check("and the poll is running to carry it", model.isPollingForCheck)
+            model.stopWords()
+            model.closeWords()
+        } else {
+            note("could not write or open the unrouted fixture — skipped")
+        }
+        if wasRunning {
+            model.start()
+            await waitUntil("the route came back", { model.isRunning }, timeout: 20)
+        }
+
         try section("the stage is only built once")
         // Both presentations read the same song, the same words and the same
         // meters. With the Sing tab open behind an open stage, every change

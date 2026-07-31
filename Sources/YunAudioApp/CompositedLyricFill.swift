@@ -484,6 +484,10 @@ final class CompositedLyricView: NSView {
     /// So the only place the mask can be asserted is here.
     func revealRowsForCheck() -> [CALayer] { revealRows }
 
+    /// The travelling halos, one per row, for the check that a row nobody has
+    /// reached carries no light.
+    func glowBandsForCheck() -> [CALayer] { glowBands }
+
     /// The travelling highlight, for the same reason and with the same excuse.
     func glowForCheck() -> (layer: CALayer, bands: [CALayer]) { (glowLayer, glowBands) }
 
@@ -621,7 +625,19 @@ final class CompositedLyricView: NSView {
                 continue
             }
             rowLayer.bounds.size.width = rowWidth
-            glowBands[safe: index]?.opacity = 1
+            // Dark until this row is reached, and this is the block that
+            // survived two fixes.
+            //
+            // The still branch above already refuses to park a halo mid-line —
+            // "a halo parked mid-line on a paused song is a smudge, not a
+            // sweep" — and the moving branch set every row's halo to full
+            // opacity regardless. A row nobody had sung yet therefore carried a
+            // soft bright blob at its leading edge, which on a wrapped line
+            // sits behind the first character of the second row. Reported as a
+            // leak three times: first read as the glow escaping the card, then
+            // as the fill mask's half-feather, and it was neither. Both of
+            // those were real and are fixed; this is the one in the picture.
+            glowBands[safe: index]?.opacity = timing.initialScale > 0 ? 1 : 0
             // The shape the words describe, where the file gave one. The whole
             // line's curve is handed over at once and the animation is started
             // in the past by however much of the line has already been sung, so
@@ -661,6 +677,20 @@ final class CompositedLyricView: NSView {
                     travel.isRemovedOnCompletion = true
                     glow.position.x = band(1)
                     glow.add(travel, forKey: "lyric-glow")
+                    // And the halo arrives with the row rather than waiting at
+                    // its edge. The same key times, so it cannot disagree with
+                    // the fill about when this row begins: nought while the
+                    // curve is still clamped at the row's start, one after.
+                    let appear = CAKeyframeAnimation(keyPath: "opacity")
+                    appear.values = curve.values.map { $0 > 0 ? 1.0 : 0.0 }
+                    appear.keyTimes = animation.keyTimes
+                    appear.duration = animation.duration
+                    appear.beginTime = animation.beginTime
+                    appear.calculationMode = .discrete
+                    appear.fillMode = .backwards
+                    appear.isRemovedOnCompletion = true
+                    glow.opacity = 1
+                    glow.add(appear, forKey: "lyric-glow-appear")
                 }
                 continue
             }

@@ -383,3 +383,59 @@ struct SoundModelReadoutTests {
         #expect(forDucking == .forSomethingElse)
     }
 }
+
+/// The halo on a row nobody has reached.
+///
+/// The still branch has always refused to park one mid-line. The moving branch
+/// set every row's halo to full opacity, so on a wrapped line a soft bright blob
+/// sat at the leading edge of the second row, behind a character nobody had
+/// sung. Reported three times, and the first two readings of it — the glow
+/// escaping the card, the fill mask's half-feather — were different defects that
+/// are also fixed.
+@Suite("no halo on a row nobody has reached")
+struct UnreachedRowHaloTests {
+
+    @Test("the second row carries no light while the first is being sung")
+    @MainActor
+    func theHaloWaitsForItsRow() throws {
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 160))
+        view.configure(
+            text: "難道非要耗盡所有委屈才能學會不在乎",
+            font: .systemFont(ofSize: 27, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: nil,
+            reduceMotion: false,
+            // Inside the first row of a wrap.
+            frozenProgress: 0.2)
+        view.layoutSubtreeIfNeeded()
+
+        let rows = view.revealRowsForCheck()
+        let halos = view.glowBandsForCheck()
+        #expect(rows.count >= 2, "the fixture has to wrap")
+        #expect(halos.count == rows.count)
+        for index in 1..<halos.count {
+            #expect(halos[index].opacity == 0, "row \(index) carried a halo")
+        }
+    }
+
+    @Test("and none of them does before the line has started at all")
+    @MainActor
+    func nothingBeforeTheLine() throws {
+        let view = CompositedLyricView(
+            frame: NSRect(x: 0, y: 0, width: 300, height: 160))
+        view.configure(
+            text: "難道非要耗盡所有委屈才能學會不在乎",
+            font: .systemFont(ofSize: 27, weight: .bold),
+            baseColour: .white.withAlphaComponent(0.62),
+            fillColour: .white,
+            anchor: nil,
+            reduceMotion: false,
+            frozenProgress: 0)
+        view.layoutSubtreeIfNeeded()
+        for (index, halo) in view.glowBandsForCheck().enumerated() {
+            #expect(halo.opacity == 0, "row \(index) carried a halo at nought")
+        }
+    }
+}

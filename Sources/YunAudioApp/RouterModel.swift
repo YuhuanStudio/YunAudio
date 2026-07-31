@@ -1182,6 +1182,13 @@ final class RouterModel: ScriptTarget {
             guard oldValue != isSingingVisible else { return }
             refreshAnalysisNeeds()
             if isSingingVisible { refreshNowPlaying(); updateSinging() } else { clearSinging() }
+            // The poll has to exist for the words to move.
+            //
+            // `startPolling` was called from one place — the completion of a
+            // successful route start — so with nothing routed there was no
+            // timer at all, and the branch added to `poll()` for exactly this
+            // case was never reached. Half a fix reads the same as none.
+            keepThePollAlive()
         }
     }
 
@@ -4729,8 +4736,32 @@ final class RouterModel: ScriptTarget {
         outputDevices.filter {
             Self.canMonitor(
                 uid: $0.uid, name: $0.name, hasOutput: $0.hasOutput,
-                destinationUID: selectedDestinationUID)
+                destinationUID: selectedDestinationUID, sourceUID: selectedSourceUID)
         }
+    }
+
+    /// What to say when somebody puts one device at both ends.
+    ///
+    /// The refusal is right and the old sentence was not enough. Somebody who
+    /// sets a Razer Seiren as the input *and* the output is not confused about
+    /// routing — they want to hear themselves in the microphone's own headphone
+    /// socket, which is what that socket is for, and the destination is the
+    /// wrong control for it: it is what the far end hears, and pointing it at
+    /// the headphones would send Discord nothing.
+    ///
+    /// The right control is the monitor, three rows down and easy to miss. A
+    /// message that names it turns a dead end into an instruction — and it is
+    /// only offered when the device really can do it, so it never sends anybody
+    /// to a picker that will not have their microphone in it.
+    private func sameDeviceMessage(source: String, destination: String) -> String {
+        let refusal = loc("The input and the output cannot be the same device.")
+        guard let device = outputDevices.first(where: { $0.uid == destination }),
+            device.hasInput, device.hasOutput, device.uid == source
+        else { return refusal }
+        return refusal + " "
+            + loc(
+                "To hear yourself in this microphone's own headphone socket, choose it under Monitor instead."
+            )
     }
 
     /// Whether one device can carry the monitor mix.
@@ -4741,14 +4772,28 @@ final class RouterModel: ScriptTarget {
     /// a microphone plugged in. The source is not a parameter any more, which
     /// is the change: it was the only reason the socket was hidden.
     nonisolated static func canMonitor(
-        uid: String, name: String, hasOutput: Bool, destinationUID: String?
+        uid: String, name: String, hasOutput: Bool,
+        destinationUID: String?, sourceUID: String?
     ) -> Bool {
         guard hasOutput else { return false }
         // Our own virtual device is what the far end is listening to. Sending
         // the microphone back into it is a loop, not a monitor.
         guard !name.localizedCaseInsensitiveContains("YunAudio") else { return false }
-        // The mix already goes there.
-        return uid != destinationUID
+        // The mix already goes there — unless the destination is the source,
+        // which is a pair that cannot start at all.
+        //
+        // That combination is exactly what somebody trying to hear themselves
+        // in their microphone's headphone socket sets first, and hiding the
+        // device from the monitor for being a destination it can never actually
+        // be left them locked out of both controls at once: the output refuses
+        // the device, and the monitor will not list it until the output has been
+        // changed back to something they were not thinking about. The message
+        // that now points them at the monitor would have pointed at a picker
+        // with nothing in it.
+        if let destinationUID, uid == destinationUID, destinationUID != sourceUID {
+            return false
+        }
+        return true
     }
 
     /// True when the chosen monitor is a loudspeaker rather than headphones, as
@@ -8526,12 +8571,12 @@ final class RouterModel: ScriptTarget {
         // tells nobody anything.
         guard !isSamePhysicalDevice(source, destination) else {
             startFailed = true
-            lastError = loc("The input and the output cannot be the same device.")
+            lastError = sameDeviceMessage(source: source, destination: destination)
             return
         }
         guard source != destination else {
             startFailed = true
-            lastError = loc("The input and the output cannot be the same device.")
+            lastError = sameDeviceMessage(source: source, destination: destination)
             return
         }
         beginStartOnEngineQueue(source: source, destination: destination, selftest: selftest)
@@ -9482,6 +9527,26 @@ final class RouterModel: ScriptTarget {
         }
         RunLoop.main.add(timer, forMode: .common)
         levelTimer = timer
+    }
+
+    /// Whether the twenty-hertz poll exists, for the flow check.
+    ///
+    /// Not visible any other way, and the defect it guards is invisible too: a
+    /// missing timer looks exactly like a song that is not playing.
+    var isPollingForCheck: Bool { levelTimer != nil }
+
+    /// Runs the poll for as long as anything needs it.
+    ///
+    /// Two things do: a route, whose meters and cycle counter are the reason
+    /// twenty hertz was chosen, and the stage, whose words move whether or not
+    /// any audio is being routed. Neither owns the timer, so neither may stop
+    /// it while the other still wants it.
+    private func keepThePollAlive() {
+        if isRunning || isSingingVisible {
+            if levelTimer == nil { startPolling() }
+        } else {
+            stopPolling()
+        }
     }
 
     private func stopPolling() {
