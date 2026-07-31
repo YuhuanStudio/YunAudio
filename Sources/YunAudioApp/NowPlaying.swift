@@ -208,6 +208,27 @@ enum NowPlaying {
     /// than somebody starts a song, and between sweeps the last answer stands.
     nonisolated static let browserSweepInterval: Double = 2.0
 
+    /// How long to wait after a sweep that found nothing.
+    ///
+    /// **Where the time actually goes, measured on this machine** (less
+    /// `osascript`'s own 35 ms of startup):
+    ///
+    ///     one event, no JavaScript at all      73 ms
+    ///     one event and one evaluation         91 ms
+    ///     a sweep of ten tabs                 325 ms
+    ///
+    /// So 73 ms is the floor for saying anything to Safari at all, and each
+    /// tab after the first is about 25. That settles a tempting idea — letting
+    /// somebody pin the window the music is in. It would remove the per-tab
+    /// part and nothing else: the steady-state poll already asks one tab, and
+    /// it would still pay the 73. The saving worth having is not a narrower
+    /// question, it is *not asking* — so a browser with no video in it at all,
+    /// which is most browsers most of the time, is left alone for ten seconds
+    /// instead of two. A song that starts is found within one of those.
+    nonisolated static let browserQuietInterval: Double = 10
+
+    nonisolated(unsafe) private static var browserFoundNothing: Set<String> = []
+
     nonisolated(unsafe) private static var lastBrowserTracks:
         [String: (track: Track?, asked: Double)] = [:]
 
@@ -216,12 +237,19 @@ enum NowPlaying {
         knownTabsLock.lock()
         let cached = lastBrowserTracks[name]
         knownTabsLock.unlock()
-        if let cached, monotonicNow - cached.asked < browserSweepInterval {
+        let quiet = browserFoundNothing.contains(name)
+        let interval = quiet ? browserQuietInterval : browserSweepInterval
+        if let cached, monotonicNow - cached.asked < interval {
             return cached.track
         }
         let track = sweepBrowser(name)
         knownTabsLock.lock()
         lastBrowserTracks[name] = (track, monotonicNow)
+        if track == nil {
+            browserFoundNothing.insert(name)
+        } else {
+            browserFoundNothing.remove(name)
+        }
         knownTabsLock.unlock()
         return track
     }

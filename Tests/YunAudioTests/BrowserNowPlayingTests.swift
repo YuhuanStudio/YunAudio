@@ -285,6 +285,38 @@ struct BrowserNowPlayingTests {
         #expect(NowPlaying.browserSweepInterval >= NowPlaying.browserAskInterval)
     }
 
+    @Test("the wider corpus of real titles YouTube answered with")
+    func aWiderCorpusIsParsed() {
+        // Five more, fetched the same way, chosen to be different shapes
+        // rather than more of the same — and two of them broke the parser as
+        // it stood.
+        let cases:
+            [(title: String, channel: String, song: String, artist: String)] = [
+                // 慢冷 itself. The bracket is a tagline the uploader wrote,
+                // and it is short enough to look like a name — taking it made
+                // the song's title a line of advertising.
+                (
+                    "梁靜茹 Fish Leong - 慢冷 Slow-To-Cool-Down【慢冷的人啊，會自我折磨】[ 歌詞 ]",
+                    "TWKchannel", "慢冷", "梁靜茹"
+                ),
+                // Japanese titles are quoted, not bracketed. Treating 「」 as a
+                // lyric quote deleted the song's name and left the channel and
+                // the words 「Official Music Video」.
+                ("YOASOBI「夜に駆ける」 Official Music Video", "YOASOBI", "夜に駆ける", "YOASOBI"),
+                // These two already worked, and must go on working.
+                (
+                    "五月天 Mayday【溫柔 Tenderness】台視 2000年「俠女闖天關」片尾主題曲 Official Music Video",
+                    "滾石唱片 ROCK RECORDS", "溫柔", "五月天"
+                ),
+                ("Hype Boy", "NewJeans - Topic", "Hype Boy", "NewJeans"),
+            ]
+        for one in cases {
+            let parsed = BrowserNowPlaying.splitTitle(one.title, channel: one.channel)
+            #expect(parsed.title == one.song, Comment(rawValue: one.title))
+            #expect(parsed.artist == one.artist, Comment(rawValue: one.title))
+        }
+    }
+
     @Test("the answer carried between asks is the answer, not a guess")
     func carriedPositionsAdvance() throws {
         // No sleeping. A wall-clock wait inside the full suite is a race

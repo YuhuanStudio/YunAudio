@@ -189,7 +189,14 @@ enum BrowserNowPlaying {
             let song = String(cleaned[range.upperBound...])
                 .trimmingCharacters(in: .whitespaces)
             if !artist.isEmpty, !song.isEmpty {
-                return (preferringHan(song), preferringHan(artist))
+                // A name inside the song half still wins — 「五月天 - 【溫柔】…」
+                // — and anything else in brackets goes before the Chinese is
+                // preferred, or the longest run of it would be a tagline.
+                let named = bracketedName(in: song)
+                return (
+                    preferringHan(named ?? withoutBracketGroups(song)),
+                    preferringHan(withoutBracketGroups(artist))
+                )
             }
         }
         return (preferringHan(cleaned), preferringHan(creditedName(in: "", or: channel)))
@@ -198,7 +205,10 @@ enum BrowserNowPlaying {
     /// The credit written before the song, or the channel when there is none.
     private static func creditedName(in prefix: String, or channel: String) -> String {
         let trimmed = prefix.trimmingCharacters(
-            in: CharacterSet(charactersIn: " -–—‐《》【】").union(.whitespaces))
+            // The opening mark of whatever bracket the name was taken out of
+            // belongs to the bracket, not to the person: 「YOASOBI「」 is a
+            // channel called YOASOBI with a quote mark stuck to it.
+            in: CharacterSet(charactersIn: " -–—‐《》【】「」『』()（）").union(.whitespaces))
         if !trimmed.isEmpty { return trimmed }
         // YouTube appends 「 - Topic」 to the channels it generates, and no
         // lyric index has heard of an artist called that.
@@ -209,14 +219,42 @@ enum BrowserNowPlaying {
     /// The name an uploader put inside 《》 or 【】, when it is short enough to
     /// be a name rather than a sentence.
     static func bracketedName(in title: String) -> String? {
-        for pattern in ["《([^》]{1,24})》", "【([^】]{1,24})】"] {
+        for pattern in [
+            "《([^》]{1,24})》", "【([^】]{1,24})】",
+            // Japanese titles are quoted, not bracketed: 「夜に駆ける」. Treating
+            // these as lyric quotes and deleting them removed the song's name
+            // and left 「YOASOBI Official Music Video」.
+            "「([^」]{1,24})」", "『([^』]{1,24})』",
+        ] {
             guard let match = title.range(of: pattern, options: .regularExpression)
             else { continue }
             let inner = title[match].dropFirst().dropLast()
             let name = inner.trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty { return name }
+            // A sentence is not a name. 「慢冷的人啊，會自我折磨」 is eleven
+            // characters and fits every other test — it is a tagline the
+            // uploader wrote, and taking it would have made the song's name a
+            // line of advertising. Sentence punctuation is what tells them
+            // apart.
+            guard !name.isEmpty,
+                name.rangeOfCharacter(from: CharacterSet(charactersIn: "，。！？、；：,;")) == nil
+            else { continue }
+            return name
         }
         return nil
+    }
+
+    /// Whatever is left in brackets once the name has been chosen.
+    ///
+    /// 「慢冷 Slow-To-Cool-Down【慢冷的人啊，會自我折磨】」 is the song plus a
+    /// tagline, and the tagline has the longer run of Chinese in it — so
+    /// without this the preference below would have picked the advertising.
+    static func withoutBracketGroups(_ text: String) -> String {
+        var cleaned = text
+        for pattern in ["《[^》]*》", "【[^】]*】", "「[^」]*」", "『[^』]*』", "\\([^)]*\\)"] {
+            cleaned = cleaned.replacingOccurrences(
+                of: pattern, with: " ", options: .regularExpression)
+        }
+        return cleaned.trimmingCharacters(in: .whitespaces)
     }
 
     /// Where a string carries both Chinese and Latin, the Chinese.
@@ -250,8 +288,10 @@ enum BrowserNowPlaying {
     static func strippedDecoration(_ title: String) -> String {
         var cleaned = title
         for pattern in [
-            // A quoted line of the lyric, which uploaders use as a subtitle.
-            "[『「][^』」]*[』」]",
+            // A quoted line of the lyric, which uploaders use as a subtitle —
+            // long, unlike a Japanese title in the same punctuation, which is
+            // why the length is what separates them rather than the marks.
+            "[『「][^』」]{25,}[』」]",
             // Bracket groups that are about the upload rather than the song.
             "\\s*[\\(\\[（【][^\\)\\]）】]*"
                 + "(?i:official|mv|m/v|hd|4k|lyric|audio|video|live|vietsub|pinyin"
