@@ -6,7 +6,7 @@
 
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系统需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
-[![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+[![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
 [![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#验证)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系统需求)
 
@@ -32,7 +32,7 @@ YunAudio 把麦克风，以及任何应用程序的音频，路由进一个虚�
 | **依赖** | 无。`Package.swift` 的 `dependencies` 为空数组 |
 | **接口** | 窗口、菜单栏面板、URL scheme、CLI、Unix socket、MCP、MIDI、常驻 JavaScript |
 | **格式** | 44.1–192 kHz；WAV、FLAC、AAC，支持每来源分轨 |
-| **许可** | MIT |
+| **许可** | Apache 2.0 |
 
 ## 功能
 
@@ -295,7 +295,11 @@ App/                bundle 组装、图标与 verify.sh
 
 ## 许可
 
-MIT。见 [LICENSE](LICENSE)。
+Apache 2.0。见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
+选它而非 MIT 是为了专利授权：贡献者连同代码一起授予其专利主张，而任何人
+拿专利提告就失去这份授权。其余权限与 MIT 相同 —— 随你使用、修改，包进闭源
+产品也可以。
 
 ## 参与
 

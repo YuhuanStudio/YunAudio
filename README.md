@@ -7,7 +7,7 @@ can be proved bit-exact.**
 
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
-[![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
+[![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
 [![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#verification)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
@@ -37,7 +37,7 @@ cover them.
 | **Dependencies** | None. `Package.swift` declares an empty `dependencies` array |
 | **Interfaces** | Window, menu bar panel, URL scheme, CLI, Unix socket, MCP, MIDI, resident JavaScript |
 | **Formats** | 44.1–192 kHz; WAV, FLAC and AAC, with per-source stems |
-| **Licence** | MIT |
+| **Licence** | Apache 2.0 |
 
 ## Features
 
@@ -357,7 +357,12 @@ An index in all three languages: **[docs/](docs/README.md)**.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Chosen over MIT for the patent grant: contributors licence their patent
+claims along with their code, and that licence ends for anyone who sues
+over them. The permissions are otherwise the same — use it, change it,
+ship it in something closed if you like.
 
 ## Contributing
 
