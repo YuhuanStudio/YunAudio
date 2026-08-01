@@ -91,6 +91,18 @@ public enum YunStrings {
         }
     }
 
+    /// Reads a language for this launch only, without writing it down.
+    ///
+    /// The screenshot capture needs the interface in a stated language, and
+    /// setting `language` to get there **persists the choice**: taking the
+    /// English screenshots on a machine set to Chinese left that machine's
+    /// application in English afterwards. A documentation build must not change
+    /// the settings of the person running it.
+    public static func useForThisLaunchOnly(_ language: YunLanguage) {
+        stored = language
+        resolved = nil
+    }
+
     /// The bundle for the language the user actually reads, or the container
     /// itself when nothing better matches.
     private static func table() -> Bundle {

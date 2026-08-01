@@ -41,7 +41,12 @@ enum WindowCapture {
         if let wanted = ProcessInfo.processInfo.environment["YUNAUDIO_CAPTURE_LANGUAGE"],
             let language = YunLanguage(rawValue: wanted)
         {
-            YunTheme.shared.language = language
+            // For this launch only. Assigning `YunTheme.shared.language`
+            // writes the choice to the defaults, so taking the English
+            // screenshots on a machine set to Chinese left that machine's
+            // application in English — a documentation build that changes the
+            // settings of whoever ran it.
+            YunStrings.useForThisLaunchOnly(language)
             settle(turns: 4)
         }
         guard let window = mainWindow() else {
