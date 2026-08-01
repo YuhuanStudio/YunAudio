@@ -12,3 +12,16 @@ build/
 # Agent worktrees live here and are not part of the project.
 .claude/worktrees/
 build/screenshots/
+
+# Working notes, kept on disk and out of the repository.
+#
+# `TODO.md` is an engineering diary — 1362 lines of post-mortems and settled
+# arguments, in Chinese, when every document here is in English. It is genuinely
+# useful and it is useful to *us*: what a reader needs from it is the open items,
+# and those belong in the issue tracker where they can be answered.
+#
+# `CLAUDE.md` routes an AI tool to `AGENTS.md` and contains nothing that is not
+# already there.
+TODO.md
+CLAUDE.md
+

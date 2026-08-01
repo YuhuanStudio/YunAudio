@@ -64,5 +64,6 @@ must not be broken, why the four interface checks are each blind to what the
 others catch, and the approaches already measured and rejected — worth reading
 before proposing one of them again.
 
-**[TODO.md](TODO.md)** is what to do next, with the evidence behind each item,
-and **[docs/limits.md](docs/limits.md)** is what does not work and why.
+The issue tracker is what to do next. **[docs/limits.md](docs/limits.md)** is
+what does not work and why — including the approaches already measured and
+rejected, so that a good idea is not proposed for the third time.

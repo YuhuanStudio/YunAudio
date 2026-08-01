@@ -49,10 +49,10 @@ struct LocalSongClock: Equatable, Sendable {
 
 /// A song this application plays itself.
 ///
-/// **Not the routing engine's path, and deliberately not on it.** `TODO.md`
-/// rules out `AVAudioEngine` for the microphone chain because it would put its
-/// own graph and its own thread between a real-time callback and a deadline of
-/// 2.7 ms. This is the other thing entirely: a file being decoded and played to
+/// **Not the routing engine's path, and deliberately not on it.**
+/// `AVAudioEngine` is ruled out for the microphone chain because it would put
+/// its own graph and its own thread between a real-time callback and a deadline
+/// of 2.7 ms. This is the other thing entirely: a file being decoded and played to
 /// whatever the system output is, with no real-time constraint of its own and
 /// nothing of the router's in it. What it buys is the position — a count of
 /// samples rather than a question asked of another process.

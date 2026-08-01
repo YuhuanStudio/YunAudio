@@ -290,7 +290,6 @@ App/                bundle 組裝、圖示與 verify.sh
 | [docs/limits.md](docs/limits.md) | 不可行的部分，以及已排除的方案 |
 | [DEVICES.md](DEVICES.md) | 各裝置的硬體事實，以及每項事實的查證方式 |
 | [AGENTS.md](AGENTS.md) | 變更本專案的工作協定 |
-| [TODO.md](TODO.md) | 還開著的、已經定案不必再試的，以及每一項背後的證據 |
 
 ## 授權
 

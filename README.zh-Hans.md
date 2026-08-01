@@ -290,7 +290,6 @@ App/                bundle 组装、图标与 verify.sh
 | [docs/limits.md](docs/limits.md) | 不可行的部分，以及已排除的方案 |
 | [DEVICES.md](DEVICES.md) | 各设备的硬件事实，以及每项事实的核实方式 |
 | [AGENTS.md](AGENTS.md) | 变更本项目的工作约定 |
-| [TODO.md](TODO.md) | 还开着的、已经定案不必再试的，以及每一项背后的证据 |
 
 ## 许可
 

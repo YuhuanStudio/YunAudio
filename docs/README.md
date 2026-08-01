@@ -20,4 +20,3 @@ documents rather than reference:
 | [MEASUREMENT.md](../MEASUREMENT.md) | How the bit-exactness figure is obtained, and what it does not prove |
 | [DEVICES.md](../DEVICES.md) | What each piece of hardware is, and how each fact was checked |
 | [AGENTS.md](../AGENTS.md) | The working agreement for changing this project |
-| [TODO.md](../TODO.md) | What is worth doing next, with the evidence each item deserves |

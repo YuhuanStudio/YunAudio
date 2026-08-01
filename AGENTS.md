@@ -6,11 +6,11 @@ how to work on it without breaking the things that are hard to notice breaking.
 
 Read this first. Most of it exists because something already went wrong.
 
-`TODO.md` is the other half: what is worth working on next, what has already
-been settled and should not be retried, and where each of those conclusions came
-from. Read it before deciding what to do; read this before doing it. It is
-written in Chinese, which is worth knowing before you open it — this file and
-the rest of the documentation are in English.
+The issue tracker is the other half: what is worth working on next, and what
+has already been settled and should not be retried. Read it before deciding what
+to do; read this before doing it. `docs/limits.md` carries the conclusions that
+are permanent rather than merely current — the approaches that were measured and
+rejected, which is the half worth knowing before proposing one of them again.
 
 ## The one thing to understand before anything else
 

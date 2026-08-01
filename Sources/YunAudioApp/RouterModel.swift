@@ -3444,7 +3444,7 @@ final class RouterModel: ScriptTarget {
     /// times a second. `adopt` only runs when the player's track identity
     /// changes, so one song is one request and one cache file.
     private func startLyricsLookup(for track: NowPlaying.Track) {
-        // A switch for bisecting the `0x1e` crash, nothing else. See TODO.md.
+        // A switch for bisecting the `0x1e` crash, nothing else.
         guard ProcessInfo.processInfo.environment["YUNAUDIO_NO_LYRIC_LOOKUP"] == nil
         else { return }
         let identity = Self.lyricsIdentity(for: track)
@@ -9823,7 +9823,7 @@ final class RouterModel: ScriptTarget {
         // once the audio engine became lazy and the two `Canvas` closures
         // stopped reaching for `@MainActor` state, and this run — the whole
         // flow check, six minutes, every device switch — did not fault once.
-        // `TODO.md` says so rather than pretending either way.
+        // Recorded here rather than pretending either way.
         let timer = Timer(timeInterval: 1.0 / 20.0, repeats: true) { [weak self] _ in
             // Registered on the main run loop below, so this is the main
             // thread by construction and another task per meter frame would be

@@ -19,4 +19,3 @@
 | [MEASUREMENT.md](../../MEASUREMENT.md) | 比特精确那个数字是怎么测的，以及它不能证明什么 |
 | [DEVICES.md](../../DEVICES.md) | 每一件硬件到底是什么，以及每个事实是怎么核实的 |
 | [AGENTS.md](../../AGENTS.md) | 在这个项目里工作的约定 |
-| [TODO.md](../../TODO.md) | 接下来什么值得做，以及每一项配得上多少信任 |

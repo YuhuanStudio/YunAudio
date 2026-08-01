@@ -15,7 +15,7 @@ import PackageDescription
 // main-actor-isolated closure is handed to a `@preconcurrency` conformance —
 // which is every SwiftUI container, in every view. Twelve hypotheses were tested
 // and killed before this one, including the toolchain: Swift 6.3.3 crashes
-// identically. `TODO.md` has the table.
+// identically. The measurements are in the commit that made the change.
 //
 // Turning them off is safe *here* specifically because this package is in Swift
 // 6 language mode, so the isolation these checks re-verify at runtime has

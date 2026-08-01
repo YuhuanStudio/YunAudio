@@ -19,4 +19,3 @@
 | [MEASUREMENT.md](../../MEASUREMENT.md) | 位元精確那個數字是怎麼量的，以及它不能證明什麼 |
 | [DEVICES.md](../../DEVICES.md) | 每一件硬體到底是什麼，以及每個事實是怎麼查證的 |
 | [AGENTS.md](../../AGENTS.md) | 在這個專案裡工作的協定 |
-| [TODO.md](../../TODO.md) | 接下來什麼值得做，以及每一項配得上多少信任 |

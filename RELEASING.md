@@ -61,9 +61,8 @@ gh release create v0.2.0 build/YunAudio-*.dmg \
 
 What belongs in the notes, in this order: what somebody can now do that they
 could not, what changed under them, and what is still broken. The last of those
-is not optional — `TODO.md` and `docs/limits.md` are in this repository because
-a limitation somebody discovers themselves costs more than one they were told
-about.
+is not optional — `docs/limits.md` is in this repository because a limitation
+somebody discovers themselves costs more than one they were told about.
 
 ## Afterwards
 

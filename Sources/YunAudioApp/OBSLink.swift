@@ -4,9 +4,8 @@ import YunDesign
 
 /// This application's end of an OBS session.
 ///
-/// Deliberately small, and the reason is written in `TODO.md`: this project's
-/// problem is not too few features, it is more features than have been
-/// verified. So this does the three things that are worth something and are not
+/// Deliberately small, and the reason is worth stating: this project's problem
+/// is not too few features, it is more features than have been verified. So this does the three things that are worth something and are not
 /// somebody else's job:
 ///
 /// 1. **Connects**, and when it cannot, says which switch in OBS is off rather
