@@ -29,6 +29,12 @@ public enum RemoteCommand: Equatable, Sendable {
     case mute(Bool?)
     case record(Bool?)
     case transcribe(Bool?)
+    /// The KTV stage window. The one surface with no way in but a mouse — which
+    /// is how a screenshot of it with the scoring on turned out to be
+    /// impossible to take without somebody sitting at the machine.
+    case stage(Bool?)
+    /// Scoring the singing. Same reason.
+    case score(Bool?)
     /// A saved scene, by the name it was saved under.
     case preset(String)
     /// A saved whole-machine arrangement, likewise.
@@ -66,6 +72,10 @@ public enum RemoteCommand: Equatable, Sendable {
             return state(verb).map(RemoteCommand.record)
         case "transcribe", "transcript":
             return state(verb).map(RemoteCommand.transcribe)
+        case "stage", "ktv":
+            return state(verb).map(RemoteCommand.stage)
+        case "score", "scoring":
+            return state(verb).map(RemoteCommand.score)
         case "config", "setup":
             let name = rest.joined(separator: "/")
             return name.isEmpty ? nil : .config(name)
@@ -95,6 +105,8 @@ public enum RemoteCommand: Equatable, Sendable {
         case .mute(let state): Self.url("mute", state)
         case .record(let state): Self.url("record", state)
         case .transcribe(let state): Self.url("transcribe", state)
+        case .stage(let state): Self.url("stage", state)
+        case .score(let state): Self.url("score", state)
         case .config(let name): Self.url("config", name)
         case .preset(let name): Self.url("preset", name)
         case .script(let source): Self.url("script", source)

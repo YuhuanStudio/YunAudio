@@ -9469,6 +9469,32 @@ final class RouterModel: ScriptTarget {
                 return transcriptionError ?? loc("Transcription could not be started.")
             }
             return isTranscribing ? loc("Transcribing.") : loc("Transcription stopped.")
+        case .stage(let wanted):
+            let target = wanted ?? !isKTVWindowOpen
+            if target != isKTVWindowOpen {
+                if target { _ = KTVWindow.open(model: self) } else { KTVWindow.close() }
+            }
+            // Asked afterwards rather than assumed: opening a window can fail —
+            // there may be no screen to put it on — and reporting success for
+            // something that did not happen is the failure this whole
+            // vocabulary exists to avoid.
+            if target, !isKTVWindowOpen {
+                lastCommandFailed = true
+                return loc("The KTV window would not open.")
+            }
+            return isKTVWindowOpen ? loc("KTV window open.") : loc("KTV window closed.")
+        case .score(let wanted):
+            let target = wanted ?? !isScoringSinging
+            if target != isScoringSinging { isScoringSinging = target }
+            // `startScoring` refuses without a route and puts the switch back,
+            // and it leaves its reason in `singingError`. Handing that back is
+            // the difference between "it did not work" and "start routing
+            // first".
+            if target, !isScoringSinging {
+                lastCommandFailed = true
+                return singingError ?? loc("Scoring could not be started.")
+            }
+            return isScoringSinging ? loc("Scoring the singing.") : loc("Scoring stopped.")
         case .config(let name):
             guard
                 let configuration = quickConfigs.first(where: {

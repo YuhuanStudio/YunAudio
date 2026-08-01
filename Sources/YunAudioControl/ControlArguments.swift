@@ -31,7 +31,7 @@ public enum ControlArguments {
     /// The verbs this half of the tool answers to.
     public static let verbs = [
         "start", "stop", "toggle", "routing", "mute", "record", "transcribe",
-        "preset", "config", "script", "status",
+        "preset", "config", "script", "status", "stage", "score",
     ]
 
     /// The words for on and off, for a message that has to list them.
@@ -59,6 +59,8 @@ public enum ControlArguments {
         case "record", "recording": return switched(verb, rest, RemoteCommand.record)
         case "transcribe", "transcript":
             return switched(verb, rest, RemoteCommand.transcribe)
+        case "stage", "ktv": return switched(verb, rest, RemoteCommand.stage)
+        case "score", "scoring": return switched(verb, rest, RemoteCommand.score)
 
         case "preset", "scene": return named(verb, rest, "scene", RemoteCommand.preset)
         case "config", "setup": return named(verb, rest, "setup", RemoteCommand.config)

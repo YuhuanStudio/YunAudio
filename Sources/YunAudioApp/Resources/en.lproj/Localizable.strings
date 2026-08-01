@@ -779,3 +779,10 @@
 "Bluetooth · loads after selection" = "Bluetooth · loads after selection";
 "%@ could not be selected; the previous device is still in use." = "%@ could not be selected; the previous device is still in use.";
 "Loading %@…" = "Loading %@…";
+"Open / close the KTV window" = "Open / close the KTV window";
+"The KTV window would not open." = "The KTV window would not open.";
+"KTV window open." = "KTV window open.";
+"KTV window closed." = "KTV window closed.";
+"Scoring could not be started." = "Scoring could not be started.";
+"Scoring the singing." = "Scoring the singing.";
+"Scoring stopped." = "Scoring stopped.";

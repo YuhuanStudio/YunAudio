@@ -779,3 +779,10 @@
 "Bluetooth · loads after selection" = "藍牙 · 選取後載入";
 "%@ could not be selected; the previous device is still in use." = "無法選取 %@；目前仍使用原本的裝置。";
 "Loading %@…" = "正在載入 %@…";
+"Open / close the KTV window" = "開啟／關閉 KTV 視窗";
+"The KTV window would not open." = "KTV 視窗無法開啟。";
+"KTV window open." = "KTV 視窗已開啟。";
+"KTV window closed." = "KTV 視窗已關閉。";
+"Scoring could not be started." = "無法開始評分。";
+"Scoring the singing." = "正在為歌聲評分。";
+"Scoring stopped." = "已停止評分。";

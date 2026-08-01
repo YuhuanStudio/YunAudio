@@ -862,3 +862,70 @@ struct MCPBinaryTests {
         }
     }
 }
+
+/// The two surfaces that had no way in but a mouse.
+///
+/// Every other switch in this application answers to the URL scheme, the command
+/// line, the socket, MCP, MIDI and a script. The KTV stage and the scoring
+/// switch answered to none of them — which only became obvious when a
+/// screenshot of the stage with scoring on turned out to be impossible to take
+/// without somebody sitting at the machine to click twice.
+@Suite("the stage and the scoring switch can be reached without a mouse")
+struct StageAndScoreCommandTests {
+
+    @Test("the command line knows both verbs, and their aliases")
+    func fromTheCommandLine() {
+        for (words, expected) in [
+            (["stage", "on"], RemoteCommand.stage(true)),
+            (["stage", "off"], RemoteCommand.stage(false)),
+            (["stage", "toggle"], RemoteCommand.stage(nil)),
+            (["ktv", "on"], RemoteCommand.stage(true)),
+            (["score", "on"], RemoteCommand.score(true)),
+            (["scoring", "off"], RemoteCommand.score(false)),
+        ] {
+            guard case let .perform(command) = ControlArguments.parse(words) else {
+                Issue.record("\(words) was not recognised")
+                continue
+            }
+            #expect(command == expected, "\(words)")
+        }
+    }
+
+    @Test("and so does the URL scheme")
+    func fromTheURLScheme() throws {
+        #expect(
+            RemoteCommand.parse(try #require(URL(string: "yunaudio://stage/on")))
+                == .stage(true))
+        #expect(
+            RemoteCommand.parse(try #require(URL(string: "yunaudio://score/off")))
+                == .score(false))
+        #expect(
+            RemoteCommand.parse(try #require(URL(string: "yunaudio://ktv/toggle")))
+                == .stage(nil))
+    }
+
+    @Test("and a command survives being written down and read back")
+    func roundTripsThroughItsURL() {
+        // What a MIDI binding stores is the URL, so a verb that cannot make the
+        // journey is a verb no fader can be bound to.
+        for command in [
+            RemoteCommand.stage(true), .stage(false), .stage(nil),
+            .score(true), .score(false), .score(nil),
+        ] {
+            #expect(RemoteCommand.parse(command.url) == command, "\(command)")
+        }
+    }
+
+    @Test("both are offered where somebody picks something to automate")
+    func haveTitles() throws {
+        // `title` lives in the application, which this file does not import —
+        // it tests the vocabulary, and the vocabulary deliberately has no
+        // translated labels in it. Read from the source instead, because a verb
+        // with no title is a verb that cannot be bound to a fader.
+        let titles = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RemoteCommand+Title.swift", encoding: .utf8)
+        #expect(titles.contains("case .stage:"))
+        #expect(titles.contains("case .score:"))
+    }
+}
