@@ -1331,6 +1331,23 @@ enum UIFlowCheck {
         model.isSoundIdentificationEnabled = false
         model.isAutoLevelling = false
         model.isDucking = false
+        // And the two the list left out. `analysisNeeds` takes five inputs and
+        // this named three of them.
+        //
+        // The stage counts because the words and the note being sung are
+        // analysis by another name, and scoring counts because it keeps a pitch
+        // tracker per source. Neither mattered while the application always
+        // opened on the Sound tab with scoring off — and both are now restored
+        // from the saved settings, which is the point of persisting them. On a
+        // machine where somebody had been singing, this asserted that nothing
+        // had asked for analysis while something had, and the analysis was
+        // right.
+        //
+        // The same lesson as the chain alignment section: a check that reads
+        // the machine's settings and calls them its starting conditions is
+        // measuring the machine.
+        model.isSingingVisible = false
+        model.isScoringSinging = false
         await pause(0.4)
         check("nothing is being analysed when nothing asked", model.analysisIsIdle)
         model.isAnalysisVisible = true
