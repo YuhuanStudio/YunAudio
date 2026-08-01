@@ -169,6 +169,25 @@ struct Preferences: Codable, Equatable, Sendable {
     var obsInputName: String?
     var obsMirrorsMute: Bool?
 
+    // Things somebody switched on, which used to be forgotten every launch.
+    //
+    // All optional, like everything added since the first version: a
+    // preferences file written before these existed still decodes.
+
+    /// Whether the singing is being scored. The KTV switch — somebody who sings
+    /// every evening had to find it again every evening.
+    var isScoringSinging: Bool?
+    /// 重唱. A property of the queue, and the queue outlives a launch.
+    var repeatsOneSong: Bool?
+    /// Which inspector tab was open. Coming back to the panel somebody was
+    /// using is what every other application on this machine does.
+    var inspectorTab: String?
+    /// Whether the daemons are listed with the applications.
+    var showsBackgroundApps: Bool?
+    /// Whether Apple's sound classifier is running for the analysis card. It is
+    /// opt-in because it costs, and opting in should stay opted in.
+    var isSoundIdentificationEnabled: Bool?
+
     static let `default` = Preferences(
         sourceDeviceUID: nil,
         destinationDeviceUID: nil,
@@ -225,7 +244,12 @@ struct Preferences: Codable, Equatable, Sendable {
         obsHost: "127.0.0.1",
         obsPort: 4455,
         obsInputName: "",
-        obsMirrorsMute: false)
+        obsMirrorsMute: false,
+        isScoringSinging: false,
+        repeatsOneSong: false,
+        inspectorTab: nil,
+        showsBackgroundApps: false,
+        isSoundIdentificationEnabled: false)
 }
 
 /// A value-semantic preference snapshot whose derived collections are built

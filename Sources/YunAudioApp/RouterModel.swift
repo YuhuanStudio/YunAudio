@@ -1539,6 +1539,7 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != isScoringSinging else { return }
             if isScoringSinging { startScoring() } else { stopScoring() }
+            persist()
         }
     }
 
@@ -2264,6 +2265,7 @@ final class RouterModel: ScriptTarget {
         set {
             songQueue.repeatsOne = newValue
             settingsRevision &+= 1
+            persist()
         }
     }
 
@@ -4313,7 +4315,12 @@ final class RouterModel: ScriptTarget {
     /// Whether the daemons are shown alongside the applications. Off by
     /// default: they outnumber the real applications four to one, and none of
     /// them is what anyone came here to capture.
-    var showsBackgroundApps = false
+    var showsBackgroundApps = false {
+        didSet {
+            guard oldValue != showsBackgroundApps else { return }
+            persist()
+        }
+    }
 
     /// What the list actually offers, which is the applications plus, when
     /// asked for, everything else. A background process that is audible right
@@ -7502,6 +7509,23 @@ final class RouterModel: ScriptTarget {
         obsLink.port = saved.obsPort ?? OBSConnection.defaultPort
         obsLink.inputName = saved.obsInputName ?? ""
         obsLink.mirrorsMute = saved.obsMirrorsMute ?? false
+        // What somebody switched on, put back.
+        //
+        // Every one of these was forgotten at every launch, and each was a
+        // choice made on purpose: the KTV scoring switch, 重唱, the inspector
+        // tab, whether the daemons are listed, and whether Apple's classifier
+        // is running. `watchesIOAllocations` is deliberately *not* here — see
+        // its own note; a process-wide allocation hook that survives a relaunch
+        // is a machine that is quietly slower with nothing on screen to say so.
+        songQueue.repeatsOne = saved.repeatsOneSong ?? false
+        showsBackgroundApps = saved.showsBackgroundApps ?? false
+        isSoundIdentificationEnabled = saved.isSoundIdentificationEnabled ?? false
+        if let tab = saved.inspectorTab.flatMap(MainWindow.Inspector.init(rawValue:)) {
+            inspectorTab = tab
+        }
+        // Last, because it starts the scoring machinery and that wants the rest
+        // of the model already in place.
+        isScoringSinging = saved.isScoringSinging ?? false
 
         if deviceInventoryIsReady {
             resolveRestoredDeviceIntent(defaultInputUID: try? AudioDevices.defaultInputUID())
@@ -7591,7 +7615,12 @@ final class RouterModel: ScriptTarget {
                     obsHost: obsLink.host,
                     obsPort: obsLink.port,
                     obsInputName: obsLink.inputName,
-                    obsMirrorsMute: obsLink.mirrorsMute),
+                    obsMirrorsMute: obsLink.mirrorsMute,
+                    isScoringSinging: isScoringSinging,
+                    repeatsOneSong: songQueue.repeatsOne,
+                    inspectorTab: inspectorTab.rawValue,
+                    showsBackgroundApps: showsBackgroundApps,
+                    isSoundIdentificationEnabled: isSoundIdentificationEnabled),
                 capturedAppBundleIDs: capturedAppBundleIDs,
                 excludedAppBundleIDs: excludedAppBundleIDs,
                 enabledEffects: enabledEffects,
@@ -9331,7 +9360,12 @@ final class RouterModel: ScriptTarget {
     /// On the model so it survives a launch, and so the window photographer can
     /// reach it — the live window is built once by the scene, so before this
     /// five of the six tabs had never been photographed.
-    var inspectorTab: MainWindow.Inspector = .sound
+    var inspectorTab: MainWindow.Inspector = .sound {
+        didSet {
+            guard oldValue != inspectorTab else { return }
+            persist()
+        }
+    }
 
     /// What resident handlers have said, most recent last.
     private(set) var scriptLog: [String] = []
@@ -10580,6 +10614,7 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != isSoundIdentificationEnabled else { return }
             refreshAnalysisNeeds()
+            persist()
         }
     }
 
@@ -11078,6 +11113,11 @@ final class RouterModel: ScriptTarget {
     /// hook is process-wide and has no way to be installed selectively, so
     /// every allocation in SwiftUI, AppKit and CoreAudio was paying for a page
     /// almost nobody opens. It is a measurement to switch on.
+    /// It is deliberately **not** remembered across launches, for the same
+    /// reason: a hook that survives a relaunch is a machine that is quietly
+    /// slower with nothing on screen to say why. Every other switch somebody
+    /// throws is persisted; this one is the exception, and this is the note
+    /// saying so rather than an omission that looks like one.
     var watchesIOAllocations = false {
         didSet {
             guard oldValue != watchesIOAllocations else { return }
