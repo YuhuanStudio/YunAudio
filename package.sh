@@ -95,6 +95,51 @@ fi
 cp -R Driver/build/YunAudioDriver.driver "${STAGING}/"
 codesign --force "${SIGN_ARGS[@]}" "${STAGING}/YunAudioDriver.driver"
 
+# The command line and the MCP server, which the disk image did not carry.
+#
+# `README.md` leads with `yunaudio-cli selftest` as the proof of this project's
+# central claim, quotes `yunaudio-cli soak` for its performance numbers, and
+# lists both binaries as interfaces. None of that was reachable by anybody who
+# installed the image: they were built, tested, and then left behind — so the
+# one command that demonstrates the headline needed a clone and a toolchain.
+#
+# Release build, because the numbers those two report are meaningless from a
+# debug one: Swift's own checking machinery allocates on the realtime path and
+# turns the allocation count into a catastrophe that is not there.
+echo "==> building the command line and the MCP server"
+swift build -c release --product yunaudio-cli >/dev/null
+swift build -c release --product yunaudio-mcp >/dev/null
+mkdir -p "${STAGING}/Command Line"
+for tool in yunaudio-cli yunaudio-mcp; do
+	cp ".build/release/${tool}" "${STAGING}/Command Line/${tool}"
+	codesign --force "${SIGN_ARGS[@]}" "${STAGING}/Command Line/${tool}"
+done
+cat >"${STAGING}/Command Line/READ ME.txt" <<'TXT'
+yunaudio-cli   the verification harness and the command line
+yunaudio-mcp   a Model Context Protocol server, JSON-RPC 2.0 over stdio
+
+Neither needs installing. Run them from here, or copy them somewhere on your
+PATH:
+
+    sudo cp yunaudio-cli yunaudio-mcp /usr/local/bin/
+
+What the README leads with, and what these are for:
+
+    yunaudio-cli devices
+    yunaudio-cli selftest "<your microphone>" YunAudio
+
+The second sends a 24-bit pseudorandom sequence through the whole path, reads it
+back from the loopback, recovers the delay from the data and compares every
+sample. It needs the virtual device installed. On a path that is not clock-locked
+it reports the actual condition — resampled, or processed — rather than a pass or
+a failure.
+
+    yunaudio-cli soak
+
+Six minutes of a bare stereo route with no interface attached, which is where
+the processor and memory figures in the README come from.
+TXT
+
 # Installer for the driver half, since it needs privileges the app does not have.
 cat >"${STAGING}/Install Audio Device.command" <<'SCRIPT'
 #!/bin/bash
@@ -199,6 +244,34 @@ if [[ -n "${IDENTITY}" ]]; then
 fi
 
 echo "built ${IMAGE}"
+
+# Archives beside the image, because a disk image is not the only way somebody
+# wants this.
+#
+# A `.dmg` has to be mounted, which a script cannot do without ceremony and a
+# Homebrew cask would rather avoid. The application on its own, and the two
+# command-line tools on their own, cover the cases the image is clumsy for —
+# and `ditto` rather than `zip` because only `ditto` preserves the bundle's
+# symlinks and extended attributes, and a `.app` that loses those is a `.app`
+# that will not launch.
+APP_ZIP="build/YunAudio-${VERSION}-app.zip"
+TOOLS_ZIP="build/yunaudio-tools-${VERSION}.zip"
+rm -f "${APP_ZIP}" "${TOOLS_ZIP}"
+ditto -c -k --sequesterRsrc --keepParent "${APP}" "${APP_ZIP}"
+ditto -c -k --sequesterRsrc --keepParent "${STAGING}/Command Line" "${TOOLS_ZIP}"
+echo "built ${APP_ZIP}"
+echo "built ${TOOLS_ZIP}"
+
+# What somebody can check the download against, since there is no notarisation
+# to check it for them. An ad-hoc signature says the file has not changed since
+# it was signed; it says nothing about who signed it. A digest published beside
+# the file is the only integrity signal this project can offer, so it offers it.
+SUMS="build/checksums-${VERSION}.txt"
+( cd build && shasum -a 256 \
+	"$(basename "${IMAGE}")" \
+	"$(basename "${APP_ZIP}")" \
+	"$(basename "${TOOLS_ZIP}")" >"$(basename "${SUMS}")" )
+echo "built ${SUMS}"
 
 if [[ "${NOTARIZE}" == "1" ]]; then
 	echo "==> submitting for notarisation"
