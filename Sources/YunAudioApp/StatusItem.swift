@@ -659,6 +659,32 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     /// open here".
     var isPanelShownForCheck: Bool { popover.isShown }
 
+    /// The window the panel is drawn in, so it can be photographed.
+    ///
+    /// `docs/images/panel.png` is in the README's own table and nothing
+    /// generated it — it was taken by hand once and has been a version of the
+    /// interface nobody ships ever since. A popover has a real window; it is
+    /// simply not one anybody thought to hand to the capture.
+    var panelContentForCapture: NSView? {
+        guard popover.isShown, let root = popover.contentViewController?.view else {
+            return nil
+        }
+        // The scrolled document, when there is one.
+        //
+        // The panel is taller than the popover it is shown in, so the content
+        // view is only what happens to be visible — a photograph of it stops
+        // partway down the mixer and never reaches Quit. What the documentation
+        // wants is the panel, not the window onto it.
+        func scrolled(_ view: NSView) -> NSView? {
+            if let scroll = view as? NSScrollView { return scroll.documentView }
+            for child in view.subviews {
+                if let found = scrolled(child) { return found }
+            }
+            return nil
+        }
+        return scrolled(root) ?? root
+    }
+
     /// A retained hosting graph need not recompute its root merely because it
     /// was reattached. This is the structural proof that a reopened popover has
     /// real content; the live-child body count separately proves it is moving.

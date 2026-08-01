@@ -202,6 +202,40 @@ enum WindowCapture {
     ) async -> Bool {
         var wroteEverything = true
 
+        // The menu bar panel, which nothing has ever photographed.
+        //
+        // It is in the README's own table and the picture there was taken by
+        // hand, once, of an interface that has moved on several times since.
+        // A popover has a real window; nobody had handed it to the capture.
+        if let statusItem = StatusItemController.current {
+            statusItem.setPanelOpenForCheck(true)
+            try? await Task.sleep(for: .milliseconds(700))
+            settle(turns: 12)
+            if let panel = statusItem.panelContentForCapture {
+                // Its own path rather than `photograph`, which validates that a
+                // window carries an integrated title bar — true of every window
+                // this application owns and false of a popover, correctly. The
+                // check is right; the panel simply is not a window in the sense
+                // it means, so what is captured is the content view.
+                if let data = capture(view: panel),
+                    (try? data.write(
+                        to: URL(fileURLWithPath: directory + "/live-panel-dark.png"))) != nil
+                {
+                    FileHandle.standardError.write(
+                        Data("photographed \(directory)/live-panel-dark.png\n".utf8))
+                } else {
+                    FileHandle.standardError.write(
+                        Data("the menu bar panel would not render\n".utf8))
+                    wroteEverything = false
+                }
+            } else {
+                FileHandle.standardError.write(
+                    Data("the menu bar panel would not open for capture\n".utf8))
+            }
+            statusItem.setPanelOpenForCheck(false)
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+
         guard SettingsWindow.open(model: model),
             let settings = PreferencesWindow.openWindow()
         else {
@@ -546,6 +580,27 @@ enum WindowCapture {
         for _ in 0..<turns {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02))
         }
+    }
+
+    /// A view on its own, for the one surface that is not in a window of ours.
+    ///
+    /// The menu bar panel lives in a popover. `capture(_ window:)` reaches for
+    /// the theme frame — the title bar, the traffic lights, the corner rounding
+    /// — and a popover has none of those; what it has is the panel.
+    private static func capture(view: NSView) -> Data? {
+        view.displayIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds)
+        else { return nil }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let image = bitmap.cgImage else { return nil }
+        let data = NSMutableData()
+        guard
+            let destination = CGImageDestinationCreateWithData(
+                data, "public.png" as CFString, 1, nil)
+        else { return nil }
+        CGImageDestinationAddImage(destination, image, nil)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
     }
 
     private static func capture(_ window: NSWindow) -> Data? {
