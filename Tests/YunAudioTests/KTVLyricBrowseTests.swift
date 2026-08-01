@@ -132,7 +132,8 @@ struct KTVLyricBrowseTests {
         let files = try FileManager.default
             .contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "swift" }
-        for seed in ["browsedLineForRendering", "lyricScaleForRendering", "revealForRendering"] {
+        for seed in ["browsedLineForRendering", "lyricScaleForRendering", "revealForRendering"]
+        {
             for file in files {
                 let source = try String(contentsOf: file, encoding: .utf8)
                 // Declarations are not assignments: `static var x = false`

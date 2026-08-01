@@ -341,10 +341,16 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     print("device under test  \(destination.name)")
 
     let engine = RoutingEngine()
+    // A rate can be forced, so that "does this path work at 96 kHz" is a
+    // question somebody can put to it rather than a guess about why a
+    // particular microphone behaves differently.
+    let forcedRate = ProcessInfo.processInfo.environment["YUNAUDIO_RATE"].flatMap(Double.init)
+    if let forcedRate { print("forced rate   \(Int(forcedRate)) Hz") }
     try engine.start(
         sourceDeviceUID: source.uid,
         destinationDeviceUID: destination.uid,
         routes: [],
+        preferredSampleRate: forcedRate,
         selftest: true)
 
     if let quality = engine.pathQuality {

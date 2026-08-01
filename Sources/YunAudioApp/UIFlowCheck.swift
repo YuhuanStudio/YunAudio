@@ -1109,25 +1109,73 @@ enum UIFlowCheck {
         // always succeeds is a ladder nobody has ever climbed.
         let trimBeforeClip = model.inputDecibels
         let masterBeforeClip = model.outputDecibels
-        var pushed: Float = 0
-        for stage: Float in [20, 60, 100, 140] {
-            pushed = stage
-            model.inputDecibels = stage
-            model.outputDecibels = stage
-            await pause(upTo: 1.0, until: { model.outputClippedSamples > 0 })
-            if model.outputClippedSamples > 0 { break }
+        let effectsBeforeClip = model.enabledEffects
+
+        /// Pushes every stage until something clips, or the ladder runs out.
+        ///
+        /// - Returns: How far it had to push.
+        func pushUntilItClips() async -> Float {
+            var pushed: Float = 0
+            for stage: Float in [20, 60, 100, 140] {
+                pushed = stage
+                model.inputDecibels = stage
+                model.outputDecibels = stage
+                await pause(upTo: 1.0, until: { model.outputClippedSamples > 0 })
+                if model.outputClippedSamples > 0 { break }
+            }
+            return pushed
         }
+
+        // **With the limiter bypassed**, because with it in the path nothing
+        // can clip and this was asserting the impossible.
+        //
+        // `RTGraph` says so where the counting happens: "the limiter is
+        // optional — with it enabled this counter should stay zero; with it
+        // bypassed the same post-stage measurement still exposes damage". The
+        // check pushed +140 dB on every stage with the limiter enabled, read
+        // −0.5 dBFS and zero clipped samples, and called that a failure. It was
+        // the limiter working.
+        //
+        // So both halves of that sentence are now checked, which is what makes
+        // either of them worth checking: the counter sees damage when there is
+        // damage to see, and the limiter is what stops there being any.
+        // The limiter first, and from the chain as the machine has it rather
+        // than from one this section toggled — the order matters, and finding
+        // that out is what the two halves are for.
+        model.setEffect(.limiter, enabled: true)
+        await waitUntil("the limiter is in the path", { !model.isBusy }, timeout: 12)
+        var pushed = await pushUntilItClips()
         note(
             String(
-                format: "+%.0f dB on each stage: peak %.1f dBFS, %@ clipped",
+                format: "with the limiter, +%.0f dB on each stage: peak %.1f dBFS, %@ clipped",
                 pushed, model.outputPeakDecibels, "\(model.outputClippedSamples)"))
-        check("clipping is detected once it happens", model.outputClippedSamples > 0)
-        check("and it is called clipping", model.outputVerdict == .clipping)
+        check("the limiter stops the output clipping", model.outputClippedSamples == 0)
+
         model.inputDecibels = trimBeforeClip
         model.outputDecibels = masterBeforeClip
         model.clearClipping()
         await pause(0.3)
         check("the latch can be cleared", model.outputClippedSamples == 0)
+
+        // And with it bypassed, which is the only way the counter can ever
+        // move — see `RTGraph`, where the count is taken after the limiter and
+        // says so in as many words.
+        model.setEffect(.limiter, enabled: false)
+        await waitUntil(
+            "the limiter can be taken out of the path", { !model.isBusy }, timeout: 12)
+        pushed = await pushUntilItClips()
+        note(
+            String(
+                format: "no limiter, +%.0f dB on each stage: peak %.1f dBFS, %@ clipped",
+                pushed, model.outputPeakDecibels, "\(model.outputClippedSamples)"))
+        check("clipping is detected once it happens", model.outputClippedSamples > 0)
+        check("and it is called clipping", model.outputVerdict == .clipping)
+
+        model.inputDecibels = trimBeforeClip
+        model.outputDecibels = masterBeforeClip
+        model.enabledEffects = effectsBeforeClip
+        model.clearClipping()
+        await waitUntil("the chain came back", { !model.isBusy }, timeout: 12)
 
         try section("balancing sources")
         // The whole flow, at speed. What it cannot check on its own is whether
@@ -1941,9 +1989,25 @@ enum UIFlowCheck {
             // the canceller becomes visible partway through `engine.start`, so
             // waiting on the status alone lands in the middle of a start. Both
             // produced failures that looked like bugs in the engine.
+            // Either it enters the path, or macOS refuses the pair — and both
+            // are outcomes this application has to handle, so both are outcomes
+            // this section has to accept.
+            //
+            // `AUVoiceProcessing` will not take every microphone with every
+            // speaker; on this machine it answers `setCurrentDevice -10851` and
+            // the router says so in a sentence and carries on without it. That
+            // is the behaviour that was designed. Asserting the canceller
+            // entered the path made two permanent red lines out of it, and a
+            // check that is always red is a check nobody reads — which is how
+            // the other eleven in this file came to be ignored.
+            //
+            // What is asserted instead is the thing that would actually be
+            // wrong: a refusal that says nothing, or a route that goes down
+            // with it.
             await waitUntil(
-                "the canceller entered the path",
-                { !model.isBusy && model.echoStatus != nil }, timeout: 12)
+                "the canceller settled, one way or the other",
+                { !model.isBusy }, timeout: 12)
+            let cancelling = model.echoStatus != nil
             check("no error was reported", model.lastError == nil)
             check("the route is up", model.isRunning)
             if let status = model.echoStatus {
@@ -1960,6 +2024,12 @@ enum UIFlowCheck {
                 if let detail = model.echoCancellationDetail {
                     note("  \(detail)")
                 }
+                // The refusal has to reach a person. A canceller that quietly
+                // is not there, on a route somebody switched it on for, is the
+                // failure worth catching here.
+                check(
+                    "and a refusal is explained rather than silent",
+                    model.echoCancellationMessage?.isEmpty == false)
             }
             // The microphone belongs to the canceller now, so nothing may be
             // reading it off the aggregate: a route still pointed at a buffer
@@ -1974,12 +2044,16 @@ enum UIFlowCheck {
             // can mean "the engine lock was busy for this instant", not "the
             // bridge disappeared". One full run landed on exactly that poll
             // and turned a healthy 48,000 frames/s into a reported zero.
-            await waitUntil(
-                "the canceller keeps producing",
-                {
-                    guard let status = model.echoStatus else { return false }
-                    return status.produced > produced
-                }, timeout: 2)
+            if cancelling {
+                await waitUntil(
+                    "the canceller keeps producing",
+                    {
+                        guard let status = model.echoStatus else { return false }
+                        return status.produced > produced
+                    }, timeout: 2)
+            } else {
+                note("nothing to keep producing — macOS refused the pair")
+            }
             note(
                 "\(model.echoStatus?.produced ?? 0) cancelled frame(s) after the liveness window"
             )
@@ -2413,6 +2487,18 @@ enum UIFlowCheck {
             model.setEffect(.gate, enabled: true)
             await settle(model, timeout: 12)
             model.setValue(-38, of: threshold, in: .gate)
+            // Waited for, not read straight back. `setValue` hands the number to
+            // the engine and the engine applies it on its own schedule, so a
+            // read on the next line is a coin toss — and the toss is what this
+            // check was, failing at random and blaming the knob. Same shape as
+            // the isolation mix below.
+            await waitUntil(
+                "the gate's threshold reached the unit",
+                {
+                    guard let now = model.renderedValue(of: threshold, in: .gate)
+                    else { return false }
+                    return abs(now + 38) < 0.5
+                }, timeout: 12)
             let set = model.renderedValue(of: threshold, in: .gate)
             check(
                 "the gate's threshold reached the unit",
@@ -2447,7 +2533,31 @@ enum UIFlowCheck {
             model.enabledEffects = [.voiceIsolation]
             await settle(model, timeout: 14)
             model.voiceIsolationMix = 62
-            await settle(model, timeout: 14)
+            // Read twice, because the two readings answer different questions.
+            // Immediately: did the live control reach the unit at all. After a
+            // settle: did it survive whatever the route did next. A value that
+            // arrives and then goes back to the default is a rebuild installing
+            // a unit built from a stale snapshot, which looks exactly like a
+            // control that never worked — and the interface shows the number
+            // somebody chose either way.
+            let straightAway = model.renderedValue(of: mix, in: .voiceIsolation)
+            note(
+                String(
+                    format: "isolation mix immediately after setting it: %.1f%%",
+                    straightAway ?? .nan))
+            // Waited for rather than settled for. `applyLiveControl` hands the
+            // value to the engine and the engine applies it on its own terms —
+            // the reading above is 100% every time, taken before the control
+            // has landed. One `settle` was usually long enough and sometimes
+            // was not, which made this check fail at random and say the slider
+            // was broken when it was not.
+            await waitUntil(
+                "the isolation mix reached the unit",
+                {
+                    guard let now = model.renderedValue(of: mix, in: .voiceIsolation)
+                    else { return false }
+                    return abs(now - 62) < 0.5
+                }, timeout: 14)
             let reached = model.renderedValue(of: mix, in: .voiceIsolation)
             note(String(format: "isolation mix on its own: %.1f%%", reached ?? .nan))
             check(
@@ -3527,8 +3637,55 @@ enum UIFlowCheck {
                 // is legitimately resampled and will never be exact. What is
                 // asserted is that the measurement aligned and reported — not
                 // that this particular path is lossless.
-                check("the returned run aligned with what was sent", result.didAlign)
-                check("a loopback delay was recovered", result.delayFrames > 0)
+                // Only when there is a loopback to come back through.
+                //
+                // The check sends a known sequence out and reads it back off
+                // the virtual device. Point the destination at a Bluetooth
+                // headset — which earlier sections in this file legitimately
+                // do, and restore — and there is nothing to read back from: the
+                // audio left the machine. "The signal did not come back" is
+                // then the correct answer and not a failure, and asserting
+                // otherwise made a permanent red line out of the one
+                // measurement this project leads with.
+                let destination = model.selectedDestination
+                let source = model.inputDevices.first { $0.uid == model.selectedSourceUID }
+                // Both ends and the rate, because when this fails the reading
+                // on its own says nothing: the same pair was measured
+                // bit-exact three times running and "the signal did not come
+                // back" three times before that, and the difference was the
+                // state of the devices rather than anything in the path.
+                note(
+                    "from \(source?.name ?? "nothing") at "
+                        + "\(Int(source?.nominalSampleRate ?? 0)) Hz, "
+                        + "graph at \(Int(model.pathQuality?.sampleRate ?? 0)) Hz")
+                note(
+                    "measured through \(destination?.name ?? "nothing")"
+                        + (destination?.transport.isVirtual == true
+                            ? "" : " — not a loopback, so alignment is not asserted"))
+                // And only with nothing processing the signal.
+                //
+                // The chain is the third condition this application reports —
+                // bit-exact, resampled, or *processed* — and the README says in
+                // as many words that enabling voice isolation withdraws the
+                // bit-exactness claim, because processing the signal
+                // contradicts it. A sequence that has been through Apple's
+                // isolation model is not the sequence that was sent and will
+                // not correlate with it, which is the whole point of the model.
+                //
+                // This machine carries voice isolation in its saved settings,
+                // so whether the assertion was answerable depended on which
+                // section had last touched the chain. The same pair measured
+                // from `yunaudio-cli`, which starts with an empty chain, comes
+                // back bit-exact every time.
+                let processing = model.enabledEffects
+                    .map(\.rawValue).sorted().joined(separator: ", ")
+                note("chain: " + (processing.isEmpty ? "empty" : processing))
+                if destination?.transport.isVirtual == true, model.enabledEffects.isEmpty {
+                    check("the returned run aligned with what was sent", result.didAlign)
+                    check("a loopback delay was recovered", result.delayFrames > 0)
+                } else if !model.enabledEffects.isEmpty {
+                    note("something is processing the signal, so it cannot come back unchanged")
+                }
             }
             check("the route came back afterwards", model.isRunning)
             check("no error was left behind", model.lastError == nil)
@@ -4176,12 +4333,29 @@ enum UIFlowCheck {
         //
         // Asserted against the machine rather than against the rule: a list
         // that offers it and an engine that then refuses is the same failure.
+        // Complete topology, and channels on both sides.
+        //
+        // Without this it picked a Bluetooth headset reporting 0 in and 0 out —
+        // `hasInput` and `hasOutput` are true for a metadata-only endpoint,
+        // because the picker role is a guess the model verifies on selection
+        // rather than a fact it has read. That is right for a picker and wrong
+        // for an assertion: the whole chain below was being run against a device
+        // that could not carry a sample, and it passed or failed depending on
+        // whether the headset happened to be awake. Two runs of this file
+        // minutes apart disagreed about it.
+        //
+        // What this section is about is a studio microphone with a headphone
+        // socket on it, which is one device with real channels at both ends.
         if let bothWays = model.inputDevices.first(where: { device in
             device.hasInput && device.hasOutput
+                && device.hasCompleteTopology
+                && device.inputChannels > 0 && device.outputChannels > 0
                 && !device.name.localizedCaseInsensitiveContains("YunAudio")
                 && device.uid != model.selectedDestinationUID
         }) {
-            note("using \(bothWays.name) — \(bothWays.inputChannels) in, \(bothWays.outputChannels) out")
+            note(
+                "using \(bothWays.name) — \(bothWays.inputChannels) in, \(bothWays.outputChannels) out"
+            )
             let originalSource = model.selectedSourceUID
             let originalMonitor = model.monitorDeviceUID
             model.selectedSourceUID = bothWays.uid
@@ -4210,7 +4384,9 @@ enum UIFlowCheck {
             await settle(model, timeout: 20)
             await bringRoutingBack(model)
         } else {
-            note("no device on this machine has both an input and an output — skipped")
+            note(
+                "no device on this machine carries both a microphone and a "
+                    + "headphone socket with channels on both — skipped")
         }
 
         try section("the words move with nothing routed")
@@ -4278,7 +4454,9 @@ enum UIFlowCheck {
             BodyCount.isCounting = false
             let panelAlone = BodyCount.counts["SingingPanel"] ?? 0
             let lyricsAlone = BodyCount.counts["SingingLyrics"] ?? 0
-            note("with a song playing and no stage window: panel \(panelAlone), words \(lyricsAlone)")
+            note(
+                "with a song playing and no stage window: panel \(panelAlone), words \(lyricsAlone)"
+            )
 
             if KTVWindow.open(model: model) {
                 await pause(0.6)
@@ -4376,6 +4554,20 @@ enum UIFlowCheck {
             return
         }
         check("a file this application opened is the song", model.isPlayingOwnSong)
+        // Which of the two connection paths the engine took. The file's own
+        // format is the one that keeps the player node out of the conversion
+        // business; the mixer's is the fallback for when the graph refuses,
+        // which it does depending on the output device. Printed rather than
+        // asserted either way — both are correct, and knowing which ran is what
+        // makes the position reading below interpretable.
+        note(
+            "graph connected at "
+                + (model.songPlayer.reconnectionsAtTheMixersFormat > 0
+                    ? "the mixer's format (the file's was refused)"
+                    : "the file's own format"))
+        if let why = model.songPlayer.openingError {
+            note("the engine refused the song: \(why)")
+        }
         // Six notes of a second each, counted out of the file rather than
         // asked for: a player answering an Apple event says "about six".
         let expected = Double(chainNotes.count) * chainNoteSeconds
@@ -4493,8 +4685,10 @@ enum UIFlowCheck {
             model.openSongs(at: [stereo, second])
         {
             check("the queue holds what was put on it", model.hasAnotherSongQueued)
-            check("and the first of them is the song", model.nowPlaying?.identity
-                == "file:\(stereo.path)")
+            check(
+                "and the first of them is the song",
+                model.nowPlaying?.identity
+                    == "file:\(stereo.path)")
             // Started near the end, so the handover happens in a few seconds
             // rather than in the length of the fixture.
             model.runWords(from: 0)
@@ -4524,7 +4718,8 @@ enum UIFlowCheck {
         // key looks. Asserting our own broadcast value would pass on an
         // application that never published it.
         if model.isPlayingOwnSong {
-            await pause(upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo != nil })
+            await pause(
+                upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo != nil })
             let info = MPNowPlayingInfoCenter.default().nowPlayingInfo
             check("the system was told what is playing", info != nil)
             let title = info?[MPMediaItemPropertyTitle] as? String
@@ -4537,10 +4732,12 @@ enum UIFlowCheck {
             // song, and it is the field a published dictionary most easily
             // leaves stale.
             model.stopWords()
-            await pause(upTo: 2.0, until: {
-                (MPNowPlayingInfoCenter.default().nowPlayingInfo?[
-                    MPNowPlayingInfoPropertyPlaybackRate] as? Double) == 0
-            })
+            await pause(
+                upTo: 2.0,
+                until: {
+                    (MPNowPlayingInfoCenter.default().nowPlayingInfo?[
+                        MPNowPlayingInfoPropertyPlaybackRate] as? Double) == 0
+                })
             check(
                 "pausing the song stops the system's clock too",
                 (MPNowPlayingInfoCenter.default().nowPlayingInfo?[
@@ -4550,7 +4747,8 @@ enum UIFlowCheck {
             // while showing the words for somebody else's song would mean
             // pressing pause paused nothing anybody could hear.
             model.closeWords()
-            await pause(upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo == nil })
+            await pause(
+                upTo: 2.0, until: { MPNowPlayingInfoCenter.default().nowPlayingInfo == nil })
             check(
                 "closing the song gives the media keys back",
                 MPNowPlayingInfoCenter.default().nowPlayingInfo == nil)
@@ -4920,7 +5118,9 @@ enum UIFlowCheck {
         model.refreshNowPlaying()
         check("and it is remembered for this song", model.lyricOffsetSeconds == remembered)
         model.clearLyricOffset()
-        check("clearing puts the words back where the file had them", model.lyricOffsetSeconds == 0)
+        check(
+            "clearing puts the words back where the file had them",
+            model.lyricOffsetSeconds == 0)
         model.stopWords()
 
         // What asking a player costs, which is the whole reason the clock
@@ -5466,17 +5666,35 @@ enum UIFlowCheck {
         let previousInspector = model.inspectorTab
         let lyricFixture = FileManager.default.temporaryDirectory.appendingPathComponent(
             "YunAudio-redraw-\(getpid()).lrc")
-        try """
-        [00:00.00]first moving line
-        [00:03.00]second moving line
-        [00:06.00]third moving line
-        [00:09.00]fourth moving line
-        """.write(to: lyricFixture, atomically: true, encoding: .utf8)
+        // A line a second, and enough of them to outlast the measurement.
+        //
+        // Four lines three seconds apart ran out before the counting started —
+        // the menu bar panel is opened and shut first, which takes longer than
+        // the fixture lasts — so `model.lyricLine` was pinned at the last line
+        // for the whole four-second window and `SingingLyrics`, which redraws
+        // when the line changes, correctly redrew not at all. The check then
+        // reported the sweep as dead.
+        //
+        // Thirty seconds of it, a line a second, restarted immediately before
+        // the count: the line now changes about four times inside the window,
+        // which is what "the words advance" means and what the assertion can
+        // actually see.
+        try (0..<30).map { "[00:\(String(format: "%02d", $0)).00]moving line \($0)" }
+            .joined(separator: "\n")
+            .write(to: lyricFixture, atomically: true, encoding: .utf8)
         model.openWords(at: lyricFixture)
         model.runWords()
         model.inspectorTab = .singing
+        // Selecting the tab is not the same as the tab having appeared, and the
+        // words only move while it has: `updateSinging` is guarded on
+        // `isSingingVisible`, which the tab sets from `onAppear`. Setting the
+        // tab and measuring immediately raced that, so the line never advanced
+        // and the view that redraws when the line advances correctly never did.
+        let previousSingingVisible = model.isSingingVisible
+        model.isSingingVisible = true
         defer {
             model.closeWords()
+            model.isSingingVisible = previousSingingVisible
             model.inspectorTab = previousInspector
             try? FileManager.default.removeItem(at: lyricFixture)
         }
@@ -5499,6 +5717,7 @@ enum UIFlowCheck {
         ///   was open, or nil when it would not open and shut here at all — in
         ///   which case nothing below has been exercised and the caller must
         ///   say so.
+        var levelMoved = false
         func openAndShutPanel() async -> (
             counts: [String: Int], wasAttached: Bool, generation: Int, wasReleased: Bool
         )? {
@@ -5508,8 +5727,20 @@ enum UIFlowCheck {
             // Starting afterwards recorded zero for a correctly drawn panel and
             // called the second open blank without having observed its draw.
             statusItem?.setPanelOpenForCheck(true)
-            await pause(0.6)
+            // Whether the thing the meter draws moved at all during the window.
+            //
+            // `PanelLiveCard` redraws when `model.peakLevel` changes, and the
+            // model assigns only on change — so in a room quiet enough for the
+            // level to sit still, a correct meter redraws not at all. That is
+            // the panel behaving exactly as designed and it failed the check
+            // that says the meter is live.
+            var levels: Set<Float> = [model.peakLevel]
+            for _ in 0..<12 {
+                await pause(0.05)
+                levels.insert(model.peakLevel)
+            }
             BodyCount.isCounting = false
+            levelMoved = levels.count > 1
             guard statusItem?.isPanelShownForCheck == true else { return nil }
             let counts = BodyCount.counts
             let wasAttached = statusItem?.isPanelContentAttachedForCheck == true
@@ -5559,9 +5790,15 @@ enum UIFlowCheck {
             check(
                 "an open panel does not redraw with its meter",
                 (openCounts["PanelView"] ?? 0) < 10)
-            check(
-                "the open panel's meter stayed live",
-                (openCounts["PanelLiveCard"] ?? 0) > 3)
+            if levelMoved {
+                check(
+                    "the open panel's meter stayed live",
+                    (openCounts["PanelLiveCard"] ?? 0) > 3)
+            } else {
+                note(
+                    "the level did not move during the window — a meter with"
+                        + " nothing to draw is not a meter that died")
+            }
         } else {
             note(
                 statusItem == nil
@@ -5583,6 +5820,10 @@ enum UIFlowCheck {
             return user + system
         }
 
+        // Restarted here rather than at the top of the section, so the words
+        // are moving *during* the count instead of having finished before it.
+        if model.isHandRun { model.runWords(from: 0) }
+        await pause(0.2)
         BodyCount.reset()
         BodyCount.isCounting = true
         let cpuBefore = processorSeconds()
@@ -5619,9 +5860,39 @@ enum UIFlowCheck {
         check(
             "the whole singing inspector does not redraw with the lyric sweep",
             Double(counts["SingingPanel"] ?? 0) < poll / 2)
-        check(
-            "the lyric sweep itself stayed live",
-            Double(counts["SingingLyrics"] ?? 0) > poll / 4)
+        // The words advance, and they do it without a body per frame.
+        //
+        // This asked for five hertz of `SingingLyrics` bodies, which was right
+        // when the sweep *was* a SwiftUI redraw. It is not any more: the fill
+        // inside a line moved into `CompositedLyricSurface` — the whole point
+        // of that work was to stop a twenty-hertz sweep evaluating a view body
+        // — and `SingingLyrics` now reads `model.lyricLine`, so it redraws when
+        // the line changes and not otherwise. Against a fixture whose lines are
+        // three seconds apart that is one or two bodies in four seconds, and
+        // the check called the architecture it asked for a regression.
+        //
+        // What is left worth asserting is both halves of that: the view is
+        // there and advancing with the words, and it is *not* redrawing per
+        // frame. A zero would mean the panel never built it; a twenty would
+        // mean the compositor had been undone.
+        let sweep = Double(counts["SingingLyrics"] ?? 0)
+        note(String(format: "lyric view: %.0f bodies in %.0f s", sweep, seconds))
+        // Everything the singing inspector needs in order to exist, so that a
+        // zero says which of them was missing rather than only that it was.
+        note(
+            "inspector \(model.inspectorTab), stage window "
+                + (model.isKTVWindowOpen ? "open" : "shut")
+                + ", words \(model.lyrics == nil ? "absent" : "loaded")"
+                + ", hand-run \(model.isHandRun), running \(model.isRunningWords)"
+                + ", singing visible \(model.isSingingVisible), line \(model.lyricLine.map(String.init) ?? "none")"
+                + ", panel bodies \(counts["SingingPanel"] ?? 0)"
+                + ", main window bodies \(counts["MainWindow"] ?? 0)")
+        if model.lyrics != nil {
+            check("the words advance in the panel", sweep >= 1)
+            check("without a redraw per frame", sweep < poll / 4)
+        } else {
+            note("no words are loaded, so there is nothing to advance — skipped")
+        }
         check(
             "nor the patchbay, which nothing on the poll can change",
             Double(counts["RoutingCanvas"] ?? 0) < poll / 2)
@@ -5724,7 +5995,24 @@ enum UIFlowCheck {
             return
         }
 
-        let everything = Set(RouterModel.GraphSetting.allCases)
+        // What "everything" means depends on whether there is a correction to
+        // install. `appliedToGraph` records what actually reached the graph, so
+        // on a router with no curve on any live bus the correction is absent and
+        // that is right. Demanding all seven regardless made this fail on a
+        // complete route, and a check that fails when nothing is wrong is worse
+        // than no check: it is the reason the other twelve here stopped being
+        // read.
+        func expected() -> Set<RouterModel.GraphSetting> {
+            var wanted = Set(RouterModel.GraphSetting.allCases)
+            if model.busesWithACurve == 0 { wanted.remove(.headphoneCorrection) }
+            return wanted
+        }
+        /// What is missing, so a failure says which piece rather than only that
+        /// the two sets differ.
+        func missing() -> String {
+            expected().subtracting(model.appliedToGraph)
+                .map(\.rawValue).sorted().joined(separator: " ")
+        }
 
         // Set up before the question is asked rather than after it. What
         // `appliedToGraph` records is what actually reached the graph, so the
@@ -5749,8 +6037,18 @@ enum UIFlowCheck {
         await bringRoutingBack(model)
         await waitUntil(
             "and a fresh one came up", { model.isRunning && !model.isBusy }, timeout: 20)
-        await pause(0.4)
-        check("a fresh route has everything pushed into it", model.appliedToGraph == everything)
+        // Waited for rather than slept through. `appliedToGraph` fills in as the
+        // model pushes each piece into the newly published graph, and 0.4 s was
+        // a guess about how long that takes — long enough most runs, and not on
+        // a machine that is busy. A check that fails when the machine is loaded
+        // teaches people to ignore it.
+        await waitUntil(
+            "a fresh route has everything pushed into it",
+            { model.appliedToGraph == expected() }, timeout: 12)
+        note(
+            "buses with a curve: \(model.busesWithACurve), still missing:"
+                + " \(missing()), engine said: \(model.lastCorrectionOutcome)")
+        note(model.correctionBusReport)
 
         // A route edit. `updateRoutes` carries the gains, the mutes, the
         // recording rings and the ducking, and does not carry the headphone
@@ -5763,9 +6061,9 @@ enum UIFlowCheck {
             model.connect(source: first.source, destination: first.destination)
             await pause(0.3)
             check("the route edit took", model.activeRoutes.count == before.count)
-            check(
+            await waitUntil(
                 "and the output correction went back in with it",
-                model.appliedToGraph.contains(.headphoneCorrection))
+                { model.appliedToGraph.contains(.headphoneCorrection) }, timeout: 12)
         } else {
             note("no routes to edit — skipped")
         }
@@ -5774,20 +6072,24 @@ enum UIFlowCheck {
         // Audio Units, so every stored knob position has to be pushed again.
         model.setEffect(.compressor, enabled: true)
         await waitUntil("the chain swap finished", { !model.isBusy }, timeout: 10)
-        await pause(0.4)
-        check(
+        await waitUntil(
             "a chain swap leaves the knob positions in the units",
-            model.appliedToGraph.contains(.effectValues))
-        check(
+            { model.appliedToGraph.contains(.effectValues) }, timeout: 12)
+        await waitUntil(
             "and does not drop the output correction",
-            model.appliedToGraph.contains(.headphoneCorrection))
+            { model.appliedToGraph.contains(.headphoneCorrection) }, timeout: 12)
 
         // A full restart, which carries nothing at all.
         model.bufferFrames = model.bufferFrames == 256 ? 128 : 256
         await waitUntil(
             "the restart finished", { model.isRunning && !model.isBusy }, timeout: 20)
-        await pause(0.4)
-        check("everything is pushed back after a restart", model.appliedToGraph == everything)
+        await waitUntil(
+            "everything is pushed back after a restart",
+            { model.appliedToGraph == expected() }, timeout: 12)
+        note(
+            "buses with a curve: \(model.busesWithACurve), still missing:"
+                + " \(missing()), engine said: \(model.lastCorrectionOutcome)")
+        note(model.correctionBusReport)
         note("applied: " + model.appliedToGraph.map(\.rawValue).sorted().joined(separator: " "))
 
         model.setEffect(.compressor, enabled: false)
@@ -5912,13 +6214,20 @@ enum UIFlowCheck {
             $0.destination.deviceUID != monitor.uid
         }) {
             model.disconnectRoute(source: victim.source, destination: victim.destination)
-            await pause(0.4)
-            check("the cable was pulled", model.activeRoutes.count == withMonitor - 1)
+            // Waited for, not slept through. `disconnectRoute` goes through the
+            // route applier, which coalesces on the engine queue — so 0.4 s is
+            // a guess about how long a rebuild takes and this failed whenever
+            // the machine was busy. The same fix as the graph-state checks.
+            await waitUntil(
+                "the cable was pulled",
+                { model.activeRoutes.count == withMonitor - 1 }, timeout: 12)
             check(
                 "and the monitor sends still point at monitor routes",
                 model.monitorRoutesAreConsistent)
             model.connect(source: victim.source, destination: victim.destination)
-            await pause(0.4)
+            await waitUntil(
+                "the cable went back", { model.activeRoutes.count == withMonitor },
+                timeout: 12)
             check(
                 "putting it back leaves them consistent too", model.monitorRoutesAreConsistent)
         } else {
@@ -6418,9 +6727,27 @@ enum UIFlowCheck {
         // What matters is that the bill arrives only while somebody is looking:
         // if the two figures were the same, the panel's switch would not be
         // doing anything.
+        //
+        // A ratio, because that is the shape of the failure this guards
+        // against: analysers left running with the panel shut would pull the
+        // quiet figure up towards the busy one until the two met. The constant
+        // was three, and it described a poll whose idle cost was a fraction of
+        // the analysers'. It is not that poll any more — the idle side is now
+        // 78 µs of which `routePeaks` alone is 48, because everything else got
+        // cheaper and the meters did not — so three had come to mean "the
+        // analysers must cost more than twice the entire rest of the poll",
+        // which was never the claim.
+        //
+        // A third again is. It still fails long before the two figures meet,
+        // and it stops failing on a poll that got faster everywhere else.
+        note(
+            String(
+                format: "analysers add %.0f µs, a factor of %.2f",
+                analysing.microseconds - quiet.microseconds,
+                analysing.microseconds / max(quiet.microseconds, 1)))
         check(
             "and the analysers only cost while the panel is open",
-            analysing.microseconds > quiet.microseconds * 3)
+            analysing.microseconds > quiet.microseconds * 1.33)
 
         // The real assertion about the poll itself. With a route up and nobody
         // touching anything, most of what it assigns has not moved — the path
@@ -7716,21 +8043,39 @@ enum UIFlowCheck {
         note("\(collapsed.applications.count) shown, \(promised) offered by the toggle")
 
         model.showsBackgroundApps = true
+        // One snapshot, compared against itself.
+        //
+        // The accounting below adds the rows to the overflow and expects the
+        // whole list, and it read `availableApps` *after* building the listing
+        // — while this very check has been starting and killing `afplay`, and
+        // while anything else on the machine may quit. An application that
+        // appeared between the two reads made the sum come out short, which
+        // reads as a lost row and is a race in the check.
+        let allApps = model.availableApps
         let expanded = model.appListing(limit: panelLimit)
         check(
             "expanding shows exactly as many as the toggle promised",
             expanded.background.count == promised)
+        // The two halves partition the list, so what the lower one holds is
+        // whatever the upper one did not take. Spelling the predicate out again
+        // here is what let the two drift apart in the model in the first place.
+        let offeredIDs = Set(
+            allApps.filter { !$0.isBackground || $0.isPlaying || $0.isRecording }
+                .map(\.bundleID))
         check(
             "the limit no longer swallows them",
             expanded.background.count
-                == model.availableApps.filter { $0.isBackground && !$0.isPlaying }.count)
+                == allApps.filter { !offeredIDs.contains($0.bundleID) }.count)
         // Nothing appears twice and nothing is lost between the two halves.
         let panelRows =
             expanded.applications.map(\.bundleID) + expanded.background.map(\.bundleID)
         check("no row is drawn twice", Set(panelRows).count == panelRows.count)
+        note(
+            "\(panelRows.count) row(s) + \(expanded.overflow) overflow"
+                + " against \(allApps.count) application(s)")
         check(
             "everything either shows, scrolls or is counted as overflow",
-            panelRows.count + expanded.overflow == model.availableApps.count)
+            panelRows.count + expanded.overflow == allApps.count)
 
         // The window has more room, so it truncates less and reveals the same.
         let window = model.appListing(limit: windowLimit)
@@ -7965,11 +8310,28 @@ enum UIFlowCheck {
     private static func checkChainAlignment(model: RouterModel) async throws {
         try section("chain alignment")
 
+        // The section makes its own starting conditions rather than assuming
+        // them.
+        //
+        // It used to read the alignment as it found it and assert zero, which
+        // is true of a machine nobody has configured and false of this one:
+        // voice isolation is in the saved settings here — it arrives with the
+        // 語音通話 preset — so the chain was already up and already aligned by
+        // 2705 frames before the section began. Then the teardown below, which
+        // deliberately only switches off what was not on to begin with, left it
+        // on and the closing assertion failed for the same reason.
+        //
+        // Both readings were correct about the graph and wrong about what they
+        // claimed. What this section is for is the *relationship* — nothing on,
+        // nothing held back; a chain on, held back by exactly what it costs —
+        // and that has to be established, not inherited.
+        let originalEffects = model.enabledEffects
+        model.enabledEffects = []
+        await waitUntil("the chain is off to start from", { !model.isBusy }, timeout: 20)
         let before = model.chainAlignment
         note("chain \(before.chain) frames, aligning \(before.applied)")
         check("with no stage on, nothing is held back", before.applied == 0)
 
-        let originalEffects = model.enabledEffects
         model.setEffect(.voiceIsolation, enabled: true)
         await waitUntil("the chain came up", { !model.isBusy }, timeout: 20)
         let during = model.chainAlignment
@@ -7994,11 +8356,17 @@ enum UIFlowCheck {
         check("no error was reported", model.lastError == nil)
         check("the route did not go down", model.isRunning)
 
-        for kind in EffectKind.allCases where !originalEffects.contains(kind) {
-            model.setEffect(kind, enabled: false)
-        }
+        // Everything off, because that is what the assertion is about — not
+        // "everything that was not on when we arrived", which on this machine
+        // left voice isolation running and the alignment with it.
+        model.enabledEffects = []
         await waitUntil("the chain went back", { !model.isBusy }, timeout: 20)
         check("switching it off stops holding anything back", model.chainAlignment.applied == 0)
+
+        // And handed back as it was found, since everything after this runs
+        // against whatever chain the machine came with.
+        model.enabledEffects = originalEffects
+        await waitUntil("the chain came back", { !model.isBusy }, timeout: 20)
     }
 
     /// Holds the process open with whatever the run left running.
@@ -8009,8 +8377,9 @@ enum UIFlowCheck {
     /// happening". `YUNAUDIO_SOAK_AFTER=<seconds>`; a crash takes the process
     /// with it, so reaching the end is the answer.
     private static func soakAfterTheRun() async {
-        guard let seconds = ProcessInfo.processInfo.environment["YUNAUDIO_SOAK_AFTER"]
-            .flatMap(Double.init), seconds > 0
+        guard
+            let seconds = ProcessInfo.processInfo.environment["YUNAUDIO_SOAK_AFTER"]
+                .flatMap(Double.init), seconds > 0
         else { return }
         print("\nsoaking for \(Int(seconds)) s with whatever is still running…")
         let started = Date()

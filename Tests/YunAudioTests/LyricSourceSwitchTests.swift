@@ -57,7 +57,8 @@ struct LyricSourceSwitchTests {
     func theAttributionFollowsTheChosenAnswer() throws {
         let source = try model
         #expect(
-            source.contains("self.lyricsSourceName = Self.lyricsSourceName(for: chosen.source)"))
+            source.contains("self.lyricsSourceName = Self.lyricsSourceName(for: chosen.source)")
+        )
         #expect(source.contains("self.lyricsCopyright = chosen.providerMetadata?.copyright"))
         #expect(source.contains("self.lyricsRegion = chosen.providerMetadata?.region"))
         // And an empty remembered answer must not win over a full one.

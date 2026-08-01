@@ -83,8 +83,9 @@ while written < count {
     // an octave out — caught by the sample-rate consistency test, which uses
     // exactly that note. A model is only defined where it was shown something.
     let f0 = exp(
-        random.inRange(log(PitchTracker.lowestSungHertz * 1.02),
-                       log(PitchTracker.highestSungHertz * 0.98)))
+        random.inRange(
+            log(PitchTracker.lowestSungHertz * 1.02),
+            log(PitchTracker.highestSungHertz * 0.98)))
     let voiceGain = random.inRange(0.15, 0.5)
     tone(
         hertz: f0, harmonics: Int(random.inRange(4, 14)), gain: voiceGain,

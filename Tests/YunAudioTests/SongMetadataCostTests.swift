@@ -49,18 +49,37 @@ struct SongMetadataCostTests {
         // one pays.
         _ = AVURLAsset(url: url).commonMetadata
 
-        let began = DispatchTime.now().uptimeNanoseconds
+        // The best of several batches rather than one batch.
+        //
+        // What is being asked is how long the call takes, and the answer is a
+        // floor: no batch can run faster than the work costs, but any batch can
+        // run slower because the machine did something else in the middle. One
+        // batch therefore measures the work plus whatever the scheduler did,
+        // and the whole suite runs its cases in parallel — so this passed alone
+        // at 0.3 ms and failed in the suite, which is a fact about the test
+        // machine and not about the metadata reader.
+        //
+        // Taking the minimum measures the thing itself. A regression makes
+        // every batch slow and the floor rises with them; contention makes one
+        // batch slow and the floor does not move.
         let runs = 20
-        for _ in 0..<runs {
-            let asset = AVURLAsset(url: url)
-            let items = asset.commonMetadata
-            _ = AVMetadataItem.metadataItems(
-                from: items, withKey: AVMetadataKey.commonKeyTitle, keySpace: .common
-            ).first?.stringValue
+        var best = Double.infinity
+        for _ in 0..<5 {
+            let began = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<runs {
+                let asset = AVURLAsset(url: url)
+                let items = asset.commonMetadata
+                _ =
+                    AVMetadataItem.metadataItems(
+                        from: items, withKey: AVMetadataKey.commonKeyTitle, keySpace: .common
+                    ).first?.stringValue
+            }
+            let elapsed =
+                Double(DispatchTime.now().uptimeNanoseconds - began) / Double(runs) / 1_000_000
+            best = min(best, elapsed)
         }
-        let each =
-            Double(DispatchTime.now().uptimeNanoseconds - began) / Double(runs) / 1_000_000
-        print(String(format: "song metadata read: %.3f ms", each))
+        let each = best
+        print(String(format: "song metadata read: %.3f ms (best of 5 batches of 20)", each))
 
         // Two milliseconds, against a gap between songs nobody can hear below
         // about twenty. Deliberately loose: this is a ceiling that says "not a

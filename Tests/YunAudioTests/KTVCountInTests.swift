@@ -60,7 +60,8 @@ struct KTVCountInTests {
         // The words are held back two seconds, so the music reaches the first
         // line two seconds later than the file says.
         let seconds = try #require(
-            KTVCountIn.secondsUntilWords(in: song(offset: -2), playing: nil, position: 9, nudge: 0))
+            KTVCountIn.secondsUntilWords(
+                in: song(offset: -2), playing: nil, position: 9, nudge: 0))
         #expect(abs(seconds - 3) < 0.001)
 
         // And the live nudge counts the same way.
@@ -72,7 +73,8 @@ struct KTVCountInTests {
     @Test("a rest at the end of the file counts into nothing")
     func nothingAfterTheLastWordsIsNotCounted() {
         let lyrics = Lyrics.parse("[00:10.00]最後一句\n[00:20.00]")!
-        #expect(KTVCountIn.secondsUntilWords(in: lyrics, playing: 1, position: 21, nudge: 0) == nil)
+        #expect(
+            KTVCountIn.secondsUntilWords(in: lyrics, playing: 1, position: 21, nudge: 0) == nil)
     }
 
     @Test("the moment the words start there is nothing left to count")
@@ -87,6 +89,7 @@ struct KTVCountInTests {
 
     @Test("a line index the song does not have is not counted from")
     func nonsenseIndexesAreRefused() {
-        #expect(KTVCountIn.secondsUntilWords(in: song(), playing: 99, position: 1, nudge: 0) == nil)
+        #expect(
+            KTVCountIn.secondsUntilWords(in: song(), playing: 99, position: 1, nudge: 0) == nil)
     }
 }

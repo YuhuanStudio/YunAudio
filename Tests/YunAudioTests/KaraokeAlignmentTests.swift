@@ -22,7 +22,8 @@ struct KaraokeAlignmentTests {
         }
     }
 
-    private func held(_ midi: Double, seconds: Double, from start: Double = 0) -> [PitchSample] {
+    private func held(_ midi: Double, seconds: Double, from start: Double = 0) -> [PitchSample]
+    {
         series(from: start, midi: [Double](repeating: midi, count: Int(seconds / 0.01)))
     }
 
@@ -39,10 +40,14 @@ struct KaraokeAlignmentTests {
     func lateButRight() throws {
         // The case the moment-to-moment scorer cannot see. A singer who enters
         // late and sings the phrase correctly is phrasing, not wrong.
-        let tune = series(from: 0, midi: [Double](repeating: 60, count: 100)
-            + [Double](repeating: 64, count: 100))
-        let sung = series(from: 0.30, midi: [Double](repeating: 60, count: 100)
-            + [Double](repeating: 64, count: 100))
+        let tune = series(
+            from: 0,
+            midi: [Double](repeating: 60, count: 100)
+                + [Double](repeating: 64, count: 100))
+        let sung = series(
+            from: 0.30,
+            midi: [Double](repeating: 60, count: 100)
+                + [Double](repeating: 64, count: 100))
         let result = try #require(KaraokeAlignment.align(sung: sung, reference: tune))
         // Aligned, it is the same performance.
         #expect(result.pitchAccuracy > 0.9)
@@ -73,12 +78,17 @@ struct KaraokeAlignmentTests {
 
     @Test("consistently late is steadier than late-then-early")
     func steadiness() throws {
-        let tune = series(from: 0, midi: [Double](repeating: 60, count: 100)
-            + [Double](repeating: 67, count: 100))
-        let steady = series(from: 0.2, midi: [Double](repeating: 60, count: 100)
-            + [Double](repeating: 67, count: 100))
+        let tune = series(
+            from: 0,
+            midi: [Double](repeating: 60, count: 100)
+                + [Double](repeating: 67, count: 100))
+        let steady = series(
+            from: 0.2,
+            midi: [Double](repeating: 60, count: 100)
+                + [Double](repeating: 67, count: 100))
         // The same notes, but the second half rushes back past the beat.
-        let ragged = series(from: 0.2, midi: [Double](repeating: 60, count: 100))
+        let ragged =
+            series(from: 0.2, midi: [Double](repeating: 60, count: 100))
             + series(from: 0.8, midi: [Double](repeating: 67, count: 100))
         let a = try #require(KaraokeAlignment.align(sung: steady, reference: tune))
         let b = try #require(KaraokeAlignment.align(sung: ragged, reference: tune))

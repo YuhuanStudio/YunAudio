@@ -169,7 +169,9 @@ struct LyricScaleTests {
     @Test("balanced widths stay inside the column")
     func balancedWidthsNeverExceedTheMeasure() {
         let metrics = KTVLyricMetrics.resolve(width: 720, height: 620)
-        for text in ["短", "So a young heart moving was walking backwards through a season of rain"] {
+        for text in [
+            "短", "So a young heart moving was walking backwards through a season of rain",
+        ] {
             let width = metrics.balancedWidth(
                 for: text, pointSize: metrics.neighbourSize * KTVLyricMetrics.translationScale)
             #expect(width <= metrics.measure)
@@ -195,33 +197,35 @@ struct LyricScaleTests {
             for height in [300.0, 420.0, 620.0, 900.0] as [CGFloat] {
                 for scale in [0.7, 1.0, 1.3, 1.8] as [CGFloat] {
                     for extra in [0.0, 0.68, 1.46, 2.14] as [CGFloat] {
-                      for rows in [1.0, 1.14, 2.0] as [CGFloat] {
-                        let metrics = KTVLyricMetrics.resolve(
-                            width: width, height: height, scale: scale,
-                            extraRowsPerLine: extra, rowsPerLine: rows)
-                        let perNeighbour =
-                            metrics.neighbourSize * KTVLyricMetrics.rowHeight
-                            * (rows + extra) + metrics.spacing
-                        // The two gaps the stage puts either side of the sung
-                        // line count against the height like anything else
-                        // drawn.
-                        let drawn =
-                            metrics.currentSize * KTVLyricMetrics.rowHeight
-                            * (rows + extra) + metrics.spacing * 2
-                            + CGFloat(metrics.linesBehind + metrics.linesAhead) * perNeighbour
-                        // A stage too short for even the line being sung is
-                        // clipped on purpose — some of the words beats none —
-                        // so the invariant is only claimed where a neighbour
-                        // was drawn at all.
-                        if metrics.linesBehind + metrics.linesAhead > 0 {
-                            #expect(
-                                drawn <= height,
-                                Comment(
-                                    rawValue:
-                                        "\(Int(width))×\(Int(height)) at \(scale)×, "
-                                        + "\(rows) rows + \(extra) extra: drew \(Int(drawn))"))
+                        for rows in [1.0, 1.14, 2.0] as [CGFloat] {
+                            let metrics = KTVLyricMetrics.resolve(
+                                width: width, height: height, scale: scale,
+                                extraRowsPerLine: extra, rowsPerLine: rows)
+                            let perNeighbour =
+                                metrics.neighbourSize * KTVLyricMetrics.rowHeight
+                                * (rows + extra) + metrics.spacing
+                            // The two gaps the stage puts either side of the sung
+                            // line count against the height like anything else
+                            // drawn.
+                            let drawn =
+                                metrics.currentSize * KTVLyricMetrics.rowHeight
+                                * (rows + extra) + metrics.spacing * 2
+                                + CGFloat(metrics.linesBehind + metrics.linesAhead)
+                                * perNeighbour
+                            // A stage too short for even the line being sung is
+                            // clipped on purpose — some of the words beats none —
+                            // so the invariant is only claimed where a neighbour
+                            // was drawn at all.
+                            if metrics.linesBehind + metrics.linesAhead > 0 {
+                                #expect(
+                                    drawn <= height,
+                                    Comment(
+                                        rawValue:
+                                            "\(Int(width))×\(Int(height)) at \(scale)×, "
+                                            + "\(rows) rows + \(extra) extra: drew \(Int(drawn))"
+                                    ))
+                            }
                         }
-                      }
                     }
                 }
             }
@@ -265,7 +269,8 @@ struct LyricScaleTests {
     func theKeysAreTheUsualOnes() {
         #expect(KTVKeyCommand.resolve(KeyEquivalent("-")) == .resizeLyrics(-0.1))
         #expect(KTVKeyCommand.resolve(KeyEquivalent("=")) == .resizeLyrics(0.1))
-        #expect(KTVKeyCommand.resolve(KeyEquivalent("+"), modifiers: .shift) == .resizeLyrics(0.1))
+        #expect(
+            KTVKeyCommand.resolve(KeyEquivalent("+"), modifiers: .shift) == .resizeLyrics(0.1))
         // Zero is the reset, which is why it carries no step.
         #expect(KTVKeyCommand.resolve(KeyEquivalent("0")) == .resizeLyrics(0))
         // Still somebody else's when a modifier is held.

@@ -52,11 +52,12 @@ struct LyricAttributionTests {
             Lyrics.parse(text, performers: ["王赫野 / 黃霄雲"]))
 
         #expect(lyrics.lines.count == 3)
-        #expect(lyrics.lines.map(\.text) == [
-            "痛快的離開我的依賴",
-            "多少個忍著痛的夜晚你叫我別回來",
-            "感情是偏執的",
-        ])
+        #expect(
+            lyrics.lines.map(\.text) == [
+                "痛快的離開我的依賴",
+                "多少個忍著痛的夜晚你叫我別回來",
+                "感情是偏執的",
+            ])
         #expect(lyrics.lines.map(\.singer) == ["合", "王赫野", "黃霄雲"])
         // The markers carried timestamps of their own. Taking them as lines
         // moved every real line one place later in the file, so the stage was

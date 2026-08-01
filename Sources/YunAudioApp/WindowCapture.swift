@@ -29,6 +29,21 @@ enum WindowCapture {
     ]
 
     static func write(to directory: String, model: RouterModel? = nil) async -> Bool {
+        // The language these are taken in, stated rather than inherited.
+        //
+        // `docs/images` is the front page of this project, and the English
+        // README's screenshots were English because whoever took them happened
+        // to have the application set that way. Retaking them on a machine set
+        // to Traditional Chinese silently swapped the language of the
+        // documentation — which is a documentation build that cannot be
+        // reproduced, and the whole point of these being generated is that
+        // anybody can regenerate them.
+        if let wanted = ProcessInfo.processInfo.environment["YUNAUDIO_CAPTURE_LANGUAGE"],
+            let language = YunLanguage(rawValue: wanted)
+        {
+            YunTheme.shared.language = language
+            settle(turns: 4)
+        }
         guard let window = mainWindow() else {
             FileHandle.standardError.write(Data("no window to photograph\n".utf8))
             return false
@@ -211,7 +226,7 @@ enum WindowCapture {
         }
         guard KTVWindow.open(model: model),
             let ktv = NSApp.windows.first(where: {
-                $0.frameAutosaveName == "YunAudioKTVWindow" && $0.isVisible
+                $0.frameAutosaveName == KTVWindow.autosaveName && $0.isVisible
             })
         else {
             FileHandle.standardError.write(Data("could not open KTV for capture\n".utf8))
@@ -230,9 +245,26 @@ enum WindowCapture {
         // stage photographed with no artwork and nothing else that waits to
         // appear having run.
         try? await Task.sleep(for: .milliseconds(600))
+        // Shapes the window will actually take, asked for from its own rules
+        // rather than written down again. 760 × 900 was neither: narrower than
+        // the 820-point minimum the stage was given to stop it opening as a
+        // letterbox, and taller than the screen — so the window clamped to
+        // 820 × 882 and the capture rejected it for not being what it asked
+        // for, every run, on a window behaving correctly.
+        //
+        // The narrow shape is the minimum, because the narrowest arrangement is
+        // the thing this picture exists to show. The height is bounded by the
+        // screen for the same reason the width is bounded by the minimum: a
+        // request the window server cannot grant is not a test.
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? 900
         for (label, size) in [
             ("ktv-window", CGSize(width: 1080, height: 720)),
-            ("ktv-window-narrow", CGSize(width: 760, height: 900)),
+            (
+                "ktv-window-narrow",
+                CGSize(
+                    width: KTVWindowSize.minimum.width,
+                    height: min(900, visibleHeight))
+            ),
             ("ktv-window-short", CGSize(width: 1180, height: 420)),
         ] {
             settle(turns: 12)

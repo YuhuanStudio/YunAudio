@@ -36,7 +36,8 @@ struct KTVKeyCommandTests {
     @Test("full screen answers to f in either case")
     func fFillsTheScreen() {
         #expect(KTVKeyCommand.resolve(KeyEquivalent("f")) == .toggleFullScreen)
-        #expect(KTVKeyCommand.resolve(KeyEquivalent("F"), modifiers: .shift) == .toggleFullScreen)
+        #expect(
+            KTVKeyCommand.resolve(KeyEquivalent("F"), modifiers: .shift) == .toggleFullScreen)
     }
 
     @Test("a held modifier belongs to somebody else")
