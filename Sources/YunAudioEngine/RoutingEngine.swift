@@ -1687,6 +1687,36 @@ public final class RoutingEngine: @unchecked Sendable {
     /// never say so. Every output not named here is left running nothing, which
     /// is the only reading of the argument that cannot go stale.
     ///
+    /// Why the last `setCorrections` installed nothing.
+    ///
+    /// Zero is three different failures wearing one number — no graph, no
+    /// output matching the bus, or a graph replaced between the install and the
+    /// check — and the caller reports the same "correction absent" for all
+    /// three, so "the correction did not survive a restart" was three bugs to
+    /// choose between with no way to choose. Now it says which.
+    public enum CorrectionOutcome: String, Sendable {
+        case installed
+        case noGraph
+        case noOutputForTheBus
+        case graphReplacedUnderIt
+        case nothingToInstall
+    }
+
+    /// Which device UIDs the graph actually has an output buffer for.
+    ///
+    /// The other half of `noOutputForTheBus`: the model knows which bus it has
+    /// a curve for, the engine knows which buses exist, and until both were
+    /// printed together the answer was "one of them is wrong" with no way to
+    /// say which.
+    public var outputDeviceUIDs: [String] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return Array(Set(outputMap.keys.map(\.deviceUID))).sorted()
+    }
+
+    /// The last outcome, for diagnostics and acceptance checks.
+    public private(set) var lastCorrectionOutcome: CorrectionOutcome = .nothingToInstall
+
     /// - Parameter curves: The curve for each output device UID.
     /// - Returns: How many of them reached an output. A curve for a device that
     ///   is not in this route is dropped rather than held — the ordinary case
@@ -1695,6 +1725,7 @@ public final class RoutingEngine: @unchecked Sendable {
     public func setCorrections(_ curves: [String: ParametricEQ]) -> Int {
         stateLock.lock()
         guard let graph else {
+            lastCorrectionOutcome = .noGraph
             stateLock.unlock()
             return 0
         }
@@ -1730,6 +1761,12 @@ public final class RoutingEngine: @unchecked Sendable {
         stateLock.lock()
         let reachedCurrentGraph =
             self.graph?.pointee.outputCorrections == correctionPointer
+        lastCorrectionOutcome =
+            !reachedCurrentGraph
+            ? .graphReplacedUnderIt
+            : installed > 0
+                ? .installed
+                : curves.isEmpty ? .nothingToInstall : .noOutputForTheBus
         stateLock.unlock()
         return reachedCurrentGraph ? installed : 0
     }
@@ -2909,6 +2946,35 @@ public final class RoutingEngine: @unchecked Sendable {
 
         let inputStreams = aggregateDevice.inputStreams
         let outputStreams = aggregateDevice.outputStreams
+
+        // What the aggregate publishes, against what the members claim.
+        //
+        // `map` walks the members in order and takes `inputChannels` channels
+        // each out of one flat run of stream channels, so the two totals have to
+        // agree or every member after the disagreement is offset by the
+        // difference. Printed rather than assumed, because the difference is
+        // invisible from either side on its own.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_CHANNEL_MAP"] != nil {
+            var report = "channel map\n  input streams:"
+            for (index, stream) in inputStreams.enumerated() {
+                report +=
+                    "\n    [\(index)] starting \(stream.startingChannel)"
+                    + " × \(stream.currentPhysicalFormat?.channels ?? 0)"
+            }
+            report += "\n  members claim:"
+            for uid in inputUIDs {
+                let claimed = byUID[uid]?.inputChannels ?? tapChannels[uid] ?? 0
+                report += "\n    \(byUID[uid]?.name ?? uid): \(claimed)"
+            }
+            let published = inputStreams.reduce(0) {
+                $0 + ($1.currentPhysicalFormat?.channels ?? 0)
+            }
+            let claimed = inputUIDs.reduce(0) {
+                $0 + (byUID[$1]?.inputChannels ?? tapChannels[$1] ?? 0)
+            }
+            report += "\n  published \(published), claimed \(claimed)"
+            FileHandle.standardError.write(Data((report + "\n").utf8))
+        }
         inputMap = Self.map(
             streams: inputStreams,
             orderedUIDs: inputUIDs,

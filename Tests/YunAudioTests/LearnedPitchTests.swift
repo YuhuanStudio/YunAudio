@@ -158,11 +158,27 @@ struct LearnedPitchTests {
         let tracker = try #require(self.tracker())
         let curve = tracker.correlationCurve(frame: frame(voice: 220))
         for _ in 0..<20 { _ = head.hertz(from: curve) }
-        let began = DispatchTime.now().uptimeNanoseconds
-        for _ in 0..<200 { _ = head.hertz(from: curve) }
-        let milliseconds =
-            Double(DispatchTime.now().uptimeNanoseconds - began) / 200 / 1_000_000
-        print(String(format: "learned head: %.3f ms per frame", milliseconds))
+        // The best of five batches, not one.
+        //
+        // The question is what the call costs, and the answer is a floor: no
+        // batch runs faster than the work, and any batch runs slower because
+        // the machine did something else. The suite runs its cases in parallel,
+        // so one batch measures this model plus whatever else was on the Neural
+        // Engine — it passed alone and failed in the suite, which is a fact
+        // about the machine. The minimum measures the thing itself: a
+        // regression makes every batch slow and the floor rises with them.
+        var milliseconds = Double.infinity
+        for _ in 0..<5 {
+            let began = DispatchTime.now().uptimeNanoseconds
+            for _ in 0..<200 { _ = head.hertz(from: curve) }
+            let batch =
+                Double(DispatchTime.now().uptimeNanoseconds - began) / 200 / 1_000_000
+            milliseconds = min(milliseconds, batch)
+        }
+        print(
+            String(
+                format: "learned head: %.3f ms per frame (best of 5 batches of 200)",
+                milliseconds))
         // Scoring runs at four hertz. Anything under a millisecond is free.
         #expect(milliseconds < 2)
     }
@@ -230,13 +246,15 @@ struct EndToEndScoringTests {
         }
 
         // The tune the singer was given, sampled the way the melody path does.
-        let reference: [PitchSample] = stride(from: 0.0, to: Double(notes.count) * secondsEach,
-            by: KaraokeScore.referenceInterval)
-            .map { time in
-                let index = min(notes.count - 1, Int(time / secondsEach))
-                return PitchSample(
-                    time: time, midi: PitchSample.midi(fromHertz: notes[index]))
-            }
+        let reference: [PitchSample] = stride(
+            from: 0.0, to: Double(notes.count) * secondsEach,
+            by: KaraokeScore.referenceInterval
+        )
+        .map { time in
+            let index = min(notes.count - 1, Int(time / secondsEach))
+            return PitchSample(
+                time: time, midi: PitchSample.midi(fromHertz: notes[index]))
+        }
 
         let score = KaraokeScore.score(sung: singer.samples, reference: reference)
         print(
@@ -359,5 +377,45 @@ struct EndToEndScoringTests {
         let score = KaraokeScore.score(sung: singer.samples, reference: reference)
         print(String(format: "end to end, quiet room: %.0f%%", score.percentage))
         #expect(score.percentage > 80)
+    }
+}
+
+/// The head must not invent notes where there are none.
+///
+/// Its training set is 80 000 frames and every one of them contains a voice, so
+/// "no voice" is not in its vocabulary — asked about silence it returns the
+/// best periodicity it can find in the noise, with no way to signal that the
+/// question was wrong. The flow check caught it reading 78 Hz off a quiet room.
+///
+/// This is the boundary between the two estimators, asserted rather than
+/// assumed: the rule decides whether there is a note, the head decides which
+/// one it is.
+@Suite("the head does not decide whether somebody is singing")
+struct LearnedPitchVoicingTests {
+
+    @Test("a rule that found nothing is not overruled")
+    func silenceStaysSilent() throws {
+        let head = try #require(LearnedPitch(sampleRate: 48_000))
+        // A curve with a peak in it — so the head has something to answer with
+        // and the test is about the *rule's* zero rather than about an empty
+        // input the head would refuse anyway.
+        var curve = [Float](repeating: 0, count: 512)
+        for index in curve.indices {
+            curve[index] = Float(0.6 * cos(2 * Double.pi * Double(index) / 120))
+        }
+        #expect(head.hertz(from: curve, agreeingWith: 0) == 0)
+    }
+
+    @Test("but a rule that found a note still gets the head's opinion")
+    func voicedFramesAreStillSettled() throws {
+        let head = try #require(LearnedPitch(sampleRate: 48_000))
+        var curve = [Float](repeating: 0, count: 512)
+        for index in curve.indices {
+            curve[index] = Float(0.6 * cos(2 * Double.pi * Double(index) / 120))
+        }
+        // Whatever it answers, it must answer *something* — the guard above
+        // must not have switched the head off for voiced frames too, which is
+        // the way a fix like this goes wrong.
+        #expect(head.hertz(from: curve, agreeingWith: 220) > 0)
     }
 }

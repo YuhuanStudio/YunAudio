@@ -13,7 +13,9 @@ import Foundation
 enum LyricSourceChoice {
     static let key = "YunAudioLyricSources"
 
-    static func preferred(for identity: String, in defaults: UserDefaults = .standard)
+    static func preferred(
+        for identity: String, in defaults: UserDefaults = .standard
+    )
         -> OnlineLyrics.Source?
     {
         guard !identity.isEmpty,

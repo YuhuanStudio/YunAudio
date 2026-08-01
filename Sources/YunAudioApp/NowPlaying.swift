@@ -89,9 +89,9 @@ enum NowPlaying {
     static var installedAutomationTargets: [AutomationTarget] {
         (players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) })
             .compactMap { name, bundleID in
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
-                ? nil : AutomationTarget(name: name, bundleID: bundleID)
-        }
+                NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
+                    ? nil : AutomationTarget(name: name, bundleID: bundleID)
+            }
     }
 
     /// What is loaded in a player, preferring one that is actually playing.
@@ -170,7 +170,8 @@ enum NowPlaying {
             isPlaying: true)
     }
 
-    nonisolated static func rememberBrowserPosition(_ position: Position?, for browser: String) {
+    nonisolated static func rememberBrowserPosition(_ position: Position?, for browser: String)
+    {
         knownTabsLock.lock()
         if let position {
             lastBrowserAnswers[browser] = (position, monotonicNow)

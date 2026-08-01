@@ -108,11 +108,11 @@ enum BrowserNowPlaying {
             address == nil
             ? ""
             : """
-                            if (URL of theTab as text) is not theWanted then
-                                    exit repeat
-                                end if
+                        if (URL of theTab as text) is not theWanted then
+                                exit repeat
+                            end if
 
-                """
+            """
         let wanted =
             address.map { "set theWanted to \"" + escapedForAppleScript($0) + "\"\n" }
             ?? ""
@@ -195,16 +195,18 @@ enum BrowserNowPlaying {
     /// It also crosses the scripts without anybody arranging it: the tab says
     /// 周杰倫 and the index holds 周杰伦, folded by the `Hant-Hans` transform
     /// added earlier for 「來不及愛你」.
-    static func splitTitle(_ title: String, channel: String) -> (title: String, artist: String) {
+    static func splitTitle(_ title: String, channel: String) -> (title: String, artist: String)
+    {
         let cleaned = strippedDecoration(title)
         // The name in brackets wins where there is one: an uploader who writes
         // 《年少心动雨季》 or 【稻香 Rice Field】 is naming the song inside its own
         // punctuation, and everything round it is theirs rather than the
         // song's.
         if let named = bracketedName(in: cleaned) {
-            let artist = cleaned.range(of: named).map {
-                String(cleaned[..<$0.lowerBound])
-            } ?? ""
+            let artist =
+                cleaned.range(of: named).map {
+                    String(cleaned[..<$0.lowerBound])
+                } ?? ""
             return (
                 preferringHan(named),
                 preferringHan(creditedName(in: artist, or: channel))
@@ -322,7 +324,8 @@ enum BrowserNowPlaying {
             }
         }
         runs.append(current)
-        let best = runs.map { $0.trimmingCharacters(in: .whitespaces) }
+        let best =
+            runs.map { $0.trimmingCharacters(in: .whitespaces) }
             .max { $0.count < $1.count } ?? ""
         return best.isEmpty ? text.trimmingCharacters(in: .whitespaces) : best
     }
@@ -367,7 +370,9 @@ enum BrowserNowPlaying {
     }
 
     /// Identity, position and state from one tab's answer.
-    static func parsePosition(_ reply: String) -> (identity: String, seconds: Double, isPlaying: Bool)? {
+    static func parsePosition(
+        _ reply: String
+    ) -> (identity: String, seconds: Double, isPlaying: Bool)? {
         let fields = reply.components(separatedBy: separator)
         guard fields.count >= 3, let seconds = Double(fields[1]), seconds.isFinite
         else { return nil }

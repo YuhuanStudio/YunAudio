@@ -55,6 +55,11 @@ let package = Package(
         // realtime threads"), so every call into them lives here.
         .target(name: "YunAudioRT"),
 
+        // The Objective-C exception barrier. Separate from `YunAudioRT`
+        // deliberately: that one is the realtime shim and has no
+        // Foundation in it, and this one is nothing but Foundation.
+        .target(name: "YunAudioObjC"),
+
         .target(
             name: "YunAudioHAL", dependencies: ["YunAudioRT"],
             // Device profiles ship as documents rather than compiled tables, so
@@ -105,7 +110,7 @@ let package = Package(
             name: "YunAudioApp",
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
-                "YunAudioControl", "YunAudioMedia", "YunAudioOBS",
+                "YunAudioControl", "YunAudioMedia", "YunAudioOBS", "YunAudioObjC",
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.

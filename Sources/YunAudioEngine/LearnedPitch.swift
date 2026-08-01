@@ -126,7 +126,22 @@ public final class LearnedPitch: @unchecked Sendable {
     public func hertz(from curve: [Float], agreeingWith ruled: Float) -> Float {
         let chosen = hertz(from: curve)
         guard chosen > 0 else { return ruled }
-        guard ruled > 0 else { return chosen }
+        // **Silence stays silent.** The rule reporting zero is a decision that
+        // there is no note here, and that decision is not the head's to make:
+        // every frame it was trained on contains a voice, so it has never seen
+        // silence and has no output that means "nothing". Asked about a quiet
+        // room it names a note, confidently, at whatever the room's rumble
+        // happens to correlate at.
+        //
+        // It did exactly that — the flow check read 78 Hz off an empty room —
+        // and a scorer fed invented notes between the lines is worse than one
+        // with no head at all, because it is wrong while looking like it is
+        // working.
+        //
+        // The division of labour is: the rule decides *whether* there is a
+        // note, the head decides *which* periodicity it is when there are
+        // several. Voicing is the rule's, always.
+        guard ruled > 0 else { return 0 }
         // Inside a semitone the two are answering the same question and the
         // rule's answer is the more precise one. Outside it they have picked
         // different periodicities, which is the disagreement the head exists to

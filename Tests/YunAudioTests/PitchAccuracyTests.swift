@@ -264,3 +264,61 @@ struct PitchAccuracyTests {
         #expect(track([Float](repeating: 0, count: 9600)) == 0)
     }
 }
+
+/// What the analyser's readout does when the voice stops.
+///
+/// It used to decay the *frequency* — `lastPitch *= 0.5` — which is the right
+/// shape for a level meter and wrong for a pitch: halving a frequency does not
+/// fade it, it names a different note an octave down. A voice that stopped at
+/// 128 Hz was reported as 64, then 32, then 16, each printed with the same
+/// confidence as a real reading and each below the range the tracker searches.
+/// The flow check found it as "32 Hz" in a silent room.
+@Suite("what the pitch readout does when the voice stops")
+struct PitchHoldTests {
+
+    /// The rule the analyser now follows, as a value so it can be checked
+    /// without a live analyser: hold the reading for a few frames, then drop it.
+    private func held(_ readings: [Float], holdFrames: Int = 3) -> [Float] {
+        var last: Float = 0
+        var hold = 0
+        var out: [Float] = []
+        for found in readings {
+            if found > 0 {
+                last = found
+                hold = holdFrames
+            } else if hold > 0 {
+                hold -= 1
+            } else {
+                last = 0
+            }
+            out.append(last)
+        }
+        return out
+    }
+
+    @Test("a reading survives a consonant unchanged")
+    func acrossAConsonant() {
+        // Two silent frames in the middle of a held note. The readout must not
+        // blink, and must not move: 128 Hz is still 128 Hz.
+        let out = held([128, 128, 0, 0, 128])
+        #expect(out == [128, 128, 128, 128, 128])
+    }
+
+    @Test("and is dropped rather than transposed when the voice really stops")
+    func afterTheVoiceStops() {
+        let out = held([128, 0, 0, 0, 0, 0, 0])
+        // Held for three frames, then nothing. At no point is it 64 or 32.
+        #expect(out == [128, 128, 128, 128, 0, 0, 0])
+        #expect(!out.contains(64))
+        #expect(!out.contains(32))
+    }
+
+    @Test("nothing it reports is below the range the tracker searches")
+    func neverBelowTheFloor() {
+        // The old decay produced 64, 32, 16 from a legitimate 128 — two of them
+        // below `lowestHertz` and all three notes nobody sang.
+        for reported in held([82, 0, 0, 0, 0, 0, 0, 110, 0, 0, 0, 0]) where reported > 0 {
+            #expect(Double(reported) >= PitchTracker.lowestSungHertz)
+        }
+    }
+}

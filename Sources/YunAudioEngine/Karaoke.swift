@@ -1231,12 +1231,24 @@ public final class SingerPitch {
 
     /// Whether the learned head is consulted.
     ///
-    /// Off only under `YUNAUDIO_NO_LEARNED_PITCH`, and it exists for one
-    /// reason: a claim about what the head is worth needs the same pipeline
-    /// measured without it. Without this switch the comparison would be
-    /// "95 per cent" against a number nobody ever took.
-    static let usesLearnedHead =
-        ProcessInfo.processInfo.environment["YUNAUDIO_NO_LEARNED_PITCH"] == nil
+    /// A setting rather than only an environment variable, because it is a
+    /// real choice with a measured trade: worth three to thirteen points when
+    /// the accompaniment is louder than the singer, worth nothing below that,
+    /// and 0.24 ms a frame either way. Somebody scoring a quiet studio take has
+    /// every reason to turn it off, and somebody in a room with the PA up has
+    /// every reason to leave it on.
+    ///
+    /// `YUNAUDIO_NO_LEARNED_PITCH` still forces it off, and stays: a claim
+    /// about what something is worth needs the same pipeline measured without
+    /// it, and a test cannot reach into somebody's preferences.
+    public static let isForcedOff =
+        ProcessInfo.processInfo.environment["YUNAUDIO_NO_LEARNED_PITCH"] != nil
+
+    /// Set from the model's setting. Read on the audio-analysis path, so it is
+    /// a plain `Bool` written from the main actor and read without
+    /// synchronisation — the worst a torn read could do is use the previous
+    /// value for one 43 ms frame.
+    public nonisolated(unsafe) static var usesLearnedHead = !isForcedOff
 
     public init?(sampleRate: Double) {
         // The sung range, not the spoken one. Above 400 Hz the speaking search
@@ -1307,7 +1319,7 @@ public final class SingerPitch {
                 // note. It is consulted only on the singing path — the voice
                 // changer and the analysis panel hear one person in a room, and
                 // have nothing to settle. See `LearnedPitch`.
-                if let head, SingerPitch.usesLearnedHead {
+                if let head, SingerPitch.usesLearnedHead, !SingerPitch.isForcedOff {
                     let curve = tracker.correlationCurve(
                         frame: Array(
                             UnsafeBufferPointer(

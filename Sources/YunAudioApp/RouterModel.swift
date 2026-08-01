@@ -800,6 +800,35 @@ final class RouterModel: ScriptTarget {
         return result
     }
 
+    /// How many more polls may try to install the output correction.
+    ///
+    /// Reset by `start`, spent by the poll, and zero for the whole of a steady
+    /// session — which is what keeps the retry off the twenty-times-a-second
+    /// path once it has done its job. See the poll for why the window exists.
+    @ObservationIgnored private var correctionRetriesLeft = 0
+
+    /// Two seconds at twenty polls a second.
+    private static let correctionRetries = 40
+
+    /// Which buses have a curve, and which the graph can actually reach.
+    var correctionBusReport: String {
+        let wanted = Self.correctionCurves(from: correctionSnapshot).keys.sorted()
+        return "curve on \(wanted), graph has \(engine.outputDeviceUIDs)"
+    }
+
+    /// Why the last correction install did nothing, straight from the engine.
+    var lastCorrectionOutcome: String { engine.lastCorrectionOutcome.rawValue }
+
+    /// How many live buses actually have a curve to push.
+    ///
+    /// The honest denominator for "did everything reach the graph". A router
+    /// nobody has dialled a tone into has no correction to install, and an
+    /// assertion that demands one anyway fails on a route that is complete —
+    /// which is what it did, for long enough that the failure became furniture.
+    var busesWithACurve: Int {
+        Self.correctionCurves(from: correctionSnapshot).count
+    }
+
     private func scheduleCorrections() {
         correctionApplier.submit(correctionSnapshot)
     }
@@ -2893,7 +2922,25 @@ final class RouterModel: ScriptTarget {
                     skipNowPlaying(by: 10)
                 }
             case .previous:
-                skipNowPlaying(by: -10)
+                // The previous song, or the top of this one, or ten seconds
+                // back — in that order, which is what every transport ever
+                // built does and what this one did not.
+                //
+                // It went back ten seconds and nothing else, so ⏮ could never
+                // reach the song before even though the queue has always been
+                // able to: `KTVQueue.goBack` exists and is tested, the media key
+                // was wired to it, and `NowPlayingBroadcast` advertises the
+                // capability to the system. The key did the right thing and the
+                // button on screen did not, which is worse than neither doing
+                // it. `.next` was written correctly at the time and this was
+                // not.
+                switch TransportBack.of(
+                    position: songPosition, hasPreviousSong: songQueue.hasSongBefore)
+                {
+                case .previousSong: goBackASong()
+                case .restart: runWords(from: 0)
+                case .rewind: skipNowPlaying(by: -10)
+                }
             }
             return
         }
@@ -3172,6 +3219,29 @@ final class RouterModel: ScriptTarget {
         }
         set {
             UserDefaults.standard.set(newValue, forKey: "YunAudioShowsRomanisation")
+            settingsRevision &+= 1
+        }
+    }
+
+    /// Whether the learned head helps choose the singer's pitch.
+    ///
+    /// On by default, and it is a real choice rather than a hedge. Measured end
+    /// to end, with the accompaniment at the singer's own level it is worth
+    /// nothing; at one and a half, two and three times it is worth three, six
+    /// and thirteen points; at four times nothing helps. It costs 0.24 ms a
+    /// frame at a four-hertz scoring cadence, which is free — but somebody
+    /// scoring a quiet studio take is entitled to switch off a thing that
+    /// cannot help them.
+    var usesLearnedPitch: Bool {
+        get {
+            _ = settingsRevision
+            guard !SingerPitch.isForcedOff else { return false }
+            return UserDefaults.standard.object(forKey: "YunAudioLearnedPitch") as? Bool
+                ?? true
+        }
+        set {
+            UserDefaults.standard.set(newValue, forKey: "YunAudioLearnedPitch")
+            SingerPitch.usesLearnedHead = newValue && !SingerPitch.isForcedOff
             settingsRevision &+= 1
         }
     }
@@ -4336,8 +4406,20 @@ final class RouterModel: ScriptTarget {
 
     /// The daemons: no Dock presence and silent. These are the ones the toggle
     /// is about.
+    /// The daemons, meaning everything the list above did not already take.
+    ///
+    /// A partition, by construction. It used to be its own predicate —
+    /// `isBackground && !isPlaying` — against the top half's
+    /// `!isBackground || isPlaying || isRecording`, and the two overlap: a
+    /// background process that is *recording* but not playing satisfies both.
+    /// It was therefore drawn twice, once in each half, and counted twice in
+    /// everything derived from them.
+    ///
+    /// Two predicates over one list have to be kept complementary by hand, and
+    /// nobody was. Subtracting the first from the whole cannot drift.
     private var backgroundApps: [AudioApplication] {
-        availableApps.filter { $0.isBackground && !$0.isPlaying }
+        let offered = Set(offeredApps.map(\.bundleID))
+        return availableApps.filter { !offered.contains($0.bundleID) }
     }
 
     /// How many entries the toggle is offering to reveal.
@@ -4363,19 +4445,52 @@ final class RouterModel: ScriptTarget {
     /// - Returns: The rows to draw, in the two groups the list draws them in.
     func appListing(limit: Int) -> AppListing {
         let offered = offeredApps
+        let applications = Array(offered.prefix(limit))
+        let background = showsBackgroundApps ? backgroundApps : []
+        // Counted as what is *not on screen*, rather than as what the truncation
+        // cut.
+        //
+        // The two halves overlap. `offeredApps` takes anything playing or
+        // recording, `backgroundApps` takes anything in the background that is
+        // not playing — so a background application that is *recording* is in
+        // both. Truncated out of the top half it still appears in the lower
+        // one, and the old arithmetic counted it as overflow anyway: the panel
+        // offered "1 more" that was already on the screen, and pressing it
+        // revealed nothing.
+        //
+        // Found by the flow check once its accounting was compared against one
+        // snapshot instead of two: `23 row(s) + 1 overflow against 23
+        // application(s)`.
         return AppListing(
-            applications: Array(offered.prefix(limit)),
-            overflow: max(0, offered.count - limit),
-            background: showsBackgroundApps ? backgroundApps : [])
+            applications: applications,
+            overflow: AppListing.overflow(
+                offered: offered.map(\.bundleID),
+                showing: applications.map(\.bundleID) + background.map(\.bundleID)),
+            background: background)
     }
 
     struct AppListing {
         /// The applications, truncated to what there is room for.
         var applications: [AudioApplication]
-        /// How many applications the truncation left out.
+        /// How many applications are not on the screen anywhere.
         var overflow: Int
         /// The daemons, in full, when they have been asked for.
         var background: [AudioApplication]
+
+        /// How many of the offered applications no row is showing.
+        ///
+        /// Not "how many the truncation cut", which is what it used to be and
+        /// is a different number: the two halves of this list overlap, so an
+        /// application cut from the top can still be on the screen in the lower
+        /// one. Counting the cut therefore offered "1 more" that was already
+        /// visible, and pressing it revealed nothing.
+        ///
+        /// A function of the two lists of identifiers, so the rule can be
+        /// checked without a running router and a machine full of processes.
+        static func overflow(offered: [String], showing: [String]) -> Int {
+            let shown = Set(showing)
+            return offered.filter { !shown.contains($0) }.count
+        }
     }
 
     /// When the application list was last enumerated, so a view can ask for it
@@ -7294,6 +7409,10 @@ final class RouterModel: ScriptTarget {
     /// present now. A device that has gone missing leaves its slot empty rather
     /// than silently falling back to some other input.
     private func restore() {
+        // The engine reads a static, so the stored preference has to reach it
+        // before anything is scored — a setting nobody applies is a switch that
+        // does nothing.
+        SingerPitch.usesLearnedHead = usesLearnedPitch
         isRestoring = true
         defer { isRestoring = false }
 
@@ -8929,8 +9048,26 @@ final class RouterModel: ScriptTarget {
         pathQuality = report.quality
         let reported = report.quality?.sampleRate ?? 0
         startAnalysis(sampleRate: reported.isFinite && reported > 0 ? reported : 48000)
-        applyCorrections()
         startPolling()
+        // The output correction goes in *after* the route is up, not during.
+        //
+        // It was applied here in the middle of `start`, and the engine answered
+        // `noOutputForTheBus` every time: at that moment the graph's output map
+        // does not yet carry the destination, so the curve is installed against
+        // a bus the graph cannot name and is dropped. Nothing tried again —
+        // `rebuiltRoutes` is what re-applies after a publication and it only
+        // runs for a route *edit*, which is exactly why dragging a cable put the
+        // correction back and stopping and starting did not.
+        //
+        // Measured rather than reasoned: the flow check printed the two sides
+        // together and they were the same device —
+        // `curve on ["44-5E-CD-68-E3-69:output"], graph has the same` — so the
+        // bus was never wrong, only early. Going through `rebuiltRoutes` uses
+        // the one path that is known to work instead of a second copy of it.
+        rebuiltRoutes()
+        // And the poll keeps trying for two seconds, because even here the
+        // outputs are not always nameable yet.
+        correctionRetriesLeft = Self.correctionRetries
         refreshHeadsetQualityAsynchronously()
         if honourPendingStop() { return }
         drainPendingRestart()
@@ -9811,6 +9948,52 @@ final class RouterModel: ScriptTarget {
             body()
             pollBreakdown[name, default: 0] +=
                 Double(DispatchTime.now().uptimeNanoseconds - entered) / 1e9
+        }
+        // The output correction, if it has not landed yet.
+        //
+        // A graph is published before its output map carries the destination,
+        // so the install in `start` is answered with `noOutputForTheBus` and
+        // the curve is dropped — and until this, nothing ever asked again. A
+        // route *edit* re-applied through `rebuiltRoutes` and put it back,
+        // which is why dragging a cable fixed it and stopping and starting did
+        // not: somebody's headphone correction survived everything except the
+        // one thing they do most.
+        //
+        // Bounded by its own success. Once the correction reaches an output,
+        // `appliedToGraph` records it and the condition is false for the rest
+        // of the session; with no curve on any live bus it is false from the
+        // start. So the ordinary cost is one set membership test per poll,
+        // twenty times a second, and the retry runs for the handful of polls
+        // between the graph appearing and its outputs being nameable.
+        lap("corrections") {
+            // A bounded number of attempts, and one integer to decide it.
+            //
+            // The window this exists for is the handful of polls between a
+            // graph being published and its outputs being nameable. Retrying
+            // for ever costs 21 µs a poll — a fifth of the whole idle poll —
+            // on any machine where the correction legitimately has nowhere to
+            // go, which is every machine with no curve on a live bus. Guarding
+            // on `busesWithACurve` was worse: it *builds* the curves to count
+            // them.
+            //
+            // Two seconds of trying. If the graph has not named its outputs by
+            // then it is not going to, and a route edit or a chain swap will
+            // re-apply through `rebuiltRoutes` when one happens.
+            guard correctionRetriesLeft > 0,
+                !appliedToGraph.contains(.headphoneCorrection)
+            else { return }
+            correctionRetriesLeft -= 1
+            // Submitted, never flushed. `applyCorrections` waits on the engine
+            // queue, and this runs on the main actor twenty times a second —
+            // so while `start` held that queue the poll stopped, and the check
+            // that changes the buffer size mid-start read `-1 frames` because
+            // it asked during the stall. The whole of `LatestValueApplier`
+            // exists so that control changes never take an engine lock on
+            // MainActor; the retry has to obey that like everything else.
+            //
+            // Coalescing is right here too: this fires on consecutive polls
+            // until the graph can name the bus, and only the last one matters.
+            scheduleCorrections()
         }
         var telemetry: RoutingEngine.TelemetryValues?
         lap("telemetry") {

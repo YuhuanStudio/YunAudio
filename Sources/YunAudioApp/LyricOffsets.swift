@@ -20,7 +20,9 @@ enum LyricOffsets {
     /// is more likely a stuck key than an intention.
     static let limit: Double = 30
 
-    static func offset(for identity: String, in defaults: UserDefaults = .standard)
+    static func offset(
+        for identity: String, in defaults: UserDefaults = .standard
+    )
         -> Double
     {
         guard !identity.isEmpty,

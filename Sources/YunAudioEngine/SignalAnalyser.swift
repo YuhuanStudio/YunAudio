@@ -88,6 +88,14 @@ public final class SignalAnalyser {
     /// Samples waiting for a whole tracker frame.
     private var pitchPending: [Float] = []
     private var lastPitch: Float = 0
+
+    /// How many silent frames a reading survives before it goes.
+    ///
+    /// Three, which at this frame size is about 60 ms — long enough to cross a
+    /// plosive and short enough that a note nobody is singing any more is not
+    /// still on screen when they look.
+    private static let pitchHoldFrames = 3
+    private var pitchHold = 0
     private let sampleRate: Double
     private var buffer: [Float]
     /// Frames which actually reached loudness, not frames consumed by some
@@ -171,6 +179,7 @@ public final class SignalAnalyser {
             tracker = nil
             pitchPending.removeAll(keepingCapacity: true)
             lastPitch = 0
+            pitchHold = 0
         }
     }
 
@@ -215,11 +224,26 @@ public final class SignalAnalyser {
                     // Held through a frame or two of consonant rather than
                     // dropping to nothing: a readout that blinks off on every
                     // plosive is unreadable.
+                    //
+                    // **Held, not faded.** This used to decay with
+                    // `lastPitch *= 0.5`, which is what one writes for a level
+                    // and is wrong for a frequency: halving a pitch does not
+                    // make it quieter, it makes it a different note an octave
+                    // down. A voice that stopped at 128 Hz was reported as
+                    // 64 Hz, then 32, then 16 — three readings of notes nobody
+                    // sang, below the range the tracker even searches, printed
+                    // with the same confidence as a real one. The flow check
+                    // caught it as "32 Hz" in a silent room.
+                    //
+                    // The value stands for a few frames and then goes. That is
+                    // what "held through a consonant" always meant.
                     if found > 0 {
                         lastPitch = found
+                        pitchHold = Self.pitchHoldFrames
+                    } else if pitchHold > 0 {
+                        pitchHold -= 1
                     } else {
-                        lastPitch *= 0.5
-                        if lastPitch < 20 { lastPitch = 0 }
+                        lastPitch = 0
                     }
                 }
                 pitchPending.removeFirst(PitchTracker.frameSize)
@@ -289,6 +313,7 @@ public final class SignalAnalyser {
         classifier?.reset()
         pitchPending.removeAll(keepingCapacity: true)
         lastPitch = 0
+        pitchHold = 0
         loudnessMeasuredFrames = 0
     }
 }

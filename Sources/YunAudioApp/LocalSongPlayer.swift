@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import Foundation
+import YunAudioObjC
 
 /// Where a song is, when the song is ours to play.
 ///
@@ -153,6 +154,45 @@ final class LocalSongPlayer {
         transpose.pitch == 0 ? 0 : transpose.latency
     }
 
+    /// Why the last song would not open, when the reason was the engine rather
+    /// than the file.
+    ///
+    /// Held rather than thrown: the caller's question is "is there a song", and
+    /// a person's question is "why not". Nil when the last open succeeded.
+    private(set) var openingError: String?
+
+    /// How many times the graph had to fall back to the mixer's own format.
+    ///
+    /// A counter rather than a log line, so the flow check can assert that the
+    /// fallback is exercised on this machine rather than merely compiled.
+    private(set) var reconnectionsAtTheMixersFormat: UInt64 = 0
+
+    /// Connects at whatever the mixer will actually take, when the file's own
+    /// format was refused.
+    ///
+    /// The mixer's input format is the one format the engine has already agreed
+    /// to, so the sample-rate conversion happens inside the player node instead
+    /// of at the graph edge. It costs a conversion the bit-exact path does not
+    /// have — and this path was never bit-exact: it is a song being played to a
+    /// room, not a microphone being routed.
+    ///
+    /// - Returns: nil when it worked, or the reason when even this raised.
+    private static func connectAtTheMixersOwnFormat(
+        engine: AVAudioEngine, node: AVAudioPlayerNode, transpose: AVAudioUnitTimePitch
+    ) -> String? {
+        let mixer = engine.mainMixerNode
+        let format = mixer.outputFormat(forBus: 0)
+        // A mixer with no rate is an engine with no device behind it, and
+        // connecting to it would raise for a third time.
+        guard format.sampleRate > 0 else {
+            return "the output device has no format"
+        }
+        return catchingObjCException {
+            engine.connect(node, to: transpose, format: format)
+            engine.connect(transpose, to: mixer, format: format)
+        }
+    }
+
     /// Reads a file and makes it the song, without playing it.
     ///
     /// - Returns: The song, or nil when nothing on this system can decode it.
@@ -179,16 +219,48 @@ final class LocalSongPlayer {
         // A KTV evening is one song after another; this is the second one.
         engine.disconnectNodeOutput(node)
         engine.disconnectNodeOutput(transpose)
-        engine.connect(node, to: transpose, format: format)
+        // Behind the barrier, because `connect` reports failure by *raising*.
+        //
+        // The disconnect above was the fix for one instance of this — a stereo
+        // file opened after a mono one — and it was a fix for that instance
+        // rather than for the class. `AVAudioEngineGraph::UpdateGraphAfterReconfig`
+        // raises whenever the graph cannot be reconfigured for a format, and
+        // what it can be reconfigured for depends on the output device: a thing
+        // this application switches while running and a person can unplug. The
+        // flow check found it again with an ordinary 44.1 kHz mono file, and an
+        // `NSException` through Swift frames is not a failed song, it is a dead
+        // process.
+        //
         // The file's format on both edges. `nil` was tried here — the theory
         // being that the mixer, sitting downstream of an output device this
         // application switches while running, might not hold the file's rate.
         // The flow check answered: with `nil` the graph connects and then
         // renders nothing at all. Position stayed at 0.0 after 600 ms of
         // playing and the time-pitch unit reported no latency, which is what an
-        // engine that never started looks like. The disconnect above is what
-        // fixed the exception; this was a guess on top of it.
-        engine.connect(transpose, to: engine.mainMixerNode, format: format)
+        // engine that never started looks like.
+        if let raised = catchingObjCException({
+            self.engine.connect(self.node, to: self.transpose, format: format)
+            self.engine.connect(
+                self.transpose, to: self.engine.mainMixerNode, format: format)
+        }) {
+            // The graph is now half-built, so it is taken down before the
+            // second attempt rather than connected on top of itself — which is
+            // the mistake that produced the first exception.
+            engine.disconnectNodeOutput(node)
+            engine.disconnectNodeOutput(transpose)
+            if let again = Self.connectAtTheMixersOwnFormat(
+                engine: engine, node: node, transpose: transpose)
+            {
+                openingError = again
+                self.file = nil
+                return nil
+            }
+            openingError = nil
+            reconnectionsAtTheMixersFormat &+= 1
+            _ = raised
+        } else {
+            openingError = nil
+        }
         let tags = Self.metadata(of: url)
         let song = Song(
             url: url,
