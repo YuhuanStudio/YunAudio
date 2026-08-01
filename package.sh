@@ -21,7 +21,15 @@ cd "$(dirname "$0")"
 # Ensures the SDK is new enough; see the script for why.
 source ./App/toolchain.sh
 
-VERSION="0.1.0"
+# The version, from the tag this commit carries — so a disk image can be traced
+# back to a commit and two people building the same tag get the same name.
+#
+# It used to be written here, which meant the number in the file and the number
+# on the release were kept in step by somebody remembering. Falls back to a
+# description of the commit when there is no tag, because an image built from an
+# untagged tree should say so rather than claiming to be the last release.
+VERSION="${YUNAUDIO_VERSION:-$(git describe --tags --always --dirty 2>/dev/null || echo 0.0.0-unknown)}"
+VERSION="${VERSION#v}"
 STAGING="build/dmg"
 IMAGE="build/YunAudio-${VERSION}.dmg"
 KEYCHAIN_PROFILE="YunAudio"
