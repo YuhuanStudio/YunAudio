@@ -8,7 +8,9 @@ Read this first. Most of it exists because something already went wrong.
 
 `TODO.md` is the other half: what is worth working on next, what has already
 been settled and should not be retried, and where each of those conclusions came
-from. Read it before deciding what to do; read this before doing it.
+from. Read it before deciding what to do; read this before doing it. It is
+written in Chinese, which is worth knowing before you open it — this file and
+the rest of the documentation are in English.
 
 ## The one thing to understand before anything else
 

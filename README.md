@@ -352,7 +352,7 @@ An index in all three languages: **[docs/](docs/README.md)**.
 | [docs/limits.md](docs/limits.md) | What does not work, and what was rejected |
 | [DEVICES.md](DEVICES.md) | Per-device hardware facts, and how each was verified |
 | [AGENTS.md](AGENTS.md) | The working agreement for changes to this project |
-| [TODO.md](TODO.md) | What is still open, what has been settled and should not be retried, and the evidence for each |
+| [TODO.md](TODO.md) | What is still open, what has been settled and should not be retried, and the evidence for each — in Chinese |
 
 ## Licence
 

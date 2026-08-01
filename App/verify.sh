@@ -193,7 +193,25 @@ tests_ran_and_did_not_shrink() {
 	fi
 	# Raised on the way past, so the floor follows the high-water mark without
 	# anybody having to remember.
-	[[ "${count}" -gt "${floor}" ]] && echo "${count}" >App/test-floor.txt
+	#
+	# The three READMEs carry the same number, in a badge and in a sentence, and
+	# they went stale the way every hand-maintained number does: 688 in two of
+	# them and 1364 in the third, against a suite that had 1379. A count that is
+	# only true on the day somebody types it is worse than no count, because a
+	# reader has no way to tell which day that was.
+	if [[ "${count}" -gt "${floor}" ]]; then
+		echo "${count}" >App/test-floor.txt
+		for readme in README.md README.zh-Hant.md README.zh-Hans.md; do
+			[[ -f "${readme}" ]] || continue
+			LC_ALL=C sed -i '' \
+				-e "s/tests-[0-9][0-9]*-brightgreen/tests-${count}-brightgreen/" \
+				-e "s/!\[[0-9][0-9]* tests\]/![${count} tests]/" \
+				-e "s/[0-9][0-9]* unit tests/${count} unit tests/" \
+				-e "s/[0-9][0-9]* 個單元測試/${count} 個單元測試/" \
+				-e "s/[0-9][0-9]* 个单元测试/${count} 个单元测试/" \
+				"${readme}"
+		done
+	fi
 	return 0
 }
 
