@@ -187,6 +187,10 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Whether Apple's sound classifier is running for the analysis card. It is
     /// opt-in because it costs, and opting in should stay opted in.
     var isSoundIdentificationEnabled: Bool?
+    /// The songs that were put on, and which one was being sung. A KTV evening
+    /// is a list somebody built up over an hour, and quitting threw it away.
+    var queuedSongPaths: [String]?
+    var queuedSongIndex: Int?
 
     static let `default` = Preferences(
         sourceDeviceUID: nil,
@@ -249,7 +253,9 @@ struct Preferences: Codable, Equatable, Sendable {
         repeatsOneSong: false,
         inspectorTab: nil,
         showsBackgroundApps: false,
-        isSoundIdentificationEnabled: false)
+        isSoundIdentificationEnabled: false,
+        queuedSongPaths: [],
+        queuedSongIndex: nil)
 }
 
 /// A value-semantic preference snapshot whose derived collections are built

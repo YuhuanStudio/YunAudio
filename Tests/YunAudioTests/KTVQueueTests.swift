@@ -161,3 +161,66 @@ struct KTVQueueTests {
         #expect(queue == KTVQueue())
     }
 }
+
+/// A queue that was written down and read back.
+///
+/// A KTV evening is a list somebody builds up over an hour, and quitting threw
+/// it away — the songs were never in `Preferences` at all. Restoring it has one
+/// hazard worth handling rather than ignoring, and these are it.
+@Suite("the songs that were put on come back")
+struct KTVQueueRestoreTests {
+
+    private func temporaryFiles(_ count: Int) throws -> [URL] {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("YunAudio-queue-\(getpid())-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        return try (0..<count).map { index in
+            let url = directory.appendingPathComponent("song\(index).wav")
+            try Data([0]).write(to: url)
+            return url
+        }
+    }
+
+    @Test("the list and the song being sung both come back")
+    func roundTrip() throws {
+        let files = try temporaryFiles(3)
+        defer { try? FileManager.default.removeItem(at: files[0].deletingLastPathComponent()) }
+        let restored = KTVQueue.restored(paths: files.map(\.path), currentIndex: 1)
+        #expect(restored.songs == files)
+        #expect(restored.current == files[1])
+    }
+
+    @Test("a song that has been deleted since is dropped")
+    func missingFiles() throws {
+        let files = try temporaryFiles(3)
+        defer { try? FileManager.default.removeItem(at: files[0].deletingLastPathComponent()) }
+        try FileManager.default.removeItem(at: files[0])
+        let restored = KTVQueue.restored(paths: files.map(\.path), currentIndex: 2)
+        // Two left, and the marker still on the song it was on — not on the
+        // number it had. Dropping an earlier file shifts every later index, so
+        // following the number would leave it pointing at somebody else's song.
+        #expect(restored.songs == [files[1], files[2]])
+        #expect(restored.current == files[2])
+    }
+
+    @Test("and when the song being sung is the one that vanished, nothing is current")
+    func currentFileMissing() throws {
+        let files = try temporaryFiles(2)
+        defer { try? FileManager.default.removeItem(at: files[0].deletingLastPathComponent()) }
+        try FileManager.default.removeItem(at: files[1])
+        let restored = KTVQueue.restored(paths: files.map(\.path), currentIndex: 1)
+        #expect(restored.songs == [files[0]])
+        // Better than guessing at a neighbour: the evening resumes with a list
+        // and nothing playing, which is a state the transport already handles.
+        #expect(restored.current == nil)
+    }
+
+    @Test("a list of songs that are all gone restores as an empty queue")
+    func everythingMissing() throws {
+        let restored = KTVQueue.restored(
+            paths: ["/nowhere/a.wav", "/nowhere/b.wav"], currentIndex: 0)
+        #expect(restored.isEmpty)
+        #expect(restored.current == nil)
+    }
+}

@@ -2257,7 +2257,19 @@ final class RouterModel: ScriptTarget {
     private var madeSongPlayer: LocalSongPlayer?
 
     /// The songs that have been put on. See `KTVQueue` for what its verbs mean.
-    private(set) var songQueue = KTVQueue()
+    ///
+    /// Written down whenever it changes, rather than at eight call sites that
+    /// would have to be kept in step — `append`, `playNext`, `choose`,
+    /// `remove`, `clear`, `advance`, `goBack` and the replacement that opening
+    /// a single song performs. A ninth verb added later gets this for nothing,
+    /// which is the point: the list was lost on every quit because saving it
+    /// was nobody's particular job.
+    private(set) var songQueue = KTVQueue() {
+        didSet {
+            guard oldValue != songQueue else { return }
+            persist()
+        }
+    }
 
     /// Whether the song being sung comes round again instead of the next one.
     var repeatsOneSong: Bool {
@@ -7517,6 +7529,10 @@ final class RouterModel: ScriptTarget {
         // is running. `watchesIOAllocations` is deliberately *not* here — see
         // its own note; a process-wide allocation hook that survives a relaunch
         // is a machine that is quietly slower with nothing on screen to say so.
+        // The list, before the switch that belongs to it.
+        if let paths = saved.queuedSongPaths, !paths.isEmpty {
+            songQueue = KTVQueue.restored(paths: paths, currentIndex: saved.queuedSongIndex)
+        }
         songQueue.repeatsOne = saved.repeatsOneSong ?? false
         showsBackgroundApps = saved.showsBackgroundApps ?? false
         isSoundIdentificationEnabled = saved.isSoundIdentificationEnabled ?? false
@@ -7620,7 +7636,9 @@ final class RouterModel: ScriptTarget {
                     repeatsOneSong: songQueue.repeatsOne,
                     inspectorTab: inspectorTab.rawValue,
                     showsBackgroundApps: showsBackgroundApps,
-                    isSoundIdentificationEnabled: isSoundIdentificationEnabled),
+                    isSoundIdentificationEnabled: isSoundIdentificationEnabled,
+                    queuedSongPaths: songQueue.songs.map(\.path),
+                    queuedSongIndex: songQueue.index),
                 capturedAppBundleIDs: capturedAppBundleIDs,
                 excludedAppBundleIDs: excludedAppBundleIDs,
                 enabledEffects: enabledEffects,

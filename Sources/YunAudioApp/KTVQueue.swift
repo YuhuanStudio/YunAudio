@@ -27,6 +27,26 @@ struct KTVQueue: Equatable, Sendable {
     /// menu: the moment somebody wants a song again is the moment it ends.
     var repeatsOne = false
 
+    /// Rebuilds a queue that was written down, dropping what is no longer there.
+    ///
+    /// A KTV evening is a list somebody built up, and it did not survive
+    /// quitting. Restoring it has one hazard worth handling rather than
+    /// ignoring: a song may have been moved or deleted since, and a queue that
+    /// points at a file which is gone fails at the moment somebody presses
+    /// play. So the list is filtered first, and the position follows the song
+    /// that was current rather than the number it happened to have — removing
+    /// an earlier file would otherwise shift everything and leave the marker on
+    /// somebody else's song.
+    static func restored(paths: [String], currentIndex: Int?) -> KTVQueue {
+        let wanted = paths.map { URL(fileURLWithPath: $0) }
+        let current = currentIndex.flatMap { wanted.indices.contains($0) ? wanted[$0] : nil }
+        let surviving = wanted.filter { FileManager.default.fileExists(atPath: $0.path) }
+        var queue = KTVQueue()
+        queue.songs = surviving
+        queue.index = current.flatMap { surviving.firstIndex(of: $0) }
+        return queue
+    }
+
     var current: URL? {
         guard let index, songs.indices.contains(index) else { return nil }
         return songs[index]
