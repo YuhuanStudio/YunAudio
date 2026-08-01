@@ -487,6 +487,8 @@
 "Sing" = "唱歌";
 "KTV" = "KTV 舞台";
 "Open KTV window" = "打开 KTV 窗口";
+"Hear me over the backing track" = "伴奏很大声时听得到我";
+"A small on-device model picks your voice out when the accompaniment is louder than you. It cannot help when it is quieter." = "一个设备端的小模型会在伴奏比你大声时把你的声音挑出来。伴奏比你小声时它帮不上忙。";
 "The lyric index is rate limiting us. It usually clears in a minute." = "歌词索引在限流。通常一分钟内会恢复。";
 "Try again" = "再试一次";
 "Singing" = "唱歌";
@@ -573,10 +575,7 @@
 "You are singing" = "你唱的音";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "麦克风自带的零延迟监听，在设备内部完成。返回的是未经处理的原始信号。";
 "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "该输出没有可回读序列的输入，无法评分。请路由到回环设备后再执行检查。";
-"The song is in" = "这首歌的调是";
 "a guess" = "推测";
-"Move it %+d" = "移调 %+d";
-"Sing for a moment and it will work out how far to move it." = "先唱一段，将自动算出移调量。";
 "Words" = "歌词";
 "Earlier" = "提前";
 "Later" = "延后";

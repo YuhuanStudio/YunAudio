@@ -728,8 +728,10 @@ struct BackgroundResourceTests {
         #expect(compositor.ranges(of: "model.lyricProgress").count == 1)
         #expect(compositor.contains("variant == .lyricFillLegacy"))
         #expect(compositor.contains("variant == .lyricFillStatic ? 0.5 : nil"))
-        #expect(singing.contains("Choose the words…"))
-        #expect(singing.contains("Find words by title"))
+        // Both moved into `KTVWordsSourcing` with the rest of the sourcing row,
+        // because the stage had no way to reach any of it. Still reachable from
+        // the inspector — through the shared construction rather than a copy.
+        #expect(singing.contains("KTVWordsSourcing(model: model, scale: .inspector)"))
         // The switch itself is shared with the stage now, so the words live in
         // the shared construction rather than here — what this file must still
         // do is take it.
@@ -812,7 +814,17 @@ struct BackgroundResourceTests {
         // letterbox against the old minimum height, and a saved frame beats any
         // default. Pinning the exact name here would make retiring the next one
         // fail this test instead of fixing the window.
-        #expect(ktv.contains("let autosaveName = \"YunAudioKTVWindow"))
+        // The whole name, and one place for it. A prefix match let the
+        // rename to "…2" through, and `WindowCapture` — which looks the window
+        // up by this to photograph it — kept the old spelling and silently
+        // photographed nothing for as long as that lasted.
+        #expect(ktv.contains("static let autosaveName = \"YunAudioKTVWindow2\""))
+        #expect(ktv.contains("let autosaveName = Self.autosaveName"))
+        let capture = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/WindowCapture.swift",
+            encoding: .utf8)
+        #expect(capture.contains("KTVWindow.autosaveName"))
+        #expect(!capture.contains("\"YunAudioKTVWindow\""))
         #expect(ktv.contains("window.setFrameAutosaveName(autosaveName)"))
         // And that the restored position is not thrown away again. `center()`
         // used to run after the autosave name, so somebody could put the stage

@@ -28,13 +28,17 @@ struct CompactSingingActionsTests {
     @Test("both dynamic action rows use the wrapping layout")
     func productionRowsWrap() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
+        // The rows moved into `KTVWordsSourcing` when the stage turned out to
+        // have no way to reach any of them. Same assertion, at its new address:
+        // the two action rows wrap rather than clipping, which is what stops
+        // 「Sp / oti / fy」 happening in a narrow column.
         let source = try String(
-            contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
+            contentsOfFile: root + "Sources/YunAudioApp/KTVWordsSourcing.swift",
             encoding: .utf8)
-        let start = try #require(source.range(of: "private var handRun: some View"))
+        let start = try #require(source.range(of: "var body: some View"))
         let lookup = try #require(
             source.range(
-                of: "if isTitleLookupExpanded",
+                of: "if isExpanded { search }",
                 range: start.upperBound..<source.endIndex))
         let actionRows = source[start.lowerBound..<lookup.lowerBound]
 

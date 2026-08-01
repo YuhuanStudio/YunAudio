@@ -96,7 +96,8 @@ struct KTVTransportBar: View {
                 .foregroundStyle(scale.tint)
                 .frame(width: size, height: size)
                 .background(
-                    scale.tint.opacity(size > 30 ? scale.wellOpacity : scale.wellOpacity * 0.62),
+                    scale.tint.opacity(
+                        size > 30 ? scale.wellOpacity : scale.wellOpacity * 0.62),
                     in: Circle()
                 )
                 .contentShape(Circle())

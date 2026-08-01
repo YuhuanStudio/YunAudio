@@ -10,6 +10,19 @@ import YunDesign
 /// two presentations share state but not a window or a layout contract.
 @MainActor
 enum KTVWindow {
+
+    /// The window's autosave name, in one place.
+    ///
+    /// It was written twice — here and in `WindowCapture`, which looks the
+    /// window up by it to photograph the stage. Renaming it to retire a bad
+    /// saved frame changed one of the two, so the photograph step stopped
+    /// finding the window and quietly photographed nothing: `could not open KTV
+    /// for capture`, printed to standard error, in a step whose whole job is to
+    /// notice that the stage looks wrong.
+    ///
+    /// The test that was meant to catch this matched on a prefix, so it went on
+    /// passing across the rename. A constant cannot drift.
+    static let autosaveName = "YunAudioKTVWindow2"
     private static var controller: NSWindowController?
     private static var delegate: Delegate?
 
@@ -95,7 +108,7 @@ enum KTVWindow {
         // over any default, so fixing the default alone changed nothing for
         // anybody who had ever opened the stage. Changing the name retires the
         // bad frame once; the good one is then saved under this.
-        let autosaveName = "YunAudioKTVWindow2"
+        let autosaveName = Self.autosaveName
         let placedBefore =
             UserDefaults.standard.string(
                 forKey: KTVWindowSize.autosaveDefaultsKey(for: autosaveName)) != nil
@@ -322,7 +335,7 @@ struct KTVStage: View {
                         } label: {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")
                                 .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.white.opacity(0.88))
+                                .foregroundStyle(Yun.Palette.OnStage.primary)
                                 .frame(width: 36, height: 36)
                                 .background(.black.opacity(0.26), in: Circle())
                         }
@@ -480,6 +493,24 @@ struct KTVStage: View {
         let columnWidth = min(
             max(360, stageHeight * 0.52), max(220, size.width * 0.31))
         HStack(alignment: .center, spacing: max(36, size.width * 0.055)) {
+            // The tile yields, rather than the controls falling off the end.
+            //
+            // `metadataHeight` reserves room beneath the artwork for the title,
+            // the progress bar and the transport, and it is a constant — so
+            // every control added to this column since it was measured came out
+            // of nobody's budget and the column simply grew past the window.
+            // The voice isolation warning is a card, the scoring block is two
+            // rows and a sentence, and the words controls wrap to a second line
+            // on a narrow stage; together they took the words controls off the
+            // bottom of a 1080×720 window entirely.
+            //
+            // Tuning the constant is what the note on `metadataHeight` warns
+            // against, and rightly — it has been wrong in both directions
+            // already. Scrolling the column was tried and is worse: it cuts the
+            // transport in half and gives no sign there is anything below it.
+            // The artwork is the one thing here that can afford to be smaller,
+            // so it is the thing that gives way, and `artworkSide` stays the
+            // ceiling rather than the answer.
             trackColumn(
                 track, width: columnWidth,
                 artwork: Self.artworkSide(
@@ -528,11 +559,11 @@ struct KTVStage: View {
                 }
             }
             // `maxHeight`, not a fixed height with an alignment. Given an
-            // exact height the column was placed 302 points down a
-            // 619-point stage where centring predicts 92 — the fixed frame
-            // was being satisfied by the row rather than positioning the
-            // column inside it. Filling the row and centring within it is
-            // the arrangement that actually holds.
+            // exact height the column was placed 302 points down a 619-point
+            // stage where centring predicts 92 — the fixed frame was being
+            // satisfied by the row rather than positioning the column inside
+            // it. Filling the row and centring within it is the arrangement
+            // that actually holds.
             .frame(maxHeight: .infinity, alignment: .center)
             // A fixed height, not a maximum. A stack whose own minimum exceeds
             // the proposal is laid out at that minimum and overflows, and
@@ -649,7 +680,7 @@ struct KTVStage: View {
                 .clipShape(.rect(cornerRadius: tile > 80 ? 12 : 8))
                 .overlay(
                     RoundedRectangle(cornerRadius: tile > 80 ? 12 : 8)
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                        .stroke(Yun.Palette.OnStage.hairline, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
 
@@ -666,7 +697,7 @@ struct KTVStage: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(track.artist)
                     .font(.system(size: tile > 80 ? 15 : 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.62))
+                    .foregroundStyle(Yun.Palette.OnStage.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -712,9 +743,9 @@ struct KTVStage: View {
             } label: {
                 Image(systemName: "minus")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(Yun.Palette.OnStage.secondary)
                     .frame(width: 24, height: 24)
-                    .background(.white.opacity(0.10), in: Circle())
+                    .background(Yun.Palette.OnStage.well, in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(loc("Take the song down a semitone"))
@@ -729,7 +760,7 @@ struct KTVStage: View {
                     .font(.system(size: 11, weight: .semibold).monospacedDigit())
                     .foregroundStyle(
                         semitones == 0
-                            ? .white.opacity(0.55) : Yun.Palette.accent.opacity(0.92)
+                            ? Yun.Palette.OnStage.tertiary : Yun.Palette.accent.opacity(0.92)
                     )
                     .frame(minWidth: 26)
             }
@@ -742,9 +773,9 @@ struct KTVStage: View {
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.72))
+                    .foregroundStyle(Yun.Palette.OnStage.secondary)
                     .frame(width: 24, height: 24)
-                    .background(.white.opacity(0.10), in: Circle())
+                    .background(Yun.Palette.OnStage.well, in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(loc("Take the song up a semitone"))
@@ -757,6 +788,18 @@ struct KTVStage: View {
     /// A `Spacer` must not appear in here: it is flexible down to nothing, so
     /// every candidate containing one fits every proposal and `ViewThatFits`
     /// would always take the first.
+    /// The transport and the words controls on as many lines as they need.
+    ///
+    /// The fallback when the column is too narrow for one line, so that being
+    /// narrow costs a row of height rather than a row of features.
+    private func wrappedPlayerRow(_ track: NowPlaying.Track) -> some View {
+        YunWrap(spacing: Yun.Space.sm, lineSpacing: Yun.Space.sm, balanced: false) {
+            transportControls(track)
+            queueButton
+            lyricAlignment
+        }
+    }
+
     private func playerRow(
         _ track: NowPlaying.Track, showsName: Bool, showsAlignment: Bool
     ) -> some View {
@@ -767,7 +810,7 @@ struct KTVStage: View {
             if showsName {
                 Text(track.application)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.66))
+                    .foregroundStyle(Yun.Palette.OnStage.secondary)
                     .lineLimit(1)
                     .fixedSize()
             }
@@ -806,7 +849,11 @@ struct KTVStage: View {
                 .font(.system(size: 26 * 0.44, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: 26, height: 26)
-                .background(.white.opacity(model.hasAnotherSongQueued ? 0.22 : 0.10), in: Circle())
+                .background(
+                    model.hasAnotherSongQueued
+                        ? Yun.Palette.OnStage.wellLit : Yun.Palette.OnStage.well,
+                    in: Circle()
+                )
                 .overlay(alignment: .topTrailing) {
                     // A dot rather than a count: the number is in the popover,
                     // and a badge on a 26-point circle is unreadable anyway.
@@ -823,9 +870,18 @@ struct KTVStage: View {
         .accessibilityLabel(loc("Songs on"))
         .accessibilityIdentifier("KTVQueueButton")
         .popover(isPresented: $isQueueShowing, arrowEdge: .top) {
-            KTVQueueList(model: model, onDarkStage: false)
-                .padding(Yun.Space.lg)
-                .frame(width: 340)
+            VStack(alignment: .leading, spacing: Yun.Space.lg) {
+                KTVQueueList(model: model, onDarkStage: false)
+                Divider()
+                // Searching by title, running a set of words by hand against
+                // another player, and going back to it. All of it existed and
+                // all of it was reachable from the inspector column only — so
+                // the one case it is for, words that did not resolve, could not
+                // be repaired from the window where somebody sees them wrong.
+                KTVWordsSourcing(model: model, scale: .popover)
+            }
+            .padding(Yun.Space.lg)
+            .frame(width: 380)
         }
     }
 
@@ -838,7 +894,12 @@ struct KTVStage: View {
                 .font(.system(size: size * 0.44, weight: .semibold))
                 .foregroundStyle(.white)
                 .frame(width: size, height: size)
-                .background(.white.opacity(size > 30 ? 0.16 : 0.10), in: Circle())
+                // The bigger button carries the lit well, so the play button
+                // reads as the primary one without a second colour.
+                .background(
+                    size > 30 ? Yun.Palette.OnStage.wellLit : Yun.Palette.OnStage.well,
+                    in: Circle()
+                )
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -867,12 +928,19 @@ struct KTVStage: View {
     ) -> some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fit)
-                .frame(width: artwork, height: artwork)
+                // A ceiling, not a size. Given an exact height the tile keeps
+                // it and the rows beneath it go off the bottom of the window;
+                // given a maximum it shrinks by however much the column is
+                // over, which is the one concession this layout can make
+                // without hiding a control. Square either way, because the
+                // width follows.
+                .frame(maxWidth: artwork, maxHeight: artwork)
+                .aspectRatio(1, contentMode: .fit)
                 .background(.black.opacity(0.32))
                 .clipShape(.rect(cornerRadius: 14))
                 .overlay(
                     RoundedRectangle(cornerRadius: 14)
-                        .stroke(.white.opacity(0.12), lineWidth: 1)
+                        .stroke(Yun.Palette.OnStage.hairline, lineWidth: 1)
                 )
                 .shadow(color: .black.opacity(0.38), radius: 24, y: 12)
 
@@ -883,11 +951,18 @@ struct KTVStage: View {
                     .lineLimit(2)
                 Text(track.artist)
                     .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.62))
+                    .foregroundStyle(Yun.Palette.OnStage.tertiary)
                     .lineLimit(1)
             }
 
             progress(track)
+
+            // Above the scoring switch rather than below it, because it is the
+            // reason the scoring is about to read zero: voice isolation removes
+            // the song and most of the singing, and the panel warned about it
+            // while the stage — the surface somebody is actually looking at —
+            // said nothing. See `KTVVoiceIsolationNotice`.
+            KTVVoiceIsolationNotice(model: model, scale: .stage)
 
             // The scoring switch, the note being heard and the key suggestion —
             // all of which used to live only in the inspector column behind
@@ -907,7 +982,21 @@ struct KTVStage: View {
                 ViewThatFits(in: .horizontal) {
                     playerRow(track, showsName: true, showsAlignment: true)
                     playerRow(track, showsName: false, showsAlignment: true)
-                    playerRow(track, showsName: false, showsAlignment: false)
+                    // Wrapped rather than dropped. The last candidate used to
+                    // be the row without the alignment controls, and
+                    // `ViewThatFits` takes the last one when none fit — so on
+                    // an ordinary 1080-point window the whole words row was
+                    // simply absent: no 早一點／晚一點, no 拼音, no 簡繁 switch,
+                    // no text size. Not disabled and not hidden behind
+                    // anything; gone, with no way to reach them from the stage
+                    // at all.
+                    //
+                    // What the original note was about is the player's *name*
+                    // breaking into 「Sp / oti / fy」 and growing the column
+                    // while it did. That is still handled — the name is what
+                    // the first two candidates drop. Controls are not text and
+                    // wrap onto a second line without any of that.
+                    wrappedPlayerRow(track)
                 }
                 Spacer(minLength: 0)
                 if let appleMusicURL = track.appleMusicURL {
@@ -915,7 +1004,7 @@ struct KTVStage: View {
                         NSWorkspace.shared.open(appleMusicURL)
                     } label: {
                         Image(systemName: "arrow.up.right.square")
-                            .foregroundStyle(.white.opacity(0.78))
+                            .foregroundStyle(Yun.Palette.OnStage.secondary)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(loc("Open in Apple Music"))
@@ -936,7 +1025,7 @@ struct KTVStage: View {
             } else if let plain = model.plainLyrics {
                 Text(plain)
                     .font(.system(size: 28, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.88))
+                    .foregroundStyle(Yun.Palette.OnStage.primary)
                     .lineSpacing(10)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             } else {
@@ -946,7 +1035,7 @@ struct KTVStage: View {
                         .tint(.white)
                     Text(loc("Looking for lyrics…"))
                         .font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.72))
+                        .foregroundStyle(Yun.Palette.OnStage.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
@@ -1041,7 +1130,7 @@ struct KTVStage: View {
                     Text(loc("Back to the line being sung"))
                 }
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.88))
+                .foregroundStyle(Yun.Palette.OnStage.primary)
                 .padding(.horizontal, 13)
                 .padding(.vertical, 8)
                 .background(.black.opacity(0.42), in: Capsule())
@@ -1215,6 +1304,13 @@ struct KTVStage: View {
                                         for: translation, pointSize: size),
                                     alignment: .leading
                                 )
+                                // Computed, so it stays a raw white rather
+                                // than a token: this is the ramp that says how
+                                // far a line is from the one being sung, and a
+                                // ramp is a function, not five names. The
+                                // `OnStage` roles are for chrome — labels,
+                                // wells, hairlines — which is what the rest of
+                                // this file now draws from.
                                 .foregroundStyle(
                                     .white.opacity(
                                         offset == 0
@@ -1308,14 +1404,14 @@ struct KTVStage: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(loc("How that went"))
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.52))
+                        .foregroundStyle(Yun.Palette.OnStage.tertiary)
                     Text(performance.title)
                         .font(.system(size: 22, weight: .bold))
                         .foregroundStyle(.white)
                         .lineLimit(2)
                     Text(performance.artist)
                         .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.62))
+                        .foregroundStyle(Yun.Palette.OnStage.tertiary)
                         .lineLimit(1)
                 }
                 ForEach(performance.singers) { singer in
@@ -1326,10 +1422,10 @@ struct KTVStage: View {
                 } label: {
                     Text(loc("Done"))
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.88))
+                        .foregroundStyle(Yun.Palette.OnStage.primary)
                         .padding(.horizontal, 18)
                         .padding(.vertical, 9)
-                        .background(.white.opacity(0.14), in: Capsule())
+                        .background(Yun.Palette.OnStage.hairline, in: Capsule())
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: .infinity, alignment: .trailing)
@@ -1340,7 +1436,7 @@ struct KTVStage: View {
             .background(.black.opacity(0.86), in: .rect(cornerRadius: 22))
             .overlay(
                 RoundedRectangle(cornerRadius: 22)
-                    .stroke(.white.opacity(0.10), lineWidth: 1)
+                    .stroke(Yun.Palette.OnStage.well, lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.5), radius: 40, y: 18)
             .accessibilityIdentifier("KTVPerformanceCard")
@@ -1362,7 +1458,7 @@ struct KTVStage: View {
             HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
                 Text(singer.name)
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.86))
+                    .foregroundStyle(Yun.Palette.OnStage.primary)
                     .lineLimit(1)
                 Spacer(minLength: Yun.Space.sm)
                 Text(grade.title)
@@ -1375,7 +1471,7 @@ struct KTVStage: View {
             if let advice = KTVPerformanceGrade.advice(for: score) {
                 Text(advice)
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.52))
+                    .foregroundStyle(Yun.Palette.OnStage.tertiary)
             }
             // Timing, which the moment-to-moment score cannot express at all: a
             // singer who was right and late reads as flat, and this is the line
@@ -1395,7 +1491,7 @@ struct KTVStage: View {
                         format: loc("Best line: %@ (%.0f%%)"), best.text, best.percentage)
                 )
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.62))
+                .foregroundStyle(Yun.Palette.OnStage.tertiary)
                 .lineLimit(2)
             }
         }
@@ -1424,7 +1520,7 @@ struct KTVStage: View {
                 }
             }
             .font(.system(size: 12, weight: .medium))
-            .foregroundStyle(.white.opacity(0.78))
+            .foregroundStyle(Yun.Palette.OnStage.secondary)
             .padding(.horizontal, 13)
             .padding(.vertical, 9)
             .background(.black.opacity(0.30), in: Capsule())
@@ -1439,7 +1535,7 @@ struct KTVStage: View {
             Text(loc("Play something, or choose the words in the Sing panel."))
                 .font(.system(size: 20, weight: .semibold))
         }
-        .foregroundStyle(.white.opacity(0.72))
+        .foregroundStyle(Yun.Palette.OnStage.secondary)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -1521,9 +1617,9 @@ private struct KTVSongProgress: View {
         return VStack(spacing: 6) {
             GeometryReader { geometry in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(.white.opacity(0.18))
+                    Capsule().fill(Yun.Palette.OnStage.wellLit)
                     Capsule()
-                        .fill(.white.opacity(0.78))
+                        .fill(Yun.Palette.OnStage.secondary)
                         .frame(width: geometry.size.width * fraction)
                 }
                 // The whole bar, not the five points it is drawn as: a target
@@ -1549,7 +1645,7 @@ private struct KTVSongProgress: View {
                 Text(duration > 0 ? KTVStage.clock(duration) : "--:--")
             }
             .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.48))
+            .foregroundStyle(Yun.Palette.OnStage.tertiary)
             .monospacedDigit()
         }
     }

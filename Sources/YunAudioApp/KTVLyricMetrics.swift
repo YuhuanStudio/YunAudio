@@ -119,13 +119,15 @@ struct KTVLyricMetrics: Equatable, Sendable {
             if let romanisation = line.romanisation {
                 // Its own rows are its own size: two rows of 0.68 type is 1.36
                 // point-size multiples, not two.
-                extras += rows(
-                    romanisation, measureInEms: charactersPerLine / romanisationScale)
+                extras +=
+                    rows(
+                        romanisation, measureInEms: charactersPerLine / romanisationScale)
                     * romanisationScale
             }
             if let translation = line.translation {
-                extras += rows(
-                    translation, measureInEms: charactersPerLine / translationScale)
+                extras +=
+                    rows(
+                        translation, measureInEms: charactersPerLine / translationScale)
                     * translationScale
             }
         }
@@ -233,7 +235,8 @@ struct KTVLyricMetrics: Equatable, Sendable {
         // Less the two gaps the stage puts either side of the sung line: they
         // are drawn, so they are spent, and a budget that ignores them is a
         // budget that overflows by exactly that much.
-        let half = max(0, (height - current * rowHeight * (max(1, rowsPerLine) + extra) - spacing * 2) / 2)
+        let half = max(
+            0, (height - current * rowHeight * (max(1, rowsPerLine) + extra) - spacing * 2) / 2)
         let fit = Int((half / perNeighbour).rounded(.down))
 
         // At least one either side while there is room for it — and the room

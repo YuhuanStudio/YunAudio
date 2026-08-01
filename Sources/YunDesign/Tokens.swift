@@ -55,6 +55,38 @@ public enum Yun {
         public static let textMuted = adaptive(
             light: Color(hex: 0x71717A), dark: Color(hex: 0x52525B))
 
+        /// Text and surfaces over the KTV stage, which is a darkened
+        /// photograph rather than a card.
+        ///
+        /// The stage is the one surface in this application that does not
+        /// adapt: it is a cover image with a scrim over it in both appearances,
+        /// so `textSecondary` — a grey chosen against a card — is the wrong
+        /// colour there in light mode and a different wrong colour in dark. The
+        /// KTV views therefore each wrote their own `\.white.opacity(…)`, and by
+        /// the time anybody counted there were **seventeen distinct values**
+        /// doing the work of five roles: 0.6, 0.62 and 0.66 all meaning
+        /// "secondary", 0.08 through 0.18 all meaning "a well or a hairline".
+        ///
+        /// That is not a stage that was designed darker; it is a stage that
+        /// stopped using the design system, one view at a time, because the
+        /// system had nothing to offer it. This is the offer.
+        public enum OnStage {
+            /// Titles and the line being sung.
+            public static let primary = Color.white
+            /// Labels beside a control, and the lines around the current one.
+            public static let secondary = Color.white.opacity(0.72)
+            /// Captions, and what a control costs.
+            public static let tertiary = Color.white.opacity(0.55)
+            /// The lines a long way from the current one.
+            public static let faint = Color.white.opacity(0.35)
+            /// The well behind a round button.
+            public static let well = Color.white.opacity(0.10)
+            /// The same well when the control it holds is on.
+            public static let wellLit = Color.white.opacity(0.18)
+            /// A hairline over the photograph.
+            public static let hairline = Color.white.opacity(0.12)
+        }
+
         /// Inverted between themes, as in the source system: near-black on
         /// light, near-white on dark. What every accent falls back to.
         public static let monochromeAccent = adaptive(

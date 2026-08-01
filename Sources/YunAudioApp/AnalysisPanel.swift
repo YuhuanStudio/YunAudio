@@ -165,13 +165,39 @@ struct LoudnessFigure: View {
     let unit: String
     var isPrimary = false
 
+    /// Below this there is no reading, only arithmetic.
+    ///
+    /// A silent room measured −150.3 LUFS and −128.5 dBFS, and both were
+    /// printed in full. Nothing is wrong with the numbers — that is what the
+    /// integrator returns for a signal that is all dither — but they are not
+    /// measurements of anything, and broadcast meters have floored around here
+    /// for the same reason for forty years.
+    ///
+    /// It was also a layout fault, which is how it was noticed. The row is
+    /// sized from the width of the readings it expects; −150.3 is a glyph wider
+    /// than −18.6 at 22 points and −128.5 is one wider than −6.2, and the two
+    /// together pushed each figure into the label of the next one. Widening
+    /// every column to fit a number that means nothing would be paying for the
+    /// meaningless case twice.
+    static let noReadingBelow: Double = -70
+
+    /// What to print, which is a dash when the value is not a reading.
+    ///
+    /// The same dash the panel already uses for "no value yet", because to
+    /// somebody looking at it those are the same fact: there is nothing to
+    /// measure here.
+    static func text(for value: Double) -> String {
+        guard value.isFinite, value > noReadingBelow else { return "—" }
+        return String(format: "%.1f", value)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
             HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(value.isFinite ? String(format: "%.1f", value) : "—")
+                Text(Self.text(for: value))
                     .font(
                         .system(
                             size: isPrimary ? 22 : 15,
@@ -179,7 +205,8 @@ struct LoudnessFigure: View {
                             design: .monospaced)
                     )
                     .foregroundStyle(
-                        value.isFinite ? Yun.Palette.textPrimary : Yun.Palette.textMuted
+                        Self.text(for: value) == "—"
+                            ? Yun.Palette.textMuted : Yun.Palette.textPrimary
                     )
                     // A number that changes width as it crosses −10 makes the
                     // whole row jitter twenty times a second.

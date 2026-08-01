@@ -38,7 +38,8 @@ enum KTVKeyCommand: Equatable, Sendable {
 
     /// The mapping. Nil means the stage does not want the key, and returning
     /// that rather than swallowing it is what leaves ⌘Q, ⌘W and the rest alone.
-    static func resolve(_ key: KeyEquivalent, modifiers: EventModifiers = []) -> KTVKeyCommand? {
+    static func resolve(_ key: KeyEquivalent, modifiers: EventModifiers = []) -> KTVKeyCommand?
+    {
         // Anything held is somebody else's shortcut. Shift is allowed through
         // because the bracket keys are shifted on some layouts.
         guard !modifiers.contains(.command), !modifiers.contains(.control),

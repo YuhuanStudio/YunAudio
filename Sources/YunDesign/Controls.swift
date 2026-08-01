@@ -571,8 +571,22 @@ public struct YunToggleStyle: ToggleStyle {
 /// This is the same switch with nothing around it, for exactly that case.
 public struct YunSwitch: View {
     @Binding private var isOn: Bool
+    private let onDark: Bool
 
-    public init(isOn: Binding<Bool>) { _isOn = isOn }
+    /// - Parameter onDark: For the KTV stage, which is a darkened photograph
+    ///   rather than a card. The off track is `elevated` — a dark grey, chosen
+    ///   against `card` — and over a photograph it is a switch nobody can see
+    ///   is there. The on state is untouched: the accent is the accent
+    ///   everywhere, which is the point of having one.
+    ///
+    ///   The stage is why three toggles were built out of SwiftUI's own
+    ///   `.switch` instead of this one. A surface the design system does not
+    ///   cover is a surface that stops using it, so the case belongs here
+    ///   rather than in each view that meets it.
+    public init(isOn: Binding<Bool>, onDark: Bool = false) {
+        _isOn = isOn
+        self.onDark = onDark
+    }
 
     public var body: some View {
         Button {
@@ -580,14 +594,14 @@ public struct YunSwitch: View {
         } label: {
             ZStack(alignment: isOn ? .trailing : .leading) {
                 Capsule()
-                    .fill(isOn ? Yun.Palette.accent : Yun.Palette.elevated)
+                    .fill(isOn ? Yun.Palette.accent : offTrack)
                     .overlay {
                         Capsule().strokeBorder(
-                            isOn ? .clear : Yun.Palette.border, lineWidth: 1)
+                            isOn ? .clear : offBorder, lineWidth: 1)
                     }
                     .frame(width: 32, height: 18)
                 Circle()
-                    .fill(isOn ? Yun.Palette.accentForeground : Yun.Palette.card)
+                    .fill(isOn ? Yun.Palette.accentForeground : knob)
                     .frame(width: 14, height: 14)
                     .padding(.horizontal, 2)
                     .shadow(color: .black.opacity(0.12), radius: 1, y: 0.5)
@@ -596,6 +610,16 @@ public struct YunSwitch: View {
         .buttonStyle(.plain)
         .focusEffectDisabled()
         .animation(.easeOut(duration: 0.18), value: isOn)
+    }
+
+    private var offTrack: Color {
+        onDark ? .white.opacity(0.16) : Yun.Palette.elevated
+    }
+    private var offBorder: Color {
+        onDark ? .white.opacity(0.28) : Yun.Palette.border
+    }
+    private var knob: Color {
+        onDark ? .white.opacity(0.92) : Yun.Palette.card
     }
 }
 

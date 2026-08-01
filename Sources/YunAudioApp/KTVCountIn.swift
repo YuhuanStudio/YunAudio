@@ -97,7 +97,7 @@ struct KTVCountInDots: View {
                     .fill(
                         index < remaining
                             ? Yun.Palette.accent.opacity(0.92)
-                            : .white.opacity(0.16)
+                            : Yun.Palette.OnStage.wellLit
                     )
                     .frame(width: dot, height: dot)
             }

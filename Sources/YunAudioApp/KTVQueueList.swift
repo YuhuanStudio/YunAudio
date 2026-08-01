@@ -23,10 +23,14 @@ struct KTVQueueList: View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
             header
             if model.allQueuedSongs.isEmpty {
-                Text(loc("Nothing is on yet. Put a song on and it starts; put more on and they wait."))
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Text(
+                    loc(
+                        "Nothing is on yet. Put a song on and it starts; put more on and they wait."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(secondary)
+                .fixedSize(horizontal: false, vertical: true)
             } else {
                 list
             }
@@ -43,10 +47,7 @@ struct KTVQueueList: View {
             // 重唱: on a real machine this is a button, not a setting buried in
             // a menu — the moment somebody wants a song again is the moment it
             // ends.
-            Toggle(loc("Sing it again"), isOn: $model.repeatsOneSong)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .labelsHidden()
+            YunSwitch(isOn: $model.repeatsOneSong, onDark: onDarkStage)
                 .accessibilityLabel(loc("Sing it again"))
                 .accessibilityIdentifier("KTVRepeatOne")
             Image(systemName: "repeat.1")
@@ -64,13 +65,13 @@ struct KTVQueueList: View {
                 Button(loc("Add songs…")) {
                     KTVFilePickers.chooseSongs(into: model)
                 }
-                    .buttonStyle(YunButtonStyle(.primary, small: true))
-                    .accessibilityIdentifier("KTVAddSongs")
+                .buttonStyle(YunButtonStyle(.primary, small: true))
+                .accessibilityIdentifier("KTVAddSongs")
                 Button(loc("插播")) {
                     KTVFilePickers.chooseSongs(into: model, playingNext: true)
                 }
-                    .buttonStyle(YunButtonStyle(.secondary, small: true))
-                    .accessibilityIdentifier("KTVPlayNext")
+                .buttonStyle(YunButtonStyle(.secondary, small: true))
+                .accessibilityIdentifier("KTVPlayNext")
                 Button(loc("Choose the words…")) {
                     KTVFilePickers.chooseWords(for: model)
                 }
@@ -95,7 +96,9 @@ struct KTVQueueList: View {
                 .frame(width: 16)
             Text(url.deletingPathExtension().lastPathComponent)
                 .font(isCurrent ? Yun.Text.label : Yun.Text.body)
-                .foregroundStyle(isCurrent ? primary : (isSung ? secondary.opacity(0.6) : primary))
+                .foregroundStyle(
+                    isCurrent ? primary : (isSung ? secondary.opacity(0.6) : primary)
+                )
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: Yun.Space.sm)
@@ -123,7 +126,7 @@ struct KTVQueueList: View {
 
     private var primary: Color { onDarkStage ? .white : Yun.Palette.textPrimary }
     private var secondary: Color {
-        onDarkStage ? .white.opacity(0.6) : Yun.Palette.textSecondary
+        onDarkStage ? Yun.Palette.OnStage.tertiary : Yun.Palette.textSecondary
     }
 
 }

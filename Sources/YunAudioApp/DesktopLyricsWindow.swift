@@ -197,7 +197,8 @@ struct DesktopLyricsControls: View {
                 .padding(.trailing, 14)
                 .opacity(isShowing ? 1 : 0)
                 .animation(
-                    reduceMotion ? nil : .easeOut(duration: 0.16), value: isShowing)
+                    reduceMotion ? nil : .easeOut(duration: 0.16), value: isShowing
+                )
                 // Not hit-testable while invisible, so a stray click on a
                 // window that looks like plain words does not skip a track.
                 .allowsHitTesting(isShowing)

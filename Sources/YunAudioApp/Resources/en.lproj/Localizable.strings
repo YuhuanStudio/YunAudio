@@ -488,6 +488,8 @@
 "Sing" = "Sing";
 "KTV" = "KTV";
 "Open KTV window" = "Open KTV window";
+"Hear me over the backing track" = "Hear me over the backing track";
+"A small on-device model picks your voice out when the accompaniment is louder than you. It cannot help when it is quieter." = "A small on-device model picks your voice out when the accompaniment is louder than you. It cannot help when it is quieter.";
 "The lyric index is rate limiting us. It usually clears in a minute." = "The lyric index is rate limiting us. It usually clears in a minute.";
 "Try again" = "Try again";
 "Singing" = "Singing";
@@ -574,10 +576,7 @@
 "You are singing" = "You are singing";
 "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule — nothing this application does is in it." = "The microphone's own zero-latency monitoring, done in the device. What comes back is the raw capsule.";
 "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check." = "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check.";
-"The song is in" = "The song is in";
 "a guess" = "a guess";
-"Move it %+d" = "Move it %+d";
-"Sing for a moment and it will work out how far to move it." = "Sing for a moment and it will work out how far to move it.";
 "Words" = "Words";
 "Earlier" = "Earlier";
 "Later" = "Later";

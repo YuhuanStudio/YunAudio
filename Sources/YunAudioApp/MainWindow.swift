@@ -1456,8 +1456,10 @@ struct MainWindow: View {
         let _ = BodyCount.tick("SingingTabAside")
         YunCard {
             VStack(alignment: .leading, spacing: Yun.Space.md) {
-                Label(loc("The stage has its own window"), systemImage: "macwindow.on.rectangle")
-                    .font(Yun.Text.title)
+                Label(
+                    loc("The stage has its own window"), systemImage: "macwindow.on.rectangle"
+                )
+                .font(Yun.Text.title)
                 if let title = model.nowPlaying?.title, !title.isEmpty {
                     Text(title)
                         .font(Yun.Text.body)
@@ -1481,8 +1483,10 @@ struct MainWindow: View {
                     Button {
                         KTVWindow.close()
                     } label: {
-                        Label(loc("Put it back here"), systemImage: "rectangle.compress.vertical")
-                            .frame(maxWidth: .infinity)
+                        Label(
+                            loc("Put it back here"), systemImage: "rectangle.compress.vertical"
+                        )
+                        .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(YunButtonStyle(.secondary, small: true))
                     .accessibilityIdentifier("PutKTVBack")

@@ -29,7 +29,7 @@ struct KTVWordsControls: View {
         var spacing: CGFloat { self == .stage ? Yun.Space.sm : 6 }
         var tint: Color { self == .stage ? .white : Yun.Palette.textPrimary }
         var quiet: Color {
-            self == .stage ? .white.opacity(0.62) : Yun.Palette.textTertiary
+            self == .stage ? Yun.Palette.OnStage.tertiary : Yun.Palette.textTertiary
         }
         var well: Double { self == .stage ? 0.10 : 0.07 }
         var lit: Double { self == .stage ? 0.18 : 0.14 }

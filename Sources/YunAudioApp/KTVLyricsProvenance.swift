@@ -21,10 +21,10 @@ struct KTVLyricsProvenance: View {
             self == .stage ? .system(size: 12, weight: .medium) : Yun.Text.caption
         }
         var quiet: Color {
-            self == .stage ? .white.opacity(0.55) : Yun.Palette.textTertiary
+            self == .stage ? Yun.Palette.OnStage.tertiary : Yun.Palette.textTertiary
         }
         var loud: Color {
-            self == .stage ? .white.opacity(0.8) : Yun.Palette.textSecondary
+            self == .stage ? Yun.Palette.OnStage.secondary : Yun.Palette.textSecondary
         }
     }
 

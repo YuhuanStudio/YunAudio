@@ -17,9 +17,6 @@ struct SingingPanel: View {
         ProcessInfo.processInfo.environment["YUNAUDIO_RENDER"] != nil
 
     @Bindable var model: RouterModel
-    @State private var isTitleLookupExpanded = false
-    @State private var handTitle = ""
-    @State private var handArtist = ""
 
     var body: some View {
         let _ = BodyCount.tick("SingingPanel")
@@ -33,48 +30,12 @@ struct SingingPanel: View {
 
     /// Voice isolation is on, and it is about to delete the song.
     ///
-    /// Apple's model keeps one person speaking and removes everything else — so
-    /// on a stage it treats the backing track and the singing as the noise it
-    /// exists to delete, and adds 56 ms doing it. 「語音通話」and 「吵雜環境」both
-    /// switch it on, because both are about a phone call, and somebody who set
-    /// one up months ago has no reason to connect the two.
-    ///
-    /// Said rather than overridden: it is a setting somebody chose, and an
-    /// application that silently undoes choices is worse than one that explains
-    /// them. The button is there because being told without being able to act
-    /// is only half of it.
+    /// The whole notice now lives in `KTVVoiceIsolationNotice`, because the
+    /// stage — the surface people actually sing at — did not have one. See
+    /// there for why a warning in the inspector alone is not a warning.
     @ViewBuilder
     private var voiceIsolationWarning: some View {
-        if model.voiceIsolationWillHurtSinging {
-            VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                Label(
-                    loc("Voice isolation is on, and it will treat the song as noise."),
-                    systemImage: "exclamationmark.triangle.fill"
-                )
-                .font(Yun.Text.label)
-                .foregroundStyle(Yun.Palette.warning)
-                .fixedSize(horizontal: false, vertical: true)
-                Text(
-                    loc(
-                        "Apple's model keeps one person speaking and removes everything else, which is the backing track and the singing. It also adds about 56 ms."
-                    )
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-                Button(loc("Turn it off while singing")) {
-                    model.voiceIsolationEnabled = false
-                }
-                .buttonStyle(YunButtonStyle(.primary, small: true))
-                .accessibilityIdentifier("SingingDisableVoiceIsolation")
-            }
-            .padding(Yun.Space.md)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                Yun.Palette.warning.opacity(0.10), in: .rect(cornerRadius: Yun.Radius.card)
-            )
-            .accessibilityIdentifier("SingingVoiceIsolationWarning")
-        }
+        KTVVoiceIsolationNotice(model: model, scale: .inspector)
     }
 
     /// How the song that just finished went, in the width of an inspector.
@@ -194,46 +155,6 @@ struct SingingPanel: View {
                     .fixedSize(horizontal: false, vertical: true)
             } else if model.nowPlaying != nil {
                 lyricsLookupState
-            }
-
-            // The key of what is playing, and how far it would have to move.
-            // Every karaoke machine has a transpose button because a song is
-            // written in the key its original singer could reach; the pitch
-            // stage to fix that is already here, and this is the number it
-            // needed.
-            if let key = model.songKey {
-                YunDivider()
-                HStack(spacing: Yun.Space.sm) {
-                    Text(loc("The song is in"))
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                    Text(key.name)
-                        .font(Yun.Text.title)
-                        .foregroundStyle(
-                            key.confidence > 0.3
-                                ? Yun.Palette.textPrimary : Yun.Palette.textMuted)
-                    // Said out loud when it is a guess. Relative major and
-                    // minor share every note, so a weak match is common and
-                    // printing a letter with a straight face would be a lie.
-                    if key.confidence <= 0.3 {
-                        YunBadge(loc("a guess"))
-                    }
-                    Spacer()
-                    if let shift = model.suggestedShift, shift != 0 {
-                        Button(
-                            String(format: loc("Move it %+d"), shift)
-                        ) {
-                            model.applySuggestedShift()
-                        }
-                        .buttonStyle(YunButtonStyle(.secondary, small: true))
-                    }
-                }
-                if model.comfortableMidi == nil {
-                    Text(loc("Sing for a moment and it will work out how far to move it."))
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
 
             // Whether you are on the note. The tracker was already here; what
@@ -426,147 +347,7 @@ struct SingingPanel: View {
     /// them when the music starts is what a karaoke machine has always done.
     @ViewBuilder
     private var handRun: some View {
-        VStack(alignment: .leading, spacing: Yun.Space.sm) {
-            YunWrap(
-                spacing: Yun.Space.sm, lineSpacing: 6,
-                balanced: true
-            ) {
-                Button(loc("Open a song…")) { KTVFilePickers.chooseSongs(into: model) }
-                    .buttonStyle(YunButtonStyle(.ghost, small: true))
-                    .help(
-                        loc(
-                            "Plays an audio file here, so the words follow the samples instead of asking another application where it is."
-                        ))
-                Button(model.isHandRun ? loc("Choose another") : loc("Choose the words…")) {
-                    KTVFilePickers.chooseWords(for: model)
-                }
-                .buttonStyle(YunButtonStyle(.ghost, small: true))
-                Button {
-                    withAnimation(.easeInOut(duration: 0.18)) {
-                        isTitleLookupExpanded.toggle()
-                    }
-                } label: {
-                    Label(
-                        loc("Find words by title"),
-                        systemImage: isTitleLookupExpanded ? "chevron.up" : "magnifyingglass"
-                    )
-                }
-                .buttonStyle(YunButtonStyle(.ghost, small: true))
-            }
-
-            if model.isHandRun || model.nowPlaying != nil {
-                YunWrap(
-                    spacing: Yun.Space.sm, lineSpacing: 6,
-                    balanced: true
-                ) {
-                    if model.isHandRun {
-                        if model.lyrics != nil {
-                            Button(model.isRunningWords ? loc("Stop") : loc("Start")) {
-                                if model.isRunningWords {
-                                    model.stopWords()
-                                } else {
-                                    model.runWords()
-                                }
-                            }
-                            .buttonStyle(YunButtonStyle(.secondary, small: true))
-                        }
-                        Button(loc("Back to the player")) { model.closeWords() }
-                            .buttonStyle(YunButtonStyle(.ghost, small: true))
-                    }
-                    if let track = model.nowPlaying {
-                        Button(loc("Find accompaniment")) {
-                            guard
-                                let url = AccompanimentSearch.youtubeSearchURL(
-                                    title: track.title, artist: track.artist)
-                            else { return }
-                            NSWorkspace.shared.open(url)
-                        }
-                        .buttonStyle(YunButtonStyle(.ghost, small: true))
-                        .help(
-                            loc(
-                                "Searches official YouTube results for accompaniment candidates; nothing is downloaded or played automatically."
-                            )
-                        )
-                    }
-                    Button(loc("Open the folder")) {
-                        guard let directory = RouterModel.lyricsDirectory else { return }
-                        try? FileManager.default.createDirectory(
-                            at: directory, withIntermediateDirectories: true)
-                        NSWorkspace.shared.open(directory)
-                    }
-                    .buttonStyle(YunButtonStyle(.ghost, small: true))
-                }
-            } else {
-                Button(loc("Open the folder")) {
-                    guard let directory = RouterModel.lyricsDirectory else { return }
-                    try? FileManager.default.createDirectory(
-                        at: directory, withIntermediateDirectories: true)
-                    NSWorkspace.shared.open(directory)
-                }
-                .buttonStyle(YunButtonStyle(.ghost, small: true))
-            }
-
-            if isTitleLookupExpanded {
-                VStack(alignment: .leading, spacing: Yun.Space.sm) {
-                    HStack(spacing: Yun.Space.sm) {
-                        TextField(loc("Song title"), text: $handTitle)
-                            .onChange(of: handTitle) { _, value in
-                                let bounded = String(
-                                    value.prefix(RouterModel.maximumHandLyricsFieldLength))
-                                if bounded != value { handTitle = bounded }
-                            }
-                            .onSubmit { searchWordsByTitle() }
-                        TextField(loc("Artist (optional)"), text: $handArtist)
-                            .onChange(of: handArtist) { _, value in
-                                let bounded = String(
-                                    value.prefix(RouterModel.maximumHandLyricsFieldLength))
-                                if bounded != value { handArtist = bounded }
-                            }
-                            .onSubmit { searchWordsByTitle() }
-                    }
-                    HStack(alignment: .center, spacing: Yun.Space.sm) {
-                        Text(
-                            loc(
-                                "Local and cached words are checked first, then every configured public lyric source. No extra permission is requested."
-                            )
-                        )
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        Spacer(minLength: Yun.Space.sm)
-                        Button(loc("Search lyric sources")) { searchWordsByTitle() }
-                            .buttonStyle(YunButtonStyle(.primary, small: true))
-                            .disabled(
-                                handTitle.trimmingCharacters(
-                                    in: .whitespacesAndNewlines
-                                ).isEmpty)
-                    }
-                }
-                .padding(Yun.Space.md)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Yun.Palette.accent.opacity(0.09),
-                            Yun.Palette.elevated.opacity(0.7),
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing),
-                    in: .rect(cornerRadius: Yun.Radius.card)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Yun.Radius.card)
-                        .stroke(Yun.Palette.borderHairline, lineWidth: 1)
-                )
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-        }
-    }
-
-    private func searchWordsByTitle() {
-        guard model.findWordsByTitle(handTitle, artist: handArtist) else { return }
-        withAnimation(.easeInOut(duration: 0.18)) {
-            isTitleLookupExpanded = false
-        }
+        KTVWordsSourcing(model: model, scale: .inspector)
     }
 
     private func chooseWords() {

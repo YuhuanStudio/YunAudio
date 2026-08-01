@@ -776,6 +776,7 @@ struct OnlineLyricsTests {
 
     @Test("the grace does not wait for a provider that never answers")
     func theGraceIsBounded() async throws {
+        let deadProvidersThatFinished = SlowFallbackTally()
         // The other half, with nothing to race. One provider answers timed
         // words immediately; the rest sleep for six seconds. The grace is a
         // tenth of a second, so the call must return in a small fraction of
@@ -797,6 +798,10 @@ struct OnlineLyricsTests {
                 body = #"{"lyric":"[00:18.96]first\n[00:25.65]second"}"#
             default:
                 try await Task.sleep(for: .seconds(6))
+                // Reached only if the grace waited for a provider that never
+                // answers, which is the regression. Counting it says that
+                // directly; the wall clock only said it on an idle machine.
+                await deadProvidersThatFinished.increment()
                 body = "[]"
             }
             return (Data(body.utf8), response(for: request, status: 200))
@@ -809,15 +814,14 @@ struct OnlineLyricsTests {
         let elapsed = start.duration(to: clock.now)
 
         #expect(match?.source == .qqMusic)
-        // Generous, because a saturated executor delays a timer's continuation
-        // too — but nowhere near the six seconds that would mean the grace had
-        // waited for the dead providers, which is the regression this catches.
-        // Five seconds: the sleepers are six, so anything under this means the
-        // grace did not wait for them, and a saturated executor delays a
-        // timer's continuation by seconds without crossing it. Measured alone
-        // this returns in 0.15 s; measured inside the full suite, in about
-        // three. Both are the same answer.
-        #expect(elapsed < .seconds(5), "quality grace was not bounded: \(elapsed)")
+        // The claim, stated as itself: the grace did not wait for a provider
+        // that never answers. The clock is printed as evidence and no longer
+        // asserted — under a full parallel suite the *fast* path is starved
+        // too, so any bound tight enough to catch the regression is loose
+        // enough to fail on a busy machine. This is the second test in this
+        // file to learn that.
+        #expect(await deadProvidersThatFinished.count == 0)
+        print("quality grace returned in \(elapsed)")
     }
 }
 
@@ -989,14 +993,23 @@ struct HandRunLyricsTests {
 
     @Test("the collapsible form and source list follow runtime configuration")
     func interfaceStructure() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
         let source = try String(
-            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
-                + "Sources/YunAudioApp/SingingPanel.swift", encoding: .utf8)
-
-        #expect(source.contains("@State private var isTitleLookupExpanded"))
-        #expect(source.contains("TextField(loc(\"Song title\")"))
-        #expect(source.contains("TextField(loc(\"Artist (optional)\")"))
-        #expect(source.contains("model.findWordsByTitle(handTitle, artist: handArtist)"))
+            contentsOfFile: root + "Sources/YunAudioApp/SingingPanel.swift",
+            encoding: .utf8)
+        // The search form itself is shared with the stage now — see
+        // `KTVWordsSourcing`, which exists because the one case it is for, words
+        // that did not resolve, could not be repaired from the window where
+        // somebody sees them wrong. What is asserted here is that the panel
+        // still reaches it, and that the form is still a form.
+        let sourcing = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/KTVWordsSourcing.swift",
+            encoding: .utf8)
+        #expect(source.contains("KTVWordsSourcing(model: model, scale: .inspector)"))
+        #expect(sourcing.contains("@State private var isExpanded"))
+        #expect(sourcing.contains("field(loc(\"Song title\")"))
+        #expect(sourcing.contains("field(loc(\"Artist (optional)\")"))
+        #expect(sourcing.contains("model.findWordsByTitle(title, artist: artist)"))
         #expect(source.contains("model.isMusixmatchSessionConfigured"))
         #expect(!source.contains("OnlineLyrics.live.isMusixmatchConfigured"))
         #expect(
