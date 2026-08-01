@@ -1,9 +1,20 @@
 # Releasing
 
 A release is a tag, a disk image built from that tag, and a page saying what
-changed. There is no build server: GitHub's macOS runners do not carry the
-macOS 27 SDK this project needs, so the image is built on a machine that has
-one, and that is stated here rather than pretended away.
+changed. Every step of it happens on a machine somebody owns, and that is
+deliberate.
+
+**There is no CI, and there was.** Four jobs on `macos-15` runners, which bill
+at ten times a Linux minute — and they failed on every push, because a hosted
+runner carries neither the Swift 6.2 toolchain nor the macOS 27 SDK this project
+needs. `error: package 'yunaudio' is using Swift tools version 6.2.0 but the
+installed version is 6.1.0`, three commits in a row, at macOS rates. A check
+that cannot run is not a check; it is a bill.
+
+What it was trying to do is worth keeping, and `./App/verify.sh` already does
+all of it and more, on a machine with the SDK and real audio hardware — which is
+the other half of the argument, because half of what matters here cannot be
+tested on a runner with no devices to enumerate.
 
 ## Before
 
