@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系统需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![688 tests](https://img.shields.io/badge/tests-688-brightgreen)](#验证)
+[![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#验证)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系统需求)
 
 [English](README.md) · [繁體中文](README.zh-Hant.md) · 简体中文
@@ -99,12 +99,27 @@ Apple 的 `AUSoundIsolation` —— FaceTime“人声隔离”背后的模型，
 
 ### 唱歌
 
+<img src="docs/images/ktv-stage.png" alt="KTV 舞台：封面、播放控制、评分与歌词" width="100%">
+
+有自己的舞台，也在主窗口里有一份。两边由同一批组件构成 —— 播放条、点歌单、歌词控制、
+评分开关与移调建议各只有一份构造，所以其中一边加了控件，另一边同时就有。不同的只有排版。
+
 歌词优先取自 Music 自身的元数据与本地 `.lrc`，其次并行查询 LRCLIB、QQ 音乐、网易云音乐
 与 lyrics.ovh。通过校验的时间轴胜出，并取消其余请求。繁简元数据、现场版与电视演出标记
-均会比对，不会将原唱错误地对应到伴奏。
+均会比对，不会将原唱错误地对应到伴奏。全部落空时，可以用歌名搜索、直接选文件，
+或对着别的播放器手动跑词。
+
+来源带有逐字时间时，歌词逐字扫过；上方可显示拼音，并可在繁简之间转换。偏移量会逐首记住 ——
+给那些没有前奏留白的文件。
 
 评分会声明其参考来源：同名 MIDI 文件提供精确旋律；已捕获的原唱提供从音频推导的参考；
-仅有伴奏时则只提供调性与时值。每支麦克风保有各自的音高历史与分数。
+仅有伴奏时则只提供调性与时值。测量之前会先用带状动态时间规整把演唱与参考对齐，因此晚进的
+乐句算成「晚了」而不是「走音」，迟滞与稳定度也与音准分开报告。伴奏比人声大时，Neural Engine
+上的小模型会把人声挑出来 —— 在 1.5、2、3 倍时分别值 3、6、13 分，低于此无用，所以可以关掉。
+每支麦克风保有各自的音高历史与分数。
+
+点歌单：加在最后，插播排到下一首，唱完就停而不是从头再来一轮。系统本身的播放控制 ——
+媒体键、控制中心、AirPods 上的按钮 —— 都能操作它。
 
 ### 录音与转录
 
@@ -219,7 +234,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 单一 flow check 段落，44 秒
 ```
 
-各步骤刻意互相独立：688 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
+各步骤刻意互相独立：1379 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
 实际绘制之窗口的照片、“无其他实例占用音频设备”的断言、release 构建的比特精确测量，
 以及一次驱动整个界面对真实硬件执行的 flow check。
 

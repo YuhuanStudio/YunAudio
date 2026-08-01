@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系統需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![688 tests](https://img.shields.io/badge/tests-688-brightgreen)](#驗證)
+[![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#驗證)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系統需求)
 
 [English](README.md) · 繁體中文 · [简体中文](README.zh-Hans.md)
@@ -99,12 +99,27 @@ render 都成為一次 XPC 往返。
 
 ### 唱歌
 
+<img src="docs/images/ktv-stage.png" alt="KTV 舞台：封面、播放控制、評分與歌詞" width="100%">
+
+有自己的舞台，也在主視窗裡有一份。兩邊由同一批元件組成 —— 播放列、點歌單、歌詞控制、
+評分開關與移調建議各只有一份構造，所以其中一邊加了控制項，另一邊同時就有。不同的只有排版。
+
 歌詞優先取自 Music 自身的中介資料與本機 `.lrc`，其次並行查詢 LRCLIB、QQ 音樂、
 網易雲音樂與 lyrics.ovh。通過驗證的時間軸勝出，並取消其餘請求。繁簡中介資料、現場版與
-電視演出標記均會比對，不會將原唱錯誤地對應到伴奏。
+電視演出標記均會比對，不會將原唱錯誤地對應到伴奏。全部落空時，可以用歌名搜尋、直接選檔，
+或對著別的播放器手動跑詞。
+
+來源帶有逐字時間時，歌詞逐字掃過；上方可顯示拼音，並可在繁簡之間轉換。偏移量會逐首記住 ——
+給那些沒有前奏留白的檔案。
 
 評分會宣告其參考來源：同名 MIDI 檔提供精確旋律；已擷取的原唱提供從音訊推導的參考；
-僅有伴奏時則只提供調性與時間。每支麥克風保有各自的音高歷史與分數。
+僅有伴奏時則只提供調性與時間。量測之前會先用帶狀動態時間規整把演唱與參考對齊，因此晚進的
+樂句算成「晚了」而不是「走音」，遲滯與穩定度也與音準分開報告。伴奏比人聲大時，Neural Engine
+上的小模型會把人聲挑出來 —— 在 1.5、2、3 倍時分別值 3、6、13 分，低於此無用，所以可以關掉。
+每支麥克風保有各自的音高歷史與分數。
+
+點歌單：加在最後，插播排到下一首，唱完就停而不是從頭再來一輪。系統本身的播放控制 ——
+媒體鍵、控制中心、AirPods 上的按鈕 —— 都能操作它。
 
 ### 錄音與轉錄
 
@@ -219,7 +234,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 單一 flow check 段落，44 秒
 ```
 
-各步驟刻意互相獨立：688 個單元測試、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
+各步驟刻意互相獨立：1379 個單元測試、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
 實際繪製之視窗的照片、「無其他實例佔用音訊裝置」的斷言、release 建置的位元精確量測，
 以及一次驅動整個介面對真實硬體執行的 flow check。
 

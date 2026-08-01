@@ -8,7 +8,7 @@ can be proved bit-exact.**
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence MIT](https://img.shields.io/badge/licence-MIT-blue)](LICENSE)
-[![688 tests](https://img.shields.io/badge/tests-688-brightgreen)](#verification)
+[![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#verification)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
@@ -120,16 +120,40 @@ because every render then becomes an XPC round trip.
 
 ### Karaoke
 
+<img src="docs/images/ktv-stage.png" alt="The KTV stage: artwork, transport, scoring and the words" width="100%">
+
+A stage of its own, alongside the panel in the main window. Both are built from
+the same controls — the transport, the queue, the words controls, the scoring
+switch and the key suggestion are one construction each, so a control added to
+either reaches both. Only the arrangement differs.
+
 Lyrics resolve from Music's own metadata and local `.lrc` files first, then from
 LRCLIB, QQ Music, NetEase Cloud Music and lyrics.ovh, queried concurrently. A
 validated timeline wins and cancels the outstanding requests. Traditional and
 Simplified metadata, live editions and television-performance labels are matched
-without attaching an original recording to an accompaniment.
+without attaching an original recording to an accompaniment. When nothing
+matches, the words can be searched for by title, chosen from a file, or driven
+by hand against another application's playback.
+
+Words are swept a syllable at a time where the source carries word timing, with
+pronunciation above the line and conversion between the two Chinese scripts. The
+offset is remembered per song, for the files that carry no lead-in.
 
 Scoring declares its reference: an exact melody from a matching MIDI file, an
 audio-derived reference from captured original vocals, or key and timing alone
-where only an accompaniment is available. Each microphone keeps its own pitch
-history and score.
+where only an accompaniment is available. The performance is aligned against the
+reference with banded dynamic time warping before it is measured, so a phrase
+sung late scores as late rather than as out of tune, and lateness and steadiness
+are reported separately from pitch. A small on-device model on the Neural Engine
+picks the voice out when the accompaniment is louder than it — worth 3, 6 and 13
+points at one and a half, two and three times the singer's level, and switchable
+because it cannot help below that. Each microphone keeps its own pitch history
+and score.
+
+A queue, because a machine nobody has to walk back to between songs is the point:
+songs go on the end, 插播 goes next, the end stops rather than starting the
+evening again. The system's own transport — the media keys, Control Centre, a
+pair of AirPods — drives it.
 
 ### Recording and transcription
 
@@ -256,7 +280,7 @@ input, over a bit-exact path.
 ./App/verify.sh --flow="more than one input"  # one flow-check section, 44 s
 ```
 
-The steps are independent by design: 688 unit tests, a string-table comparison
+The steps are independent by design: 1379 unit tests, a string-table comparison
 across three languages, an offscreen render of every panel, a photograph of the
 window as the window server drew it, an assertion that no other instance holds
 the audio devices, a release-build bit-exactness measurement, and a flow check

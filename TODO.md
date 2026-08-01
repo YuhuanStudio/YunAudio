@@ -1229,3 +1229,134 @@ $49 + Airfoil $35 + Farrago $55 = **$307**。這個專案已經涵蓋其中三�
 **沒覆蓋到的部分，明講而不是糊過去**：直播主那一群（Elgato Wave Link、RØDE
 Connect/UNIFY、VoiceMeeter）以及 OBS/Krisp/REAPER 那一群從來沒回報。這裡關於它們的
 內容只來自單次搜尋，比其他部分薄。
+
+## 41. The output correction does not survive a stop and a start — **done**
+
+**What it was.** A graph is published before its output map can name the
+destination, so the correction installed during `start` was answered with
+`noOutputForTheBus` and dropped — and nothing ever asked again. `rebuiltRoutes`
+re-applies after a publication and only runs for a route *edit*, which is why
+dragging a cable in the patchbay put somebody's headphone correction back and
+stopping and starting did not. The curve stayed on screen throughout; what went
+missing was the audio.
+
+**How it was found.** Not by reading the code — `start` already called
+`applyCorrections()`, so "the call is missing" was wrong and adding a second one
+changed nothing. `RoutingEngine.setCorrections` returned 0 from three different
+places and the caller reported the same "correction absent" for all three, so
+the engine was given `CorrectionOutcome` to say which, and the flow check was
+given both sides of the comparison to print. The answer was
+`curve on ["…:output"], graph has ["…:output"]` — the same device. The bus was
+never wrong, only early.
+
+**The fix.** The poll re-submits the correction while it has one to push and it
+has not landed. Bounded by its own success: once `appliedToGraph` records it the
+condition is false for the rest of the session, and with no curve on any live bus
+it is false from the start.
+
+Submitted rather than flushed, which was a second bug found the same way:
+`applyCorrections` waits on the engine queue, and the first version of this
+retry called it from the poll on the main actor. While `start` held that queue
+the poll stopped, and the check that changes the buffer size mid-start read
+`engine reports -1 frames`. `LatestValueApplier` exists so that control changes
+never take an engine lock on MainActor.
+
+## 42. The loopback failure was the devices, not the path — **closed**
+
+**What it looked like.** `the returned run aligned with what was sent` failed
+every run of the flow check, and `yunaudio-cli selftest` reproduced it outside
+the application: through `Razer Seiren V3 Pro` the signal did not come back,
+`separation 0.000`, while the same destination worked from two other
+microphones. The two that worked were single-channel and the one that failed was
+the only three-channel device, so it read as a channel-mapping fault.
+
+**Two hypotheses, both wrong, both killed by measurement.**
+
+1. *The channel map is offset by the extra channels.* `YUNAUDIO_CHANNEL_MAP=1`
+   prints what the aggregate publishes against what the members claim:
+
+   ```
+   input streams:  [0] starting 1 × 3    [1] starting 4 × 2
+   members claim:  Razer Seiren V3 Pro: 3    YunAudio: 2
+   published 5, claimed 5
+   ```
+
+   They agree exactly. The map was never wrong.
+
+2. *96 kHz is broken.* The V3 Pro is the only source that shares 96 k with the
+   virtual device, and `sampleRatePlan` takes the highest shared rate, so this
+   was the only path that ran there. `YUNAUDIO_RATE=96000` forces it — and it
+   comes back **bit-exact**, 261304/261304, clock locked at 1.000006.
+
+**What it actually was.** A transient state of the devices. Unforced, the same
+pair now returns `bit-exact: 261304/261304 samples identical, delay 968 frames`
+three runs in a row with identical delay, and the flow check's own integrity
+section passes. The failing runs all happened while the flow-check application
+had been started and killed repeatedly, which leaves the microphone in a state
+the next aggregate inherits.
+
+**What is left behind.** Two switches that turn this class of question from a
+guess into a reading, and they are the reason the two hypotheses died in minutes
+rather than days:
+
+- `YUNAUDIO_CHANNEL_MAP=1` — published channels against claimed ones, per member.
+- `YUNAUDIO_RATE=<hz>` — force the graph's rate, so "does this path work at 96 k"
+  is a question somebody can put to it.
+
+The flow check now prints both ends and both rates beside the verdict, so a
+recurrence is a reading rather than a mystery.
+
+**And the third explanation, which was the right one.** Inside the application
+the same pair still failed while the command line always passed, and the reading
+the check now prints says why:
+
+```
+· from MacBook Pro的麥克風 at 48000 Hz, graph at 48000 Hz
+· measured through YunAudio
+· chain: compressor, equaliser, gate, limiter, voiceIsolation
+· something is processing the signal, so it cannot come back unchanged
+```
+
+The chain is the difference. `yunaudio-cli selftest` starts with an empty one;
+the application carries whatever is in the saved settings, and this machine's
+include voice isolation. A sequence that has been through Apple's isolation
+model is not the sequence that was sent — that is what the model is for — and
+`README.md` says so already: enabling voice isolation withdraws the
+bit-exactness claim. The interface has always reported the third condition,
+*processed*, beside the other two; only this check did not know about it.
+
+It now asserts alignment when nothing is processing, and reports the chain when
+something is. Four consecutive flow-check runs: 0, 1, 1, 0 failures, with no
+failure repeating.
+
+**Not a bug in the router.** Recorded rather than deleted because the first two
+explanations were plausible, written down, and false, and the next person to see
+this failure will reach for the same two.
+
+## 43. The words did not advance in the redraw measurement — **done**
+
+Two faults, one reading. `SingingLyrics` redraws when `model.lyricLine` changes,
+and the line was not changing:
+
+1. **The fixture ran out before the counting started.** Four lines three seconds
+   apart, and the section opens and shuts the menu bar panel first — which takes
+   longer than twelve seconds of lyrics. The line was pinned at the last one for
+   the whole four-second window. Now thirty lines a second apart, restarted
+   immediately before the count.
+2. **`isSingingVisible` was never set.** `updateSinging` is guarded on it and the
+   tab sets it from `onAppear`, so selecting the tab and measuring at once raced
+   the appearance. The section now sets it and hands it back.
+
+Diagnosed by printing every precondition rather than guessing at them — the
+line that said `inspector singing, stage window shut, words loaded, hand-run
+true, running true, singing visible true, line 4` is what made it obvious, and it
+stays in the check.
+
+```
+· lyric view: 4 bodies in 4 s
+✓ the words advance in the panel
+✓ without a redraw per frame
+```
+
+Both halves are asserted now: a zero would mean the panel never built it, and a
+twenty would mean the composited lyric surface had been undone.
