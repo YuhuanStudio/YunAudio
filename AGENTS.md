@@ -62,7 +62,7 @@ source ./App/toolchain.sh
 Then:
 
 ```bash
-swift build && swift test           # 246 tests
+swift build && swift test           # the whole suite
 "$(xcrun --find swift-format)" lint --recursive Sources Tests
 "$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
 ```

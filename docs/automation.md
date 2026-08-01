@@ -139,7 +139,6 @@ Two things worth saying plainly:
   handshake is checked over a real socket against a stub server that answers the
   way that document describes — but OBS is not installed on the machine this was
   written on, and a stub cannot be evidence about a program it is imitating.
-  `RESEARCH.md` says what running it against the real thing would take.
 
 Not built, and it is a decision rather than a gap: no native OBS plugin
 (the websocket does everything needed and a plugin binds this to OBS's build

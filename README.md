@@ -8,7 +8,7 @@ can be proved bit-exact.**
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#verification)
+[![1396 tests](https://img.shields.io/badge/tests-1396-brightgreen)](#verification)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
@@ -280,7 +280,7 @@ input, over a bit-exact path.
 ./App/verify.sh --flow="more than one input"  # one flow-check section, 44 s
 ```
 
-The steps are independent by design: 1379 unit tests, a string-table comparison
+The steps are independent by design: 1396 unit tests, a string-table comparison
 across three languages, an offscreen render of every panel, a photograph of the
 window as the window server drew it, an assertion that no other instance holds
 the audio devices, a release-build bit-exactness measurement, and a flow check
@@ -352,28 +352,20 @@ An index in all three languages: **[docs/](docs/README.md)**.
 | [docs/limits.md](docs/limits.md) | What does not work, and what was rejected |
 | [DEVICES.md](DEVICES.md) | Per-device hardware facts, and how each was verified |
 | [AGENTS.md](AGENTS.md) | The working agreement for changes to this project |
-| [TODO.md](TODO.md) | Planned work, with the evidence supporting each item |
-| [RESEARCH.md](RESEARCH.md) | The competitive and API research behind the decisions |
+| [TODO.md](TODO.md) | What is still open, what has been settled and should not be retried, and the evidence for each |
 
 ## Licence
 
 Apache 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-Chosen over MIT for the patent grant: contributors licence their patent
-claims along with their code, and that licence ends for anyone who sues
-over them. The permissions are otherwise the same — use it, change it,
-ship it in something closed if you like.
-
 ## Contributing
 
-**[AGENTS.md](AGENTS.md)** is the working agreement: the invariants, the
-operations that require a human, how the four interface checks differ, and the
-approaches already measured and rejected.
+**[CONTRIBUTING.md](CONTRIBUTING.md)** is how to build it, what a change needs
+before it can be merged, and the two operations that require a human.
+**[AGENTS.md](AGENTS.md)** is the longer working agreement behind it: the
+invariants, why the four interface checks are each blind to what the others
+catch, and the approaches already measured and rejected.
 
-```bash
-swift build && swift test
-"$(xcrun --find swift-format)" lint --recursive Sources Tests
-"$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
-```
-
-`swift-format` ships in the Xcode toolchain rather than on `PATH`, hence `xcrun`.
+Security reports go through **[SECURITY.md](SECURITY.md)** rather than a public
+issue — the virtual device is loaded into `coreaudiod` and carries every other
+application's audio.

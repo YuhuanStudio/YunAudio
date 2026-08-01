@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系统需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![1379 tests](https://img.shields.io/badge/tests-1379-brightgreen)](#验证)
+[![1396 tests](https://img.shields.io/badge/tests-1396-brightgreen)](#验证)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系统需求)
 
 [English](README.md) · [繁體中文](README.zh-Hant.md) · 简体中文
@@ -234,7 +234,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 单一 flow check 段落，44 秒
 ```
 
-各步骤刻意互相独立：1379 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
+各步骤刻意互相独立：1396 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
 实际绘制之窗口的照片、“无其他实例占用音频设备”的断言、release 构建的比特精确测量，
 以及一次驱动整个界面对真实硬件执行的 flow check。
 
@@ -290,26 +290,17 @@ App/                bundle 组装、图标与 verify.sh
 | [docs/limits.md](docs/limits.md) | 不可行的部分，以及已排除的方案 |
 | [DEVICES.md](DEVICES.md) | 各设备的硬件事实，以及每项事实的核实方式 |
 | [AGENTS.md](AGENTS.md) | 变更本项目的工作约定 |
-| [TODO.md](TODO.md) | 计划中的工作，附各项的支持证据 |
-| [RESEARCH.md](RESEARCH.md) | 决策背后的竞品与 API 研究 |
+| [TODO.md](TODO.md) | 还开着的、已经定案不必再试的，以及每一项背后的证据 |
 
 ## 许可
 
 Apache 2.0。见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
-选它而非 MIT 是为了专利授权：贡献者连同代码一起授予其专利主张，而任何人
-拿专利提告就失去这份授权。其余权限与 MIT 相同 —— 随你使用、修改，包进闭源
-产品也可以。
-
 ## 参与
 
-**[AGENTS.md](AGENTS.md)** 是工作约定：不变量、需要人工执行的操作、四种界面检查的差异，
-以及已测量并排除的方案。
+**[CONTRIBUTING.md](CONTRIBUTING.md)** 说明怎么构建、一个修改要有什么才能被合并，
+以及那两个必须由人执行的操作。**[AGENTS.md](AGENTS.md)** 是它背后完整的工作协定：
+不变条件、四种界面检查为何各自看不见对方抓到的东西，以及已测量并排除的方案。
 
-```bash
-swift build && swift test
-"$(xcrun --find swift-format)" lint --recursive Sources Tests
-"$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
-```
-
-`swift-format` 位于 Xcode 工具链而不在 `PATH` 上，因此通过 `xcrun` 调用。
+安全性问题请走 **[SECURITY.md](SECURITY.md)**，不要开公开 issue —— 虚拟设备是载入
+`coreaudiod` 的，它承载着其他每一个程序的音频。

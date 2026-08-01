@@ -8251,8 +8251,9 @@ enum UIFlowCheck {
     /// disabled.
     ///
     /// The handshake itself is asserted against a stub server in the unit
-    /// tests. Nothing anywhere asserts OBS's *behaviour*, and that is stated in
-    /// `RESEARCH.md` rather than implied by a green run.
+    /// tests. Nothing anywhere asserts OBS's *behaviour* — there is no OBS on
+    /// the machine this was written on — and saying so is worth more than a
+    /// green line that quietly means less than it looks.
     private static func checkOBSLink(model: RouterModel) async throws {
         try section("obs link")
 

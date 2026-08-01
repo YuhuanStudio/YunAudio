@@ -1,0 +1,14 @@
+# Text, so that a checkout on any platform gets the same bytes and diffs stay
+# readable. Everything else is left to git's own detection.
+* text=auto eol=lf
+
+# Binary, so git does not try to diff or merge them and a `git grep` does not
+# wade through megabytes of pixels and weights.
+*.png binary
+*.icns binary
+*.bin binary
+*.mlmodelc binary
+
+# Not part of what somebody downloads a release for.
+docs/images/* linguist-documentation
+*.md linguist-documentation

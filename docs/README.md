@@ -21,4 +21,3 @@ documents rather than reference:
 | [DEVICES.md](../DEVICES.md) | What each piece of hardware is, and how each fact was checked |
 | [AGENTS.md](../AGENTS.md) | The working agreement for changing this project |
 | [TODO.md](../TODO.md) | What is worth doing next, with the evidence each item deserves |
-| [RESEARCH.md](../RESEARCH.md) | The competitive and API research behind the decisions |

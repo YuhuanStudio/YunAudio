@@ -637,7 +637,7 @@ VoiceMeeter 每條匯流排都有完整的參數等化器，所以直播混音�
 
 ### 4. OBS 對接 —— **第一版已完成，但沒有人在真的 OBS 上驗過** [本機實測 + 未驗]
 
-`RESEARCH.md` 第 8 節是這一輪的決定與量測，完整版在那裡。摘要：
+這一輪的決定與量測，摘要：
 
 **已做**：`Sources/YunAudioOBS/` 是一個 obs-websocket v5 客戶端
 （`URLSessionWebSocketTask` + CryptoKit，零第三方相依）；偏好設定多了「直播」分頁；
@@ -648,7 +648,8 @@ VoiceMeeter 每條匯流排都有完整的參數等化器，所以直播混音�
 六個測試全過；2688 frames @ 48 kHz 在線上是 −56 ms。
 
 **沒驗到什麼，明講**：**這台機器上沒有裝 OBS**。上面沒有一條可以宣稱對接是通的。
-需要一個人跑 `brew install --cask obs`，步驟寫在 `RESEARCH.md` 8 節開頭。
+需要一個人跑 `brew install --cask obs`，然後在 OBS 的「工具 → WebSocket 伺服器設定」
+裡把伺服器打開並記下密碼。
 
 **刻意留著沒做**：browser source overlay 與自動建場景。理由不是不好，是它在這台機器
 上一個字都驗不了，而這個專案的問題正是「功能多到沒被驗證過」。等有人裝了 OBS、而且
@@ -778,7 +779,7 @@ FineTune 反應數最高的 issue 就是這個，開站兩天後就有人提 [V]
 
 ## 定位：不要跟他們比功能，比可驗證 [V]
 
-`RESEARCH.md` 讀完所有競爭者的 release notes 與產品頁之後最重要的一句話：
+讀完所有競爭者的 release notes 與產品頁之後最重要的一句話：
 
 **沒有任何一個競爭者提出過一個可以被別人重跑的數字。**
 

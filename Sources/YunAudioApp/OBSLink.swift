@@ -20,9 +20,10 @@ import YunDesign
 ///    everything to be muted, and OBS's own mute is a separate switch on a
 ///    separate window.
 ///
-/// What it deliberately does not do is in `RESEARCH.md`: it does not build
-/// scenes, it does not mirror OBS's meters, and it does not model OBS's six
-/// recording tracks.
+/// What it deliberately does not do: it does not build scenes, it does not
+/// mirror OBS's meters, and it does not model OBS's six recording tracks. Each
+/// of those is OBS's own interface doing a job better than a second copy of it
+/// would.
 @Observable
 @MainActor
 final class OBSLink {
