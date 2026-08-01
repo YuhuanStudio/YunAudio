@@ -7259,6 +7259,26 @@ enum UIFlowCheck {
         note(
             "\(model.channelMode.rawValue) ch \(model.monoChannel) — \(sourceChannels(model))")
         note(String(format: "destination bus %.1f dBFS with the tone", decibels(baseline)))
+        // Which end is quiet, reported beside the reading rather than instead
+        // of it.
+        //
+        // Everything from here on measures a known signal arriving somewhere,
+        // so if the thing generating that signal has stopped, all of it reads
+        // silence and turns red pointing at the router. Twenty-two lines did
+        // that once, and the router was fine.
+        //
+        // Noted, not asserted, and nothing is skipped on it. The first attempt
+        // at this made it a `guard` that returned early — and it fired on a run
+        // where the tone was arriving at −6 dBFS, taking a whole healthy section
+        // with it. A check that suppresses other checks on a signal it cannot
+        // read reliably is worse than the noise it was trying to explain.
+        if !tone.isStillProducing() {
+            note(
+                "the tone's own callbacks are not advancing — if the readings"
+                    + " below are silent, suspect the signal source before the"
+                    + " router; a human can reset CoreAudio with:"
+                    + " sudo killall coreaudiod")
+        }
         check("the tone reaches the destination bus at all", baseline > toneFloor)
 
         if destinations.isEmpty { note("no other loopback output — not exercised") }
@@ -7942,6 +7962,18 @@ enum UIFlowCheck {
                 self.procID = nil
                 return nil
             }
+        }
+
+        /// Whether the tone is *still* being written, now.
+        ///
+        /// `init` proves two callbacks happened when it started, and that is a
+        /// different claim from "it is producing at the moment the destination
+        /// was measured". A source that started and then stopped reads exactly
+        /// like a router that lost the audio — the destination is silent either
+        /// way — and every check downstream of it turns red pointing at the
+        /// wrong thing. Twenty-two of them did, once.
+        func isStillProducing(within milliseconds: UInt32 = 500) -> Bool {
+            procID != nil && yun_rt_cell_wait_for_swap(cycles, milliseconds)
         }
 
         func stop() {
