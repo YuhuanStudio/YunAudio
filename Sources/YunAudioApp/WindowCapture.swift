@@ -88,11 +88,50 @@ enum WindowCapture {
         // clipping, overflow, a control that does not fit — and the colour
         // question is already answered by the two full passes above.
         if let model {
+            // Whatever is really playing, and then its cover.
+            //
+            // Two faults met here and the second hid the first. `SongArtwork`
+            // is two different views — without a URL it draws a gradient and a
+            // letter, with one it draws an image that arrives asynchronously —
+            // and the wait for that arrival was written for the KTV window and
+            // placed just above it, so every photograph of the Sing tab ever
+            // taken caught the letter.
+            //
+            // Adding the wait here was not enough, because the fixture
+            // `prepareForRendering` installs is not isolated from the poll: a
+            // player running on the machine replaces `nowPlaying` a moment
+            // later. Which shutter fell before that happened decided whether a
+            // given picture showed the fixture or the room, so one run produced
+            // a Sing tab holding the fixture and a stage holding the real song,
+            // in the same set. The documentation was half invented and there
+            // was no way to tell which half by looking.
+            //
+            // Settled for deliberately rather than raced: let the poll take
+            // over if it is going to, then photograph what is actually there.
+            // With nothing playing that is the fixture, which is why the
+            // fixture is still worth having.
+            try? await Task.sleep(for: .milliseconds(1600))
+            if let artwork = model.nowPlaying?.artworkURL {
+                _ = await SongArtworkResources.shared.value(for: artwork)
+                settle(turns: 12)
+            }
             let wasShowing = model.inspectorTab
             for tab in MainWindow.Inspector.allCases {
                 let began = Date()
                 model.inspectorTab = tab
                 settle(turns: 12)
+                // A real suspension as well as the spin, and the cover is why.
+                //
+                // `settle` occupies the main actor while it turns the loop, and
+                // the body of a `.task` is MainActor-isolated — so it cannot
+                // start until the main actor yields, which spinning never does.
+                // This file learned that for the KTV window and put a
+                // `Task.sleep` there; the tab pass kept the spin, so the
+                // asynchronous image load never ran and every photograph of the
+                // Sing tab showed `SongArtwork`'s letter-and-gradient branch
+                // instead of a cover. The stage in the same run showed the
+                // cover, which is what made the two look like different songs.
+                try? await Task.sleep(for: .milliseconds(700))
                 wroteEverything =
                     photograph(
                         window,
