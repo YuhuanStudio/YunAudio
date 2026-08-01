@@ -94,3 +94,53 @@ struct RememberedSettingsTests {
         #expect(text.contains("deliberately **not** remembered across launches"))
     }
 }
+
+/// Wanting to be scored, which is not the same as being scored.
+///
+/// The two differ for the whole of a launch: `startScoring` needs a route and
+/// there is none while preferences are being read, so throwing the switch there
+/// only produces its refusal. The first version of this persisted that refusal
+/// — so restoring the setting destroyed the very preference it had just read,
+/// every launch, silently. Stored and then wiped by the act of reading it is
+/// worse than never stored.
+@Suite("wanting to be scored survives having nothing to score")
+struct ScoringWishTests {
+
+    private var model: String {
+        get throws {
+            try String(
+                contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                    + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        }
+    }
+
+    @Test("the wish is what is written down, not the switch")
+    func persistsTheWish() throws {
+        #expect(try model.contains("isScoringSinging: wantsScoring,"))
+    }
+
+    @Test("and reading it back sets the wish rather than throwing the switch")
+    func restoresTheWish() throws {
+        let text = try model
+        #expect(text.contains("wantsScoring = saved.isScoringSinging ?? false"))
+        // The switch must not be assigned from the file: at that point in a
+        // launch there is no route and the assignment is undone immediately.
+        #expect(!text.contains("isScoringSinging = saved."))
+    }
+
+    @Test("the refusal does not count as somebody changing their mind")
+    func refusalDoesNotPersist() throws {
+        let text = try model
+        // Both refusals in `startScoring` are bracketed, and the observer
+        // returns before writing anything when they are.
+        #expect(text.ranges(of: "isRefusingToScore = true").count == 2)
+        #expect(text.contains("guard !isRefusingToScore else { return }"))
+    }
+
+    @Test("and the wish is spent when a route finally exists")
+    func spentOnStart() throws {
+        #expect(
+            try model.contains("if wantsScoring, !isScoringSinging { isScoringSinging = true }")
+        )
+    }
+}

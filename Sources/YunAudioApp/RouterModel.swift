@@ -1539,9 +1539,31 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != isScoringSinging else { return }
             if isScoringSinging { startScoring() } else { stopScoring() }
+            // Only a deliberate change is written down.
+            //
+            // `startScoring` turns this straight back off when there is no
+            // route, and that refusal must not erase what somebody chose — the
+            // first version of this persisted it, so restoring the setting at
+            // launch (where the route is never up yet) wiped the very
+            // preference it was reading. Stored and then destroyed by the act
+            // of reading it is worse than never stored at all.
+            guard !isRefusingToScore else { return }
+            wantsScoring = isScoringSinging
             persist()
         }
     }
+
+    /// True while `startScoring` is putting the switch back, rather than a
+    /// person.
+    @ObservationIgnored private var isRefusingToScore = false
+
+    /// Whether somebody asked for scoring, as opposed to whether it is running.
+    ///
+    /// The two differ for the whole of a launch: the wish survives, and the
+    /// route it needs does not exist until `start`. Kept separately so that
+    /// wanting to be scored is remembered even on the evenings the route never
+    /// comes up.
+    @ObservationIgnored private(set) var wantsScoring = false
 
     @ObservationIgnored private var singerTracks: [SingerPitch] = []
     @ObservationIgnored private var scoringNames: [String] = []
@@ -1731,12 +1753,16 @@ final class RouterModel: ScriptTarget {
             singingError = loc("Start routing before it can score you.")
             // Assigning inside an observer does not run the observer again, so
             // this cannot recurse.
+            isRefusingToScore = true
             isScoringSinging = false
+            isRefusingToScore = false
             return
         }
         guard refreshSingerTracks() else {
             singingError = loc("Could not listen to any source.")
+            isRefusingToScore = true
             isScoringSinging = false
+            isRefusingToScore = false
             return
         }
         restartScore()
@@ -7539,9 +7565,10 @@ final class RouterModel: ScriptTarget {
         if let tab = saved.inspectorTab.flatMap(MainWindow.Inspector.init(rawValue:)) {
             inspectorTab = tab
         }
-        // Last, because it starts the scoring machinery and that wants the rest
-        // of the model already in place.
-        isScoringSinging = saved.isScoringSinging ?? false
+        // The wish, not the switch. There is no route at this point in a launch
+        // and there cannot be, so throwing the switch here only produces the
+        // refusal above. `start` honours it once there is something to score.
+        wantsScoring = saved.isScoringSinging ?? false
 
         if deviceInventoryIsReady {
             resolveRestoredDeviceIntent(defaultInputUID: try? AudioDevices.defaultInputUID())
@@ -7632,7 +7659,7 @@ final class RouterModel: ScriptTarget {
                     obsPort: obsLink.port,
                     obsInputName: obsLink.inputName,
                     obsMirrorsMute: obsLink.mirrorsMute,
-                    isScoringSinging: isScoringSinging,
+                    isScoringSinging: wantsScoring,
                     repeatsOneSong: songQueue.repeatsOne,
                     inspectorTab: inspectorTab.rawValue,
                     showsBackgroundApps: showsBackgroundApps,
@@ -9112,6 +9139,10 @@ final class RouterModel: ScriptTarget {
         // bus was never wrong, only early. Going through `rebuiltRoutes` uses
         // the one path that is known to work instead of a second copy of it.
         rebuiltRoutes()
+        // Scoring, if somebody asked for it before there was a route to do it
+        // with. This is the other half of `wantsScoring`: the wish is restored
+        // at launch and spent here, the first time there is something to score.
+        if wantsScoring, !isScoringSinging { isScoringSinging = true }
         // And the poll keeps trying for two seconds, because even here the
         // outputs are not always nameable yet.
         correctionRetriesLeft = Self.correctionRetries
