@@ -106,6 +106,38 @@ players use public ShazamKit recognition when the distributed App ID has the
 ShazamKit service enabled; an ad-hoc build states that signing requirement
 instead of retrying a catalogue request that cannot succeed.
 
+The performance is aligned against the reference before it is measured. Banded
+dynamic time warping over one lyric line at a time — a few hundred samples
+against a corridor of a hundred, so tens of thousands of cells per line rather
+than the nine hundred million an unbanded five-minute song would cost. What that
+buys is a distinction the moment-to-moment comparison could not make: a phrase
+entered a third of a second late scores as *late* rather than as four semitones
+flat, and lateness and steadiness are reported separately from pitch. Being
+consistently behind the file is phrasing, and plenty of published `.lrc` is that
+far out on its own; being late, then early, then late is the thing people mean
+by off the beat, and it is the only part of timing worth scoring.
+
+A small on-device model on the Neural Engine picks the voice out when the
+accompaniment is louder than it. Measured through the whole pipeline rather than
+per frame, by running the suite with and without it: at the singer's own level
+it is worth nothing, which is correct — the rule is already right there and the
+model defers to it — and at one and a half, two and three times it is worth
+three, six and thirteen points. At four times both collapse, so this extends the
+range where scoring works rather than removing the limit. It costs 0.24 ms a
+frame at a four-hertz cadence and is switchable, because a claim about what
+something is worth needs the same pipeline measured without it.
+
+The stage is a window of its own, and the panel in the main window is built from
+the same controls — the transport, the queue, the words controls, the scoring
+switch and the key suggestion are one construction each, so a control added to
+either reaches both. Words sweep a syllable at a time where the source carries
+word timing, with pronunciation above the line and conversion between the two
+Chinese scripts; the offset is remembered per song, for the files that carry no
+lead-in. The queue puts songs on the end, 插播 next, and stops at the end rather
+than starting the evening again — and it survives quitting, which for the one
+feature whose purpose is not walking back to the machine between songs is the
+difference between having it and not.
+
 **Direct monitoring that is actually direct.** Hearing yourself through a
 conferencing app is thirty milliseconds behind, which is late enough to stumble
 over. Monitoring here is a second destination on the same aggregate, so it is one
