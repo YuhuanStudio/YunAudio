@@ -29,7 +29,7 @@
 #define kDevice_Name "YunAudio"
 #define kDevice_UID "YunAudioDevice_UID"
 #define kDevice_ModelUID "YunAudioDevice_Model"
-#define kDevice_Manufacturer "Yuhuan Studio"
+#define kDevice_Manufacturer "YuhuanStudio"
 #define kBox_UID "YunAudioBox_UID"
 
 #pragma mark - Configuration

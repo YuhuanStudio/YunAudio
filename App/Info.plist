@@ -35,7 +35,7 @@
 	<string>YunAudio can capture audio from other applications so it can be mixed into a route.</string>
 
 	<key>NSHumanReadableCopyright</key>
-	<string>Yuhuan Studio</string>
+	<string>YuhuanStudio</string>
 	<!-- Reading what Music or Spotify is playing, for the lyrics panel. macOS
 	     will not deliver the Apple event without this string, and refuses
 	     silently: the panel would simply never find a track. -->
