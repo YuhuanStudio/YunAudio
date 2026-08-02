@@ -22,6 +22,14 @@ rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS"
 cp Info.plist "${BUNDLE}/Contents/Info.plist"
 
+# A Mach-O UUID changes on every link, so hashing the finished binary cannot
+# tell a rebuild from a different driver. Stamp the sources instead: identical
+# code gets an identical identity however often or where it is compiled.
+DRIVER_SOURCE_ID="$({ shasum -a 256 Sources/YunAudioDriver.c; shasum -a 256 Sources/YunAudioDriver.h; } | shasum -a 256 | awk '{print $1}')"
+/usr/libexec/PlistBuddy \
+	-c "Add :YunAudioSourceIdentifier string ${DRIVER_SOURCE_ID}" \
+	"${BUNDLE}/Contents/Info.plist"
+
 echo "compiling…"
 clang \
 	-bundle \

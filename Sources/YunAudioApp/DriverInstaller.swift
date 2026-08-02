@@ -49,15 +49,32 @@ enum DriverInstaller {
     /// implemented it perfectly. The installed copy simply predated the commit
     /// that added it, and nothing anywhere said so.
     ///
-    /// Compared by hashing the binaries rather than by version string, because
-    /// both copies claimed 0.1.0 and a version string only helps somebody who
-    /// remembered to bump it. A hash cannot be forgotten.
+    /// The build stamps a hash of the source into the bundle. The finished
+    /// binary cannot be compared directly: the linker gives an otherwise
+    /// identical Mach-O a new UUID on every build, so that comparison claimed
+    /// a freshly rebuilt driver was stale every time.
     static var installedIsOutOfDate: Bool {
         guard isInstalled, let bundled = bundledDriverURL else { return false }
-        guard let installedHash = binaryHash(ofDriverAt: URL(fileURLWithPath: installPath)),
+        return driversDiffer(
+            installed: URL(fileURLWithPath: installPath), bundled: bundled)
+    }
+
+    static func driversDiffer(installed: URL, bundled: URL) -> Bool {
+        let installedID = sourceIdentifier(ofDriverAt: installed)
+        let bundledID = sourceIdentifier(ofDriverAt: bundled)
+        if installedID != nil || bundledID != nil {
+            return installedID != bundledID
+        }
+        guard let installedHash = binaryHash(ofDriverAt: installed),
             let bundledHash = binaryHash(ofDriverAt: bundled)
         else { return false }
         return installedHash != bundledHash
+    }
+
+    private static func sourceIdentifier(ofDriverAt url: URL) -> String? {
+        let info = url.appendingPathComponent("Contents/Info.plist")
+        guard let dictionary = NSDictionary(contentsOf: info) else { return nil }
+        return dictionary["YunAudioSourceIdentifier"] as? String
     }
 
     private static func binaryHash(ofDriverAt url: URL) -> String? {

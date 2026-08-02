@@ -3511,6 +3511,71 @@ struct DriverRemovalTests {
     }
 }
 
+/// Rebuilding identical driver code must not tell somebody to reinstall it.
+///
+/// A raw binary hash could never satisfy that: every link writes a fresh
+/// Mach-O UUID and the ad-hoc signature covers it. The app consequently showed
+/// the stale-driver banner after every local build even when the source was
+/// unchanged.
+@MainActor
+@Suite("Driver source identity")
+struct DriverSourceIdentityTests {
+    private func makeDriver(
+        under parent: URL, name: String, identity: String?, binary: Data
+    ) throws -> URL {
+        let bundle = parent.appendingPathComponent(name + ".driver")
+        let contents = bundle.appendingPathComponent("Contents")
+        let executable = contents.appendingPathComponent("MacOS/YunAudioDriver")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var info: [String: Any] = ["CFBundleExecutable": "YunAudioDriver"]
+        if let identity { info["YunAudioSourceIdentifier"] = identity }
+        let propertyList = try PropertyListSerialization.data(
+            fromPropertyList: info, format: .xml, options: 0)
+        try propertyList.write(to: contents.appendingPathComponent("Info.plist"))
+        try binary.write(to: executable)
+        return bundle
+    }
+
+    @Test("the same source survives different linked binaries")
+    func sameSourceWinsOverMachONoise() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "YunAudio-driver-identity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let installed = try makeDriver(
+            under: parent, name: "installed", identity: "same-source",
+            binary: Data("first UUID".utf8))
+        let bundled = try makeDriver(
+            under: parent, name: "bundled", identity: "same-source",
+            binary: Data("second UUID".utf8))
+        #expect(!DriverInstaller.driversDiffer(installed: installed, bundled: bundled))
+    }
+
+    @Test("different source is an update even when the binary bytes happen to match")
+    func sourceChangeWinsOverBinary() throws {
+        let parent = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "YunAudio-driver-identity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let bytes = Data("same binary".utf8)
+        let installed = try makeDriver(
+            under: parent, name: "installed", identity: "old", binary: bytes)
+        let bundled = try makeDriver(
+            under: parent, name: "bundled", identity: "new", binary: bytes)
+        #expect(DriverInstaller.driversDiffer(installed: installed, bundled: bundled))
+    }
+
+    @Test("the driver build stamps both source files into the identity")
+    func buildStampsTheSources() throws {
+        let root = GraphLockDisciplineTests.enginePath
+            .replacingOccurrences(of: "Sources/YunAudioEngine/RoutingEngine.swift", with: "")
+        let script = try String(
+            contentsOfFile: root + "Driver/build-driver.sh", encoding: .utf8)
+        #expect(script.contains("YunAudioSourceIdentifier"))
+        #expect(script.contains("Sources/YunAudioDriver.c"))
+        #expect(script.contains("Sources/YunAudioDriver.h"))
+    }
+}
+
 /// The fade at the bottom of a scrolling column.
 ///
 /// It says "this carries on past here", and macOS gives no other sign — the
