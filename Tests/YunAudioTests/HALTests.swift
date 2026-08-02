@@ -3065,9 +3065,9 @@ struct ControlArgumentsTests {
     @Test("the measuring verbs are left alone")
     func harnessVerbsAreNotClaimed() {
         for verb in [
-            "selftest", "soak", "dsp", "route", "capture", "tone", "light", "apps",
+            "selftest", "soak", "dsp", "route", "capture", "tone", "speech", "light", "apps",
             "tap", "volume", "aec", "bench", "mic", "vad", "swap", "timing",
-            "audio-start",
+            "audio-start", "driver-receive",
         ] {
             #expect(ControlArguments.parse([verb]) == .notMine, "\(verb)")
         }

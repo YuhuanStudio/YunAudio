@@ -1,5 +1,6 @@
 import AVFoundation
 import CoreAudio
+import Darwin
 import Foundation
 import YunAudioControl
 import YunAudioEngine
@@ -8,6 +9,50 @@ import YunAudioRazer
 
 // A verification harness for the HAL layer. Everything the GUI will rely on is
 // readable here first, so device quirks surface before any UI exists.
+
+private struct IndependentInputCadence {
+    var callbacks: UInt64 = 0
+    var silentCallbacks: UInt64 = 0
+    var firstHostTime: UInt64 = 0
+    var lastHostTime: UInt64 = 0
+    var longestGap: UInt64 = 0
+    var peak: Float = 0
+}
+
+// A C IOProc rather than a Swift block. Swift 6 correctly traps when a block
+// inherited from the main actor is called on CoreAudio's realtime queue; the
+// measuring tool must obey the same isolation and realtime rules as the app.
+private let independentInputIOProc: AudioDeviceIOProc = {
+    _, now, inputData, _, _, _, clientData in
+    guard let clientData else { return noErr }
+    let cadence = clientData.assumingMemoryBound(to: IndependentInputCadence.self)
+    let hostTime =
+        now.pointee.mFlags.contains(.hostTimeValid)
+        ? now.pointee.mHostTime : mach_absolute_time()
+    if cadence.pointee.lastHostTime > 0 {
+        cadence.pointee.longestGap = max(
+            cadence.pointee.longestGap, hostTime - cadence.pointee.lastHostTime)
+    } else {
+        cadence.pointee.firstHostTime = hostTime
+    }
+    cadence.pointee.lastHostTime = hostTime
+    cadence.pointee.callbacks += 1
+
+    let buffers = UnsafeMutableAudioBufferListPointer(
+        UnsafeMutablePointer(mutating: inputData))
+    var cyclePeak: Float = 0
+    for buffer in buffers {
+        guard let data = buffer.mData else { continue }
+        let count = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
+        let samples = data.assumingMemoryBound(to: Float.self)
+        for index in 0..<count {
+            cyclePeak = max(cyclePeak, abs(samples[index]))
+        }
+    }
+    cadence.pointee.peak = max(cadence.pointee.peak, cyclePeak)
+    if cyclePeak <= 0.000_000_1 { cadence.pointee.silentCallbacks += 1 }
+    return noErr
+}
 
 func transportLabel(_ transport: AudioTransport) -> String {
     switch transport {
@@ -38,6 +83,109 @@ func automaticPhysicalInput(in devices: [AudioDevice]) -> AudioDevice? {
         $0.hasInput && !$0.transport.isVirtual
             && !$0.transport.requiresExplicitInputSelection
     }
+}
+
+private final class SpeechPlaybackState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var finishedValue = false
+    private var scheduledValue = 0
+    private var completedValue = 0
+
+    func scheduled() {
+        lock.lock()
+        scheduledValue += 1
+        lock.unlock()
+    }
+
+    func finished() {
+        lock.lock()
+        finishedValue = true
+        lock.unlock()
+    }
+
+    func completed() {
+        lock.lock()
+        completedValue += 1
+        lock.unlock()
+    }
+
+    var snapshot: (finished: Bool, scheduled: Int, completed: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (finishedValue, scheduledValue, completedValue)
+    }
+}
+
+/// Plays deterministic synthesised speech into one device without changing the
+/// system default output. It is a fixture for the same voice-processing chain
+/// a microphone uses, with a repeatable signal instead of somebody having to
+/// speak at exactly the right time.
+private func playSyntheticSpeech(deviceMatch: String) -> Bool {
+    guard
+        let device = (try? AudioDevices.all())?.first(where: {
+            $0.hasOutput && $0.name.localizedCaseInsensitiveContains(deviceMatch)
+        })
+    else {
+        print("no output device matched \(deviceMatch)")
+        return false
+    }
+
+    let engine = AVAudioEngine()
+    let output = engine.outputNode
+    var target = device.id
+    let status = AudioUnitSetProperty(
+        output.audioUnit!, kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global, 0, &target, UInt32(MemoryLayout<AudioDeviceID>.size))
+    guard status == noErr else {
+        print("could not select \(device.name): \(fourCharDescription(status))")
+        return false
+    }
+
+    let player = AVAudioPlayerNode()
+    engine.attach(player)
+    engine.connect(player, to: engine.mainMixerNode, format: nil)
+    do { try engine.start() } catch {
+        print("could not start speech output: \(error)")
+        return false
+    }
+    defer { engine.stop() }
+
+    let state = SpeechPlaybackState()
+    let synthesiser = AVSpeechSynthesizer()
+    let utterance = AVSpeechUtterance(
+        string:
+            "Discord should receive every word of this sentence without gaps. "
+            + "The quick brown fox jumps over the lazy dog, then says the sentence again. "
+            + "Discord should receive every word of this sentence without gaps.")
+    utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+    synthesiser.write(utterance) { buffer in
+        guard let pcm = buffer as? AVAudioPCMBuffer, pcm.frameLength > 0 else {
+            state.finished()
+            return
+        }
+        guard let converted = convert(pcm, to: engine.mainMixerNode.outputFormat(forBus: 0))
+        else {
+            state.finished()
+            return
+        }
+        player.scheduleBuffer(converted) { state.completed() }
+        state.scheduled()
+        if !player.isPlaying { player.play() }
+    }
+
+    let deadline = Date().addingTimeInterval(25)
+    while Date() < deadline {
+        let snapshot = state.snapshot
+        if snapshot.finished, snapshot.completed >= snapshot.scheduled {
+            player.stop()
+            print("played \(snapshot.scheduled) speech buffers into \(device.name)")
+            return snapshot.scheduled > 0
+        }
+        RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+    }
+    let snapshot = state.snapshot
+    print("speech fixture timed out after \(snapshot.scheduled) buffers")
+    return false
 }
 
 func rateList(_ rates: [Double]) -> String {
@@ -173,7 +321,8 @@ func wrapped(_ text: String, width: Int) -> [String] {
 /// can be verified before any UI exists.
 func runRoute(
     sourceMatch: String, destinationMatch: String, seconds: Double,
-    voiceIsolation: Bool = false
+    voiceIsolation: Bool = false, effects: [EffectKind] = [], bufferFrames: UInt32 = 128,
+    preferredSampleRate: Double? = nil
 ) throws {
     let devices = try AudioDevices.all()
     guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput })
@@ -228,6 +377,9 @@ func runRoute(
         sourceDeviceUID: source.uid,
         destinationDeviceUID: destination.uid,
         routes: routes,
+        effects: effects,
+        preferredSampleRate: preferredSampleRate,
+        bufferFrames: bufferFrames,
         voiceIsolation: voiceIsolation ? VoiceIsolationSettings() : nil)
     if voiceIsolation {
         print("isolation   on · adds \(engine.voiceIsolationLatencyFrames) frames")
@@ -1145,6 +1297,98 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "audio-start" {
     exit(cycles > 0 ? 0 : 1)
 }
 
+/// What an independent client receives from the virtual microphone.
+///
+/// The router reading its own destination proves that it wrote audio, but not
+/// that a separate application is scheduled often enough to receive it. This
+/// opens YunAudio exactly as Discord does and asserts callback cadence without
+/// sharing the router's aggregate device or IOProc.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "driver-receive" {
+    let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 15 : 15
+    let requiresSignal = CommandLine.arguments.contains("--require-signal")
+    let all = (try? AudioDevices.all()) ?? []
+    guard
+        let device = all.first(where: {
+            $0.uid == ClockAnchorPublisher.driverDeviceUID && $0.hasInput
+        })
+    else {
+        print("YunAudio input is not installed")
+        exit(1)
+    }
+    guard let bufferFrames = device.currentBufferFrameSize, bufferFrames > 0 else {
+        print("YunAudio did not publish its buffer size")
+        exit(1)
+    }
+    let sampleRate = device.nominalSampleRate
+    guard sampleRate > 0 else {
+        print("YunAudio did not publish its sample rate")
+        exit(1)
+    }
+
+    // CoreAudio serialises calls to one IOProc. The main thread reads this only
+    // after AudioDeviceStop has returned, so neither side needs a lock.
+    let cadence = UnsafeMutablePointer<IndependentInputCadence>.allocate(capacity: 1)
+    cadence.initialize(to: IndependentInputCadence())
+    defer {
+        cadence.deinitialize(count: 1)
+        cadence.deallocate()
+    }
+    var procID: AudioDeviceIOProcID?
+    let createStatus = AudioDeviceCreateIOProcID(
+        device.id, independentInputIOProc, UnsafeMutableRawPointer(cadence), &procID)
+    guard createStatus == noErr, let procID else {
+        print("could not open YunAudio input: \(fourCharDescription(createStatus))")
+        exit(1)
+    }
+    defer { AudioDeviceDestroyIOProcID(device.id, procID) }
+
+    let startStatus = AudioDeviceStart(device.id, procID)
+    guard startStatus == noErr else {
+        print("could not start YunAudio input: \(fourCharDescription(startStatus))")
+        exit(1)
+    }
+    print("reading \(device.name) as an independent client for \(Int(seconds)) s…")
+    Thread.sleep(forTimeInterval: max(1, seconds))
+    let stopStatus = AudioDeviceStop(device.id, procID)
+    guard stopStatus == noErr else {
+        print("could not stop YunAudio input: \(fourCharDescription(stopStatus))")
+        exit(1)
+    }
+
+    let result = cadence.pointee
+    let intervals = result.callbacks > 0 ? result.callbacks - 1 : 0
+    let elapsedNanoseconds = AudioConvertHostTimeToNanos(
+        result.lastHostTime - result.firstHostTime)
+    let elapsed = Double(elapsedNanoseconds) / 1_000_000_000
+    let callbackRate = elapsed > 0 ? Double(intervals) / elapsed : 0
+    let expectedRate = sampleRate / Double(bufferFrames)
+    let longestGapMilliseconds =
+        Double(AudioConvertHostTimeToNanos(result.longestGap)) / 1_000_000
+    let maximumAllowedGap = max(50, 4_000 / expectedRate)
+    let silentPercent =
+        result.callbacks > 0
+        ? Double(result.silentCallbacks) / Double(result.callbacks) * 100 : 100
+
+    print(String(format: "callbacks       %llu", result.callbacks))
+    print(
+        String(format: "callback rate   %.1f/s (expected %.1f/s)", callbackRate, expectedRate))
+    print(
+        String(
+            format: "longest gap     %.2f ms (limit %.2f ms)", longestGapMilliseconds,
+            maximumAllowedGap))
+    print(String(format: "signal peak     %.6f", result.peak))
+    print(String(format: "silent blocks   %.1f%%", silentPercent))
+    let rateHeld = callbackRate >= expectedRate * 0.9
+    let gapHeld = longestGapMilliseconds <= maximumAllowedGap
+    let signalHeld = !requiresSignal || (result.peak > 0.01 && silentPercent <= 1)
+    if rateHeld, gapHeld, signalHeld {
+        print("independent input cadence held")
+        exit(0)
+    }
+    print("independent input cadence broke")
+    exit(1)
+}
+
 // Routes for a long time and watches for the things that only appear after one.
 //
 // Everything else here measures a few seconds. This application is meant to
@@ -1530,13 +1774,37 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "volume" {
     exit(0)
 }
 
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "speech" {
+    let deviceMatch = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "BlackHole"
+    exit(playSyntheticSpeech(deviceMatch: deviceMatch) ? 0 : 1)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tone" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 10 : 10
     let frequency =
         CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 440 : 440
+    let deviceMatch = CommandLine.arguments.count > 4 ? CommandLine.arguments[4] : nil
 
     let engine = AVAudioEngine()
     let output = engine.outputNode
+    if let deviceMatch {
+        guard
+            let device = (try? AudioDevices.all())?.first(where: {
+                $0.hasOutput && $0.name.localizedCaseInsensitiveContains(deviceMatch)
+            })
+        else {
+            print("no output device matched \(deviceMatch)")
+            exit(1)
+        }
+        var target = device.id
+        let status = AudioUnitSetProperty(
+            output.audioUnit!, kAudioOutputUnitProperty_CurrentDevice,
+            kAudioUnitScope_Global, 0, &target, UInt32(MemoryLayout<AudioDeviceID>.size))
+        guard status == noErr else {
+            print("could not select \(device.name): \(fourCharDescription(status))")
+            exit(1)
+        }
+    }
     let rate = output.inputFormat(forBus: 0).sampleRate
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2) else {
         print("could not build a format")
@@ -2267,10 +2535,14 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "route" {
         CommandLine.arguments.count > 4
         ? Double(CommandLine.arguments[4]) ?? 5 : 5
     let isolation = CommandLine.arguments.contains("--isolate")
+    let callChain = CommandLine.arguments.contains("--call-chain")
     do {
         try runRoute(
             sourceMatch: source, destinationMatch: destination, seconds: seconds,
-            voiceIsolation: isolation)
+            voiceIsolation: isolation,
+            effects: callChain ? [.voiceIsolation, .equaliser, .gate, .limiter] : [],
+            bufferFrames: callChain ? 256 : 128,
+            preferredSampleRate: callChain ? 48000 : nil)
     } catch {
         print("route failed: \(error)")
         exit(1)
