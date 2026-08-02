@@ -46,6 +46,12 @@
 
 #define kDevice_DefaultSampleRate 48000.0
 
+/// Gives CoreAudio enough notice to finish a loopback write before an
+/// independent input client reads the same sample time. The installed device
+/// currently runs at 512 frames; keeping that whole period in hand costs
+/// 10.67 ms at 48 kHz and removes callback-order dependence under load.
+#define kDevice_SafetyOffsetFrames 512
+
 #pragma mark - Object IDs
 
 enum {
