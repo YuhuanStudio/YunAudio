@@ -2296,6 +2296,14 @@ enum UIFlowCheck {
         let unbatched = model.restartCount - unbatchedBefore
         await waitUntil("the loose edits settled", { !model.isBusy }, timeout: 10)
 
+        // A failed device restart leaves `restartIfRunning` with nothing to
+        // restart, so the batch below would correctly cost zero and the check
+        // would blame batching for a route that was already down. Establish
+        // the precondition explicitly and let the line here own any failure to
+        // recover before measuring the batch.
+        await bringRoutingBack(model)
+        check("a route is up before batching", model.isRunning)
+
         let batchedBefore = model.restartCount
         model.batched {
             model.preferredSampleRate = 48000
