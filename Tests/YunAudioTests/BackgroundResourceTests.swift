@@ -867,6 +867,25 @@ struct BackgroundResourceTests {
     @Test("the remaining live readings have child observation boundaries")
     func liveReadingsStayOutOfParentViews() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
+        let analysisSource = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/AnalysisPanel.swift",
+            encoding: .utf8)
+        let loudnessStart = try #require(
+            analysisSource.range(of: "struct LoudnessReadout: View"))
+        let loudnessLeaves = try #require(
+            analysisSource.range(
+                of: "struct LiveLoudnessFigures: View",
+                range: loudnessStart.upperBound..<analysisSource.endIndex))
+        let loudnessParent =
+            analysisSource[loudnessStart.lowerBound..<loudnessLeaves.lowerBound]
+        #expect(loudnessParent.ranges(of: "model.").count == 0)
+        #expect(loudnessParent.ranges(of: "LiveLoudnessFigures(model: model)").count == 1)
+        #expect(loudnessParent.ranges(of: "LiveOutgoingReadout(model: model)").count == 1)
+        #expect(loudnessParent.ranges(of: "LiveLoudnessVerdict(model: model)").count == 1)
+        #expect(analysisSource.ranges(of: "BodyCount.tick(\"LiveLoudnessFigures\")").count == 1)
+        #expect(analysisSource.ranges(of: "BodyCount.tick(\"LiveOutgoingReadout\")").count == 1)
+        #expect(analysisSource.ranges(of: "BodyCount.tick(\"LiveLoudnessVerdict\")").count == 1)
+
         let panelSource = try String(
             contentsOfFile: root + "Sources/YunAudioApp/PanelView.swift",
             encoding: .utf8)

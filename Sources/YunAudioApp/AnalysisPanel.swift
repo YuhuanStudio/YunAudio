@@ -256,130 +256,21 @@ struct LoudnessPitchFigure: View {
 /// Loudness to the broadcast standard, and how far it is from the platform the
 /// user is aiming at.
 struct LoudnessReadout: View {
-    @Bindable var model: RouterModel
+    let model: RouterModel
 
     var body: some View {
         let _ = BodyCount.tick("LoudnessReadout")
         VStack(alignment: .leading, spacing: Yun.Space.md) {
-            outgoing
+            LiveOutgoingReadout(model: model)
             YunDivider()
-            LoudnessFigures(
-                shortTerm: model.analysis.shortTerm,
-                // Held back until the gate has enough material to mean
-                // anything. Showing −54.6 with "not meaningful yet" written
-                // directly underneath asks the reader to believe two things at
-                // once, and the number is the one they will believe.
-                integrated:
-                    model.loudnessOffset == nil ? -.infinity : model.analysis.integrated,
-                peak: model.analysis.peak,
-                // The note being sung or spoken, which nothing else in this
-                // category shows and which anybody using the voice presets
-                // wants: it is the number the shift is relative to.
-                pitchHertz: model.analysis.pitchHertz)
-
+            LiveLoudnessFigures(model: model)
             YunDivider()
-
-            HStack(spacing: Yun.Space.sm) {
-                Text(loc("Target"))
-                    .font(Yun.Text.label)
-                    .foregroundStyle(Yun.Palette.textSecondary)
-                YunSelect(
-                    selection: $model.loudnessTarget,
-                    options: LoudnessTarget.allCases.map {
-                        .init(
-                            value: $0, title: $0.title,
-                            detail: String(format: loc("%d LUFS"), Int($0.lufs)))
-                    })
-                Spacer(minLength: 0)
-                Button(loc("Reset")) { model.resetLoudness() }
-                    .buttonStyle(YunButtonStyle(.ghost, small: true))
-            }
-
-            verdict
-            soundIdentification
+            LoudnessTargetControls(model: model)
+            LiveLoudnessVerdict(model: model)
+            SoundIdentificationControls(model: model)
             YunDivider()
-            autoLevel
+            AutoLevelControls(model: model)
         }
-    }
-
-    /// Keeps the expensive diagnostic model separate from the cheap meters.
-    ///
-    /// Levelling and ducking still ask for it automatically because they act
-    /// on its verdict. Merely opening the window no longer loads CoreML for a
-    /// label somebody may not want.
-    private var soundIdentification: some View {
-        // Which of the three things that can want the model actually does. The
-        // switch is not a master switch and the caption used to imply it was —
-        // see `SoundModelUse`.
-        let use = SoundModelUse.of(
-            identifying: model.isSoundIdentificationEnabled,
-            levelling: model.isAutoLevelling,
-            ducking: model.isDucking)
-        return VStack(alignment: .leading, spacing: Yun.Space.sm) {
-            HStack(spacing: Yun.Space.sm) {
-                YunSwitch(isOn: $model.isSoundIdentificationEnabled)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(loc("Identify sounds"))
-                        .font(Yun.Text.label)
-                        .foregroundStyle(Yun.Palette.textPrimary)
-                    Text(use.caption)
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
-
-            if !YunUIBenchmarkConfiguration.process.isEnabled, use.showsReadout {
-                heardBadge
-            }
-        }
-    }
-
-    /// The levelling loop, and what the model is hearing.
-    ///
-    /// The two belong together: the classifier's verdict is the reason the
-    /// levelling can be trusted, and showing it is what stops the feature being
-    /// a black box. When it says it is waiting, the readout says why.
-    @ViewBuilder
-    private var autoLevel: some View {
-        HStack(spacing: Yun.Space.sm) {
-            YunSwitch(isOn: $model.isAutoLevelling)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(loc("Hold this level automatically"))
-                    .font(Yun.Text.label)
-                    .foregroundStyle(Yun.Palette.textPrimary)
-                Text(
-                    loc(
-                        "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up."
-                    )
-                )
-                .font(Yun.Text.caption)
-                .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-
-        HStack(spacing: Yun.Space.sm) {
-            Spacer(minLength: 0)
-            if model.isAutoLevelling {
-                Text(autoLevelState)
-                    .font(Yun.Text.mono)
-                    .foregroundStyle(
-                        model.autoLevelIsAtLimit || model.autoLevelIsHeldByHeadroom
-                            ? Yun.Palette.warning : Yun.Palette.textTertiary
-                    )
-                    .monospacedDigit()
-            }
-        }
-    }
-
-    private var autoLevelState: String {
-        Self.autoLevelState(
-            offset: model.autoLevelOffset, isWaiting: model.autoLevelIsWaiting,
-            isAtLimit: model.autoLevelIsAtLimit,
-            isHeldByHeadroom: model.autoLevelIsHeldByHeadroom)
     }
 
     /// What the loop's state reads as, as a pure function of the loop's state.
@@ -393,92 +284,65 @@ struct LoudnessReadout: View {
     static func autoLevelState(
         offset: Double, isWaiting: Bool, isAtLimit: Bool, isHeldByHeadroom: Bool
     ) -> String {
-        if isAtLimit { return loc("out of range") }
-        if isWaiting { return loc("waiting for speech") }
-        // Without this the loop looks stuck: it is hearing speech, it is under
-        // target, it is not at its limit, and it is deliberately refusing to go
-        // up because the peak would clip. "Nothing is happening" and "the peaks
-        // are what is stopping it" look identical otherwise, and only one of
-        // them is something a person can act on.
-        if isHeldByHeadroom {
-            return String(format: loc("%+.1f dB · held by peaks"), offset)
-        }
-        return String(format: "%+.1f dB", offset)
+        AutoLevelControls.state(
+            offset: offset, isWaiting: isWaiting, isAtLimit: isAtLimit,
+            isHeldByHeadroom: isHeldByHeadroom)
     }
+}
 
-    /// What the classifier hears, as a small badge.
-    private var heardBadge: some View {
-        HStack(spacing: 5) {
-            Image(systemName: symbol(for: model.heardVerdict))
-                .font(.system(size: 10))
-            Text(title(for: model.heardVerdict))
-                .font(Yun.Text.caption)
-            // The number behind the word. It was computed and shown nowhere,
-            // which leaves the badge saying "Typing" with the same authority
-            // whether the classifier is certain or guessing between two things
-            // — and it is the guessing case that explains why the automatic
-            // trim just stopped moving.
-            Text(String(format: "%.0f%%", model.heardConfidence * 100))
-                .font(Yun.Text.mono)
-                .monospacedDigit()
-                .opacity(0.65)
-        }
-        .foregroundStyle(tint(for: model.heardVerdict))
-        .padding(.horizontal, Yun.Space.sm)
-        .padding(.vertical, 3)
-        .background(
-            tint(for: model.heardVerdict).opacity(0.12),
-            in: .rect(cornerRadius: Yun.Radius.pill)
-        )
-        // The model's own label is finer than the badge, and is what somebody
-        // debugging their room actually wants.
-        .help(model.analysis.verdictLabel)
+/// The changing analyser figures and no other part of their card.
+///
+/// `Reading.duration` advances even in silence, so reading any member of
+/// `analysis` invalidates this view at the twenty-hertz poll. Keeping that
+/// dependency here stops four moving numbers from laying out every switch,
+/// sentence and menu in `LoudnessReadout` on the same cadence.
+struct LiveLoudnessFigures: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("LiveLoudnessFigures")
+        LoudnessFigures(
+            shortTerm: model.analysis.shortTerm,
+            // Held back until the gate has enough material to mean anything.
+            integrated: model.loudnessOffset == nil ? -.infinity : model.analysis.integrated,
+            peak: model.analysis.peak,
+            pitchHertz: model.analysis.pitchHertz)
     }
+}
 
-    private func symbol(for verdict: SoundClassifier.Verdict) -> String {
-        switch verdict {
-        case .speech: "waveform"
-        case .singing: "music.microphone"
-        case .typing: "keyboard"
-        case .music: "music.note"
-        case .noise: "wind"
-        case .quiet: "moon.zzz"
+/// The target control is intentionally isolated from the live reading.
+struct LoudnessTargetControls: View {
+    @Bindable var model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("LoudnessTargetControls")
+        HStack(spacing: Yun.Space.sm) {
+            Text(loc("Target"))
+                .font(Yun.Text.label)
+                .foregroundStyle(Yun.Palette.textSecondary)
+            YunSelect(
+                selection: $model.loudnessTarget,
+                options: LoudnessTarget.allCases.map {
+                    .init(
+                        value: $0, title: $0.title,
+                        detail: String(format: loc("%d LUFS"), Int($0.lufs)))
+                })
+            Spacer(minLength: 0)
+            Button(loc("Reset")) { model.resetLoudness() }
+                .buttonStyle(YunButtonStyle(.ghost, small: true))
         }
     }
+}
 
-    private func title(for verdict: SoundClassifier.Verdict) -> String {
-        switch verdict {
-        case .speech: loc("Speech")
-        case .singing: loc("Singing")
-        case .typing: loc("Typing")
-        case .music: loc("Music")
-        case .noise: loc("Room noise")
-        case .quiet: loc("Quiet")
-        }
-    }
+/// The level actually leaving, and a sentence about it.
+///
+/// Output telemetry changes at the poll rate. It must update the number and
+/// advice without making the rest of the loudness card participate.
+struct LiveOutgoingReadout: View {
+    let model: RouterModel
 
-    private func tint(for verdict: SoundClassifier.Verdict) -> Color {
-        switch verdict {
-        case .speech: Yun.Palette.success
-        case .singing: Yun.Palette.accent
-        case .typing: Yun.Palette.warning
-        case .music: Yun.Palette.info
-        case .noise: Yun.Palette.textTertiary
-        case .quiet: Yun.Palette.textMuted
-        }
-    }
-
-    /// The level actually leaving, and a sentence about it.
-    ///
-    /// This is the first thing in the card because it is the first thing to
-    /// check when a call sounds wrong, and until now the application could not
-    /// answer it at all: every meter here was taken before the gain stages, so
-    /// a signal being truncated on the way out looked perfectly healthy. Both
-    /// failure modes are silent otherwise — too loud is distortion nothing was
-    /// watching for, and too quiet means the far end's own automatic gain
-    /// amplifies the room noise along with the voice.
-    @ViewBuilder
-    private var outgoing: some View {
+    var body: some View {
+        let _ = BodyCount.tick("LiveOutgoingReadout")
         HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
             Text(loc("Leaving"))
                 .font(Yun.Text.caption)
@@ -532,10 +396,6 @@ struct LoudnessReadout: View {
                 ), "\(model.outputClippedSamples)")
         case .hot: loc("Very close to full scale. A little headroom is worth keeping.")
         case .good: loc("A healthy level to send.")
-        // The advice differs by what the hardware actually offers. Telling
-        // somebody to raise their microphone's gain is useless when the device
-        // publishes none to macOS — the Seiren V3 Pro is exactly that case, and
-        // its only pre-converter gain is the knob on the front.
         case .quiet:
             model.hardwareGain?.isSettable == true
                 ? loc(
@@ -555,14 +415,15 @@ struct LoudnessReadout: View {
         case .silent: loc("Nothing is reaching the output.")
         }
     }
+}
 
-    /// What the number means, in a sentence.
-    ///
-    /// A bare "−19.4 LUFS" is only useful to somebody who already knows what
-    /// Discord does with it. The whole reason to show loudness rather than just
-    /// peaks is to answer "am I too quiet", so it answers that.
+/// The integrated loudness judgement, isolated from the controls beside it.
+struct LiveLoudnessVerdict: View {
+    let model: RouterModel
+
     @ViewBuilder
-    private var verdict: some View {
+    var body: some View {
+        let _ = BodyCount.tick("LiveLoudnessVerdict")
         if let offset = model.loudnessOffset {
             let rounded = (offset * 10).rounded() / 10
             HStack(spacing: Yun.Space.sm) {
@@ -587,8 +448,6 @@ struct LoudnessReadout: View {
         }
     }
 
-    /// One unit either way is inaudible and not worth chasing; past three, a
-    /// platform's normalisation will move the whole thing audibly.
     private func verdictColour(_ magnitude: Double) -> Color {
         if magnitude <= 1 { return Yun.Palette.success }
         if magnitude <= 3 { return Yun.Palette.warning }
@@ -597,8 +456,7 @@ struct LoudnessReadout: View {
 
     private func verdictText(_ offset: Double) -> String {
         if abs(offset) <= 1 {
-            return String(
-                format: loc("On target for %@."), model.loudnessTarget.title)
+            return String(format: loc("On target for %@."), model.loudnessTarget.title)
         }
         let amount = String(format: "%.1f", abs(offset))
         return offset > 0
@@ -609,5 +467,165 @@ struct LoudnessReadout: View {
                 format: loc("%@ LU quieter than %@ expects — raise the master or gain."),
                 amount, model.loudnessTarget.title)
     }
+}
 
+/// Configuration for the classifier, whose live verdict has its own leaf.
+struct SoundIdentificationControls: View {
+    @Bindable var model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("SoundIdentificationControls")
+        let use = SoundModelUse.of(
+            identifying: model.isSoundIdentificationEnabled,
+            levelling: model.isAutoLevelling,
+            ducking: model.isDucking)
+        VStack(alignment: .leading, spacing: Yun.Space.sm) {
+            HStack(spacing: Yun.Space.sm) {
+                YunSwitch(isOn: $model.isSoundIdentificationEnabled)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(loc("Identify sounds"))
+                        .font(Yun.Text.label)
+                        .foregroundStyle(Yun.Palette.textPrimary)
+                    Text(use.caption)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+
+            if !YunUIBenchmarkConfiguration.process.isEnabled, use.showsReadout {
+                LiveHeardBadge(model: model)
+            }
+        }
+    }
+}
+
+/// The classifier result is live; the switch and its explanation are not.
+struct LiveHeardBadge: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("LiveHeardBadge")
+        HStack(spacing: 5) {
+            Image(systemName: symbol(for: model.heardVerdict))
+                .font(.system(size: 10))
+            Text(title(for: model.heardVerdict))
+                .font(Yun.Text.caption)
+            Text(String(format: "%.0f%%", model.heardConfidence * 100))
+                .font(Yun.Text.mono)
+                .monospacedDigit()
+                .opacity(0.65)
+        }
+        .foregroundStyle(tint(for: model.heardVerdict))
+        .padding(.horizontal, Yun.Space.sm)
+        .padding(.vertical, 3)
+        .background(
+            tint(for: model.heardVerdict).opacity(0.12),
+            in: .rect(cornerRadius: Yun.Radius.pill)
+        )
+        .help(model.analysis.verdictLabel)
+    }
+
+    private func symbol(for verdict: SoundClassifier.Verdict) -> String {
+        switch verdict {
+        case .speech: "waveform"
+        case .singing: "music.microphone"
+        case .typing: "keyboard"
+        case .music: "music.note"
+        case .noise: "wind"
+        case .quiet: "moon.zzz"
+        }
+    }
+
+    private func title(for verdict: SoundClassifier.Verdict) -> String {
+        switch verdict {
+        case .speech: loc("Speech")
+        case .singing: loc("Singing")
+        case .typing: loc("Typing")
+        case .music: loc("Music")
+        case .noise: loc("Room noise")
+        case .quiet: loc("Quiet")
+        }
+    }
+
+    private func tint(for verdict: SoundClassifier.Verdict) -> Color {
+        switch verdict {
+        case .speech: Yun.Palette.success
+        case .singing: Yun.Palette.accent
+        case .typing: Yun.Palette.warning
+        case .music: Yun.Palette.info
+        case .noise: Yun.Palette.textTertiary
+        case .quiet: Yun.Palette.textMuted
+        }
+    }
+}
+
+/// The automatic level switch, with its moving state isolated beneath it.
+struct AutoLevelControls: View {
+    @Bindable var model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("AutoLevelControls")
+        HStack(spacing: Yun.Space.sm) {
+            YunSwitch(isOn: $model.isAutoLevelling)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(loc("Hold this level automatically"))
+                    .font(Yun.Text.label)
+                    .foregroundStyle(Yun.Palette.textPrimary)
+                Text(
+                    loc(
+                        "Moves the trim only while Apple's on-device model hears speech, so pauses and keyboards do not wind the gain up."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+
+        if model.isAutoLevelling {
+            LiveAutoLevelState(model: model)
+        }
+    }
+
+    static func state(
+        offset: Double, isWaiting: Bool, isAtLimit: Bool, isHeldByHeadroom: Bool
+    ) -> String {
+        if isAtLimit { return loc("out of range") }
+        if isWaiting { return loc("waiting for speech") }
+        // Without this the loop looks stuck: it is hearing speech, it is under
+        // target, it is not at its limit, and it is deliberately refusing to go
+        // up because the peak would clip. "Nothing is happening" and "the peaks
+        // are what is stopping it" look identical otherwise, and only one of
+        // them is something a person can act on.
+        if isHeldByHeadroom {
+            return String(format: loc("%+.1f dB · held by peaks"), offset)
+        }
+        return String(format: "%+.1f dB", offset)
+    }
+}
+
+struct LiveAutoLevelState: View {
+    let model: RouterModel
+
+    var body: some View {
+        let _ = BodyCount.tick("LiveAutoLevelState")
+        HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+            Spacer(minLength: 0)
+            Text(
+                AutoLevelControls.state(
+                    offset: model.autoLevelOffset, isWaiting: model.autoLevelIsWaiting,
+                    isAtLimit: model.autoLevelIsAtLimit,
+                    isHeldByHeadroom: model.autoLevelIsHeldByHeadroom)
+            )
+            .font(Yun.Text.mono)
+            .foregroundStyle(
+                model.autoLevelIsAtLimit || model.autoLevelIsHeldByHeadroom
+                    ? Yun.Palette.warning : Yun.Palette.textTertiary
+            )
+            .monospacedDigit()
+        }
+    }
 }

@@ -5875,6 +5875,9 @@ enum UIFlowCheck {
             "the whole window does not redraw with the meters",
             Double(counts["MainWindow"] ?? 0) < poll / 2)
         check(
+            "the whole loudness card does not redraw with its figures",
+            Double(counts["LoudnessReadout"] ?? 0) < poll / 2)
+        check(
             "the whole singing inspector does not redraw with the lyric sweep",
             Double(counts["SingingPanel"] ?? 0) < poll / 2)
         // The words advance, and they do it without a body per frame.
