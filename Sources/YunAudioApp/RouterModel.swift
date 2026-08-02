@@ -9089,6 +9089,7 @@ final class RouterModel: ScriptTarget {
             return
         }
 
+        ioContinuity.reset()
         isRunning = true
         lighting.setSignalActive(true)
         routeUpdatesAreAccepted = true
@@ -9289,7 +9290,17 @@ final class RouterModel: ScriptTarget {
         }
         if isRunning {
             status["peak"] = Double(peakLevel)
+            status["outputPeak"] = Double(outputPeak)
             status["loudness"] = analysis.shortTerm.isFinite ? analysis.shortTerm : -70
+            if let cycles = ioContinuity.cycleCount {
+                status["cycles"] = Int(clamping: cycles)
+            }
+            status["cycleStallEvents"] = ioContinuity.stallEvents
+            status["cycleStallPolls"] = ioContinuity.stalledPolls
+            status["cycleStalled"] = ioContinuity.isStalled
+            status["clockLocked"] = isClockLocked
+            status["clockRatio"] = measuredRateRatio
+            status["ioAllocations"] = Int(clamping: allocationViolations)
         }
         return status
     }
@@ -9888,6 +9899,37 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var telemetryRoutePeaksB: [Float] = []
     @ObservationIgnored private var telemetryUsesFirstBuffer = true
 
+    /// Detects a callback gap at the same cadence as the interface telemetry.
+    ///
+    /// On the measured route, 512 frames at 44.1 kHz is 11.61 ms. An unchanged
+    /// counter across a 50 ms poll therefore means at least four deadlines
+    /// passed without a callback; that is long enough to be heard as a broken
+    /// word rather than ordinary timer jitter.
+    struct IOContinuity: Sendable, Equatable {
+        private(set) var cycleCount: UInt64?
+        private(set) var stalledPolls = 0
+        private(set) var stallEvents = 0
+        private(set) var isStalled = false
+
+        mutating func observe(_ incoming: UInt64?) {
+            guard let incoming else { return }
+            let previous = cycleCount
+            cycleCount = incoming
+            guard let previous else { return }
+            if incoming == previous {
+                stalledPolls += 1
+                if !isStalled { stallEvents += 1 }
+                isStalled = true
+            } else {
+                isStalled = false
+            }
+        }
+
+        mutating func reset() { self = IOContinuity() }
+    }
+
+    @ObservationIgnored private(set) var ioContinuity = IOContinuity()
+
     /// Seconds spent in each part of the poll, while somebody is asking.
     ///
     /// Off by default and switched on by the flow check around its own
@@ -10113,6 +10155,7 @@ final class RouterModel: ScriptTarget {
             }
         }
         if let telemetry {
+            ioContinuity.observe(telemetry.cycleCount)
             let routePeaks =
                 telemetryUsesFirstBuffer ? telemetryRoutePeaksA : telemetryRoutePeaksB
             // One coherent read and one lock acquisition. A busy graph means

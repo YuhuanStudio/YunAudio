@@ -3068,6 +3068,7 @@ public final class RoutingEngine: @unchecked Sendable {
     /// array outside this value lets a twenty-hertz consumer reuse two buffers
     /// instead of allocating a fresh array on every poll.
     public struct TelemetryValues: Sendable, Equatable {
+        public let cycleCount: UInt64?
         public let outputPeak: Float
         public let outputClippedSamples: UInt64
         public let failedPlugins: [AudioUnitLoadFailure]
@@ -3095,6 +3096,7 @@ public final class RoutingEngine: @unchecked Sendable {
             }
         }
         return TelemetryValues(
+            cycleCount: graphCell.map { yun_rt_cell_cycles($0) },
             outputPeak: graph?.pointee.outputPeak ?? 0,
             outputClippedSamples: graph?.pointee.outputClipped ?? 0,
             failedPlugins: failedPlugins,

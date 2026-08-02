@@ -6,6 +6,26 @@ import YunAudioEngine
 
 @Suite("Polling publications")
 struct PollingPublicationTests {
+    @Test("callback continuity counts audible gaps without inventing them")
+    func callbackContinuity() {
+        var continuity = RouterModel.IOContinuity()
+        for count in [100, 109, 118, 118, 118, 127, 127, 136] as [UInt64?] {
+            continuity.observe(count)
+        }
+
+        #expect(continuity.cycleCount == 136)
+        #expect(continuity.stalledPolls == 3)
+        #expect(continuity.stallEvents == 2)
+        #expect(!continuity.isStalled)
+
+        continuity.observe(nil)
+        #expect(continuity.stalledPolls == 3)
+        #expect(continuity.stallEvents == 2)
+
+        continuity.reset()
+        #expect(continuity == RouterModel.IOContinuity())
+    }
+
     @Test("a stable feature-heavy minute publishes no identical values")
     func stableMinuteSuppressesNoOpPublications() {
         let polls = 20 * 60
