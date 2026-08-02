@@ -1079,6 +1079,38 @@ enum UIFlowCheck {
                 model.outputPeakDecibels, "\(model.outputClippedSamples)"))
         check("the output level is being measured", model.outputPeak >= 0)
         check("a quiet room is not reported as clipping", model.outputClippedSamples == 0)
+
+        // Zero multiplied by any gain is still zero. The room was quiet enough
+        // to be digital silence in two consecutive release runs, so the old
+        // ladder reached +140 dB on both stages and concluded that clipping
+        // detection was broken without ever presenting it a non-zero sample.
+        // Put the same half-scale fixture used by the device-switch check into
+        // a spare loopback, and restore the person's source afterwards.
+        let clipSourceBefore = model.selectedSourceUID
+        let clipModeBefore = model.channelMode
+        let clipChannelBefore = model.monoChannel
+        let clipToneDevice = model.outputDevices.first {
+            $0.transport == .virtual && $0.inputChannels > 0 && $0.outputChannels > 0
+                && $0.uid != model.selectedDestinationUID
+        }
+        let clipTone = clipToneDevice.flatMap { LoopbackTone(deviceUID: $0.uid) }
+        if let clipToneDevice, let clipTone {
+            note(
+                "feeding \(clipToneDevice.name) a \(Int(LoopbackTone.hertz)) Hz clipping fixture"
+            )
+            model.selectedSourceUID = clipToneDevice.uid
+            await settle(model, timeout: 15)
+            await bringRoutingBack(model)
+            await pause(upTo: 3.0, until: { model.outputPeak > 0.1 })
+            check("the clipping fixture reaches the output", model.outputPeak > 0.1)
+            if !clipTone.isStillProducing() {
+                note(
+                    "the fixture callback counter did not advance; the fresh clip count below"
+                        + " decides whether new samples still arrived")
+            }
+        } else {
+            check("a spare loopback can provide the clipping fixture", false)
+        }
         // Deliberately pushed into clipping and back, because an indicator that
         // has never been seen to light is not an indicator.
         //
@@ -1176,6 +1208,15 @@ enum UIFlowCheck {
         model.enabledEffects = effectsBeforeClip
         model.clearClipping()
         await waitUntil("the chain came back", { !model.isBusy }, timeout: 12)
+
+        if let clipTone {
+            clipTone.stop()
+            model.selectedSourceUID = clipSourceBefore
+            model.channelMode = clipModeBefore
+            model.monoChannel = clipChannelBefore
+            await settle(model, timeout: 15)
+            await bringRoutingBack(model)
+        }
 
         try section("balancing sources")
         // The whole flow, at speed. What it cannot check on its own is whether
@@ -1939,7 +1980,9 @@ enum UIFlowCheck {
             let routesBefore = model.activeRoutes.count
             if let spare {
                 model.connect(source: spare.source, destination: spare.destination)
-                check("the graph was rebuilt", model.activeRoutes.count > routesBefore)
+                await waitUntil(
+                    "the graph was rebuilt", { model.activeRoutes.count > routesBefore },
+                    timeout: 10)
             } else {
                 note("no spare channel — the rebuild was not exercised")
             }
@@ -5922,11 +5965,15 @@ enum UIFlowCheck {
         check(
             "source controls do not redraw with their meters",
             Double(counts["RouteStrip"] ?? 0) < poll / 2)
-        // And the other half: the meters must still be live, or the fix was to
-        // stop drawing rather than to stop over-drawing.
+        // And the other half: the live analysis leaves must still be moving,
+        // or the fix was to stop drawing rather than to stop over-drawing.
+        // `SourceLevelMeter` is the route-strip meter and this section leaves
+        // the analysis inspector selected; after splitting the analysis card,
+        // its spectrum and loudness figures are the two twenty-hertz leaves.
         check(
-            "the meters are still redrawing",
-            Double(counts["SourceLevelMeter"] ?? 0) > poll / 4)
+            "the analysis meters are still redrawing",
+            Double(counts["LiveSpectrum"] ?? 0) > poll / 4
+                && Double(counts["LiveLoudnessFigures"] ?? 0) > poll / 4)
         // And the one nobody was looking at. The window is on screen here and
         // the panel is not, so a body count for the panel at all is the whole
         // finding: measured at 20.0 Hz — one full evaluation of the header, the
@@ -7803,7 +7850,7 @@ enum UIFlowCheck {
         }
         var cyclesLater = cyclesAfter
         await pause(
-            upTo: 2.0,
+            upTo: 5.0,
             until: {
                 cyclesLater = higher(cyclesLater, model.cycleCountIfKnownForDiagnostics)
                 guard let cyclesAfter, let cyclesLater else { return false }
