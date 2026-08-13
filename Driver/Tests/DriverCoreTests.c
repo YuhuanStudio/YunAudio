@@ -1974,8 +1974,9 @@ static void TestExactDuplicateCoalescesDuringPublicationRelease(void) {
     PutSignalInRing(signal, frames, 0);
 
     UInt64 identity = RingWriteIdentity(0, frames);
-    // This is the only intermediate state the publication release order now
-    // permits: all tail owners are gone and the transaction record remains.
+    // This is the last intermediate state in the publication release order:
+    // tail owners may disappear in stages, but the transaction record remains
+    // until all of them are gone.
     atomic_store_explicit(
         &gDriver.ringBuffer[0].owner, identity, memory_order_seq_cst);
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
