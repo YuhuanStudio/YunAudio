@@ -126,13 +126,15 @@ struct AudioUnitDisposerTests {
     private func makeDisposer(
         quarantine: ProcessLifetimeAudioQuarantine,
         asynchronousTimeout: TimeInterval = 0.05,
-        beforeTimedOutWaitCancelsTransaction: @escaping @Sendable () -> Void = {}
+        beforeTimedOutWaitCancelsTransaction: @escaping @Sendable () -> Void = {},
+        beforeSuccessfulQuarantineRelease: @escaping @Sendable () -> Void = {}
     ) -> BoundedAudioUnitDisposer {
         BoundedAudioUnitDisposer(
             quarantine: quarantine,
             asynchronousTimeout: asynchronousTimeout,
             label: "com.yuhuanstudio.yunaudio.tests.au-disposer.\(UUID().uuidString)",
-            beforeTimedOutWaitCancelsTransaction: beforeTimedOutWaitCancelsTransaction)
+            beforeTimedOutWaitCancelsTransaction: beforeTimedOutWaitCancelsTransaction,
+            beforeSuccessfulQuarantineRelease: beforeSuccessfulQuarantineRelease)
     }
 
     @Test("a timeout enqueue promotes after the old transaction just completed")
@@ -269,6 +271,43 @@ struct AudioUnitDisposerTests {
         #expect(owner.callCounts.dispose == 1)
         #expect(disposer.transactionCount == 1)
         #expect(disposer.maximumTransactionCount == 1)
+    }
+
+    @Test("graph admission cannot observe successful teardown residue")
+    func successfulTokenReleasePrecedesAdmission() throws {
+        let quarantine = ProcessLifetimeAudioQuarantine()
+        let reachedRelease = DispatchSemaphore(value: 0)
+        let allowRelease = DispatchSemaphore(value: 0)
+        let disposer = makeDisposer(
+            quarantine: quarantine,
+            beforeSuccessfulQuarantineRelease: {
+                reachedRelease.signal()
+                allowRelease.wait()
+            })
+        let owner = InjectedOwner()
+        let admission = GraphAdmissionBox()
+        let admissionReturned = DispatchSemaphore(value: 0)
+
+        disposer.disposeAfterFence(owner)
+        #expect(reachedRelease.wait(timeout: .now() + 1) == .success)
+        #expect(quarantine.count == 1)
+        #expect(disposer.activeTransactionCount == 1)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            admission.store(
+                disposer.acquireGraphAdmissionAfterDraining(waitingUpTo: 1))
+            admissionReturned.signal()
+        }
+        #expect(admissionReturned.wait(timeout: .now() + 0.02) == .timedOut)
+        allowRelease.signal()
+        #expect(admissionReturned.wait(timeout: .now() + 1) == .success)
+        let accepted = try #require(admission.value)
+
+        #expect(quarantine.count == 0)
+        #expect(disposer.activeTransactionCount == 0)
+        #expect(owner.callCounts.uninitialise == 1)
+        #expect(owner.callCounts.dispose == 1)
+        accepted.release()
     }
 
     @Test("route restart waits for the active and queued owners on the sole disposer")

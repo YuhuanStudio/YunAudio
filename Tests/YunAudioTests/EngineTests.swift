@@ -4952,7 +4952,7 @@ struct PitchLevelTests {
 
 /// There was a high-pass and nothing else for a long time, so a boxy room or a
 /// harsh sibilance had no answer at all.
-@Suite("Equaliser")
+@Suite("Equaliser", .serialized)
 struct EqualiserTests {
 
     /// Every band has to be reachable and distinct, or a slider moves the wrong

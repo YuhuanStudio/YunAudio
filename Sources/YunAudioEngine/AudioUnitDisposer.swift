@@ -346,6 +346,7 @@ final class BoundedAudioUnitDisposer: @unchecked Sendable {
     private let quarantine: ProcessLifetimeAudioQuarantine
     private let asynchronousTimeout: TimeInterval
     private let beforeTimedOutWaitCancelsTransaction: @Sendable () -> Void
+    private let beforeSuccessfulQuarantineRelease: @Sendable () -> Void
     private var active: Transaction?
     private var graphAdmissions = 0
     private var pendingOwners: [PendingOwner] = []
@@ -356,12 +357,14 @@ final class BoundedAudioUnitDisposer: @unchecked Sendable {
         quarantine: ProcessLifetimeAudioQuarantine = .shared,
         asynchronousTimeout: TimeInterval = 2,
         label: String = "com.yuhuanstudio.yunaudio.audio-unit-disposer",
-        beforeTimedOutWaitCancelsTransaction: @escaping @Sendable () -> Void = {}
+        beforeTimedOutWaitCancelsTransaction: @escaping @Sendable () -> Void = {},
+        beforeSuccessfulQuarantineRelease: @escaping @Sendable () -> Void = {}
     ) {
         self.quarantine = quarantine
         self.asynchronousTimeout = max(0, asynchronousTimeout)
         self.beforeTimedOutWaitCancelsTransaction =
             beforeTimedOutWaitCancelsTransaction
+        self.beforeSuccessfulQuarantineRelease = beforeSuccessfulQuarantineRelease
         worker = DispatchQueue(label: label, qos: .utility)
         deadlineQueue = DispatchQueue(label: label + ".deadline", qos: .utility)
     }
@@ -607,17 +610,22 @@ final class BoundedAudioUnitDisposer: @unchecked Sendable {
             // A normal stop followed immediately by start must not race the old
             // owner's deinit or its process-quarantine token.
             transaction.releaseOwner()
-            let tokensToRelease: [ProcessLifetimeAudioQuarantine.Token] = lock.withLock {
-                if active === transaction { active = nil }
-                var tokens: [ProcessLifetimeAudioQuarantine.Token] = []
-                if let token = transaction.quarantineToken {
-                    tokens.append(token)
-                    transaction.quarantineToken = nil
-                }
-                if graphAdmissions == 0 { tokens += startPendingLocked() }
-                return tokens
+            let transactionToken: ProcessLifetimeAudioQuarantine.Token? = lock.withLock {
+                defer { transaction.quarantineToken = nil }
+                return transaction.quarantineToken
             }
-            for token in tokensToRelease { quarantine.release(token) }
+            beforeSuccessfulQuarantineRelease()
+            if let transactionToken { quarantine.release(transactionToken) }
+
+            // Keep `active` visible until the process-wide token is genuinely
+            // gone. Clearing it first exposed a tiny false-residue window in
+            // which a sequential graph was permanently refused even though
+            // the predecessor had completed successfully.
+            let pendingTokens: [ProcessLifetimeAudioQuarantine.Token] = lock.withLock {
+                if active === transaction { active = nil }
+                return graphAdmissions == 0 ? startPendingLocked() : []
+            }
+            for token in pendingTokens { quarantine.release(token) }
         } else if transaction.timedOut, result.isComplete {
             result = .timedOut(step: nil, disposedUnits: 0)
         }
