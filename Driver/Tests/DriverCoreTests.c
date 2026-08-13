@@ -335,6 +335,7 @@ static void TestNominalRebaseKeepsTheTimelineContinuous(void) {
 static void TestRealtimeAtomicsAreActuallyLockFree(void) {
     YunRingFrame ringFrame;
     atomic_init(&ringFrame.owner, 0);
+    atomic_init(&ringFrame.ownerEndFrame, 0);
     atomic_init(&ringFrame.sampleFrame, 0);
     atomic_init(&ringFrame.stereoBits, 0);
     assert(atomic_is_lock_free(&gDriver.inputGainBits));
@@ -342,6 +343,7 @@ static void TestRealtimeAtomicsAreActuallyLockFree(void) {
     assert(atomic_is_lock_free(&gDriver.publishedClock.version));
     assert(atomic_is_lock_free(&gDriver.publishedClock.hostTicksPerFrameBits));
     assert(atomic_is_lock_free(&ringFrame.owner));
+    assert(atomic_is_lock_free(&ringFrame.ownerEndFrame));
     assert(atomic_is_lock_free(&ringFrame.sampleFrame));
     assert(atomic_is_lock_free(&ringFrame.stereoBits));
 }
@@ -1831,6 +1833,13 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
 
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
            == kRingWriteClaimed);
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteCoalesced);
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[frame].ownerEndFrame,
+            memory_order_seq_cst) == frames);
+    }
     // Simulate a publisher part-way through its block. A callback one ring
     // later addresses the same physical slots but must not steal the prefix
     // which already carries samples while the suffix is still being built.
@@ -2058,6 +2067,7 @@ static void TestPublishedFullMixStaysReadableAcrossDuplicateCallbacks(void) {
         &gDriver.unsafeWriteOperations, 0, memory_order_relaxed);
     Float32 signal[kDevice_ChannelCount] = { 0.375f, -0.375f };
     PutSignalInRing(signal, 1, 0);
+    PutSignalInRing(signal, 1, kDevice_SafetyOffsetFrames);
     assert(RingWriteSpanIsPublished(gDriver.ringBuffer, 0, 1));
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, 1)
            == kRingWriteCoalesced);
