@@ -612,17 +612,33 @@ enum UIFlowCheck {
             // overwrite the level mid-assertion.
             model.lightingMode = .spectrum
             await pause(0.5)
-            // Sampled several times rather than twice. Reading the device
-            // competes with the render thread for it, so a single pair can come
-            // back identical without the ring having stopped.
+            // Six completed HID reads rather than six looks at one cached
+            // value. Each revision is a fence published only after that
+            // feature-report transaction returns from the device.
             var samples: [[UInt8]] = []
+            var completedReads = 0
             for _ in 0..<6 {
-                if let frame = model.lighting.currentFrame() { samples.append(frame) }
+                guard let revision = model.lighting.requestCurrentFrame() else {
+                    continue
+                }
+                let deadline = Date().addingTimeInterval(1)
+                var completed: LightingFrameReadSnapshot?
+                while Date() < deadline, completed == nil {
+                    completed = model.lighting.completedCurrentFrameRead(revision)
+                    if completed == nil { await pause(0.01) }
+                }
+                if let completed {
+                    completedReads += 1
+                    if let frame = completed.frame { samples.append(frame) }
+                }
                 await pause(0.25)
             }
-            check("the device holds the frames it is sent", !samples.isEmpty)
+            check("six feature-report reads completed", completedReads == 6)
+            check("the device holds the frames it is sent", samples.count == 6)
             check("and they keep arriving", Set(samples).count > 1)
-            note("\(Set(samples).count) distinct frames in \(samples.count) reads")
+            note(
+                "\(Set(samples).count) distinct frames in \(samples.count) successful "
+                    + "reads; \(completedReads) completed")
 
             // Left dark: hardware state outlives the process, and a ring stuck
             // on a colour after quitting looks like a fault.

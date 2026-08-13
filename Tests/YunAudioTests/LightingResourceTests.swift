@@ -23,6 +23,51 @@ private final class LightingAccessCounter: @unchecked Sendable {
 
 @Suite("Lighting background resource use")
 struct LightingResourceTests {
+    @Test("a cached frame cannot satisfy any later HID read fence")
+    func frameReadEvidenceRequiresTheExactCompletion() {
+        var evidence = LightingFrameReadEvidence()
+        let first = evidence.begin()
+        evidence.publish(
+            LightingFrameReadSnapshot(revision: first, frame: Array(repeating: 1, count: 36)))
+        let second = evidence.begin()
+
+        #expect(evidence.completion(for: first)?.frame?.count == 36)
+        #expect(evidence.completion(for: second) == nil)
+
+        evidence.publish(
+            LightingFrameReadSnapshot(revision: second, frame: Array(repeating: 2, count: 36)))
+        #expect(evidence.completion(for: first) == nil)
+        #expect(evidence.completion(for: second)?.frame?.first == 2)
+
+        let third = evidence.begin()
+        evidence.publish(LightingFrameReadSnapshot(revision: third, frame: nil))
+        #expect(evidence.completion(for: third) != nil)
+        #expect(evidence.completion(for: third)?.frame == nil)
+    }
+
+    @Test("six requested HID reads require six matching publications")
+    func sixFrameReadFencesNeedSixCompletions() {
+        var evidence = LightingFrameReadEvidence()
+        var completed = 0
+        var frames: [[UInt8]] = []
+
+        for value in UInt8(0)..<6 {
+            let revision = evidence.begin()
+            #expect(evidence.completion(for: revision) == nil)
+            evidence.publish(
+                LightingFrameReadSnapshot(
+                    revision: revision, frame: Array(repeating: value, count: 36)))
+            if let snapshot = evidence.completion(for: revision) {
+                completed += 1
+                if let frame = snapshot.frame { frames.append(frame) }
+            }
+        }
+
+        #expect(completed == 6)
+        #expect(frames.count == 6)
+        #expect(Set(frames).count == 6)
+    }
+
     @Test("10,000 revoked HID callers perform zero device operations")
     func revokedEpochRejectsEveryOldCaller() {
         let access = LightingDeviceAccessGate()

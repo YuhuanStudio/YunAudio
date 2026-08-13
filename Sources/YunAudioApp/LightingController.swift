@@ -306,20 +306,55 @@ private enum LightingNormalOperation {
 }
 
 private final class LightingFrameReadRequest: @unchecked Sendable {
+    let revision: UInt64
     let device: RazerDevice
     let deviceLock: NSLock
     let accessGate: LightingDeviceAccessGate
     let accessToken: LightingDeviceAccessGate.Token
 
     init(
-        device: RazerDevice, deviceLock: NSLock,
+        revision: UInt64, device: RazerDevice, deviceLock: NSLock,
         accessGate: LightingDeviceAccessGate,
         accessToken: LightingDeviceAccessGate.Token
     ) {
+        self.revision = revision
         self.device = device
         self.deviceLock = deviceLock
         self.accessGate = accessGate
         self.accessToken = accessToken
+    }
+}
+
+/// One completed feature-report transaction, identified independently of its payload.
+///
+/// A nil frame is still a completion: keeping the revision lets the hardware
+/// check distinguish a failed read from a background read which has not returned.
+struct LightingFrameReadSnapshot: Equatable, Sendable {
+    let revision: UInt64
+    let frame: [UInt8]?
+}
+
+/// The publication fence between asynchronous HID reads and their observer.
+struct LightingFrameReadEvidence {
+    private var nextRevision: UInt64 = 0
+    private var latest: LightingFrameReadSnapshot?
+
+    mutating func begin() -> UInt64 {
+        nextRevision &+= 1
+        return nextRevision
+    }
+
+    mutating func publish(_ snapshot: LightingFrameReadSnapshot) {
+        latest = snapshot
+    }
+
+    func completion(for revision: UInt64) -> LightingFrameReadSnapshot? {
+        guard latest?.revision == revision else { return nil }
+        return latest
+    }
+
+    mutating func invalidate() {
+        latest = nil
     }
 }
 
@@ -479,12 +514,12 @@ final class LightingController {
             apply: LightingNormalOperation.apply,
             publish: { [weak self] result in self?.finishNormalOperation(result) })
     @ObservationIgnored private lazy var frameReadLane =
-        LatestExternalWorkLane<LightingFrameReadRequest, [UInt8]?>(
+        LatestExternalWorkLane<LightingFrameReadRequest, LightingFrameReadSnapshot>(
             queue: DispatchQueue(
                 label: "com.yuhuanstudio.yunaudio.lighting-read", qos: .utility),
             apply: { request in
-                guard
-                    let frame = request.accessGate.perform(
+                let frame =
+                    request.accessGate.perform(
                         request.accessToken, deviceLock: request.deviceLock,
                         operation: { () -> [UInt8]? in
                             guard
@@ -493,12 +528,14 @@ final class LightingController {
                                 bytes.count >= 50
                             else { return nil }
                             return Array(bytes[14..<50])
-                        })
-                else { return nil }
-                return frame
+                        }) ?? nil
+                return LightingFrameReadSnapshot(
+                    revision: request.revision, frame: frame)
             },
-            publish: { [weak self] frame in self?.lastFrameRead = frame })
-    @ObservationIgnored private var lastFrameRead: [UInt8]?
+            publish: { [weak self] snapshot in
+                self?.frameReadEvidence.publish(snapshot)
+            })
+    @ObservationIgnored private var frameReadEvidence = LightingFrameReadEvidence()
     @ObservationIgnored private let terminationWorker =
         BoundedOwnerShutdownWorker<LightingTerminationOwner>(
             label: "com.yuhuanstudio.yunaudio.lighting-shutdown",
@@ -546,7 +583,7 @@ final class LightingController {
         _ = deviceAccessGate.advance()
         thread = nil
         frameReadLane.invalidate()
-        lastFrameRead = nil
+        frameReadEvidence.invalidate()
         device = discoveredDevice
         let available = discoveredDevice != nil
         if isAvailable != available { isAvailable = available }
@@ -690,20 +727,30 @@ final class LightingController {
         mode == .solid || isSignalActive && (mode == .level || mode == .spectrum)
     }
 
-    /// The frame the device is currently holding, read back off it.
+    /// Requests the frame the device is currently holding, returning its fence.
     ///
     /// Used to check that the ring is following the signal rather than assuming
-    /// it: the device keeps the last frame it was given, so two reads a moment
-    /// apart say whether anything is moving.
-    func currentFrame() -> [UInt8]? {
+    /// it. The returned revision does not become observable as complete until
+    /// the background feature-report transaction has returned to MainActor.
+    func requestCurrentFrame() -> UInt64? {
         guard !isTerminating, let device,
             let accessToken = deviceAccessGate.current()
         else { return nil }
-        _ = frameReadLane.submit(
-            LightingFrameReadRequest(
-                device: device, deviceLock: deviceLock,
-                accessGate: deviceAccessGate, accessToken: accessToken))
-        return lastFrameRead
+        let revision = frameReadEvidence.begin()
+        guard
+            frameReadLane.submit(
+                LightingFrameReadRequest(
+                    revision: revision, device: device, deviceLock: deviceLock,
+                    accessGate: deviceAccessGate, accessToken: accessToken))
+        else { return nil }
+        return revision
+    }
+
+    /// Returns only the HID transaction requested by this exact fence.
+    func completedCurrentFrameRead(
+        _ revision: UInt64
+    ) -> LightingFrameReadSnapshot? {
+        frameReadEvidence.completion(for: revision)
     }
 
     /// Dispatches to the ring renderer, which lives beside the protocol
