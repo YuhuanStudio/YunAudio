@@ -521,12 +521,17 @@ builds_from_a_fresh_clone() {
 		echo "the clone built without producing a binary"
 		return 1
 	}
-    # The same process-wide allocator, Audio Unit registry and device-lock
-    # seams which require serial execution in the primary gate exist in the
-    # clone too. A fresh filesystem is not authority to make those global
-    # fault fixtures race each other.
-    ( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && \
-        env YUNAUDIO_LIVE_HAL_TESTS=0 swift test --no-parallel ) || return 1
+	# The same process-wide allocator, Audio Unit registry and device-lock
+	# seams which require serial execution in the primary gate exist in the
+	# clone too. A fresh filesystem is not authority to make those global
+	# fault fixtures race each other.
+	# Finish the cold test build before measuring runtime deadlines. Letting
+	# `swift test` own both phases put first-run scheduler pressure inside the
+	# same driver invocation as the performance evidence.
+	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && \
+		env YUNAUDIO_LIVE_HAL_TESTS=0 swift build --build-tests ) || return 1
+	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && \
+		env YUNAUDIO_LIVE_HAL_TESTS=0 swift test --skip-build --no-parallel ) || return 1
 }
 
 if [[ "${FRESH}" == "1" ]]; then
