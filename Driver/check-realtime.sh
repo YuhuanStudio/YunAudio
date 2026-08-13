@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 extract_function() {
 	local name="$1"
 	awk -v name="${name}" '
-		$0 ~ "static (bool|void|OSStatus|UInt32|UInt64|Float32|YunClockSnapshot) " name "\\(" {
+		$0 ~ "static (bool|void|OSStatus|UInt32|UInt64|Float32|YunClockSnapshot|YunRingWriteAdmission) " name "\\(" {
 			inside = 1
 		}
 		inside {
@@ -34,8 +34,8 @@ for function in \
 	RebasedAnchorHostTime \
 	ReadPublishedClock \
 	SampleTimeToFrame \
-	CycleSpansAreDisjoint \
 	RingSpanCanBeTagged \
+	RingWriteSpanIsPublished \
 	ClaimRingWriteSpan \
 	PublishRingWrite \
 	ReadRingSpan \

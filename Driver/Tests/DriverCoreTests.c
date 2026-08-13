@@ -1208,12 +1208,81 @@ static void TestCallbacksOnBothSidesOf512IgnoreOperationOrder(void) {
     }
 
     // Drift compensation can make an actual operation larger than the
-    // nominal 512-frame period. It remains safe when the timestamps keep the
-    // circular input and output spans disjoint.
+    // nominal 512-frame period. A wider safety gap remains order-independent.
     ExpectOrderIndependentAtFrameCount(513, 513, false);
     ExpectOrderIndependentAtFrameCount(513, 513, true);
     ExpectOrderIndependentAtFrameCount(769, 769, false);
     ExpectOrderIndependentAtFrameCount(769, 769, true);
+}
+
+static void ExpectPublishedOverlapAtFrameCount(UInt32 frames) {
+    UInt32 separation = kDevice_SafetyOffsetFrames;
+    assert(frames > separation);
+    size_t sampleCount = (size_t)frames * kDevice_ChannelCount;
+    Float32 *prior = calloc(sampleCount, sizeof(Float32));
+    Float32 *written = calloc(sampleCount, sizeof(Float32));
+    Float32 *received = calloc(sampleCount, sizeof(Float32));
+    assert(prior != NULL && written != NULL && received != NULL);
+    FillSignal(prior, frames, 0.125f);
+    FillSignal(written, frames, 0.625f);
+
+    gDriver.ringBuffer = CreateRingBuffer();
+    assert(gDriver.ringBuffer != NULL);
+    atomic_store_explicit(
+        &gDriver.inputGainBits, Float32Bits(1.0f), memory_order_release);
+    atomic_store_explicit(
+        &gDriver.outputGainBits, Float32Bits(1.0f), memory_order_release);
+    atomic_store_explicit(
+        &gDriver.unsafeReadOperations, 0, memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeWriteOperations, 0, memory_order_relaxed);
+
+    // Only the prefix precedes this output operation. The tail of the input
+    // span is the same absolute timeline as the start of this write, so once
+    // the host has delivered WriteMix first it must read those new samples.
+    PutSignalInRing(prior, separation, 0);
+    AudioServerPlugInIOCycleInfo cycle = CycleAt(0, separation);
+    assert(Yun_DoIOOperation(
+        TestDriver(), kObjectID_Device, kObjectID_Stream_Output, 1,
+        kAudioServerPlugInIOOperationWriteMix, frames,
+        &cycle, written, NULL) == 0);
+    assert(Yun_DoIOOperation(
+        TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
+        kAudioServerPlugInIOOperationReadInput, frames,
+        &cycle, received, NULL) == 0);
+
+    for (UInt32 frame = 0; frame < separation; ++frame) {
+        for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
+            assert(received[frame * kDevice_ChannelCount + channel]
+                   == prior[frame * kDevice_ChannelCount + channel]);
+        }
+    }
+    for (UInt32 frame = separation; frame < frames; ++frame) {
+        UInt32 writtenFrame = frame - separation;
+        for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
+            assert(received[frame * kDevice_ChannelCount + channel]
+                   == written[writtenFrame * kDevice_ChannelCount + channel]);
+        }
+    }
+    assert(atomic_load_explicit(
+        &gDriver.unsafeReadOperations, memory_order_relaxed) == 0);
+    assert(atomic_load_explicit(
+        &gDriver.unsafeWriteOperations, memory_order_relaxed) == 0);
+
+    free(gDriver.ringBuffer);
+    gDriver.ringBuffer = NULL;
+    free(received);
+    free(written);
+    free(prior);
+}
+
+static void TestPublishedVariableCallbacksNeedNoDisjointSpanRule(void) {
+    ExpectPublishedOverlapAtFrameCount(513);
+    ExpectPublishedOverlapAtFrameCount(769);
+    printf(
+        "driver variable IO: 513 and 769 frames across a %u-frame safety "
+        "window, exact and 0 unsafe\n",
+        kDevice_SafetyOffsetFrames);
 }
 
 static void ExpectUnsafeCallbackFailsSilent(UInt32 frames, bool writeFirst) {
@@ -1293,15 +1362,10 @@ static void ExpectUnsafeCallbackFailsSilent(UInt32 frames, bool writeFirst) {
 }
 
 static void TestUnsafeCallbacksFailSilentWithoutAnErrorStorm(void) {
-    const UInt32 frameCounts[] = {
-        kDevice_SafetyOffsetFrames + 1,
-        kDevice_SafetyOffsetFrames + 257,
-        kRingBufferFrames + 1,
-    };
-    for (UInt32 index = 0; index < sizeof(frameCounts) / sizeof(frameCounts[0]); ++index) {
-        ExpectUnsafeCallbackFailsSilent(frameCounts[index], false);
-        ExpectUnsafeCallbackFailsSilent(frameCounts[index], true);
-    }
+    // One operation cannot visit a physical slot twice. The host is allowed
+    // to exceed its nominal 512 frames, but never the one-second ring itself.
+    ExpectUnsafeCallbackFailsSilent(kRingBufferFrames + 1, false);
+    ExpectUnsafeCallbackFailsSilent(kRingBufferFrames + 1, true);
 
     enum { frames = 64 };
     Float32 readBuffer[frames * kDevice_ChannelCount];
@@ -1765,7 +1829,8 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
     FillSignal(first, frames, 0.125f);
     FillSignal(wrapped, frames, 0.625f);
 
-    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames));
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteClaimed);
     // Simulate a publisher part-way through its block. A callback one ring
     // later addresses the same physical slots but must not steal the prefix
     // which already carries samples while the suffix is still being built.
@@ -1774,21 +1839,25 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
         memory_order_seq_cst);
     atomic_store_explicit(
         &gDriver.ringBuffer[0].sampleFrame, 0, memory_order_seq_cst);
-    assert(!ClaimRingWriteSpan(
-        gDriver.ringBuffer, kRingBufferFrames, frames));
+    assert(ClaimRingWriteSpan(
+        gDriver.ringBuffer, kRingBufferFrames, frames)
+        == kRingWriteUnsafe);
     for (UInt32 frame = 0; frame < frames; ++frame) {
         assert(atomic_load_explicit(
-            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 1);
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst)
+            == (UInt64)frame + 1);
     }
 
     PublishRingWrite(gDriver.ringBuffer, 0, frames, first, 1.0f);
     assert(ReadRingSpan(
         gDriver.ringBuffer, 0, frames, received, 1.0f));
     ExpectSignalEqual(received, first, frames);
-    assert(!ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames));
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteCoalesced);
 
     assert(ClaimRingWriteSpan(
-        gDriver.ringBuffer, kRingBufferFrames, frames));
+        gDriver.ringBuffer, kRingBufferFrames, frames)
+        == kRingWriteClaimed);
     PublishRingWrite(
         gDriver.ringBuffer, kRingBufferFrames, frames, wrapped, 1.0f);
     assert(ReadRingSpan(
@@ -1799,7 +1868,7 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
     gDriver.ringBuffer = NULL;
 }
 
-static void TestOneConcurrentWriterOwnsTheWholeBlock(void) {
+static void TestConcurrentFullMixCallbacksCoalesceWithoutDropout(void) {
     gDriver.ringBuffer = CreateRingBuffer();
     assert(gDriver.ringBuffer != NULL);
     atomic_store_explicit(
@@ -1819,7 +1888,7 @@ static void TestOneConcurrentWriterOwnsTheWholeBlock(void) {
         writers[index].clientID = index + 1;
         FillSignal(
             writers[index].samples, kConcurrentOwnershipFrames,
-            (Float32)(index + 1) / 16.0f);
+            0.375f);
         assert(pthread_create(
             &threads[index], NULL, RunConcurrentRingWriter,
             &writers[index]) == 0);
@@ -1835,8 +1904,7 @@ static void TestOneConcurrentWriterOwnsTheWholeBlock(void) {
         &sIOMaximumActiveCallbacks, memory_order_relaxed)
         == kConcurrentClientCount);
     assert(atomic_load_explicit(
-        &gDriver.unsafeWriteOperations, memory_order_relaxed)
-        == kConcurrentClientCount - 1);
+        &gDriver.unsafeWriteOperations, memory_order_relaxed) == 0);
     for (UInt32 left = 0; left < kConcurrentClientCount; ++left) {
         assert(writers[left].threadID != 0);
         for (UInt32 right = left + 1; right < kConcurrentClientCount; ++right) {
@@ -1851,22 +1919,122 @@ static void TestOneConcurrentWriterOwnsTheWholeBlock(void) {
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 99,
         kAudioServerPlugInIOOperationReadInput, kConcurrentOwnershipFrames,
         &readCycle, received, NULL) == 0);
-    UInt32 matchingWriters = 0;
-    for (UInt32 index = 0; index < kConcurrentClientCount; ++index) {
-        if (SignalsAreEqual(
-                received, writers[index].samples,
-                kConcurrentOwnershipFrames)) {
-            ++matchingWriters;
-        }
-    }
-    assert(matchingWriters == 1);
+    assert(SignalsAreEqual(
+        received, writers[0].samples, kConcurrentOwnershipFrames));
     assert(atomic_load_explicit(
         &gDriver.unsafeReadOperations, memory_order_relaxed) == 0);
     printf(
-        "driver writer ownership: %u contenders, 1 whole-block owner, "
-        "%u rejected, %u exact frames\n",
-        kConcurrentClientCount, kConcurrentClientCount - 1,
+        "driver full-mix publication: %u overlapping callbacks, "
+        "0 unsafe, %u exact frames\n",
+        kConcurrentClientCount,
         kConcurrentOwnershipFrames);
+
+    free(gDriver.ringBuffer);
+    gDriver.ringBuffer = NULL;
+}
+
+typedef struct {
+    UInt32 clientID;
+    bool writes;
+    UInt64 exactReads;
+    UInt64 silentReads;
+    UInt64 invalidReads;
+    UInt64 threadID;
+} PublishedSpanClient;
+
+static void *RunPublishedSpanClient(void *context) {
+    PublishedSpanClient *client = (PublishedSpanClient *)context;
+    assert(pthread_threadid_np(NULL, &client->threadID) == 0);
+    AudioServerPlugInIOCycleInfo cycle = CycleAt(
+        0, kDevice_SafetyOffsetFrames);
+
+    for (UInt32 iteration = 0;
+         iteration < kConcurrentCallbacksPerClient; ++iteration) {
+        Float32 buffer[kDevice_ChannelCount] = { 0.375f, -0.375f };
+        UInt32 operation = client->writes
+            ? kAudioServerPlugInIOOperationWriteMix
+            : kAudioServerPlugInIOOperationReadInput;
+        AudioObjectID stream = client->writes
+            ? kObjectID_Stream_Output
+            : kObjectID_Stream_Input;
+        assert(Yun_DoIOOperation(
+            TestDriver(), kObjectID_Device, stream, client->clientID,
+            operation, 1, &cycle, buffer, NULL) == 0);
+        if (client->writes) continue;
+
+        if (buffer[0] == 0.375f && buffer[1] == -0.375f) {
+            ++client->exactReads;
+        } else if (buffer[0] == 0.0f && buffer[1] == 0.0f) {
+            ++client->silentReads;
+        } else {
+            ++client->invalidReads;
+        }
+    }
+    return NULL;
+}
+
+static void TestPublishedFullMixStaysReadableAcrossDuplicateCallbacks(void) {
+    gDriver.ringBuffer = CreateRingBuffer();
+    assert(gDriver.ringBuffer != NULL);
+    atomic_store_explicit(
+        &gDriver.outputGainBits, Float32Bits(1.0f), memory_order_release);
+    atomic_store_explicit(
+        &gDriver.inputGainBits, Float32Bits(1.0f), memory_order_release);
+    atomic_store_explicit(
+        &gDriver.unsafeReadOperations, 0, memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeWriteOperations, 0, memory_order_relaxed);
+    Float32 signal[kDevice_ChannelCount] = { 0.375f, -0.375f };
+    PutSignalInRing(signal, 1, 0);
+    assert(RingWriteSpanIsPublished(gDriver.ringBuffer, 0, 1));
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, 1)
+           == kRingWriteCoalesced);
+    assert(atomic_load_explicit(
+        &gDriver.ringBuffer[0].owner, memory_order_seq_cst) == 0);
+
+    PrepareIOStartGate(kConcurrentClientCount);
+    gYunDriverIOTestHook = ConcurrentIOTestHook;
+    PublishedSpanClient clients[kConcurrentClientCount] = { 0 };
+    pthread_t threads[kConcurrentClientCount];
+    for (UInt32 index = 0; index < kConcurrentClientCount; ++index) {
+        clients[index].clientID = index + 1;
+        clients[index].writes = index < kConcurrentClientCount / 2;
+        assert(pthread_create(
+            &threads[index], NULL, RunPublishedSpanClient,
+            &clients[index]) == 0);
+    }
+    for (UInt32 index = 0; index < kConcurrentClientCount; ++index) {
+        assert(pthread_join(threads[index], NULL) == 0);
+    }
+    gYunDriverIOTestHook = NULL;
+
+    assert(!sIOStartGate.timedOut);
+    assert(sIOStartGate.arrived == kConcurrentClientCount);
+    assert(atomic_load_explicit(
+        &sIOMaximumActiveCallbacks, memory_order_relaxed)
+        == kConcurrentClientCount);
+    UInt64 exactReads = 0;
+    UInt64 silentReads = 0;
+    UInt64 invalidReads = 0;
+    for (UInt32 index = kConcurrentClientCount / 2;
+         index < kConcurrentClientCount; ++index) {
+        exactReads += clients[index].exactReads;
+        silentReads += clients[index].silentReads;
+        invalidReads += clients[index].invalidReads;
+    }
+    assert(exactReads
+           == (UInt64)(kConcurrentClientCount / 2)
+               * kConcurrentCallbacksPerClient);
+    assert(silentReads == 0);
+    assert(invalidReads == 0);
+    assert(atomic_load_explicit(
+        &gDriver.unsafeReadOperations, memory_order_relaxed) == 0);
+    assert(atomic_load_explicit(
+        &gDriver.unsafeWriteOperations, memory_order_relaxed) == 0);
+    printf(
+        "driver duplicate full mix: %llu exact concurrent reads, "
+        "0 silent, 0 invalid, 0 unsafe\n",
+        exactReads);
 
     free(gDriver.ringBuffer);
     gDriver.ringBuffer = NULL;
@@ -1986,18 +2154,20 @@ int main(void) {
     TestPublishedClockRoundTripsEveryField();
     TestFixedBufferContractMatchesTheSafetyWindow();
     TestCallbacksOnBothSidesOf512IgnoreOperationOrder();
+    TestPublishedVariableCallbacksNeedNoDisjointSpanRule();
     TestUnsafeCallbacksFailSilentWithoutAnErrorStorm();
     TestUnsafeOperationCountsAreObservable();
     TestPropertyDictionaryHandlesEveryNumberAllocationFailure();
     TestSafetyWindowMakesClientOrderIrrelevant();
     TestEightClientsCanOverlapWithoutTornAudio();
     TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished();
-    TestOneConcurrentWriterOwnsTheWholeBlock();
+    TestConcurrentFullMixCallbacksCoalesceWithoutDropout();
+    TestPublishedFullMixStaysReadableAcrossDuplicateCallbacks();
 #if defined(YUNAUDIO_DRIVER_PERFORMANCE_TESTS)
     TestAtomicRingCallbackCPUTail();
-    puts("driver core: 26 tests passed");
+    puts("driver core: 28 tests passed");
 #else
-    puts("driver core: 25 tests passed");
+    puts("driver core: 27 tests passed");
 #endif
     return 0;
 }

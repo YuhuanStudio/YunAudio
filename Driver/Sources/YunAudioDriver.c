@@ -2023,40 +2023,65 @@ static bool SampleTimeToFrame(Float64 sampleTime, UInt64 *outFrame) {
     return true;
 }
 
-/// The HAL can vary an operation above its nominal frame count for drift
-/// compensation. Size alone therefore cannot decide whether a cycle is safe:
-/// the two timestamped spans must occupy disjoint parts of the circular ring.
-static bool CycleSpansAreDisjoint(UInt64 inputStart,
-                                  UInt64 outputStart,
-                                  UInt32 frames) {
-    if (frames == 0) return true;
-    if (frames > kRingBufferFrames / 2) return false;
-
-    UInt64 separation = (outputStart - inputStart) & kRingBufferMask;
-    return separation >= frames && separation <= kRingBufferFrames - frames;
-}
-
 static bool RingSpanCanBeTagged(UInt64 startFrame, UInt32 frames) {
     if (frames == 0) return true;
+    if (frames > kRingBufferFrames) return false;
     if (startFrame == kRingFrameUnpublished) return false;
     return (UInt64)(frames - 1) < kRingFrameUnpublished - startFrame;
 }
 
-/// Claims every slot before changing a sample. This makes one callback the
-/// owner of the whole block: overlapping or duplicate writers lose without
-/// publishing a partial mix. No retry is deliberate; an IO deadline is a poor
-/// place for a spin loop.
-static bool ClaimRingWriteSpan(YunRingFrame *ring,
-                               UInt64 startFrame,
-                               UInt32 frames) {
+typedef enum {
+    kRingWriteClaimed,
+    kRingWriteCoalesced,
+    kRingWriteUnsafe,
+} YunRingWriteAdmission;
+
+/// A `WriteMix` buffer is the host's complete mix, not one client's
+/// contribution. coreaudiod can nevertheless deliver the same absolute span
+/// through overlapping client callbacks. Once that span is fully published,
+/// touching its ownership again would briefly turn valid input reads into
+/// silence for no change in audio.
+static bool RingWriteSpanIsPublished(YunRingFrame *ring,
+                                     UInt64 startFrame,
+                                     UInt32 frames) {
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        UInt64 absoluteFrame = startFrame + frame;
+        UInt64 slot = absoluteFrame & kRingBufferMask;
+        UInt64 ownerBefore = atomic_load_explicit(
+            &ring[slot].owner, memory_order_seq_cst);
+        if (ownerBefore != 0) return false;
+        UInt64 published = atomic_load_explicit(
+            &ring[slot].sampleFrame, memory_order_seq_cst);
+        UInt64 ownerAfter = atomic_load_explicit(
+            &ring[slot].owner, memory_order_seq_cst);
+        if (published != absoluteFrame || ownerAfter != 0) return false;
+    }
+    return true;
+}
+
+/// Claims every slot before changing a sample. One callback owns the whole
+/// block; callbacks for the same host-produced full mix coalesce behind it,
+/// while a different absolute frame colliding after a ring wrap is still an
+/// unsafe overrun. No retry is deliberate: an IO deadline is a poor place for
+/// a spin loop.
+static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
+                                                UInt64 startFrame,
+                                                UInt32 frames) {
+    if (RingWriteSpanIsPublished(ring, startFrame, frames)) {
+        return kRingWriteCoalesced;
+    }
+
     UInt32 claimed = 0;
+    YunRingWriteAdmission rejection = kRingWriteUnsafe;
     for (; claimed < frames; ++claimed) {
         UInt64 absoluteFrame = startFrame + claimed;
         UInt64 slot = absoluteFrame & kRingBufferMask;
+        UInt64 wantedOwner = absoluteFrame + 1;
         UInt64 unowned = 0;
         if (!atomic_compare_exchange_strong_explicit(
-                &ring[slot].owner, &unowned, 1,
+                &ring[slot].owner, &unowned, wantedOwner,
                 memory_order_seq_cst, memory_order_seq_cst)) {
+            if (unowned == wantedOwner) rejection = kRingWriteCoalesced;
             break;
         }
         UInt64 published = atomic_load_explicit(
@@ -2064,20 +2089,21 @@ static bool ClaimRingWriteSpan(YunRingFrame *ring,
         if (published == absoluteFrame) {
             atomic_store_explicit(
                 &ring[slot].owner, 0, memory_order_seq_cst);
+            rejection = kRingWriteCoalesced;
             break;
         }
     }
-    if (claimed == frames) return true;
+    if (claimed == frames) return kRingWriteClaimed;
 
-    // A loser releases only the prefix it claimed and publishes no samples.
-    // Readers then get one bounded silent block, never a mix assembled from
-    // competing clients.
+    // A loser releases only its prefix and publishes no samples. A matching
+    // owner is completing the identical host mix; a different owner is the
+    // only case which represents lost timeline capacity.
     for (UInt32 frame = 0; frame < claimed; ++frame) {
         UInt64 slot = (startFrame + frame) & kRingBufferMask;
         atomic_store_explicit(
             &ring[slot].owner, 0, memory_order_seq_cst);
     }
-    return false;
+    return rejection;
 }
 
 static void PublishRingWrite(YunRingFrame *ring,
@@ -2210,9 +2236,7 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
         inIOCycleInfo->mOutputTime.mSampleTime, &outputStart);
     if (ring == NULL || !inputTimeIsValid || !outputTimeIsValid
         || !RingSpanCanBeTagged(inputStart, inIOBufferFrameSize)
-        || !RingSpanCanBeTagged(outputStart, inIOBufferFrameSize)
-        || !CycleSpansAreDisjoint(
-            inputStart, outputStart, inIOBufferFrameSize)) {
+        || !RingSpanCanBeTagged(outputStart, inIOBufferFrameSize)) {
         FailSilentIO(isRead, buffer, inIOBufferFrameSize);
         return 0;
     }
@@ -2233,10 +2257,12 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (isWrite) {
         Float32 gain = Float32FromBits(
             atomic_load_explicit(&gDriver.outputGainBits, memory_order_acquire));
-        if (ClaimRingWriteSpan(ring, outputStart, inIOBufferFrameSize)) {
+        YunRingWriteAdmission admission = ClaimRingWriteSpan(
+            ring, outputStart, inIOBufferFrameSize);
+        if (admission == kRingWriteClaimed) {
             PublishRingWrite(
                 ring, outputStart, inIOBufferFrameSize, buffer, gain);
-        } else {
+        } else if (admission == kRingWriteUnsafe) {
             FailSilentIO(false, buffer, inIOBufferFrameSize);
         }
         YUN_DRIVER_IO_TEST_HOOK(false, inClientID, inOperationID);

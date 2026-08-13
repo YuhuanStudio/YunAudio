@@ -54,9 +54,9 @@
 
 /// Gives CoreAudio enough notice to finish a loopback write before an
 /// independent input client reads the same sample time. One whole advertised
-/// period costs 10.67 ms at 48 kHz and removes callback-order dependence under
-/// ordinary load. `DoIOOperation` still fails silent if an operation is larger:
-/// Apple explicitly permits some operation sizes to differ from the nominal.
+/// period costs 10.67 ms at 48 kHz. Apple permits individual operation sizes
+/// to differ from the nominal period, so per-frame publication — rather than
+/// this constant alone — decides whether those uncommon cycles are ready.
 #define kDevice_SafetyOffsetFrames kDevice_BufferFrameSize
 
 #pragma mark - Object IDs
@@ -140,10 +140,11 @@ typedef struct {
 ///
 /// CoreAudio identifies each callback's client but does not promise that
 /// callbacks for different clients share a thread or a serial executor. All
-/// three fields are therefore atomic: `owner` keeps a writer's whole callback
-/// span immutable until publication, `sampleFrame` prevents stale wraparound data,
-/// and `stereoBits` keeps left and right from ever belonging to different
-/// writes. A claimed frame is never observed as audio.
+/// three fields are therefore atomic: `owner` carries the absolute frame plus
+/// one while a writer owns the slot, `sampleFrame` prevents stale wraparound
+/// data, and `stereoBits` keeps left and right from ever belonging to different
+/// writes. The owner identity lets duplicate `WriteMix` callbacks coalesce
+/// without confusing a one-ring overrun for the same full mix.
 typedef struct {
     _Atomic UInt64 owner;
     _Atomic UInt64 sampleFrame;
