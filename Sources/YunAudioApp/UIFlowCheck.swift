@@ -610,35 +610,21 @@ enum UIFlowCheck {
             // it and it holds what was sent. What the ring *shows* is checked
             // in the unit tests, where the router's own metering cannot
             // overwrite the level mid-assertion.
-            model.lightingMode = .spectrum
+            // The flow is deliberately idle here. Animated modes own no
+            // render thread without a live signal, so a solid frame is the
+            // honest hardware claim at this point: every completed read must
+            // see the same frame the device is holding. Animation is measured
+            // below, immediately after the first route comes up.
+            model.lightingMode = .solid
             await pause(0.5)
-            // Six completed HID reads rather than six looks at one cached
-            // value. Each revision is a fence published only after that
-            // feature-report transaction returns from the device.
-            var samples: [[UInt8]] = []
-            var completedReads = 0
-            for _ in 0..<6 {
-                guard let revision = model.lighting.requestCurrentFrame() else {
-                    continue
-                }
-                let deadline = Date().addingTimeInterval(1)
-                var completed: LightingFrameReadSnapshot?
-                while Date() < deadline, completed == nil {
-                    completed = model.lighting.completedCurrentFrameRead(revision)
-                    if completed == nil { await pause(0.01) }
-                }
-                if let completed {
-                    completedReads += 1
-                    if let frame = completed.frame { samples.append(frame) }
-                }
-                await pause(0.25)
-            }
-            check("six feature-report reads completed", completedReads == 6)
-            check("the device holds the frames it is sent", samples.count == 6)
-            check("and they keep arriving", Set(samples).count > 1)
+            let idleReads = await lightingFrames(model.lighting, count: 6)
+            check("six feature-report reads completed", idleReads.completed == 6)
+            check("the device holds the frames it is sent", idleReads.frames.count == 6)
+            check("the idle ring keeps the frame it was sent", Set(idleReads.frames).count == 1)
             note(
-                "\(Set(samples).count) distinct frames in \(samples.count) successful "
-                    + "reads; \(completedReads) completed")
+                "\(Set(idleReads.frames).count) distinct frame in "
+                    + "\(idleReads.frames.count) successful reads; "
+                    + "\(idleReads.completed) completed")
 
             // Left dark: hardware state outlives the process, and a ring stuck
             // on a colour after quitting looks like a fault.
@@ -910,6 +896,18 @@ enum UIFlowCheck {
         )
 
         await waitUntil("levels started arriving", { !model.routeLevels.isEmpty }, timeout: 3)
+        if model.lighting.isAvailable {
+            model.lightingMode = .spectrum
+            await pause(0.5)
+            let animatedReads = await lightingFrames(model.lighting, count: 6)
+            check("six live feature-report reads completed", animatedReads.completed == 6)
+            check("six live ring frames read back", animatedReads.frames.count == 6)
+            check("and they keep arriving", Set(animatedReads.frames).count > 1)
+            note(
+                "\(Set(animatedReads.frames).count) distinct live frames in "
+                    + "\(animatedReads.frames.count) successful reads")
+            model.lightingMode = .off
+        }
         check("path quality is being reported", model.pathQuality != nil)
         // The application routed audio into a virtual device and never said the
         // one thing it exists to enable: that the conferencing application has
@@ -7393,6 +7391,29 @@ enum UIFlowCheck {
         // not measured.
         let wait = inWantedSection ? seconds : min(seconds, 0.05)
         try? await Task.sleep(for: .seconds(wait))
+    }
+
+    /// Reads distinct HID transactions rather than revisiting one cached frame.
+    private static func lightingFrames(
+        _ lighting: LightingController, count: Int
+    ) async -> (completed: Int, frames: [[UInt8]]) {
+        var completedReads = 0
+        var frames: [[UInt8]] = []
+        for _ in 0..<count {
+            guard let revision = lighting.requestCurrentFrame() else { continue }
+            let deadline = Date().addingTimeInterval(1)
+            var completed: LightingFrameReadSnapshot?
+            while Date() < deadline, completed == nil {
+                completed = lighting.completedCurrentFrameRead(revision)
+                if completed == nil { await pause(0.01) }
+            }
+            if let completed {
+                completedReads += 1
+                if let frame = completed.frame { frames.append(frame) }
+            }
+            await pause(0.25)
+        }
+        return (completedReads, frames)
     }
 
     /// Starts the route again if it is down, and waits without asserting.
