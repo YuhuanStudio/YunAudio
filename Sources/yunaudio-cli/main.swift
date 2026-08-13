@@ -630,6 +630,13 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     let result = engine.evaluateSelftest()
     let locked = engine.isClockLocked
     let ratio = engine.measuredRateRatio
+    // Stop may hand the driver through a new IO lifetime while the aggregate
+    // is dismantled. Read the fault coordinates before that boundary, then use
+    // the post-fence counters below for the actual pass/fail decision.
+    let liveDriverEvidence = AudioIncidentDriverHealthReader.read(
+        deviceID: destination.id,
+        wasRequired: destination.uid == ClockAnchorPublisher.driverDeviceUID,
+        until: HALTeardownDeadline(timeout: 0.25))
     let teardown = engine.stop()
     let driverHealthAfter = AudioIncidentDriverHealthReader.read(
         deviceID: destination.id,
@@ -655,12 +662,15 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
         let unsafeWrites =
             driverHealthAfter.unsafeWriteOperations - driverHealthBefore.unsafeWriteOperations
         print("driver unsafe operations: \(unsafeReads) read, \(unsafeWrites) write")
+        let evidence =
+            driverHealthAfter.unsafeReadStartFrame == nil
+            ? liveDriverEvidence : driverHealthAfter
         if unsafeReads > 0,
-            let readStart = driverHealthAfter.unsafeReadStartFrame,
-            let readFrames = driverHealthAfter.unsafeReadFrameCount,
-            let unavailable = driverHealthAfter.unsafeReadUnavailableFrame,
-            let publishedStart = driverHealthAfter.lastPublishedStartFrame,
-            let publishedFrames = driverHealthAfter.lastPublishedFrameCount
+            let readStart = evidence.unsafeReadStartFrame,
+            let readFrames = evidence.unsafeReadFrameCount,
+            let unavailable = evidence.unsafeReadUnavailableFrame,
+            let publishedStart = evidence.lastPublishedStartFrame,
+            let publishedFrames = evidence.lastPublishedFrameCount
         {
             print(
                 "first unsafe read: \(readStart)+\(readFrames), unavailable \(unavailable), "
