@@ -768,6 +768,22 @@ struct LoopbackGradingTests {
         #expect(result.delayFrames == 872)
         #expect(result.maxAbsoluteError == 0)
         #expect(result.alignmentSeparation == 0)
+        #expect(result.firstMismatchOffset == nil)
+        #expect(result.lastMismatchOffset == nil)
+        #expect(result.mismatchRunCount == 0)
+        #expect(result.longestMismatchRun == 0)
+    }
+
+    @Test("one silent hardware callback is reported as one exact mismatch run")
+    func oneSilentCallback() {
+        let result = grade(delay: 872) { sample, index in
+            (3100..<3516).contains(index) ? 0 : sample
+        }
+        #expect(!result.isBitExact)
+        #expect(result.firstMismatchOffset == 3100)
+        #expect(result.lastMismatchOffset == 3515)
+        #expect(result.mismatchRunCount == 1)
+        #expect(result.longestMismatchRun == 416)
     }
 
     /// The case that was being reported as a total failure.
@@ -2985,6 +3001,29 @@ struct OutputMeasurementTests {
         for frame in 0..<64 {
             #expect(output.sample(0, 0, frame: frame) == 0.5)
         }
+    }
+
+    /// The outgoing readout used to keep multiplying a Float by the release
+    /// coefficient forever. The signal was silent, but the interface marched
+    /// through −138, −865 and eventually subnormal dBFS values instead of
+    /// reaching the same exact zero as the visible meter floor.
+    @Test("the outgoing peak reaches an exact stable silence")
+    func outputPeakSettlesAtTheMeterFloor() {
+        let graph = graph(gain: 1)
+        defer { RTGraph.deallocate(graph) }
+        graph.pointee.peakDecay = 0.5
+        let input = Bus(channelCounts: [1], frames: 64)
+        let output = Bus(channelCounts: [1], frames: 64)
+
+        input.set(0, 0, to: 1)
+        cycle(graph: graph, input: input, output: output)
+        #expect(graph.pointee.outputPeak == 1)
+
+        input.set(0, 0, to: 0)
+        cycle(graph: graph, input: input, output: output, cycles: 10)
+        #expect(graph.pointee.outputPeak == 0)
+        cycle(graph: graph, input: input, output: output, cycles: 10_000)
+        #expect(graph.pointee.outputPeak == 0)
     }
 
     /// The count latches across cycles: a clip two seconds ago is exactly the

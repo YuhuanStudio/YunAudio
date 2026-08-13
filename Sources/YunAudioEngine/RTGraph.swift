@@ -513,6 +513,17 @@ struct RTGraph {
         return Float(pow(10.0, -20.0 * secondsPerCycle / 20.0))
     }
 
+    /// Peak-meter release with a finite silence state.
+    ///
+    /// The display floors at −60 dBFS. Keeping smaller values alive made the
+    /// callback publish an ever-decreasing subnormal forever; converting that
+    /// residue to decibels eventually produced readings such as −865 dBFS.
+    @inline(__always)
+    static func nextMeterPeak(previous: Float, incoming: Float, decay: Float) -> Float {
+        let next = max(incoming, previous * decay)
+        return next <= 0.001 ? 0 : next
+    }
+
     /// One-pole smoothing coefficient for a given time constant.
     ///
     /// Expressed in seconds rather than as a per-cycle number for the same
@@ -2425,8 +2436,10 @@ func yunAudioIOProc(
         if peak >= 0.999 {
             for index in 0..<samples where abs(pointer[index]) >= 0.999 { clipped &+= 1 }
         }
-        let previous = graph.pointee.outputPeak
-        graph.pointee.outputPeak = max(peak, previous * graph.pointee.peakDecay)
+        graph.pointee.outputPeak = RTGraph.nextMeterPeak(
+            previous: graph.pointee.outputPeak,
+            incoming: peak,
+            decay: graph.pointee.peakDecay)
         graph.pointee.outputClipped &+= clipped
     }
 

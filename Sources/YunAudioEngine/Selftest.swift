@@ -99,6 +99,13 @@ public struct SelftestResult: Sendable {
     public let delayFrames: Int
     public let comparedFrames: Int
     public let exactMatches: Int
+    /// Capture-relative bounds and shape of non-identical samples. These stay
+    /// empty on success and make one fail-silent hardware callback distinguishable
+    /// from continuous conversion without weakening the bit-exact verdict.
+    public let firstMismatchOffset: Int?
+    public let lastMismatchOffset: Int?
+    public let mismatchRunCount: Int
+    public let longestMismatchRun: Int
     /// Largest absolute difference across the compared run. Zero is the only
     /// acceptable answer for a path that claims to be lossless.
     public let maxAbsoluteError: Float
@@ -144,12 +151,21 @@ public struct SelftestResult: Sendable {
                 alignmentSeparation, comparedFrames)
         }
         let percentage = Double(exactMatches) / Double(comparedFrames) * 100
+        let mismatchShape: String
+        if let firstMismatchOffset, let lastMismatchOffset {
+            mismatchShape = String(
+                format: ", mismatch offsets %d...%d in %d run(s), longest %d",
+                firstMismatchOffset, lastMismatchOffset, mismatchRunCount,
+                longestMismatchRun)
+        } else {
+            mismatchShape = ""
+        }
         return String(
             format:
                 "resampled: %d/%d identical (%.2f%%), mean error %.4f, max %.4f, "
-                + "delay %d frames, separation %.3f",
+                + "delay %d frames, separation %.3f%@",
             exactMatches, comparedFrames, percentage, meanAbsoluteError, maxAbsoluteError,
-            delayFrames, alignmentSeparation)
+            delayFrames, alignmentSeparation, mismatchShape)
     }
 }
 
@@ -261,7 +277,9 @@ extension SelftestCapture {
         let capture = samples
         guard count > 64 else {
             return SelftestResult(
-                delayFrames: 0, comparedFrames: 0, exactMatches: 0, maxAbsoluteError: 0,
+                delayFrames: 0, comparedFrames: 0, exactMatches: 0,
+                firstMismatchOffset: nil, lastMismatchOffset: nil,
+                mismatchRunCount: 0, longestMismatchRun: 0, maxAbsoluteError: 0,
                 meanAbsoluteError: 0, alignmentSeparation: 1)
         }
 
@@ -327,6 +345,11 @@ extension SelftestCapture {
         var matches = 0
         var maxError: Float = 0
         var totalError = 0.0
+        var firstMismatchOffset: Int?
+        var lastMismatchOffset: Int?
+        var mismatchRunCount = 0
+        var currentMismatchRun = 0
+        var longestMismatchRun = 0
         for index in 0..<count {
             let absolute = startFrame &+ UInt64(index)
             guard absolute >= UInt64(bestDelay) else { continue }
@@ -335,7 +358,13 @@ extension SelftestCapture {
             compared += 1
             if actual == expected {
                 matches += 1
+                currentMismatchRun = 0
             } else {
+                if currentMismatchRun == 0 { mismatchRunCount += 1 }
+                currentMismatchRun += 1
+                longestMismatchRun = max(longestMismatchRun, currentMismatchRun)
+                if firstMismatchOffset == nil { firstMismatchOffset = index }
+                lastMismatchOffset = index
                 let error = abs(actual - expected)
                 totalError += Double(error)
                 if error > maxError { maxError = error }
@@ -346,6 +375,10 @@ extension SelftestCapture {
             delayFrames: bestDelay,
             comparedFrames: compared,
             exactMatches: matches,
+            firstMismatchOffset: firstMismatchOffset,
+            lastMismatchOffset: lastMismatchOffset,
+            mismatchRunCount: mismatchRunCount,
+            longestMismatchRun: longestMismatchRun,
             maxAbsoluteError: maxError,
             meanAbsoluteError: compared > 0 ? Float(totalError / Double(compared)) : 0,
             alignmentSeparation: Float(separation))
