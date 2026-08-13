@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系统需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![2031 tests](https://img.shields.io/badge/tests-2031-brightgreen)](#验证)
+[![2033 tests](https://img.shields.io/badge/tests-2033-brightgreen)](#验证)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系统需求)
 
 [English](README.md) · [繁體中文](README.zh-Hant.md) · 简体中文
@@ -234,7 +234,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 单一 flow check 段落，44 秒
 ```
 
-各步骤刻意互相独立：2031 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
+各步骤刻意互相独立：2033 个单元测试、三语言字符串表比对、每个面板的离屏渲染、窗口服务器
 实际绘制之窗口的照片、“无其他实例占用音频设备”的断言、release 构建的比特精确测量，
 以及一次驱动整个界面对真实硬件执行的 flow check。
 
