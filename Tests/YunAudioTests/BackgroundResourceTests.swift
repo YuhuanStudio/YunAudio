@@ -928,6 +928,14 @@ struct BackgroundResourceTests {
         #expect(capture.contains("error-message"))
         #expect(capture.contains("model.setErrorForWindowCapture"))
 
+        let monitorMessage = "無法監聽所選的輸出；主要混音仍正常運作。"
+        let repeatedMessage = Array(repeating: monitorMessage, count: 4).joined(separator: " ")
+        #expect(YunMessagePresentation.displayText(for: repeatedMessage) == monitorMessage)
+        #expect(
+            YunMessagePresentation.displayText(for: "第一個問題。 第二個問題。")
+                == "第一個問題。 第二個問題。")
+        #expect(YunMessagePresentation.displayText(for: "very very") == "very very")
+
         let technical = String(
             repeating: "com.yuhuanstudio.yunaudio.aggregate.E065AB82", count: 96)
         let translated = String(
@@ -937,16 +945,16 @@ struct BackgroundResourceTests {
             (translated, MainWindowLayout.inspectorWidth),
         ] {
             let renderer = ImageRenderer(
-                content: Text(message)
+                content: Text(YunMessagePresentation.displayText(for: message))
                     .font(Yun.Text.caption)
-                    .yunBoundedMessage(message)
+                    .yunBoundedMessage(message, maximumLines: 1)
                     .frame(width: width, alignment: .leading))
             renderer.scale = 1
             let image = try #require(renderer.nsImage)
             #expect(image.size.width == width)
             #expect(
-                image.size.height <= 64,
-                "a bounded message used \(image.size.height) points at width \(width)")
+                image.size.height <= 20,
+                "a one-line message used \(image.size.height) points at width \(width)")
         }
     }
 

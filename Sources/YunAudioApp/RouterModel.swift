@@ -5496,7 +5496,7 @@ final class RouterModel {
     /// The one user-facing account of a monitor refusal.
     static func monitorUnavailableMessage(_ name: String) -> String {
         String(
-            format: loc("%@ is unavailable for monitoring. Your main mix is still running."),
+            format: loc("Monitoring %@ is unavailable; your main mix is unaffected."),
             name)
     }
 

@@ -163,6 +163,42 @@ public enum YunStatusTone {
     }
 }
 
+/// Reduces accidental repetition without changing the underlying diagnostic.
+///
+/// Several framework failures can be reported by more than one route at the
+/// same instant. Joining four identical sentences is useful in a log and
+/// unreadable in a banner, so presentation collapses only an exact repetition
+/// of the complete word sequence. Different messages are never merged.
+public enum YunMessagePresentation {
+    private static let sentenceTerminators: Set<Character> = [".", "!", "?", "。", "！", "？"]
+
+    public static func displayText(for fullText: String) -> String {
+        let trimmed = fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count > 1 else { return trimmed }
+
+        var prefixLengths = Array(repeating: 0, count: words.count)
+        var matched = 0
+        for index in 1..<words.count {
+            while matched > 0, words[index] != words[matched] {
+                matched = prefixLengths[matched - 1]
+            }
+            if words[index] == words[matched] { matched += 1 }
+            prefixLengths[index] = matched
+        }
+
+        let period = words.count - prefixLengths[words.count - 1]
+        guard
+            period < words.count,
+            words.count.isMultiple(of: period),
+            words[period - 1].last.map(sentenceTerminators.contains) == true
+        else {
+            return trimmed
+        }
+        return words[..<period].joined(separator: " ")
+    }
+}
+
 /// Keeps a status or failure from becoming a layout input of arbitrary size.
 ///
 /// System frameworks sometimes return a device UID, a path, or an entire

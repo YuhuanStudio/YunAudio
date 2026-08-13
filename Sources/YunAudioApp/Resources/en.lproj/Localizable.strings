@@ -236,7 +236,7 @@
 "Monitor" = "Monitor";
 "Hear yourself, %@ ms behind." = "Hear yourself, %@ ms behind.";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "This output does not look like headphones. Monitoring on speakers feeds the microphone back into the room.";
-"%@ is unavailable for monitoring. Your main mix is still running." = "%@ is unavailable for monitoring. Your main mix is still running.";
+"Monitoring %@ is unavailable; your main mix is unaffected." = "Monitoring %@ is unavailable; your main mix is unaffected.";
 "The selected output" = "The selected output";
 "Hold this level automatically" = "Hold this level automatically";
 "Identify sounds" = "Identify sounds";

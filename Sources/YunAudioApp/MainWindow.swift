@@ -225,15 +225,15 @@ struct MainWindow: View {
     /// A CoreAudio sentence once squeezed the wordmark, four scene buttons and
     /// the primary action into fragments even though every column below fitted.
     private func errorBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: Yun.Space.sm) {
+        let displayMessage = YunMessagePresentation.displayText(for: message)
+        return HStack(spacing: Yun.Space.sm) {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 11))
                 .foregroundStyle(Yun.Palette.danger)
-                .padding(.top, 1)
-            Text(message)
+            Text(displayMessage)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.danger)
-                .yunBoundedMessage(message)
+                .yunBoundedMessage(message, maximumLines: 1)
         }
         .padding(.horizontal, Yun.Space.md)
         .padding(.vertical, Yun.Space.sm)

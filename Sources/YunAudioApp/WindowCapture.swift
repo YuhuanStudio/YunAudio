@@ -84,7 +84,7 @@ enum WindowCapture {
             let previousError = model.lastError
             let monitorMessage = String(
                 format: loc(
-                    "%@ is unavailable for monitoring. Your main mix is still running."),
+                    "Monitoring %@ is unavailable; your main mix is unaffected."),
                 loc("The selected output"))
             model.setErrorForWindowCapture(
                 [monitorMessage, monitorMessage, monitorMessage, monitorMessage]

@@ -236,7 +236,7 @@
 "Monitor" = "监听";
 "Hear yourself, %@ ms behind." = "听见自己，延迟 %@ 毫秒。";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "该输出看起来不是耳机。用外放监听会把声音送回麦克风正在收音的房间。";
-"%@ is unavailable for monitoring. Your main mix is still running." = "%@ 目前无法用于监听，主混音仍在正常运行。";
+"Monitoring %@ is unavailable; your main mix is unaffected." = "无法监听%@；主混音仍正常运行。";
 "The selected output" = "所选输出";
 "Hold this level automatically" = "自动保持该响度";
 "Identify sounds" = "识别声音";
