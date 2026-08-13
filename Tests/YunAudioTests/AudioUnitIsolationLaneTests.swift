@@ -34,6 +34,23 @@ struct AudioUnitIsolationLaneTests {
         return condition()
     }
 
+    @Test("echo cancellation has one larger absolute construction budget")
+    func echoCancellationConstructionBudgetIsLocalAndBounded() {
+        #expect(AudioUnitConstructionBudget.standard == 2)
+        #expect(AudioUnitConstructionBudget.echoCancellation == 3)
+
+        let start: UInt64 = 10_000_000_000
+        let deadline = HALTeardownDeadline(
+            timeout: AudioUnitConstructionBudget.echoCancellation,
+            nowUptimeNanoseconds: start)
+        #expect(
+            deadline.remainingTimeInterval(
+                nowUptimeNanoseconds: start + 2_100_000_000) == 0.9)
+        #expect(
+            deadline.remainingTimeInterval(
+                nowUptimeNanoseconds: start + 3_000_000_000) == 0)
+    }
+
     @Test("a hung constructor releases the engine queue at one absolute deadline")
     func hungConstructionCannotBlockStopLane() {
         let quarantine = ProcessLifetimeAudioQuarantine()

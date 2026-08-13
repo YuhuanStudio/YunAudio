@@ -2870,6 +2870,7 @@ public final class RoutingEngine: @unchecked Sendable {
                 .acquireGraphAdmissionAfterDraining(waitingUpTo: 2.25)
             {
                 construction = BoundedAudioUnitConstructionLane.shared.perform(
+                    timeout: AudioUnitConstructionBudget.echoCancellation,
                     observing: { resource in
                         incident.recordConstructionResource(resource)
                         guard

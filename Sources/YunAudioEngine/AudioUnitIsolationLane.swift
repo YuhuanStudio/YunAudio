@@ -183,6 +183,18 @@ enum AudioUnitLaneResult<Value: Sendable>: Sendable {
     case refused
 }
 
+/// Absolute construction budgets for unpublished Audio Unit graphs.
+///
+/// VoiceProcessingIO also builds a private aggregate and configures both sides
+/// of the unit before initialisation. Measured on real hardware, that complete
+/// transaction can return just after the generic two-second graph budget. It
+/// remains one transaction on the sole construction lane; this larger budget
+/// must not become the default for ordinary effect graphs.
+enum AudioUnitConstructionBudget {
+    static let standard: TimeInterval = 2
+    static let echoCancellation: TimeInterval = 3
+}
+
 private protocol AudioUnitLaneTransaction: AnyObject, Sendable {
     var identifier: UUID { get }
     var key: String { get }
@@ -418,7 +430,7 @@ final class BoundedAudioUnitConstructionLane: @unchecked Sendable {
     var admitsConstruction: Bool { lock.withLock { !isQuarantined } }
 
     func perform<Value: Sendable>(
-        timeout: TimeInterval = 2,
+        timeout: TimeInterval = AudioUnitConstructionBudget.standard,
         observing observeResource:
             @escaping @Sendable (
                 AudioUnitConstructionResource
