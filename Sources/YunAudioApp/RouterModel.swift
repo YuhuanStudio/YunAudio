@@ -5468,7 +5468,8 @@ final class RouterModel {
             // A new choice is a new question, so the last refusal stops being
             // an answer to it.
             droppedMonitorName = nil
-            droppedMonitorReason = nil
+            droppedMonitorMessage = nil
+            droppedMonitorDiagnostic = nil
             restartIfRunning()
         }
     }
@@ -5482,10 +5483,22 @@ final class RouterModel {
     /// has quietly gone back to "Off" with nothing to explain it is precisely
     /// the silent disappearance this project keeps finding in other forms.
     private(set) var droppedMonitorName: String?
-    /// What the engine said when it refused, verbatim. Technical on purpose —
-    /// the failed plugins are reported the same way, because the status is the
-    /// only part the device's own author can act on.
-    private(set) var droppedMonitorReason: String?
+    /// The product-language explanation shown beside the picker and in the
+    /// general error row. Held separately from the diagnostic so an internal
+    /// CoreAudio endpoint cannot become interface copy by accident.
+    private(set) var droppedMonitorMessage: String?
+    /// What the engine said when it refused, verbatim. This is evidence for the
+    /// flow harness and incident diagnostics, never text for a person using the
+    /// app: channel numbers and aggregate UIDs identify our implementation,
+    /// not an action they can take.
+    @ObservationIgnored private(set) var droppedMonitorDiagnostic: String?
+
+    /// The one user-facing account of a monitor refusal.
+    static func monitorUnavailableMessage(_ name: String) -> String {
+        String(
+            format: loc("%@ is unavailable for monitoring. Your main mix is still running."),
+            name)
+    }
 
     /// Set while the monitor is being cleared on the engine's behalf rather than
     /// on the user's, so the picker's `didSet` does not order a restart of a
@@ -5503,9 +5516,11 @@ final class RouterModel {
         // "AppleGFXHDAEngineOutputDP:…" is not.
         let name =
             outputDevices.first(where: { $0.uid == dropped.uid })?.name
-            ?? deviceNames[dropped.uid] ?? dropped.uid
+            ?? deviceNames[dropped.uid] ?? loc("The selected output")
+        let message = Self.monitorUnavailableMessage(name)
         droppedMonitorName = name
-        droppedMonitorReason = dropped.reason
+        droppedMonitorMessage = message
+        droppedMonitorDiagnostic = dropped.reason
         isDroppingMonitor = true
         monitorDeviceUID = nil
         isDroppingMonitor = false
@@ -5518,9 +5533,7 @@ final class RouterModel {
             routeMutes = installed.map(\.isMuted)
         }
         remapMonitorRoutes()
-        lastError = String(
-            format: loc("%@ would not start as a monitor; the mix is carrying on without it."),
-            name)
+        lastError = message
     }
 
     /// Extra inputs and outputs the engine gave up on, by name.

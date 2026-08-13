@@ -236,8 +236,8 @@
 "Monitor" = "Monitor";
 "Hear yourself, %@ ms behind." = "Hear yourself, %@ ms behind.";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "This output does not look like headphones. Monitoring on speakers feeds the microphone back into the room.";
-"%@ would not start as a monitor; the mix is carrying on without it." = "%@ would not start as a monitor; the mix is carrying on without it.";
-"%1$@ could not be used for monitoring. %2$@" = "%1$@ could not be used for monitoring. %2$@";
+"%@ is unavailable for monitoring. Your main mix is still running." = "%@ is unavailable for monitoring. Your main mix is still running.";
+"The selected output" = "The selected output";
 "Hold this level automatically" = "Hold this level automatically";
 "Identify sounds" = "Identify sounds";
 "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it." = "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it.";
@@ -355,8 +355,8 @@
 "Nasal" = "Nasal";
 "Presence" = "Presence";
 "Air" = "Air";
-"The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "The installed driver is older than the one in this app. Anything added since is missing.";
-"Update the driver" = "Update the driver";
+"The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes." = "The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes.";
+"Reinstall driver" = "Reinstall driver";
 "Transcript" = "Transcript";
 "Transcribe" = "Transcribe";
 "Stop transcribing" = "Stop transcribing";

@@ -141,7 +141,7 @@ struct MainWindow: View {
         .onDisappear { model.isAnalysisVisible = false }
     }
 
-    /// The installed driver is not the one this app ships.
+    /// The installed driver predates the version bundled with this release.
     ///
     /// Loud rather than quiet, because an older driver is missing whatever the
     /// newer one added and every symptom of that looks like a bug in the
@@ -155,14 +155,14 @@ struct MainWindow: View {
                 .foregroundStyle(Yun.Palette.warning)
             Text(
                 loc(
-                    "The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here."
+                    "The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes."
                 )
             )
             .font(Yun.Text.caption)
             .foregroundStyle(Yun.Palette.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            Button(loc("Update the driver")) { model.installDriver() }
+            Button(loc("Reinstall driver")) { model.installDriver() }
                 .buttonStyle(YunButtonStyle(.primary, small: true))
                 .disabled(model.isInstallingDriver)
         }
@@ -941,17 +941,14 @@ struct MainWindow: View {
         }
         // The picker has gone back to "Off" on its own, which is a change the
         // user did not make and would otherwise have to guess at. One line,
-        // with the engine's own words behind it: "would not start" leaves
-        // somebody switching a display on and off, and the status it returned
-        // is the only part that device's author can act on.
-        if let dropped = model.droppedMonitorName, let reason = model.droppedMonitorReason {
-            Text(
-                String(
-                    format: loc("%1$@ could not be used for monitoring. %2$@"), dropped, reason)
-            )
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.danger)
-            .fixedSize(horizontal: false, vertical: true)
+        // without making an implementation detail look like something they
+        // could fix. The verbatim CoreAudio reason remains diagnostic evidence
+        // in the model; a channel number or aggregate UID is not interface copy.
+        if let message = model.droppedMonitorMessage {
+            Text(message)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.danger)
+                .fixedSize(horizontal: false, vertical: true)
         }
         if model.monitorDeviceUID != nil {
             HStack(spacing: Yun.Space.sm) {

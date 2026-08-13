@@ -236,8 +236,8 @@
 "Monitor" = "监听";
 "Hear yourself, %@ ms behind." = "听见自己，延迟 %@ 毫秒。";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "该输出看起来不是耳机。用外放监听会把声音送回麦克风正在收音的房间。";
-"%@ would not start as a monitor; the mix is carrying on without it." = "%@ 无法作为监听输出启动，混音在没有它的情况下继续。";
-"%1$@ could not be used for monitoring. %2$@" = "%1$@ 无法用于监听。%2$@";
+"%@ is unavailable for monitoring. Your main mix is still running." = "%@ 目前无法用于监听，主混音仍在正常运行。";
+"The selected output" = "所选输出";
 "Hold this level automatically" = "自动保持该响度";
 "Identify sounds" = "识别声音";
 "Loads Apple's on-device sound model only while this readout, automatic levelling or ducking needs it." = "仅在此读数、自动响度或闪避功能需要时载入 Apple 的设备端声音模型。";
@@ -355,8 +355,8 @@
 "Nasal" = "鼻音";
 "Presence" = "临场";
 "Air" = "空气感";
-"The installed driver is older than the one in this app. Anything added since is missing, and it will look like a fault here." = "已安装的驱动比该应用内附的旧，之后新增的功能都不存在。";
-"Update the driver" = "更新驱动";
+"The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes." = "已安装的 YunAudio 虚拟音频驱动程序版本较旧。请重新安装此版本随附的驱动程序，以获取最新功能与修复。";
+"Reinstall driver" = "重新安装驱动程序";
 "Transcript" = "转录文本";
 "Transcribe" = "开始转录";
 "Stop transcribing" = "停止转录";

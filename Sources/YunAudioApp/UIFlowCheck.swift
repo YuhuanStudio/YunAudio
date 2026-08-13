@@ -1713,8 +1713,18 @@ enum UIFlowCheck {
                         "the message names it too",
                         model.droppedMonitorName.map { model.lastError?.contains($0) ?? false }
                             ?? false)
-                    if let reason = model.droppedMonitorReason {
-                        note("the engine said: \(reason)")
+                    check(
+                        "the interface uses the safe monitor message",
+                        model.droppedMonitorMessage == model.lastError)
+                    check(
+                        "the raw monitor diagnostic was retained",
+                        model.droppedMonitorDiagnostic?.isEmpty == false)
+                    if let diagnostic = model.droppedMonitorDiagnostic {
+                        check(
+                            "the raw monitor diagnostic stays out of the interface",
+                            model.droppedMonitorMessage?.contains(diagnostic) == false
+                                && model.lastError?.contains(diagnostic) == false)
+                        note("the engine said internally: \(diagnostic)")
                     }
                     if let error = model.lastError { note("the user is told: \(error)") }
                     await checkAudioIsFlowing(model, "and audio is still flowing")
@@ -4594,8 +4604,10 @@ enum UIFlowCheck {
             // The picker going quietly back to "Off" is the failure this is
             // really hunting: a list that offers a device the engine then drops
             // is worse than a list that never offered it.
-            if let dropped = model.droppedMonitorName, let reason = model.droppedMonitorReason {
-                note("the engine gave it up: \(dropped) — \(reason)")
+            if let dropped = model.droppedMonitorName,
+                let diagnostic = model.droppedMonitorDiagnostic
+            {
+                note("the engine gave it up internally: \(dropped) — \(diagnostic)")
             }
             check("and the engine kept it", model.droppedMonitorName == nil)
             check("the monitor is still the microphone", model.monitorDeviceUID == bothWays.uid)
