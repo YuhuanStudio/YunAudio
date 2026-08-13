@@ -720,10 +720,10 @@ enum UIFlowCheck {
                         ?? "no decibel mapping")
                     + (gain.isSettable ? ", settable" : ", read-only"))
         }
-        // The microphone's own gain sits before the converter, so raising it
-        // costs no headroom, while the trim afterwards can only amplify what
-        // the converter already decided. They are different controls and the
-        // interface had only the second one.
+        // The microphone's own gain sits before the converter. Enough improves
+        // signal-to-noise ratio; too much clips before the trim afterwards can
+        // do anything about it. They are different controls and the interface
+        // had only the second one.
         if let gain = model.hardwareGain, gain.isSettable {
             note(
                 "range "
@@ -1043,9 +1043,22 @@ enum UIFlowCheck {
         check(
             "every band is inside the display range",
             model.analysis.bands.allSatisfy { $0 >= 0 && $0 <= 1 })
+        let spectrumStarted = DispatchTime.now().uptimeNanoseconds
+        if model.outputPeak > 0.001 {
+            await pause(
+                upTo: 2,
+                until: { (model.analysis.bands.max() ?? 0) > 0.001 })
+        }
+        let spectrumMilliseconds =
+            Double(
+                DispatchTime.now().uptimeNanoseconds - spectrumStarted) / 1_000_000
+        note(String(format: "first non-flat spectrum in %.1f ms", spectrumMilliseconds))
         check(
             "a measured output cannot leave the spectrum completely flat",
-            model.outputPeak <= 0.001 || (model.analysis.bands.max() ?? 0) > 0.001)
+            model.outputPeak <= 0.001
+                || ((model.analysis.bands.max() ?? 0) > 0.001
+                    && spectrumMilliseconds < 2_000)
+        )
         let analysisStatistics = model.analysisStatistics
         check("the realtime graph has analysis enabled", analysisStatistics.isEnabled)
         check("the realtime graph wrote analyser samples", analysisStatistics.written > 0)
