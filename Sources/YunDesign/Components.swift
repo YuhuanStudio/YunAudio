@@ -163,6 +163,22 @@ public enum YunStatusTone {
     }
 }
 
+/// Keeps a status or failure from becoming a layout input of arbitrary size.
+///
+/// System frameworks sometimes return a device UID, a path, or an entire
+/// sentence with no useful break point. The complete answer remains available
+/// as help text, while the interface reserves a deliberate number of lines.
+public extension View {
+    func yunBoundedMessage(_ fullText: String, maximumLines: Int = 3) -> some View {
+        lineLimit(max(1, maximumLines))
+            .truncationMode(.tail)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(fullText)
+            .accessibilityLabel(Text(fullText))
+    }
+}
+
 /// A small labelled pill. Status colour is carried by the dot and the text, not
 /// by a saturated fill — the fill stays neutral so several pills can sit
 /// together without the panel turning into a traffic light.
@@ -577,14 +593,23 @@ public struct YunDetailRow: View {
     }
 
     public var body: some View {
-        HStack {
+        HStack(alignment: .firstTextBaseline) {
             Text(label)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
+                .lineLimit(1)
+                .layoutPriority(1)
             Spacer(minLength: Yun.Space.md)
             Text(value)
                 .font(Yun.Text.mono)
                 .foregroundStyle(tone == .neutral ? Yun.Palette.textPrimary : tone.color)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(3)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .help(value)
+                .accessibilityLabel(Text(value))
         }
     }
 }

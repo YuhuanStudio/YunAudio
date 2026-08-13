@@ -367,7 +367,7 @@ struct PreferencesWindow: View {
                         Text(error)
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .yunBoundedMessage(error)
                     }
                 }
             }
@@ -976,6 +976,7 @@ struct PreferencesWindow: View {
                     Text(failure)
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.warning)
+                        .yunBoundedMessage(failure)
                 }
             }
         }
@@ -1007,7 +1008,7 @@ struct PreferencesWindow: View {
                         Text(error)
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .yunBoundedMessage(error)
                     }
                 }
             }
@@ -1267,7 +1268,7 @@ struct PreferencesWindow: View {
                         Text(error)
                             .font(Yun.Text.caption)
                             .foregroundStyle(Yun.Palette.warning)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .yunBoundedMessage(error)
                     } else if model.selectedDestination?.inputChannels == 0 {
                         // A destination with no input cannot be read back, so
                         // there is nothing to compare against. Saying which
@@ -1421,6 +1422,7 @@ struct PreferencesWindow: View {
                             Text(message)
                                 .font(Yun.Text.caption)
                                 .foregroundStyle(Yun.Palette.danger)
+                                .yunBoundedMessage(message)
                                 .textSelection(.enabled)
                         }
                     }

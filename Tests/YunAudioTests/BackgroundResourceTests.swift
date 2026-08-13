@@ -1,6 +1,9 @@
+import AppKit
 import Foundation
+import SwiftUI
 import Testing
 import YunAudioRT
+import YunDesign
 
 @testable import YunAudioApp
 @testable import YunAudioEngine
@@ -883,7 +886,8 @@ struct BackgroundResourceTests {
             ))
     }
 
-    @Test("the main window keeps all three columns on every inspector tab")
+    @Test("the main window keeps all three columns and bounded errors")
+    @MainActor
     func mainWindowAlwaysKeepsItsThreeColumnLayout() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
         let window = try String(
@@ -909,6 +913,41 @@ struct BackgroundResourceTests {
         #expect(MainWindowLayout.minimumSize == CGSize(width: 1_180, height: 720))
         #expect(MainWindowLayout.inspectorWidth >= 360)
         #expect(MainWindowLayout.mixerWidth(at: MainWindowLayout.minimumSize.width) >= 470)
+
+        let headerActionsStart = try #require(
+            window.range(of: "private var headerActions: some View"))
+        let headerActionsEnd = try #require(
+            window.range(
+                of: "// MARK: Sources", range: headerActionsStart.upperBound..<window.endIndex))
+        let headerActions = window[headerActionsStart.lowerBound..<headerActionsEnd.lowerBound]
+        #expect(!headerActions.contains("model.lastError"))
+        #expect(window.contains("errorBanner(error)"))
+        let capture = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/WindowCapture.swift",
+            encoding: .utf8)
+        #expect(capture.contains("error-message"))
+        #expect(capture.contains("model.setErrorForWindowCapture"))
+
+        let technical = String(
+            repeating: "com.yuhuanstudio.yunaudio.aggregate.E065AB82", count: 96)
+        let translated = String(
+            repeating: "目前無法完成這項操作，主要混音仍在運作，請稍後再試。", count: 96)
+        for (message, width) in [
+            (technical, MainWindowLayout.sourceWidth),
+            (translated, MainWindowLayout.inspectorWidth),
+        ] {
+            let renderer = ImageRenderer(
+                content: Text(message)
+                    .font(Yun.Text.caption)
+                    .yunBoundedMessage(message)
+                    .frame(width: width, alignment: .leading))
+            renderer.scale = 1
+            let image = try #require(renderer.nsImage)
+            #expect(image.size.width == width)
+            #expect(
+                image.size.height <= 64,
+                "a bounded message used \(image.size.height) points at width \(width)")
+        }
     }
 
     @Test("the KTV window is retained and supports native full screen")

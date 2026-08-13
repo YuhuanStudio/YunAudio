@@ -382,17 +382,17 @@ struct PanelView: View {
             Text(reason)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(reason)
         } else if let error = model.transcriptionError {
             Text(error)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.warning)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(error)
         } else if let warning = model.transcriptionAdmissionWarning {
             Text(warning)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.warning)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(warning)
         }
     }
 
@@ -429,7 +429,7 @@ struct PanelView: View {
             Text(message)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.danger)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(message)
             if PermissionCentre.shared.systemAudio == .needsRequest
                 || PermissionCentre.shared.microphone == .needsRequest
                 || model.autoStartNeedsPermissionReview

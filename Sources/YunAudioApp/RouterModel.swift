@@ -6198,6 +6198,16 @@ final class RouterModel {
         }
     }
 
+    /// Installs one deliberately awkward message for visual layout evidence.
+    ///
+    /// The guard makes this unavailable to an ordinary launch. Window capture
+    /// uses it after the representative state is ready, then restores the real
+    /// value after photographing the bounded presentation.
+    func setErrorForWindowCapture(_ message: String?) {
+        guard ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT"] != nil else { return }
+        lastError = message
+    }
+
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
     func prepareForRendering(refreshesApplications: Bool = true) {

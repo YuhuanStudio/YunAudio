@@ -69,7 +69,7 @@ struct DriverOnboarding: View {
                     Text(message)
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.danger)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .yunBoundedMessage(message)
                 }
             }
         }

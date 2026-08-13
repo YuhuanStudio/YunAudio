@@ -175,7 +175,7 @@ struct CalibrationPanel: View {
             Text(message)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(message)
             Spacer(minLength: 0)
             Button(loc("Again")) { model.startCalibration() }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))

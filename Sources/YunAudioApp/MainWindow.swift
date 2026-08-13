@@ -121,6 +121,12 @@ struct MainWindow: View {
                     .padding(.bottom, Yun.Space.md)
             }
 
+            if let error = model.lastError {
+                errorBanner(error)
+                    .padding(.horizontal, Yun.Space.xl)
+                    .padding(.bottom, Yun.Space.md)
+            }
+
             // Columns separated by space rather than rules: the cards already
             // carry the boundaries, and a 1px line through the middle of a card
             // layout is what made this read as a wireframe.
@@ -173,18 +179,17 @@ struct MainWindow: View {
     /// volume control, the driver source implemented it perfectly, and the
     /// installed copy simply predated the commit.
     private var staleDriverBanner: some View {
-        HStack(spacing: Yun.Space.sm) {
+        let message = loc(
+            "The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes."
+        )
+        return HStack(spacing: Yun.Space.sm) {
             Image(systemName: "exclamationmark.arrow.trianglehead.2.clockwise.rotate.90")
                 .font(.system(size: 11))
                 .foregroundStyle(Yun.Palette.warning)
-            Text(
-                loc(
-                    "The installed YunAudio virtual audio driver is out of date. Reinstall the driver included with this version to receive the latest features and fixes."
-                )
-            )
-            .font(Yun.Text.caption)
-            .foregroundStyle(Yun.Palette.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
+            Text(message)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textSecondary)
+                .yunBoundedMessage(message)
             Spacer(minLength: 0)
             Button(loc("Reinstall driver")) { model.installDriver() }
                 .buttonStyle(YunButtonStyle(.primary, small: true))
@@ -208,11 +213,32 @@ struct MainWindow: View {
             Text(text)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textSecondary)
+                .yunBoundedMessage(text, maximumLines: 2)
             Spacer(minLength: 0)
         }
         .padding(.horizontal, Yun.Space.md)
         .padding(.vertical, Yun.Space.sm)
         .background(Yun.Palette.elevated, in: .rect(cornerRadius: Yun.Radius.button))
+    }
+
+    /// An error gets a row of its own instead of negotiating the header width.
+    /// A CoreAudio sentence once squeezed the wordmark, four scene buttons and
+    /// the primary action into fragments even though every column below fitted.
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: Yun.Space.sm) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 11))
+                .foregroundStyle(Yun.Palette.danger)
+                .padding(.top, 1)
+            Text(message)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.danger)
+                .yunBoundedMessage(message)
+        }
+        .padding(.horizontal, Yun.Space.md)
+        .padding(.vertical, Yun.Space.sm)
+        .background(
+            Yun.Palette.danger.opacity(0.08), in: .rect(cornerRadius: Yun.Radius.button))
     }
 
     /// Keyboard shortcuts for the things done most often.
@@ -331,14 +357,6 @@ struct MainWindow: View {
     @ViewBuilder
     private var headerActions: some View {
         Group {
-            if let error = model.lastError {
-                Text(error)
-                    .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.danger)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .help(error)
-            }
             if !YunUIBenchmarkConfiguration.process.isEnabled,
                 PermissionCentre.shared.systemAudio == .needsRequest
                     || PermissionCentre.shared.microphone == .needsRequest
@@ -972,7 +990,7 @@ struct MainWindow: View {
             Text(message)
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.danger)
-                .fixedSize(horizontal: false, vertical: true)
+                .yunBoundedMessage(message)
         }
         if model.monitorDeviceUID != nil {
             HStack(spacing: Yun.Space.sm) {
@@ -1377,7 +1395,7 @@ struct MainWindow: View {
                             Text(error)
                                 .font(Yun.Text.caption)
                                 .foregroundStyle(Yun.Palette.danger)
-                                .fixedSize(horizontal: false, vertical: true)
+                                .yunBoundedMessage(error)
                         }
                     }
                 }
@@ -1711,22 +1729,22 @@ struct MainWindow: View {
                 Text(reason)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .yunBoundedMessage(reason)
             } else if let error = model.transcriptionError {
                 Text(error)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .yunBoundedMessage(error)
             } else if let warning = model.transcriptionAdmissionWarning {
                 Text(warning)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .yunBoundedMessage(warning)
             } else if let error = model.transcriptSaveError {
                 Text(error)
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .yunBoundedMessage(error)
             } else if let url = model.lastSavedTranscriptURL {
                 Text(String(format: loc("Saved to %@."), url.lastPathComponent))
                     .font(Yun.Text.caption)

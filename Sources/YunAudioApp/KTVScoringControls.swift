@@ -100,7 +100,7 @@ struct KTVScoringControls: View {
                 Text(error)
                     .font(scale.caption)
                     .foregroundStyle(Yun.Palette.warning)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .yunBoundedMessage(error)
             }
             key
         }

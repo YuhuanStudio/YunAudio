@@ -76,6 +76,28 @@ enum WindowCapture {
         }
         YunTheme.shared.style = .flat
 
+        // Error text is hostile layout input: CoreAudio can return a sentence,
+        // path or UID much longer than any copy fixture. Photograph it in the
+        // real minimum window so a future change cannot move it back into the
+        // header and still pass merely because a PNG existed.
+        if let model {
+            let previousError = model.lastError
+            let monitorMessage = String(
+                format: loc(
+                    "%@ is unavailable for monitoring. Your main mix is still running."),
+                loc("The selected output"))
+            model.setErrorForWindowCapture(
+                [monitorMessage, monitorMessage, monitorMessage, monitorMessage]
+                    .joined(separator: " "))
+            settle(turns: 12)
+            wroteEverything =
+                photograph(
+                    window, sizes: [("error-message", MainWindowLayout.minimumSize)],
+                    into: directory, appearances: [.aqua, .darkAqua]) && wroteEverything
+            model.setErrorForWindowCapture(previousError)
+            settle(turns: 4)
+        }
+
         // Every tab, because five of the six had never been photographed. The
         // offscreen renderer cycles them by building a fresh view per tab; the
         // live window is built once by the scene, so whatever tab it opened on
