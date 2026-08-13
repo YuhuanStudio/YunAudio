@@ -59,11 +59,13 @@
 #define kDevice_BufferFrameSize 512
 
 /// Gives CoreAudio enough notice to finish a loopback write before an
-/// independent input client reads the same sample time. One whole advertised
-/// period costs 10.67 ms at 48 kHz. Apple permits individual operation sizes
-/// to differ from the nominal period, so per-frame publication — rather than
-/// this constant alone — decides whether those uncommon cycles are ready.
-#define kDevice_SafetyOffsetFrames kDevice_BufferFrameSize
+/// independent input client reads the same sample time. Drift compensation has
+/// delivered 769-frame operations for this nominal 512-frame device; one period
+/// let a read overtake that write and produced one fail-silent callback in the
+/// release self-test. Two periods cover the measured maximum while adding only
+/// 5.33 ms at 96 kHz. Per-frame publication still decides whether a cycle is
+/// actually ready.
+#define kDevice_SafetyOffsetFrames (2 * kDevice_BufferFrameSize)
 
 #pragma mark - Object IDs
 

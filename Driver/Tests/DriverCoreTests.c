@@ -1227,12 +1227,18 @@ static void TestCallbacksOnBothSidesOf512IgnoreOperationOrder(void) {
             frameCounts[index], kDevice_SafetyOffsetFrames, true);
     }
 
-    // Drift compensation can make an actual operation larger than the
-    // nominal 512-frame period. A wider safety gap remains order-independent.
-    ExpectOrderIndependentAtFrameCount(513, 513, false);
-    ExpectOrderIndependentAtFrameCount(513, 513, true);
-    ExpectOrderIndependentAtFrameCount(769, 769, false);
-    ExpectOrderIndependentAtFrameCount(769, 769, true);
+    // Drift compensation has produced 769-frame operations on the installed
+    // driver. The advertised safety offset, not a test-only wider gap, must
+    // keep those operations order-independent.
+    assert(kDevice_SafetyOffsetFrames >= 769);
+    ExpectOrderIndependentAtFrameCount(
+        513, kDevice_SafetyOffsetFrames, false);
+    ExpectOrderIndependentAtFrameCount(
+        513, kDevice_SafetyOffsetFrames, true);
+    ExpectOrderIndependentAtFrameCount(
+        769, kDevice_SafetyOffsetFrames, false);
+    ExpectOrderIndependentAtFrameCount(
+        769, kDevice_SafetyOffsetFrames, true);
 }
 
 static void ExpectPublishedOverlapAtFrameCount(UInt32 frames) {
@@ -1297,16 +1303,16 @@ static void ExpectPublishedOverlapAtFrameCount(UInt32 frames) {
 }
 
 static void TestPublishedVariableCallbacksNeedNoDisjointSpanRule(void) {
-    ExpectPublishedOverlapAtFrameCount(513);
-    ExpectPublishedOverlapAtFrameCount(769);
+    ExpectPublishedOverlapAtFrameCount(kDevice_SafetyOffsetFrames + 1);
+    ExpectPublishedOverlapAtFrameCount(kDevice_SafetyOffsetFrames + 257);
     printf(
-        "driver variable IO: 513 and 769 frames across a %u-frame safety "
+        "driver variable IO: 513 and 769 frames within a %u-frame safety "
         "window, exact and 0 unsafe\n",
         kDevice_SafetyOffsetFrames);
 }
 
 static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
-    enum { frames = 769 };
+    enum { frames = kDevice_SafetyOffsetFrames + 257 };
     gDriver.ringBuffer = CreateRingBuffer();
     assert(gDriver.ringBuffer != NULL);
     atomic_store_explicit(
@@ -1324,23 +1330,25 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
         (size_t)frames * kDevice_ChannelCount * sizeof(Float32));
     assert(written != NULL && received != NULL);
     FillSignal(written, frames, 0.625f);
-    AudioServerPlugInIOCycleInfo writeCycle = CycleAt(0, 512);
+    AudioServerPlugInIOCycleInfo writeCycle = CycleAt(
+        0, kDevice_SafetyOffsetFrames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Output, 1,
         kAudioServerPlugInIOOperationWriteMix, frames,
         &writeCycle, written, NULL) == 0);
 
-    AudioServerPlugInIOCycleInfo readCycle = CycleAt(0, 512);
+    AudioServerPlugInIOCycleInfo readCycle = CycleAt(
+        0, kDevice_SafetyOffsetFrames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
         kAudioServerPlugInIOOperationReadInput, frames,
         &readCycle, received, NULL) == 0);
-    for (UInt32 frame = 0; frame < 512; ++frame) {
+    for (UInt32 frame = 0; frame < kDevice_SafetyOffsetFrames; ++frame) {
         assert(received[frame * kDevice_ChannelCount] == 0);
         assert(received[frame * kDevice_ChannelCount + 1] == 0);
     }
-    for (UInt32 frame = 512; frame < frames; ++frame) {
-        UInt32 writtenFrame = frame - 512;
+    for (UInt32 frame = kDevice_SafetyOffsetFrames; frame < frames; ++frame) {
+        UInt32 writtenFrame = frame - kDevice_SafetyOffsetFrames;
         assert(received[frame * kDevice_ChannelCount]
                == written[writtenFrame * kDevice_ChannelCount]);
         assert(received[frame * kDevice_ChannelCount + 1]
@@ -1350,7 +1358,9 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
         &gDriver.unsafeReadOperations, memory_order_relaxed) == 0);
 
     Float32 missing[64 * kDevice_ChannelCount];
-    AudioServerPlugInIOCycleInfo missingCycle = CycleAt(1281, 1793);
+    AudioServerPlugInIOCycleInfo missingCycle = CycleAt(
+        kDevice_SafetyOffsetFrames + frames,
+        2 * kDevice_SafetyOffsetFrames + frames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
         kAudioServerPlugInIOOperationReadInput, 64,
@@ -1361,8 +1371,9 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
     assert(atomic_load_explicit(
         &gDriver.unsafeReadOperations, memory_order_relaxed) == 1);
     printf(
-        "driver cold start: 512 prehistory frames silent, published tail exact, "
-        "later gap unsafe\n");
+        "driver cold start: %u prehistory frames silent, published tail exact, "
+        "later gap unsafe\n",
+        kDevice_SafetyOffsetFrames);
 
     free(received);
     free(written);
@@ -1481,7 +1492,7 @@ static void TestUnsafeCallbacksFailSilentWithoutAnErrorStorm(void) {
     gDriver.ringBuffer = NULL;
 }
 
-static void TestFixedBufferContractMatchesTheSafetyWindow(void) {
+static void TestFixedBufferContractHasTwoPeriodsOfSafety(void) {
     AudioServerPlugInDriverRef driver = (AudioServerPlugInDriverRef)&gInterfacePtr;
     AudioObjectPropertyAddress bufferSize = {
         kAudioDevicePropertyBufferFrameSize,
@@ -1538,8 +1549,9 @@ static void TestFixedBufferContractMatchesTheSafetyWindow(void) {
         size = sizeof(value);
         assert(Yun_GetPropertyData(
             driver, kObjectID_Device, 1, &safety, 0, NULL, size, &size, &value) == 0);
-        assert(value == kDevice_BufferFrameSize);
-        assert((double)value / kDevice_DefaultSampleRate * 1000.0 < 10.67);
+        assert(value == kDevice_SafetyOffsetFrames);
+        assert(value == 2 * kDevice_BufferFrameSize);
+        assert((double)value / kDevice_DefaultSampleRate * 1000.0 < 21.34);
     }
 }
 
@@ -2461,7 +2473,7 @@ int main(void) {
     TestConfigurationRequestNeverHoldsDriverLocksAcrossHostReentry();
     TestTranslateUIDRejectsMalformedQualifiers();
     TestPublishedClockRoundTripsEveryField();
-    TestFixedBufferContractMatchesTheSafetyWindow();
+    TestFixedBufferContractHasTwoPeriodsOfSafety();
     TestCallbacksOnBothSidesOf512IgnoreOperationOrder();
     TestPublishedVariableCallbacksNeedNoDisjointSpanRule();
     TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation();
