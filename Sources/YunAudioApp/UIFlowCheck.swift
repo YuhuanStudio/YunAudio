@@ -1742,15 +1742,17 @@ enum UIFlowCheck {
 
         try section("pitch tracking")
         // Knowing the actual fundamental is what would let a voice be moved to
-        // a range rather than by an amount. Measured against the live signal:
-        // in a quiet room there is no pitch to find, and reporting one would be
-        // the failure worth catching.
+        // a range rather than by an amount. This is a live input, not a silence
+        // fixture: a fan, an appliance or somebody speaking may legitimately
+        // put a periodic signal in the room. Exact sub-floor silence belongs to
+        // the deterministic tracker test; here the hardware claim is that any
+        // value which reaches the interface stays inside the advertised range.
         // Through the analyser rather than beside it: the analyser drains the
         // ring dry every fifty milliseconds, so a diagnostic that read the same
         // ring found nothing and reported it as a lack of audio. The tracker is
         // one of the analyser's outputs now, which is where it belonged.
         model.isAnalysisVisible = true
-        await pause(upTo: 1.5, until: { model.analysis.pitchHertz > 0 })
+        await pause(0.5)
         let pitch = model.analysis.pitchHertz
         note(
             pitch > 0
@@ -1761,12 +1763,6 @@ enum UIFlowCheck {
                 || (Double(pitch) >= PitchTracker.lowestHertz - 1
                     && Double(pitch) <= PitchTracker.highestHertz + 1)
         )
-        // A quiet room has no fundamental, and inventing one would make a
-        // converter chase noise between words.
-        if model.outputVerdict == .veryQuiet || model.outputVerdict == .silent {
-            check("a silent room reports no pitch", pitch == 0)
-        }
-
         try section("every stage on its own")
         // One at a time, which is how somebody actually uses these and the case
         // that was broken: the chain was only built for more than one stage, so
@@ -7037,15 +7033,14 @@ enum UIFlowCheck {
             "and no analyser turn ran on MainActor",
             analysingWorkerAfter.mainThreadTurns == quietWorkerBefore.mainThreadTurns)
 
-        // The real assertion about the poll itself. With a route up and nobody
-        // touching anything, most of what it assigns has not moved — the path
-        // verdict, the clock lock, the plugin list, the clip count, the rate
-        // ratio — and an `@Observable` publishes on assignment rather than on
-        // change, so every one of those used to re-evaluate the body of every
-        // view that had read it. Measured at 67 to 71% of all writes.
+        // The real assertion about the poll itself. Four values are stable on
+        // every idle route regardless of how many independently moving meter
+        // routes it has. A ratio made the number smaller merely by adding a
+        // live meter; this per-poll floor measures the no-op suppression rather
+        // than the current graph shape.
         check(
-            "most of what it writes is recognised as unchanged",
-            quiet.cost.unchanged * 2 > quiet.cost.writes)
+            "four stable writes per poll are recognised as unchanged",
+            quiet.cost.unchanged >= quiet.cost.polls * 4)
 
         try await checkStartupCost(model: model)
     }
