@@ -703,7 +703,13 @@ final class AudioUnitGraphAdmissionBox: @unchecked Sendable {
         waitingUpTo timeout: TimeInterval,
         disposer: BoundedAudioUnitDisposer = .shared
     ) {
-        guard let admission = disposer.acquireGraphAdmission(waitingUpTo: timeout) else {
+        // A predecessor's deinit has already surrendered ownership when it
+        // submits teardown. Refusing that queue made two sequential graph
+        // scopes race; wait within this constructor's existing absolute budget.
+        guard
+            let admission = disposer.acquireGraphAdmissionAfterDraining(
+                waitingUpTo: timeout)
+        else {
             return nil
         }
         self.admission = admission

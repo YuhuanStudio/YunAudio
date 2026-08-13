@@ -100,6 +100,17 @@ struct AudioUnitDisposerTests {
         var value: BoundedAudioUnitDisposer.GraphAdmission? { lock.withLock { storage } }
     }
 
+    private final class ConstructionAdmissionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: AudioUnitGraphAdmissionBox?
+
+        func store(_ value: AudioUnitGraphAdmissionBox?) {
+            lock.withLock { storage = value }
+        }
+
+        var value: AudioUnitGraphAdmissionBox? { lock.withLock { storage } }
+    }
+
     private func waitUntil(
         timeout: TimeInterval,
         _ condition: () -> Bool
@@ -298,6 +309,54 @@ struct AudioUnitDisposerTests {
         #expect(second.callCounts.dispose == 1)
         #expect(disposer.activeTransactionCount == 0)
         #expect(disposer.pendingOwnerCount == 0)
+        #expect(disposer.maximumTransactionCount == 1)
+        #expect(quarantine.count == 0)
+        accepted.release()
+    }
+
+    @Test("a fresh graph waits for active and queued chain disposal")
+    func freshGraphDrainsSubmittedOwners() throws {
+        let quarantine = ProcessLifetimeAudioQuarantine()
+        let disposer = makeDisposer(quarantine: quarantine, asynchronousTimeout: 5)
+        let firstEntered = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let first = InjectedOwner(
+            uninitialise: {
+                firstEntered.signal()
+                releaseFirst.wait()
+                return noErr
+            })
+        let second = InjectedOwner()
+        let admission = ConstructionAdmissionBox()
+        let admissionReturned = DispatchSemaphore(value: 0)
+
+        disposer.disposeAfterFence(first)
+        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        disposer.disposeAfterFence(second)
+        #expect(disposer.activeTransactionCount == 1)
+        #expect(disposer.pendingOwnerCount == 1)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            admission.store(
+                AudioUnitGraphAdmissionBox(
+                    waitingUpTo: 1, disposer: disposer))
+            admissionReturned.signal()
+        }
+        #expect(admissionReturned.wait(timeout: .now()) == .timedOut)
+        #expect(disposer.transactionCount == 1)
+        #expect(disposer.maximumTransactionCount == 1)
+
+        releaseFirst.signal()
+        #expect(admissionReturned.wait(timeout: .now() + 1) == .success)
+        let accepted = try #require(admission.value)
+
+        #expect(first.callCounts.uninitialise == 1)
+        #expect(first.callCounts.dispose == 1)
+        #expect(second.callCounts.uninitialise == 1)
+        #expect(second.callCounts.dispose == 1)
+        #expect(disposer.activeTransactionCount == 0)
+        #expect(disposer.pendingOwnerCount == 0)
+        #expect(disposer.transactionCount == 2)
         #expect(disposer.maximumTransactionCount == 1)
         #expect(quarantine.count == 0)
         accepted.release()
