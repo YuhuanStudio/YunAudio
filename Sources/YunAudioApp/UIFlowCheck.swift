@@ -2128,9 +2128,9 @@ enum UIFlowCheck {
             check("no error was reported", model.transcriptionError == nil)
             // One per source is the whole mechanism: attribution is the wiring
             // rather than a guess about who was speaking.
-            check(
+            await waitUntil(
                 "one tap per source",
-                model.engineTranscriptTaps == model.sourceGroups.count)
+                { model.engineTranscriptTaps == model.sourceGroups.count }, timeout: 3)
             await pause(2.0)
             check("it is still going", model.isTranscribing)
             check("still no error", model.transcriptionError == nil)
