@@ -140,11 +140,11 @@ typedef struct {
 ///
 /// CoreAudio identifies each callback's client but does not promise that
 /// callbacks for different clients share a thread or a serial executor. All
-/// three fields are therefore atomic: `owner` carries the absolute frame plus
-/// one while a writer owns the slot, `sampleFrame` prevents stale wraparound
+/// three fields are therefore atomic: `owner` keeps a writer's whole callback
+/// span immutable until publication, `sampleFrame` prevents stale wraparound
 /// data, and `stereoBits` keeps left and right from ever belonging to different
-/// writes. The owner identity lets duplicate `WriteMix` callbacks coalesce
-/// without confusing a one-ring overrun for the same full mix.
+/// writes. Only a completely published span can be treated as a duplicate;
+/// one matching frame is not an identity for a variable-sized callback.
 typedef struct {
     _Atomic UInt64 owner;
     _Atomic UInt64 sampleFrame;

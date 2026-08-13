@@ -36,6 +36,7 @@ for function in \
 	SampleTimeToFrame \
 	RingSpanCanBeTagged \
 	RingWriteSpanIsPublished \
+	ReleaseRingWritePrefix \
 	ClaimRingWriteSpan \
 	PublishRingWrite \
 	ReadRingSpan \

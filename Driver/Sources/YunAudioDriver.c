@@ -2059,11 +2059,21 @@ static bool RingWriteSpanIsPublished(YunRingFrame *ring,
     return true;
 }
 
+static void ReleaseRingWritePrefix(YunRingFrame *ring,
+                                   UInt64 startFrame,
+                                   UInt32 frames) {
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        UInt64 slot = (startFrame + frame) & kRingBufferMask;
+        atomic_store_explicit(
+            &ring[slot].owner, 0, memory_order_seq_cst);
+    }
+}
+
 /// Claims every slot before changing a sample. One callback owns the whole
-/// block; callbacks for the same host-produced full mix coalesce behind it,
-/// while a different absolute frame colliding after a ring wrap is still an
-/// unsafe overrun. No retry is deliberate: an IO deadline is a poor place for
-/// a spin loop.
+/// block. A callback coalesces only after every frame is already published;
+/// active and partial overlaps remain unsafe because a single slot cannot
+/// identify the other callback's start and length. No retry is deliberate: an
+/// IO deadline is a poor place for a spin loop.
 static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
                                                 UInt64 startFrame,
                                                 UInt32 frames) {
@@ -2072,38 +2082,36 @@ static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
     }
 
     UInt32 claimed = 0;
-    YunRingWriteAdmission rejection = kRingWriteUnsafe;
     for (; claimed < frames; ++claimed) {
         UInt64 absoluteFrame = startFrame + claimed;
         UInt64 slot = absoluteFrame & kRingBufferMask;
-        UInt64 wantedOwner = absoluteFrame + 1;
         UInt64 unowned = 0;
         if (!atomic_compare_exchange_strong_explicit(
-                &ring[slot].owner, &unowned, wantedOwner,
+                &ring[slot].owner, &unowned, 1,
                 memory_order_seq_cst, memory_order_seq_cst)) {
-            if (unowned == wantedOwner) rejection = kRingWriteCoalesced;
-            break;
+            ReleaseRingWritePrefix(ring, startFrame, claimed);
+            return RingWriteSpanIsPublished(ring, startFrame, frames)
+                ? kRingWriteCoalesced : kRingWriteUnsafe;
         }
         UInt64 published = atomic_load_explicit(
             &ring[slot].sampleFrame, memory_order_seq_cst);
         if (published == absoluteFrame) {
             atomic_store_explicit(
                 &ring[slot].owner, 0, memory_order_seq_cst);
-            rejection = kRingWriteCoalesced;
-            break;
+            ReleaseRingWritePrefix(ring, startFrame, claimed);
+            return RingWriteSpanIsPublished(ring, startFrame, frames)
+                ? kRingWriteCoalesced : kRingWriteUnsafe;
+        }
+        if (published != kRingFrameUnpublished
+            && published > absoluteFrame) {
+            atomic_store_explicit(
+                &ring[slot].owner, 0, memory_order_seq_cst);
+            ReleaseRingWritePrefix(ring, startFrame, claimed);
+            return kRingWriteUnsafe;
         }
     }
     if (claimed == frames) return kRingWriteClaimed;
-
-    // A loser releases only its prefix and publishes no samples. A matching
-    // owner is completing the identical host mix; a different owner is the
-    // only case which represents lost timeline capacity.
-    for (UInt32 frame = 0; frame < claimed; ++frame) {
-        UInt64 slot = (startFrame + frame) & kRingBufferMask;
-        atomic_store_explicit(
-            &ring[slot].owner, 0, memory_order_seq_cst);
-    }
-    return rejection;
+    return kRingWriteUnsafe;
 }
 
 static void PublishRingWrite(YunRingFrame *ring,
