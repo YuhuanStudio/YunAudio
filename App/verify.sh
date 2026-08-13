@@ -51,7 +51,7 @@ verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
   strict formatting             swift-format lint --strict           ~2 s
-  tests                          2020 of them                         ~80 s
+  tests                          2022 of them                         ~80 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build and isolated resource smoke   ~50 s
   settings entry                 opens a real settings window          ~2 s
@@ -59,8 +59,9 @@ verify.sh runs these, in this order. Each is a substring match for --only.
   photograph the real window     what the window server drew         ~70 s
   --full adds:
   nobody else has the devices    refuses to contend                    ~0 s
+  installed driver matches release source identity                    <1 s
   audio can start at all         one IO cycle                         ~3 s
-  the path is bit-exact          release build, measured             ~40 s
+  the path is bit-exact          two release runs, measured           ~50 s
   flow check                     the whole interface, live        ~150-230 s
   --fresh adds:
   a fresh clone                  built from nothing                  ~120 s
@@ -430,22 +431,66 @@ step "photograph the real window" photographed_the_real_window
 # a million times in one self-test — so a debug measurement of this says nothing
 # and reads as a catastrophe. It was measured by hand until now, which for the
 # two claims this project is actually about is not good enough.
-bit_exact_release() {
-	swift build -c release --product yunaudio-cli >/dev/null 2>&1 || return 1
+driver_source_identifier() {
+	/usr/libexec/PlistBuddy -c 'Print :YunAudioSourceIdentifier' \
+		"$1/Contents/Info.plist" 2>/dev/null || true
+}
+
+driver_version() {
+	/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+		"$1/Contents/Info.plist" 2>/dev/null || echo unknown
+}
+
+release_driver_matches_installed() {
+	local installed=/Library/Audio/Plug-Ins/HAL/YunAudioDriver.driver
+	local bundled=build/YunAudio.app/Contents/Resources/YunAudioDriver.driver
+	local expected
+	expected="$({ shasum -a 256 Driver/Sources/YunAudioDriver.c; \
+		shasum -a 256 Driver/Sources/YunAudioDriver.h; } | shasum -a 256 | awk '{print $1}')"
+	local installed_id bundled_id
+	installed_id=$(driver_source_identifier "${installed}")
+	bundled_id=$(driver_source_identifier "${bundled}")
+	if [[ ! "${installed_id}" =~ ^[0-9a-f]{64}$ ]] ||
+		[[ ! "${bundled_id}" =~ ^[0-9a-f]{64}$ ]] ||
+		[[ "${bundled_id}" != "${expected}" ]] ||
+		[[ "${installed_id}" != "${bundled_id}" ]]; then
+		cat <<DRIVER_MISMATCH
+the installed YunAudio driver cannot verify this release:
+  installed $(driver_version "${installed}")  ${installed_id:-missing source identifier}
+  bundled   $(driver_version "${bundled}")  ${bundled_id:-missing source identifier}
+
+Build and install this release's driver, which asks for administrator approval
+and restarts coreaudiod, then run the gate again:
+
+  ./Driver/build-driver.sh --install
+DRIVER_MISMATCH
+		return 1
+	fi
+}
+
+one_bit_exact_release_run() {
 	local output
 	output=$(.build/release/yunaudio-cli selftest "MacBook Pro" "YunAudio" 2>&1)
-	echo "${output}" | tail -3
+	echo "${output}" | tail -6
 	grep -q "^bit-exact:" <<<"${output}" || return 1
-	# Counted rather than pattern-matched on the happy phrasing: the failing
-	# line says "ALLOCATIONS ... the no-allocation rule is broken", and a check
-	# that only looked for the good sentence would pass on an empty run.
 	grep -q "realtime path: 0 allocations" <<<"${output}" || return 1
+	grep -q "^driver unsafe operations: 0 read, 0 write$" <<<"${output}" || return 1
+	grep -q "^teardown: complete$" <<<"${output}" || return 1
 	# The identical count has to be the whole count. "1/261738 identical" also
 	# begins with "bit-exact:".
 	local counts
 	counts=$(grep -oE "[0-9]+/[0-9]+ samples identical" <<<"${output}" | head -1)
 	[[ -n "${counts}" ]] || return 1
 	[[ "${counts%%/*}" == "$(echo "${counts}" | sed 's|.*/||; s| .*||')" ]]
+}
+
+bit_exact_release() {
+	release_driver_matches_installed || return 1
+	swift build -c release --product yunaudio-cli >/dev/null 2>&1 || return 1
+	# The first run is the cold path. The second proves teardown did not merely
+	# leave enough state behind to make a retry pass. Neither run is optional.
+	one_bit_exact_release_run || return 1
+	one_bit_exact_release_run
 }
 
 # Asked before anything is measured, not after it has produced a number.
@@ -485,6 +530,8 @@ if [[ "${FULL}" == "1" ]]; then
 	# an afternoon before. See AGENTS.md.
 	if ! nobody_else_has_the_devices; then
 		SKIPPED+=("everything that touches audio — another copy of YunAudio is running and would be competing for the devices")
+	elif ! step "installed driver matches release" release_driver_matches_installed; then
+		SKIPPED+=("everything that touches audio — the installed driver is not the one being released")
 	elif step "audio can start at all" audio_can_start; then
 		step "the path is bit-exact, release" bit_exact_release
 		step "flow check" env YUNAUDIO_FLOWCHECK=1 \

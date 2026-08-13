@@ -551,10 +551,10 @@ final class AudioIncidentRecorder: @unchecked Sendable {
     }
 }
 
-enum AudioIncidentDriverHealthReader {
+package enum AudioIncidentDriverHealthReader {
     static let selector: AudioObjectPropertySelector = 0x79_69_6F_68  // 'yioh'
 
-    static func read(
+    package static func read(
         deviceID: AudioObjectID?,
         wasRequired: Bool,
         until deadline: HALTeardownDeadline

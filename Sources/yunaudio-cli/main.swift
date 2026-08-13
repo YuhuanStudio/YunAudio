@@ -492,6 +492,11 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     print("clock master  \(source.name)")
     print("device under test  \(destination.name)")
 
+    let driverHealthBefore = AudioIncidentDriverHealthReader.read(
+        deviceID: destination.id,
+        wasRequired: destination.uid == ClockAnchorPublisher.driverDeviceUID,
+        until: HALTeardownDeadline(timeout: 0.25))
+
     let engine = RoutingEngine()
     // A rate can be forced, so that "does this path work at 96 kHz" is a
     // question somebody can put to it rather than a guess about why a
@@ -537,7 +542,11 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
     let result = engine.evaluateSelftest()
     let locked = engine.isClockLocked
     let ratio = engine.measuredRateRatio
-    engine.stop()
+    let teardown = engine.stop()
+    let driverHealthAfter = AudioIncidentDriverHealthReader.read(
+        deviceID: destination.id,
+        wasRequired: destination.uid == ClockAnchorPublisher.driverDeviceUID,
+        until: HALTeardownDeadline(timeout: 0.25))
 
     print("")
     guard let result else {
@@ -545,7 +554,25 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
         exit(1)
     }
     print(result.summary)
-    if locked { print(String(format: "clock lock held at %.6f throughout", ratio)) }
+    if locked { print(String(format: "clock locked at end at %.6f", ratio)) }
+
+    let driverHealthIsClean: Bool
+    switch (driverHealthBefore.state, driverHealthAfter.state) {
+    case (.available, .available)
+    where driverHealthAfter.unsafeReadOperations >= driverHealthBefore.unsafeReadOperations
+        && driverHealthAfter.unsafeWriteOperations
+            >= driverHealthBefore.unsafeWriteOperations:
+        let unsafeReads =
+            driverHealthAfter.unsafeReadOperations - driverHealthBefore.unsafeReadOperations
+        let unsafeWrites =
+            driverHealthAfter.unsafeWriteOperations - driverHealthBefore.unsafeWriteOperations
+        print("driver unsafe operations: \(unsafeReads) read, \(unsafeWrites) write")
+        driverHealthIsClean = unsafeReads == 0 && unsafeWrites == 0
+    default:
+        print("driver unsafe operations: unavailable")
+        driverHealthIsClean = false
+    }
+    print("teardown: \(teardown.isComplete ? "complete" : "FAILED — \(teardown)")")
 
     let violations = RoutingEngine.allocationViolations - violationsBefore
     if violations == 0 {
@@ -555,7 +582,9 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
             "realtime path: \(violations) ALLOCATIONS on the IO thread — the no-allocation rule is broken"
         )
     }
-    exit(result.isBitExact && violations == 0 ? 0 : 1)
+    exit(
+        result.isBitExact && violations == 0 && driverHealthIsClean && teardown.isComplete
+            ? 0 : 1)
 }
 
 // MARK: - Run
