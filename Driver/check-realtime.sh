@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 extract_function() {
 	local name="$1"
 	awk -v name="${name}" '
-		$0 ~ "static (bool|void|OSStatus|UInt32|UInt64|Float32|YunClockSnapshot|YunRingWriteAdmission) " name "\\(" {
+		$0 ~ "static (bool|void|OSStatus|UInt32|UInt64|Float32|YunClockSnapshot|YunRingWriteAdmission|YunRingReadResult) " name "\\(" {
 			inside = 1
 		}
 		inside {
@@ -40,6 +40,7 @@ for function in \
 	ReleaseRingWritePrefix \
 	ClaimRingWriteSpan \
 	PublishRingWrite \
+	RingReadIsColdStart \
 	ReadRingSpan \
 	FailSilentIO \
 	Yun_GetZeroTimeStamp \

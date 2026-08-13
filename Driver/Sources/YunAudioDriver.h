@@ -207,6 +207,9 @@ typedef struct {
     /// exposed through the read-only `yioh` custom property.
     _Atomic UInt64 unsafeReadOperations;
     _Atomic UInt64 unsafeWriteOperations;
+    /// The first absolute frame completed by any WriteMix in this IO lifetime.
+    /// Reads before it are startup prehistory and correctly return silence.
+    _Atomic UInt64 firstPublishedFrame;
     bool inputMuted;
     bool outputMuted;
 

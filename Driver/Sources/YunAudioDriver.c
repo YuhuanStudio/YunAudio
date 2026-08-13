@@ -30,6 +30,7 @@ YunDriverState gDriver = {
     .outputVolume = 1.0f,
     .inputGainBits = 0x3F800000,
     .outputGainBits = 0x3F800000,
+    .firstPublishedFrame = UINT64_MAX,
     .hostTicksPerFrame = 0.0,
     .clockSeed = 1,
 };
@@ -119,6 +120,9 @@ static YunRingFrame *CreateRingBuffer(void) {
         atomic_init(&ring[frame].sampleFrame, kRingFrameUnpublished);
         atomic_init(&ring[frame].stereoBits, 0);
     }
+    atomic_store_explicit(
+        &gDriver.firstPublishedFrame, kRingFrameUnpublished,
+        memory_order_seq_cst);
     return ring;
 }
 
@@ -133,6 +137,9 @@ static void ResetRingBuffer(YunRingFrame *ring) {
         atomic_store_explicit(
             &ring[frame].stereoBits, 0, memory_order_seq_cst);
     }
+    atomic_store_explicit(
+        &gDriver.firstPublishedFrame, kRingFrameUnpublished,
+        memory_order_seq_cst);
 }
 
 static UInt64 Float64Bits(Float64 value) {
@@ -2165,33 +2172,72 @@ static void PublishRingWrite(YunRingFrame *ring,
     UInt64 firstSlot = startFrame & kRingBufferMask;
     atomic_store_explicit(
         &ring[firstSlot].owner, 0, memory_order_seq_cst);
+
+    // Publish the boundary only after the complete first span is immutable.
+    // A concurrent reader which arrives earlier sees an unpublished boundary
+    // and returns the correct cold-start silence instead of diagnosing a race.
+    UInt64 unpublished = kRingFrameUnpublished;
+    atomic_compare_exchange_strong_explicit(
+        &gDriver.firstPublishedFrame, &unpublished, startFrame,
+        memory_order_seq_cst, memory_order_seq_cst);
 }
 
 /// The two tag loads bracket the packed stereo load. All ring operations are
 /// sequentially consistent so a slot reuse which overwrites the sample must
 /// also be visible to the second tag load. Release/acquire publication alone
 /// cannot give that guarantee when a reader straddles a later writer's claim.
-static bool ReadRingSpan(YunRingFrame *ring,
-                         UInt64 startFrame,
-                         UInt32 frames,
-                         Float32 *buffer,
-                         Float32 gain) {
+typedef enum {
+    kRingReadExact,
+    kRingReadColdStart,
+    kRingReadUnsafe,
+} YunRingReadResult;
+
+static bool RingReadIsColdStart(UInt64 absoluteFrame) {
+    UInt64 first = atomic_load_explicit(
+        &gDriver.firstPublishedFrame, memory_order_seq_cst);
+    return first == kRingFrameUnpublished || absoluteFrame < first;
+}
+
+static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
+                                      UInt64 startFrame,
+                                      UInt32 frames,
+                                      Float32 *buffer,
+                                      Float32 gain) {
+    bool includedColdStart = false;
     for (UInt32 frame = 0; frame < frames; ++frame) {
         UInt64 absoluteFrame = startFrame + frame;
         UInt64 slot = absoluteFrame & kRingBufferMask;
         UInt64 ownerBefore = atomic_load_explicit(
             &ring[slot].owner, memory_order_seq_cst);
-        if (ownerBefore != 0) return false;
+        if (ownerBefore != 0) {
+            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            buffer[frame * kDevice_ChannelCount] = 0;
+            buffer[frame * kDevice_ChannelCount + 1] = 0;
+            includedColdStart = true;
+            continue;
+        }
         UInt64 tagBefore = atomic_load_explicit(
             &ring[slot].sampleFrame, memory_order_seq_cst);
-        if (tagBefore != absoluteFrame) return false;
+        if (tagBefore != absoluteFrame) {
+            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            buffer[frame * kDevice_ChannelCount] = 0;
+            buffer[frame * kDevice_ChannelCount + 1] = 0;
+            includedColdStart = true;
+            continue;
+        }
         UInt64 bits = atomic_load_explicit(
             &ring[slot].stereoBits, memory_order_seq_cst);
         UInt64 tagAfter = atomic_load_explicit(
             &ring[slot].sampleFrame, memory_order_seq_cst);
         UInt64 ownerAfter = atomic_load_explicit(
             &ring[slot].owner, memory_order_seq_cst);
-        if (tagAfter != absoluteFrame || ownerAfter != 0) return false;
+        if (tagAfter != absoluteFrame || ownerAfter != 0) {
+            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            buffer[frame * kDevice_ChannelCount] = 0;
+            buffer[frame * kDevice_ChannelCount + 1] = 0;
+            includedColdStart = true;
+            continue;
+        }
 
         Float32 samples[kDevice_ChannelCount];
         UnpackStereoFrame(bits, samples);
@@ -2206,7 +2252,7 @@ static bool ReadRingSpan(YunRingFrame *ring,
             buffer[frame * kDevice_ChannelCount + 1] = samples[1] * gain;
         }
     }
-    return true;
+    return includedColdStart ? kRingReadColdStart : kRingReadExact;
 }
 
 /// Converts a timing-contract violation into a deterministic silent cycle.
@@ -2276,8 +2322,9 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (isRead) {
         Float32 gain = Float32FromBits(
             atomic_load_explicit(&gDriver.inputGainBits, memory_order_acquire));
-        if (!ReadRingSpan(
-                ring, inputStart, inIOBufferFrameSize, buffer, gain)) {
+        YunRingReadResult result = ReadRingSpan(
+            ring, inputStart, inIOBufferFrameSize, buffer, gain);
+        if (result == kRingReadUnsafe) {
             FailSilentIO(true, buffer, inIOBufferFrameSize);
         }
         YUN_DRIVER_IO_TEST_HOOK(false, inClientID, inOperationID);
