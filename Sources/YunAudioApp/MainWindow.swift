@@ -18,6 +18,11 @@ enum MainWindowLayout {
     static let inspectorWidth: CGFloat = 360
     static let columnSpacing = Yun.Space.lg
     static let horizontalPadding = Yun.Space.xl
+    /// The footer is a row of chips, not a second panel. Keep the established
+    /// distance from the chips to the window edge and trim only the empty space
+    /// above them.
+    static let statusBandTopPadding = Yun.Space.xs
+    static let statusBandBottomPadding = Yun.Space.md
 
     static func mixerWidth(at windowWidth: CGFloat) -> CGFloat {
         windowWidth - sourceWidth - inspectorWidth - columnSpacing * 2
@@ -139,7 +144,7 @@ struct MainWindow: View {
                     .frame(width: MainWindowLayout.inspectorWidth)
             }
             .padding(.horizontal, MainWindowLayout.horizontalPadding)
-            .padding(.bottom, Yun.Space.lg)
+            .padding(.bottom, MainWindowLayout.statusBandTopPadding)
             .frame(maxHeight: .infinity, alignment: .top)
 
             StatusPills(model: model)

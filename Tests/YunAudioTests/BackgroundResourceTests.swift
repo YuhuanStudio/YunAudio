@@ -913,6 +913,8 @@ struct BackgroundResourceTests {
         #expect(MainWindowLayout.minimumSize == CGSize(width: 1_180, height: 720))
         #expect(MainWindowLayout.inspectorWidth >= 360)
         #expect(MainWindowLayout.mixerWidth(at: MainWindowLayout.minimumSize.width) >= 470)
+        #expect(MainWindowLayout.statusBandTopPadding == 4)
+        #expect(MainWindowLayout.statusBandBottomPadding == 12)
 
         let headerActionsStart = try #require(
             window.range(of: "private var headerActions: some View"))

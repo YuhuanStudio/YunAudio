@@ -38,7 +38,7 @@ struct StatusPills: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, isCompact ? 0 : Yun.Space.xl)
-        .padding(.bottom, isCompact ? 0 : Yun.Space.md)
+        .padding(.bottom, isCompact ? 0 : MainWindowLayout.statusBandBottomPadding)
     }
 }
 
