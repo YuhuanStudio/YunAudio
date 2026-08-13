@@ -17,8 +17,10 @@ enum KTVFilePickers {
     /// permission prompt, and a position that is a count of samples rather than
     /// a second-old answer extrapolated forward.
     ///
-    /// - Parameter playingNext: 插播 — after the song being sung rather than
-    ///   behind everything already queued.
+    /// - Parameters:
+    ///   - model: The queue that receives the chosen songs.
+    ///   - playingNext: 插播 — after the song being sung rather than behind
+    ///     everything already queued.
     static func chooseSongs(into model: RouterModel, playingNext: Bool = false) {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true

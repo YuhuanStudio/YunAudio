@@ -40,7 +40,7 @@ public struct MCPServer: Sendable {
     static let versions = ["2025-06-18", "2025-03-26", "2024-11-05"]
     static let latestVersion = versions[0]
     static let serverName = "yunaudio"
-    static let serverVersion = "0.1.1"
+    static let serverVersion = "0.1.2"
 
     // MARK: - One line in, one line out
 

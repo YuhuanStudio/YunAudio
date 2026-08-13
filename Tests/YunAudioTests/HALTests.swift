@@ -36,7 +36,10 @@ struct FourCharTests {
 
 @Suite("CoreAudio object strings")
 struct AudioObjectStringTests {
-    @Test("a retained device UID reads back byte for byte")
+    @Test(
+        "a retained device UID reads back byte for byte",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.AudioObjectStringTests/deviceUID()"))
     func deviceUID() throws {
         let device = try #require(try AudioDevices.all().first)
         let value = try device.id.string(of: .deviceUID)
@@ -214,7 +217,10 @@ struct SampleRateRestorationTests {
     /// Routing has to align sample rates, and that change persists on the
     /// hardware after the process exits. Handing back what was there before is
     /// the only thing that makes the change undoable.
-    @Test("aligning reports what each device was set to beforehand")
+    @Test(
+        "aligning reports what each device was set to beforehand",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.SampleRateRestorationTests/reportsPreviousRates()"))
     func reportsPreviousRates() throws {
         let devices = try AudioDevices.all().filter {
             !$0.transport.requiresExplicitInputSelection
@@ -238,7 +244,10 @@ struct SampleRateRestorationTests {
         #expect(restored == original)
     }
 
-    @Test("a device that is already at the target is not recorded")
+    @Test(
+        "a device that is already at the target is not recorded",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.SampleRateRestorationTests/noChangeNoRecord()"))
     func noChangeNoRecord() throws {
         let device = try #require(try AudioDevices.all().first)
         let current = try #require(device.currentSampleRate)
@@ -605,6 +614,22 @@ struct DeviceProfileTests {
         #expect(
             library.profile(modelUID: nil, name: "Razer Seiren V2 X")?
                 .inputChannels.first?.name == "General")
+    }
+
+    @Test("a user profile replaces an equally specific bundled profile")
+    func laterEqualMatchWins() {
+        let library = DeviceProfileLibrary(profiles: [
+            DeviceProfile(
+                match: "example microphone",
+                inputChannels: [DeviceProfile.Channel(name: "Bundled", detail: "x")]),
+            DeviceProfile(
+                match: "example microphone",
+                inputChannels: [DeviceProfile.Channel(name: "User", detail: "x")]),
+        ])
+
+        #expect(
+            library.profile(modelUID: nil, name: "Example Microphone")?
+                .inputChannels.first?.name == "User")
     }
 
     /// These files come from outside. One that will not parse must be skipped,
@@ -992,16 +1017,33 @@ struct AudioApplicationGroupingTests {
             AudioApplications.displayName(
                 bundleID: "com.hnc.Discord", pid: mine, halName: "Discord") == "Discord")
 
-        // And the general form of it, against whatever is running: every row
-        // the interface offers is reachable by the name it shows.
+        // A workspace name is an alias for all of the application's HAL
+        // processes. It need not occur in their HAL names: OrbStack was listed
+        // under that name while none of its processes matched it.
+        #expect(
+            AudioApplications.matches(
+                "OrbStack", bundleID: "dev.orbstack.OrbStack.helper", pid: mine,
+                halName: "Virtual Machine Service",
+                named: ["dev.orbstack.OrbStack": .init(name: "OrbStack")]))
+
+    }
+
+    /// The pure cases above prove the matching vocabulary. This final census
+    /// proves that the same rule covers the applications on the current host,
+    /// but it is kept behind the live-HAL capability so a normal unit-test run
+    /// never waits on `coreaudiod`.
+    @Test(
+        "every live row is reachable by its displayed name",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.AudioApplicationGroupingTests/everyLiveRowMatches()"))
+    func everyLiveRowMatches() throws {
+        let workspace = AudioApplications.workspaceSnapshot()
         let processes = try AudioProcesses.all(includingSilent: true)
-        var byID: [AudioObjectID: AudioProcess] = [:]
-        for process in processes where byID[process.id] == nil { byID[process.id] = process }
-        for application in try AudioApplications.grouped() {
-            let members = application.processIDs.compactMap { byID[$0] }
-            guard !members.isEmpty else { continue }
+        for application in try AudioApplications.grouped(workspace: workspace) {
+            let members = AudioApplications.matching(
+                application.name, in: processes, workspace: workspace)
             #expect(
-                members.contains { AudioApplications.matches(application.name, process: $0) },
+                !members.isEmpty,
                 "the interface lists \"\(application.name)\" and no process matches that")
         }
     }
@@ -1064,6 +1106,52 @@ struct SubDeviceDescriptionTests {
         let entry = AggregateDevice.SubDevice(uid: "device", driftCompensation: false)
             .description
         #expect(entry[kAudioSubDeviceUIDKey] as? String == "device")
+    }
+}
+
+@Suite("Asynchronous HAL removal")
+struct HALRemovalWaiterTests {
+    @Test("absence completes immediately without sleeping")
+    func alreadyAbsent() {
+        var sleeps = 0
+        let removed = HALRemovalWaiter.wait(
+            maximumAttempts: 3,
+            betweenAttempts: { sleeps += 1 },
+            isPresent: { false })
+        #expect(removed)
+        #expect(sleeps == 0)
+    }
+
+    @Test("an accepted removal is observed on a later census")
+    func becomesAbsent() {
+        var reads = 0
+        var sleeps = 0
+        let removed = HALRemovalWaiter.wait(
+            maximumAttempts: 4,
+            betweenAttempts: { sleeps += 1 },
+            isPresent: {
+                reads += 1
+                return reads < 3
+            })
+        #expect(removed)
+        #expect(reads == 3)
+        #expect(sleeps == 2)
+    }
+
+    @Test("a removal which never completes reaches its bound")
+    func timesOut() {
+        var reads = 0
+        var sleeps = 0
+        let removed = HALRemovalWaiter.wait(
+            maximumAttempts: 2,
+            betweenAttempts: { sleeps += 1 },
+            isPresent: {
+                reads += 1
+                return true
+            })
+        #expect(!removed)
+        #expect(reads == 3)
+        #expect(sleeps == 2)
     }
 }
 
@@ -2532,188 +2620,6 @@ struct RecordingApplicationTests {
     }
 }
 
-/// The scripting interface.
-///
-/// Audio Hijack's JavaScript API is the feature every review of it singles out,
-/// and the open goal is that Loopback has no scripting, no AppleScript and no
-/// Shortcuts at all. JavaScriptCore ships with macOS, so the interpreter is
-/// free and the work is entirely the object model — which is a promise about
-/// compatibility, and a promise only ever checked by hand is not one.
-///
-/// Every case here runs real JavaScript through a real `JSContext` against a
-/// stub, so what is asserted is what somebody's script will actually meet.
-@MainActor
-@Suite("The scripting interface")
-struct ScriptingTests {
-
-    /// Records what was asked for, so a script can be checked by what it did
-    /// rather than by what it returned.
-    final class Target: ScriptTarget {
-        var performed: [RemoteCommand] = []
-        var known: Set<String> = ["Voice chat"]
-        var status: [String: Any] = ["running": false, "muted": false]
-
-        func perform(_ command: RemoteCommand) -> String? {
-            performed.append(command)
-            switch command {
-            case .preset(let name), .config(let name):
-                // Nil is how the model says "no such thing", and the script
-                // layer has to turn that into an error rather than a shrug.
-                lastCommandFailed = !known.contains(name)
-                return known.contains(name) ? "applied \(name)" : nil
-            default:
-                // Left alone rather than cleared: one set of cases sets it from
-                // outside to stand for whatever happened before, and clearing
-                // it here would make `perform` erase the thing under test.
-                return "done"
-            }
-        }
-        var scriptStatus: [String: Any] { status }
-        var scriptPresetNames: [String] { ["Voice chat", "Recording"] }
-        var scriptConfigNames: [String] { ["Streaming"] }
-        /// Settable, because one set of cases drives it from outside and the
-        /// other wants `perform` to set it — the same two ways the model is
-        /// used. `perform` writes it for the case that has a rule: a command
-        /// that named something this application does not have.
-        var lastCommandFailed = false
-    }
-
-    private func host() -> (ScriptHost, Target) {
-        let target = Target()
-        return (ScriptHost(target: target), target)
-    }
-
-    @Test("a command reaches the application")
-    func commandsArrive() {
-        let (host, target) = self.host()
-        let result = host.run("yun.routing(true); yun.mute(false);")
-        #expect(result.isSuccess, "\(result.error ?? "")")
-        #expect(target.performed == [.routing(true), .mute(false)])
-    }
-
-    /// The three states the URL scheme has, for the same reason: a button with
-    /// no light has to be able to ask for a toggle.
-    @Test("no argument means toggle")
-    func absentArgumentToggles() {
-        let (host, target) = self.host()
-        _ = host.run("yun.mute(); yun.record(); yun.transcribe();")
-        #expect(target.performed == [.mute(nil), .record(nil), .transcribe(nil)])
-    }
-
-    /// A scene renamed since somebody wrote the script must stop the script,
-    /// not be skipped. Carrying on would leave the rest of it running against
-    /// an arrangement nobody chose.
-    @Test("a name the application does not have is an error, not a shrug")
-    func unknownNameThrows() {
-        let (host, target) = self.host()
-        let result = host.run("yun.preset('Gone'); yun.routing(true);")
-        #expect(!result.isSuccess)
-        #expect(result.error?.contains("Gone") == true)
-        // And nothing after it ran.
-        #expect(target.performed == [.preset("Gone")])
-    }
-
-    @Test("a name it does have comes back with what happened")
-    func knownNameSucceeds() {
-        // The target is bound rather than discarded: the host holds it weakly,
-        // so a test that lets it go is testing a host with nothing behind it.
-        let (host, target) = self.host()
-        _ = target
-        let result = host.run("yun.preset('Voice chat')")
-        #expect(result.isSuccess, "\(result.error ?? "")")
-        #expect(result.value == "applied Voice chat")
-    }
-
-    @Test("state is readable, and readable as one moment")
-    func statusIsReadable() {
-        let (host, target) = self.host()
-        target.status = ["running": true, "muted": false, "sampleRate": 48000]
-        let result = host.run("var s = yun.status(); s.running && s.sampleRate === 48000")
-        #expect(result.isSuccess, "\(result.error ?? "")")
-        #expect(result.value == "true")
-    }
-
-    @Test("the lists say what names exist rather than leaving them to be guessed")
-    func listsAreReadable() {
-        let (host, target) = self.host()
-        _ = target
-        let result = host.run("yun.presets().join(',') + '|' + yun.configs().join(',')")
-        #expect(result.value == "Voice chat,Recording|Streaming")
-    }
-
-    @Test("a script can say something, by either spelling")
-    func loggingWorks() {
-        let (host, target) = self.host()
-        _ = target
-        let result = host.run("yun.log('one'); console.log('two');")
-        #expect(result.log == ["one", "two"])
-    }
-
-    /// Syntax errors are a message, not a crash. A script is untrusted text and
-    /// the only correct answer to a bad one is a sentence.
-    @Test("a broken script comes back with a message")
-    func syntaxErrorIsReported() {
-        let (host, target) = self.host()
-        _ = target
-        let result = host.run("this is not javascript {{{")
-        #expect(!result.isSuccess)
-        #expect(result.error?.isEmpty == false)
-    }
-
-    @Test("a script that throws comes back with its own message")
-    func thrownErrorIsReported() {
-        let (host, target) = self.host()
-        _ = target
-        let result = host.run("throw new Error('nope')")
-        #expect(result.error?.contains("nope") == true)
-    }
-
-    /// The one that decides whether this feature can ship at all. The model
-    /// lives on the main actor, so a script with an endless loop would take the
-    /// interface with it — and nothing in JavaScriptCore's public Swift surface
-    /// can interrupt a loop that makes no function calls. The time limit is
-    /// declared by hand in YunAudioRT.h for exactly this, and this is the check
-    /// that says it is still there: if a future macOS drops it, this fails here
-    /// rather than hanging on somebody's machine.
-    @Test("an endless loop is stopped rather than hanging the application")
-    func runawayScriptIsStopped() {
-        let (host, target) = self.host()
-        _ = target
-        let began = Date()
-        let result = host.run("while (true) {}")
-        let elapsed = Date().timeIntervalSince(began)
-        #expect(!result.isSuccess, "an endless loop reported success")
-        // Generously bounded: the limit is two seconds and the check is that it
-        // returns at all, not that it returns punctually.
-        #expect(elapsed < 20, "took \(elapsed)s")
-    }
-
-    /// What a script cannot do is as much of the design as what it can. The
-    /// context starts empty — there is nothing to escape from rather than a
-    /// sandbox somebody has to maintain — and this says so in the four ways
-    /// anybody would try.
-    @Test("there is no filesystem, no network, no timers and no require")
-    func nothingElseIsReachable() {
-        let (host, target) = self.host()
-        _ = target
-        for global in ["require", "fetch", "XMLHttpRequest", "setTimeout", "process"] {
-            let result = host.run("typeof \(global)")
-            #expect(result.value == "undefined", "\(global) is reachable")
-        }
-    }
-
-    /// A run leaves nothing behind for the next one, or one script could set a
-    /// global that changes what the next one means.
-    @Test("one run cannot reach into the next")
-    func runsAreIsolated() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.run("var leftBehind = 42")
-        let result = host.run("typeof leftBehind")
-        #expect(result.value == "undefined")
-    }
-}
-
 /// A script as a URL, which is how anything outside this application sends one.
 ///
 /// The round trip is the compatibility promise: somebody wires a Stream Deck
@@ -2751,167 +2657,6 @@ struct ScriptURLTests {
         let other = RemoteCommand.parse(URL(string: "yunaudio://run/yun.mute()")!)
         #expect(one == .script("yun.mute()"))
         #expect(other == .script("yun.mute()"))
-    }
-}
-
-/// Scripts that stay and react.
-///
-/// A scripting interface with no triggers is half an interface — automation is
-/// what Audio Hijack's is praised for, and a script that can only be run by
-/// hand is a slower way of pressing a button. These run real JavaScript in a
-/// real resident context and then make the events happen.
-@MainActor
-@Suite("Scripts that react to things")
-struct ScriptEventTests {
-
-    private func host() -> (ScriptHost, ScriptingTests.Target) {
-        let target = ScriptingTests.Target()
-        return (ScriptHost(target: target), target)
-    }
-
-    @Test("a handler is called when the thing happens")
-    func handlerFires() {
-        let (host, target) = self.host()
-        _ = target
-        let loaded = host.load("yun.on('start', function () { yun.log('up'); });")
-        #expect(loaded.isSuccess, "\(loaded.error ?? "")")
-        let fired = host.dispatch(.routingStarted)
-        #expect(fired.log == ["up"])
-    }
-
-    /// The payload is how an event says anything useful. Without it a handler
-    /// has to go and ask, and by then the moment has moved.
-    @Test("a handler is given what happened")
-    func handlerReceivesPayload() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load("yun.on('tick', function (e) { yun.log('peak ' + e.peak); });")
-        let fired = host.dispatch(.tick, ["peak": 0.25])
-        #expect(fired.log == ["peak 0.25"])
-    }
-
-    /// Several scripts watching one event is the ordinary case: one watching
-    /// the microphone and another watching the recording are not one script.
-    @Test("every handler for an event is called")
-    func allHandlersFire() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load(
-            """
-            yun.on('muted', function () { yun.log('one'); });
-            yun.on('muted', function () { yun.log('two'); });
-            """)
-        #expect(host.dispatch(.muted).log == ["one", "two"])
-    }
-
-    /// A typo in an event name would otherwise be a script that looks right,
-    /// loads cleanly and does nothing for ever — the worst outcome available.
-    @Test("an event name that does not exist is an error at load time")
-    func unknownEventIsRejected() {
-        let (host, target) = self.host()
-        _ = target
-        let loaded = host.load("yun.on('started', function () {});")
-        #expect(!loaded.isSuccess)
-        #expect(loaded.error?.contains("started") == true)
-        // And the list of real names is in the message, because the next thing
-        // anybody wants to know is what they should have typed.
-        #expect(loaded.error?.contains("start") == true)
-    }
-
-    /// A handler that throws must not take the others with it, and must not
-    /// quietly unregister itself: an event that failed once because a device
-    /// was busy should still be handled for the rest of the session.
-    @Test("a handler that throws does not stop the others or itself")
-    func oneBadHandlerDoesNotStopTheRest() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load(
-            """
-            yun.on('stop', function () { throw new Error('bad'); });
-            yun.on('stop', function () { yun.log('still here'); });
-            """)
-        let first = host.dispatch(.routingStopped)
-        #expect(first.log == ["still here"])
-        #expect(first.error?.contains("bad") == true)
-        // Again, and it is still registered.
-        #expect(host.dispatch(.routingStopped).log == ["still here"])
-    }
-
-    /// A resident script keeps its own state — that is the whole reason the
-    /// context is kept rather than rebuilt for each event.
-    @Test("a script remembers between events")
-    func stateSurvivesBetweenEvents() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load(
-            "var seen = 0; yun.on('tick', function () { seen++; yun.log('' + seen); });")
-        _ = host.dispatch(.tick)
-        _ = host.dispatch(.tick)
-        #expect(host.dispatch(.tick).log == ["3"])
-    }
-
-    /// Loading replaces. Two copies of a script both reacting is not what
-    /// anybody means by editing one.
-    @Test("loading again replaces what was there")
-    func loadingReplaces() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load("yun.on('muted', function () { yun.log('old'); });")
-        _ = host.load("yun.on('muted', function () { yun.log('new'); });")
-        #expect(host.dispatch(.muted).log == ["new"])
-    }
-
-    /// A script that fails while loading leaves nothing behind. Half a script
-    /// reacting to things is worse than none, because the half that is there
-    /// looks like the whole.
-    @Test("a script that throws while loading registers nothing")
-    func failedLoadRegistersNothing() {
-        let (host, target) = self.host()
-        _ = target
-        let loaded = host.load(
-            "yun.on('muted', function () { yun.log('half'); }); throw new Error('nope');")
-        #expect(!loaded.isSuccess)
-        #expect(host.dispatch(.muted).log.isEmpty)
-        #expect(!host.listens(for: .muted))
-    }
-
-    /// The same limit as a one-shot run, and for a stronger reason: a handler
-    /// runs on somebody else's schedule rather than on a person pressing a
-    /// button, so an endless loop in one would hang the application at a moment
-    /// nobody chose.
-    @Test("an endless loop inside a handler is stopped too")
-    func runawayHandlerIsStopped() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load("yun.on('tick', function () { while (true) {} });")
-        let began = Date()
-        let fired = host.dispatch(.tick)
-        #expect(!fired.isSuccess, "an endless handler reported success")
-        #expect(Date().timeIntervalSince(began) < 20)
-    }
-
-    /// Dispatching something nothing listens for costs nothing and says
-    /// nothing, because most events have no handler most of the time.
-    @Test("an event nobody listens for is quiet")
-    func unhandledEventIsQuiet() {
-        let (host, target) = self.host()
-        _ = target
-        _ = host.load("yun.on('start', function () { yun.log('up'); });")
-        let fired = host.dispatch(.deviceAppeared)
-        #expect(fired.log.isEmpty)
-        #expect(fired.isSuccess)
-        #expect(!host.listens(for: .deviceAppeared))
-        #expect(host.listens(for: .routingStarted))
-    }
-
-    /// A handler can act, not only observe — otherwise this is a logging
-    /// facility rather than automation.
-    @Test("a handler can drive the application")
-    func handlerCanAct() {
-        let (host, target) = self.host()
-        _ = host.load("yun.on('speakingWhileMuted', function () { yun.mute(false); });")
-        _ = host.dispatch(.speakingWhileMuted)
-        #expect(target.performed == [.mute(false)])
     }
 }
 
@@ -3149,24 +2894,59 @@ struct ControlArgumentsTests {
 
 /// What the application says back to another process.
 ///
-/// There is one transport now: the control socket, which `yunaudio-cli` and
-/// `yunaudio-mcp` both speak. `yunaudio-cli` used to have a
-/// distributed-notification channel of its own, and this suite is what that
-/// channel's tests became — every case below asserts something that was true of
-/// the notification reply and had to stay true of the socket one, because a
-/// carry-across that is only checked by reading it is not a carry-across.
-///
-/// Written against `ScriptTarget` and a stub, for the reason the scripting
-/// layer is: a reply that misreports the state is exactly the defect that looks
-/// fine from outside.
+/// The stub implements the same callback boundary as the router: command result
+/// and failure travel together, so a later request cannot observe stale state.
 @MainActor
 @Suite("Answering another process")
 struct ControlAnswerTests {
+    private final class ReplyBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: ControlReply?
 
-    /// The one that will bite. A `Bool` inside `Any` bridges to `NSNumber`, and
-    /// so does an `Int`: ordinary `as? Bool` casting turns "one route" into
-    /// "routes: yes", and `as? Int` turns a level of −70.0 dB into "-70" while
-    /// −69.5 stays a decimal. Both were observed in the first status printed.
+        func store(_ reply: ControlReply) { lock.withLock { storage = reply } }
+        var value: ControlReply? { lock.withLock { storage } }
+    }
+
+    private final class Target: ControlCommandTarget {
+        var performed: [RemoteCommand] = []
+        var outcome = ScriptService.CommandOutcome.success("done")
+        var scriptStatus: JSONValue = .object([
+            "running": .bool(false), "muted": .bool(false),
+        ])
+        var scriptPresetNames = ["Voice chat", "Recording"]
+        var scriptConfigNames = ["Streaming"]
+
+        func submitRemoteCommand(
+            _ command: RemoteCommand, deadline: ScriptService.Deadline?,
+            completion: @escaping @MainActor @Sendable (ScriptService.CommandOutcome) -> Void
+        ) {
+            _ = deadline
+            performed.append(command)
+            switch command {
+            case .preset(let name):
+                completion(
+                    scriptPresetNames.contains(name) ? outcome : .failure(nil))
+            case .config(let name):
+                completion(
+                    scriptConfigNames.contains(name) ? outcome : .failure(nil))
+            default:
+                completion(outcome)
+            }
+        }
+    }
+
+    private func answer(
+        _ request: ControlRequest, model: Target
+    ) -> ControlReply? {
+        let box = ReplyBox()
+        let deadline = ControlRequestDeadline(
+            uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + 1_000_000_000)
+        ControlServer.answer(request, deadline: deadline, model: model) {
+            box.store($0)
+        }
+        return box.value
+    }
+
     @Test("a count is not a flag, and a whole number is not a count")
     func numbersKeepTheirType() {
         #expect(JSONValue(any: 1) == .int(1))
@@ -3181,29 +2961,15 @@ struct ControlAnswerTests {
             JSONValue(any: ["gate", "limiter"])
                 == .array([.string("gate"), .string("limiter")]))
         #expect(JSONValue(any: Data()) == nil)
-
-        // And how each of them reads on a terminal, which is the half a type
-        // alone does not fix.
         #expect(JSONValue(any: 0.0)?.described == "0.00")
         #expect(JSONValue(any: 0)?.described == "0")
         #expect(JSONValue(any: true)?.described == "yes")
         #expect(JSONValue(any: false)?.described == "no")
         #expect(JSONValue(any: ["gate", "limiter"])?.described == "gate limiter")
         #expect(JSONValue(any: [String]())?.described == "—")
-        // A level of −∞ dBFS is what a meter reads with nothing plugged in, and
-        // JSON has no word for it. One dash, not a document that failed.
         #expect(JSONValue(any: -Double.infinity)?.described == "—")
     }
 
-    /// The trap that made the channel this replaced tag every value on the wire:
-    /// a level of exactly 0 dB written as a bare JSON number is `0`, which reads
-    /// back as an integer, so the terminal printed "0" beside "-69.50".
-    ///
-    /// This encoding needs no tag because it never writes `0` for a double —
-    /// `Double.description` is "0.0" and `JSONSerialization` reads that back as
-    /// a floating-point `NSNumber`. That is a property of two pieces of
-    /// Foundation behaviour rather than of anything written down here, which is
-    /// exactly why it is asserted rather than assumed.
     @Test("a status survives the wire with every value still the type it was")
     func statusRoundTripsThroughItsOwnText() throws {
         let status = JSONValue.object([
@@ -3227,82 +2993,64 @@ struct ControlAnswerTests {
         #expect(read["running"]?.described == "yes")
     }
 
-    /// "No such scene" is a dead end. The names that would have worked travel
-    /// with the refusal, so the tool can print them without asking again.
     @Test("a refusal carries the names that would have worked, across the wire")
     func refusalCarriesTheAlternatives() throws {
-        let target = ScriptingTests.Target()
-        let reply = ControlServer.answer(.perform(.preset("Voise chat")), model: target)
+        let target = Target()
+        let reply = answer(.perform(.preset("Voise chat")), model: target)
         #expect(
             reply
                 == .failure(
                     "There is no scene called \"Voise chat\".",
                     alternatives: ["Voice chat", "Recording"]))
 
-        let setup = ControlServer.answer(.perform(.config("Nope")), model: target)
+        let setup = answer(.perform(.config("Nope")), model: target)
         #expect(
             setup
                 == .failure(
                     "There is no setup called \"Nope\".", alternatives: ["Streaming"]))
-
-        // And the list is still there on the far side. An `alternatives` key
-        // that only exists in the struct is a list nothing ever prints.
-        let onTheWire = try #require(JSONValue.parse(reply.json.text))
-        #expect(try #require(ControlReply(json: onTheWire)) == reply)
+        let refusedReply = try #require(reply)
+        let parsedReply = JSONValue.parse(refusedReply.json.text)
+        let onTheWire = try #require(parsedReply)
+        let decodedReply = ControlReply(json: onTheWire)
+        #expect(try #require(decodedReply) == refusedReply)
     }
 
-    /// A sentence is not an exit status.
-    ///
-    /// A script that throws still produces a sentence — the interpreter's
-    /// error — so a shell reading only the text could not tell a script that had
-    /// stopped working from one that was working. `yunaudio-cli script` printed
-    /// the error and exited 0 for exactly as long as nothing asserted this.
-    @Test("a command that failed says so, separately from what it printed")
+    @Test("a command failure travels atomically with its sentence")
     func failureIsCarriedApartFromTheSentence() {
-        let target = ScriptingTests.Target()
-        target.lastCommandFailed = true
-        #expect(
-            ControlServer.answer(.perform(.mute(true)), model: target)
-                == .failure("done"))
+        let target = Target()
+        target.outcome = .failure("refused")
+        #expect(answer(.perform(.mute(true)), model: target) == .failure("refused"))
 
-        // A question cannot fail, and must not report a failure left over from
-        // whatever the last command was.
-        guard case .status = ControlServer.answer(.status, model: target) else {
-            Issue.record("a question reported the last command's failure")
+        guard case .status = answer(.status, model: target) else {
+            Issue.record("a question reported a command failure")
             return
         }
-
-        // And a command that worked is a message, not a failure — otherwise the
-        // case above passes for the wrong reason.
-        target.lastCommandFailed = false
-        #expect(
-            ControlServer.answer(.perform(.mute(true)), model: target) == .message("done"))
+        target.outcome = .success("done")
+        #expect(answer(.perform(.mute(true)), model: target) == .message("done"))
     }
 
     @Test("a command reaches the application and its sentence comes back")
     func commandsArePerformed() {
-        let target = ScriptingTests.Target()
-        #expect(
-            ControlServer.answer(.perform(.mute(true)), model: target) == .message("done"))
+        let target = Target()
+        #expect(answer(.perform(.mute(true)), model: target) == .message("done"))
         #expect(target.performed == [.mute(true)])
     }
 
-    /// The whole point of keeping `status` out of `RemoteCommand`: asking what
-    /// is happening must not change what is happening.
     @Test("asking changes nothing")
     func statusPerformsNothing() {
-        let target = ScriptingTests.Target()
-        target.status = ["running": true, "routes": 3]
-        let reply = ControlServer.answer(.status, model: target)
+        let target = Target()
+        target.scriptStatus = .object(["running": .bool(true), "routes": .int(3)])
+        #expect(
+            answer(.status, model: target)
+                == .status(.object(["running": .bool(true), "routes": .int(3)])))
         #expect(target.performed.isEmpty)
-        #expect(reply == .status(.object(["running": .bool(true), "routes": .int(3)])))
     }
 
     @Test("the names come back as the two lists that exist")
     func namesAreListed() {
-        let target = ScriptingTests.Target()
+        let target = Target()
         #expect(
-            ControlServer.answer(.names, model: target)
+            answer(.names, model: target)
                 == .names(scenes: ["Voice chat", "Recording"], setups: ["Streaming"]))
         #expect(target.performed.isEmpty)
     }
@@ -3322,10 +3070,7 @@ struct FailureMessageTests {
     /// compile-time change rather than a silent fall-through to raw English.
     @Test("every isolation failure the engine can record has a sentence")
     func isolationFailuresAreExplained() {
-        for reason in [
-            RoutingEngine.IsolationFailure.chainNotBuilt,
-            RoutingEngine.IsolationFailure.unitNotInstantiated,
-        ] {
+        for reason in RoutingEngine.IsolationFailure.all {
             let message = RouterModel.isolationMessage(reason)
             #expect(message != reason, "\(reason)")
             #expect(message.contains(loc("Voice isolation is not running: %@.").prefix(5)))
@@ -3501,13 +3246,54 @@ struct DriverRemovalTests {
         let model = try String(
             contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
         #expect(model.contains("DriverInstaller.uninstall()"))
-        // And it stops routing first: removing the plug-in restarts coreaudiod,
-        // and a route running through the device that is about to stop existing
-        // is an aggregate whose member vanishes underneath it.
-        let removal = model.components(separatedBy: "func removeDriver()")
-        try #require(removal.count == 2)
-        let body = String(removal[1].prefix(400))
-        #expect(body.contains("if isRunning { stop() }"))
+        #expect(model.contains("driverInstallationQueue.async"))
+        // Both operations restart coreaudiod. Merely enqueueing Stop is not a
+        // fence: the privileged operation must only be reachable from the
+        // completion which runs after every aggregate and tap is absent.
+        let install = try #require(model.range(of: "func installDriver()"))
+        let installFence = try #require(
+            model.range(of: "stop(then: install)", range: install.upperBound..<model.endIndex))
+        let installer = try #require(
+            model.range(
+                of: "DriverInstaller.install()", range: installFence.upperBound..<model.endIndex
+            ))
+        let remove = try #require(model.range(of: "func removeDriver()"))
+        let removeFence = try #require(
+            model.range(of: "stop(then: remove)", range: remove.upperBound..<model.endIndex))
+        let uninstaller = try #require(
+            model.range(
+                of: "DriverInstaller.uninstall()",
+                range: removeFence.upperBound..<model.endIndex))
+
+        #expect(install.lowerBound < installFence.lowerBound)
+        #expect(installFence.lowerBound < installer.lowerBound)
+        #expect(remove.lowerBound < removeFence.lowerBound)
+        #expect(removeFence.lowerBound < uninstaller.lowerBound)
+
+        let installationBodyStart = try #require(
+            model.range(
+                of: "private func performDriverInstallation()",
+                range: installFence.upperBound..<model.endIndex))
+        let installationBodyEnd = try #require(
+            model.range(
+                of: "private func finishDriverInstallation(",
+                range: installer.upperBound..<model.endIndex))
+        let installationBody = model[
+            installationBodyStart.lowerBound..<installationBodyEnd.lowerBound]
+        #expect(installationBody.contains("driverInstallationQueue.async"))
+        #expect(installationBody.contains("MainRunLoopDelivery.perform"))
+
+        let removalBodyStart = try #require(
+            model.range(
+                of: "private func performDriverRemoval()",
+                range: removeFence.upperBound..<model.endIndex))
+        let removalBodyEnd = try #require(
+            model.range(
+                of: "private func finishDriverRemoval(",
+                range: uninstaller.upperBound..<model.endIndex))
+        let removalBody = model[removalBodyStart.lowerBound..<removalBodyEnd.lowerBound]
+        #expect(removalBody.contains("driverInstallationQueue.async"))
+        #expect(removalBody.contains("MainRunLoopDelivery.perform"))
     }
 }
 
@@ -3791,6 +3577,16 @@ struct PreferencesCompletenessTests {
             "these are remembered in Preferences and never written: \(forgotten)")
     }
 
+    @Test("the About page reports the repository licence exactly")
+    func aboutLicenceMatchesRepository() throws {
+        let source = try String(
+            contentsOfFile: Self.sourceRoot
+                + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+        #expect(source.ranges(of: "loc(\"Apache 2.0\")").count == 1)
+        #expect(source.ranges(of: "\"MIT\"").isEmpty)
+    }
+
     /// And the defaults name them too, or a fresh install starts with a nil
     /// where the type promised a value.
     @Test("and the default names them as well")
@@ -3831,25 +3627,34 @@ struct ProcessTapRestoreTests {
     /// an application that is **not running**, and is not even installed. No
     /// process object exists to name, so `bundleIDs` is the only thing holding
     /// it, which is why the two properties have to be set together.
-    @Test("a tap can be made for an application that is not running")
+    @Test(
+        "a tap can be made for an application that is not running",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.ProcessTapRestoreTests/absentApplication()"))
     func absentApplication() throws {
         let tap = try ProcessTap(
             processIDs: [], bundleIDs: ["com.yuhuanstudio.nothing.at.all"])
+        defer { _ = tap.destroyAndWait() }
         let held = try #require(tap.systemDescription())
         #expect(held.isProcessRestoreEnabled)
         #expect(held.bundleIDs == ["com.yuhuanstudio.nothing.at.all"])
         // Nothing is attached, which is the point: the tap is waiting for it.
         #expect(held.processes.isEmpty)
+        #expect(tap.destroyAndWait() == .destroyed)
     }
 
     /// The read-back is off the tap object, not off the description this
     /// process is still holding. Asserting our own object would assert that
     /// Swift assigns properties.
-    @Test("the HAL keeps both, and reports them back")
+    @Test(
+        "the HAL keeps both, and reports them back",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.ProcessTapRestoreTests/roundTrip()"))
     func roundTrip() throws {
         let tap = try ProcessTap(
             processIDs: [], muteBehavior: .mutedWhenTapped,
             bundleIDs: ["com.apple.Music", "com.spotify.client"])
+        defer { _ = tap.destroyAndWait() }
         let held = try #require(ProcessTap.description(of: tap.id))
         #expect(held.isProcessRestoreEnabled)
         #expect(held.bundleIDs.sorted() == ["com.apple.Music", "com.spotify.client"])
@@ -3857,6 +3662,7 @@ struct ProcessTapRestoreTests {
         // property added to a description is a chance to overwrite one.
         #expect(held.isPrivate)
         #expect(held.muteBehavior == .mutedWhenTapped)
+        #expect(tap.destroyAndWait() == .destroyed)
     }
 
     /// **The flag was never the missing piece.** `processRestoreEnabled`
@@ -3870,13 +3676,18 @@ struct ProcessTapRestoreTests {
     /// whole reason the two properties are set together, and because a future
     /// macOS flipping the default would otherwise turn a working capture into a
     /// silent one with nothing pointing at the cause.
-    @Test("restore is on by default and does nothing without bundle identifiers")
+    @Test(
+        "restore is on by default and does nothing without bundle identifiers",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.ProcessTapRestoreTests/theFlagWasNeverTheMissingPiece()"))
     func theFlagWasNeverTheMissingPiece() throws {
         let tap = try ProcessTap(processIDs: [])
+        defer { _ = tap.destroyAndWait() }
         #expect(!tap.restoresProcesses)
         let held = try #require(tap.systemDescription())
         #expect(held.isProcessRestoreEnabled)
         #expect(held.bundleIDs.isEmpty)
+        #expect(tap.destroyAndWait() == .destroyed)
     }
 
     /// And the read-back is a read-back rather than a constant.
@@ -3885,7 +3696,10 @@ struct ProcessTapRestoreTests {
     /// returns `true` for this property no matter what it was handed — which,
     /// given that the default is already `true`, is not a far-fetched way for
     /// all of this to mean nothing.
-    @Test("an explicit refusal comes back as a refusal")
+    @Test(
+        "an explicit refusal comes back as a refusal",
+        TestCapabilities.liveHALTest(
+            "YunAudioTests.ProcessTapRestoreTests/explicitFalse()"))
     func explicitFalse() throws {
         let description = CATapDescription(stereoMixdownOfProcesses: [])
         description.isPrivate = true
@@ -4706,10 +4520,9 @@ struct PermissionRequestTests {
 /// `yun_rt_ring_write` from `HALC_ProxyIOContext::IOWorkLoop`, while a
 /// recording was being stopped.
 ///
-/// Read from the source because there is no way to provoke it on demand. The
-/// window is a few microseconds wide and it took a full flow-check run to land
-/// in it once; a test that tried to hit it would pass on every machine that
-/// missed and prove nothing.
+/// `RCUHardeningTests` holds a simulated callback inside this window on demand;
+/// these checks keep every concrete owner wired to that executable retirement
+/// mechanism rather than quietly returning to an unchecked wait.
 @Suite("Freeing a ring the realtime thread might still hold")
 struct RingTeardownDisciplineTests {
 
@@ -4725,36 +4538,43 @@ struct RingTeardownDisciplineTests {
         return String(rest[..<(end?.upperBound ?? rest.endIndex)])
     }
 
-    @Test("stopping a recording waits before the recorder is released")
+    @Test("stopping a recording defers the recorder release to its cycle fence")
     func recording() throws {
         let text = try body(of: "stopRecordingLocked")
         #expect(text.contains("recordRing = nil"), "the detach itself has gone")
         #expect(
-            text.contains("letTheRealtimeThreadPast()"),
-            "the ring is freed without letting the IO thread past the pointer it holds")
+            text.contains("publishStructuralGraphLocked"),
+            "the ring owner is not retained through its original cycle fence")
     }
 
     @Test("and so does stopping the stems")
     func stems() throws {
         let text = try body(of: "stopStemRecordingLocked")
         #expect(text.contains("stemRings[stem] = nil"))
-        #expect(text.contains("letTheRealtimeThreadPast()"))
+        #expect(text.contains("publishStructuralGraphLocked"))
     }
 
     @Test("and the transcript taps, which free their rings outright")
     func transcripts() throws {
         let text = try body(of: "stopTranscriptTapsLocked")
         #expect(text.contains("transcriptRings[slot] = nil"))
-        #expect(text.contains("letTheRealtimeThreadPast()"))
+        #expect(text.contains("publishStructuralGraphLocked"))
     }
 
-    /// The wait itself, so that somebody tidying it into a no-op is caught.
-    @Test("the wait is a real wait on the cycle counter")
-    func theWaitIsReal() throws {
-        let text = try body(of: "letTheRealtimeThreadPast")
-        #expect(
-            text.contains("yun_rt_cell_wait_for_swap"),
-            "the wait no longer waits for anything")
+    @Test("the shared structural publication owns the original cycle fence")
+    func structuralPublicationRetires() throws {
+        let text = try body(of: "publishStructuralGraphLocked")
+        #expect(text.contains("yun_rt_cell_retirement_fence"))
+        #expect(text.contains("retiredGenerations.enqueue"))
+        #expect(text.contains("reclaim(previous)"))
+    }
+
+    @Test("a timeout is never described as permission to release")
+    func timeoutRetains() throws {
+        let source = try String(
+            contentsOfFile: GraphLockDisciplineTests.enginePath, encoding: .utf8)
+        #expect(!source.contains("A false return means the device is producing no cycles"))
+        #expect(source.contains("stalled owners stay in the bounded retirement"))
     }
 }
 

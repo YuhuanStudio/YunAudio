@@ -84,7 +84,7 @@ struct DriverOnboarding: View {
                 .buttonStyle(YunButtonStyle(.primary, small: true))
                 .disabled(model.isInstallingDriver)
             }
-            Button(loc("Check again")) { model.refreshDevices() }
+            Button(loc("Check again")) { model.requestDeviceRefresh() }
                 .buttonStyle(YunButtonStyle(.secondary, small: true))
         }
     }

@@ -32,6 +32,9 @@ struct Preferences: Codable, Equatable, Sendable {
     /// Capture the microphone through the echo canceller. Optional so a
     /// preferences file written before this existed still decodes.
     var cancelsEcho: Bool?
+    /// Use CoreAudio's device-global detector for the muted-speaking warning.
+    /// Optional so existing files remain decodable; absence means fail closed.
+    var warnsWhenSpeakingWhileMuted: Bool?
     /// The speaker the canceller listens for. Nil means the current default.
     var echoSpeakerUID: String?
     /// Which look the application wears. Optional so a file written before the
@@ -207,6 +210,7 @@ struct Preferences: Codable, Equatable, Sendable {
         enabledEffects: [],
         effectValues: [:],
         cancelsEcho: false,
+        warnsWhenSpeakingWhileMuted: false,
         echoSpeakerUID: nil,
         style: YunStyle.flat.rawValue,
         lightingMode: LightingMode.off.rawValue,
@@ -266,7 +270,7 @@ struct Preferences: Codable, Equatable, Sendable {
 /// including when a later automatic adjustment deliberately suppresses
 /// persistence. Turning them into the Codable shape is the allocating part and
 /// can wait until the writer knows this snapshot will actually reach disk.
-struct PendingPreferencesSnapshot {
+struct PendingPreferencesSnapshot: Sendable {
     private struct DeferredCollections {
         var capturedAppBundleIDs: Set<String>
         var excludedAppBundleIDs: Set<String>
@@ -334,17 +338,544 @@ extension TapMuteBehavior {
     }
 }
 
+/// The observable answer to a request for a preferences durability boundary.
+enum PreferenceFlushResult: Equatable, Sendable {
+    /// Every snapshot submitted before the request reached `UserDefaults`, and
+    /// its preferences domain accepted an explicit synchronisation request.
+    /// This is the strongest boundary that API reports; it is not a claim that
+    /// bytes have reached physical storage.
+    case synchronised
+    /// This process has submitted no preference value that needs a barrier.
+    case nothingToWrite
+    /// Encoding, storing or synchronising the requested snapshot failed.
+    case failed
+    /// The writer may still finish, but did not prove synchronisation in time.
+    case timedOut
+    /// The bounded waiter set was full, so this request retained no waiter and
+    /// completed immediately.
+    case superseded
+
+    var isAccepted: Bool {
+        self == .synchronised || self == .nothingToWrite
+    }
+}
+
+/// The complete preferences-domain durability boundary for accepted Quit.
+struct ApplicationPersistenceFlushReport: Equatable, Sendable {
+    let preferences: PreferenceFlushResult
+    let quickConfigurations: PreferenceFlushResult
+    let userPresets: PreferenceFlushResult
+
+    var isAccepted: Bool {
+        preferences.isAccepted && quickConfigurations.isAccepted && userPresets.isAccepted
+    }
+}
+
+/// Joins the three independent preferences writers without serialising deadlines.
+@MainActor
+final class ApplicationPersistenceFlushJoin {
+    private var preferences: PreferenceFlushResult?
+    private var quickConfigurations: PreferenceFlushResult?
+    private var userPresets: PreferenceFlushResult?
+    private var didComplete = false
+    private let completion: @MainActor (ApplicationPersistenceFlushReport) -> Void
+
+    init(completion: @escaping @MainActor (ApplicationPersistenceFlushReport) -> Void) {
+        self.completion = completion
+    }
+
+    func receivePreferences(_ result: PreferenceFlushResult) {
+        guard preferences == nil else { return }
+        preferences = result
+        finishIfReady()
+    }
+
+    func receiveQuickConfigurations(_ result: PreferenceFlushResult) {
+        guard quickConfigurations == nil else { return }
+        quickConfigurations = result
+        finishIfReady()
+    }
+
+    func receiveUserPresets(_ result: PreferenceFlushResult) {
+        guard userPresets == nil else { return }
+        userPresets = result
+        finishIfReady()
+    }
+
+    private func finishIfReady() {
+        guard !didComplete,
+            let preferences,
+            let quickConfigurations,
+            let userPresets
+        else { return }
+        didComplete = true
+        completion(
+            ApplicationPersistenceFlushReport(
+                preferences: preferences,
+                quickConfigurations: quickConfigurations,
+                userPresets: userPresets))
+    }
+}
+
+/// The first value already being written and the latest value behind it.
+///
+/// This state is deliberately value-only. Its 10,000-request proof does not
+/// need a queue or a scheduler, so the bound cannot pass because a test happened
+/// not to give queued work time to run.
+struct PreferenceWriteGate<Value: Sendable> {
+    struct Entry: Sendable {
+        let generation: UInt64
+        let value: Value
+    }
+
+    private(set) var active: Entry?
+    private(set) var pending: Entry?
+    private(set) var latest: Entry?
+    private var generation: UInt64 = 0
+
+    /// The queue-retained values. `latest` is one additional read cache, so the
+    /// complete memory bound is three value-semantic snapshots.
+    var retainedRequestCount: Int {
+        (active == nil ? 0 : 1) + (pending == nil ? 0 : 1)
+    }
+
+    @discardableResult
+    mutating func submit(_ value: Value) -> Entry {
+        generation &+= 1
+        let entry = Entry(generation: generation, value: value)
+        pending = entry
+        latest = entry
+        return entry
+    }
+
+    mutating func takePending() -> Entry? {
+        guard active == nil, let pending else { return nil }
+        active = pending
+        self.pending = nil
+        return pending
+    }
+
+    @discardableResult
+    mutating func finish(_ generation: UInt64) -> Bool {
+        guard active?.generation == generation else { return false }
+        active = nil
+        return true
+    }
+
+    /// Gives an explicit flush one retry after an earlier write failed.
+    ///
+    /// The generation stays the same: this is the same requested state, not a
+    /// new publication. It is restored only while idle, so a newer pending
+    /// snapshot always wins and one failing encoder cannot create a retry loop.
+    @discardableResult
+    mutating func restoreLatestIfIdle() -> Bool {
+        guard active == nil, pending == nil, let latest else { return false }
+        pending = latest
+        return true
+    }
+}
+
+enum PreferenceWorkerWaitDecision: Equatable, Sendable {
+    case waitForSignal
+    case waitNanoseconds(UInt64)
+    case runNow
+}
+
+/// Decides the worker's only idle transition without touching a condition.
+///
+/// An active-only flush once left an already-expired deadline behind after the
+/// write finished. With no pending value to consume, the worker repeatedly
+/// observed that deadline while retaining the condition mutex, spinning a core
+/// and preventing its owner from ever closing. Keeping this decision pure makes
+/// that exact state assertable without hanging a test process to observe it.
+struct PreferenceWorkerWaitPolicy {
+    static func decide(
+        hasPending: Bool,
+        deadline: UInt64?,
+        now: UInt64
+    ) -> PreferenceWorkerWaitDecision {
+        guard hasPending else { return .waitForSignal }
+        guard let deadline else { return .waitForSignal }
+        guard deadline > now else { return .runNow }
+        return .waitNanoseconds(deadline - now)
+    }
+}
+
+/// One bounded, background preference writer.
+///
+/// A single condition-driven worker owns both encoding and the sink. Submitting
+/// a value only replaces `pending`; it never appends a dispatch block or starts
+/// a task. The first pending value fixes the coalescing deadline, so continuous
+/// movement is persisted periodically rather than postponing forever.
+final class CoalescedPreferenceWriter<Value: Sendable>: @unchecked Sendable {
+    struct Metrics: Equatable, Sendable {
+        var workerStarts: Int
+        var maximumConcurrentWrites: Int
+        var maximumRetainedSnapshots: Int
+        var maximumFlushWaiters: Int
+    }
+
+    private struct Waiter: @unchecked Sendable {
+        let id: UInt64
+        let targetGeneration: UInt64
+        let completion: @MainActor @Sendable (PreferenceFlushResult) -> Void
+    }
+
+    private final class Core: @unchecked Sendable {
+        let condition = NSCondition()
+        let delayNanoseconds: UInt64
+        let now: @Sendable () -> UInt64
+        let write: @Sendable (Value) -> Bool
+        let synchronise: @Sendable () -> Bool
+        let completionQueue: DispatchQueue
+
+        var gate = PreferenceWriteGate<Value>()
+        var pendingDeadline: UInt64?
+        var acceptedGeneration: UInt64 = 0
+        var synchronisedGeneration: UInt64 = 0
+        var failedSynchronisationGeneration: UInt64?
+        var nextWaiterID: UInt64 = 0
+        var waiters: [UInt64: Waiter] = [:]
+        var closesAfterDrain = false
+        var workerHasExited = false
+        var concurrentWrites = 0
+        var metrics = Metrics(
+            workerStarts: 0,
+            maximumConcurrentWrites: 0,
+            maximumRetainedSnapshots: 0,
+            maximumFlushWaiters: 0)
+
+        static var maximumWaiters: Int { 16 }
+
+        init(
+            delayNanoseconds: UInt64,
+            now: @escaping @Sendable () -> UInt64,
+            write: @escaping @Sendable (Value) -> Bool,
+            synchronise: @escaping @Sendable () -> Bool,
+            completionQueue: DispatchQueue
+        ) {
+            self.delayNanoseconds = delayNanoseconds
+            self.now = now
+            self.write = write
+            self.synchronise = synchronise
+            self.completionQueue = completionQueue
+        }
+
+        func submit(_ value: Value) {
+            condition.lock()
+            let hadPending = gate.pending != nil
+            gate.submit(value)
+            if !hadPending {
+                pendingDeadline = Self.addingClamped(delayNanoseconds, to: now())
+            }
+            metrics.maximumRetainedSnapshots = max(
+                metrics.maximumRetainedSnapshots, gate.retainedRequestCount + 1)
+            condition.signal()
+            condition.unlock()
+        }
+
+        func requestFlush(
+            timeoutNanoseconds: UInt64,
+            completion: @escaping @MainActor @Sendable (PreferenceFlushResult) -> Void
+        ) -> PreferenceFlushResult? {
+            condition.lock()
+            guard let target = gate.latest?.generation else {
+                condition.unlock()
+                return .nothingToWrite
+            }
+            if synchronisedGeneration >= target {
+                condition.unlock()
+                return .synchronised
+            }
+            guard waiters.count < Self.maximumWaiters else {
+                condition.unlock()
+                return .superseded
+            }
+
+            nextWaiterID &+= 1
+            let id = nextWaiterID
+            waiters[id] = Waiter(
+                id: id, targetGeneration: target, completion: completion)
+            metrics.maximumFlushWaiters = max(metrics.maximumFlushWaiters, waiters.count)
+            if acceptedGeneration < target { gate.restoreLatestIfIdle() }
+            if failedSynchronisationGeneration.map({ $0 >= target }) == true {
+                failedSynchronisationGeneration = nil
+            }
+            if gate.pending != nil { pendingDeadline = now() }
+            condition.signal()
+            condition.unlock()
+
+            completionQueue.asyncAfter(
+                deadline: .now() + .nanoseconds(Int(clamping: timeoutNanoseconds))
+            ) { [weak self] in
+                self?.timeOutWaiter(id)
+            }
+            return nil
+        }
+
+        func closeAfterDrain() {
+            condition.lock()
+            closesAfterDrain = true
+            if let latest = gate.latest, acceptedGeneration < latest.generation {
+                gate.restoreLatestIfIdle()
+            }
+            pendingDeadline = now()
+            condition.signal()
+            condition.unlock()
+        }
+
+        func snapshot() -> (
+            pending: Value?, latest: Value?, hasScheduledWrite: Bool,
+            hasUncommittedValue: Bool, metrics: Metrics
+        ) {
+            condition.lock()
+            defer { condition.unlock() }
+            return (
+                gate.pending?.value,
+                gate.latest?.value,
+                gate.pending != nil,
+                gate.latest.map { synchronisedGeneration < $0.generation } ?? false,
+                metrics
+            )
+        }
+
+        func run() {
+            condition.lock()
+            metrics.workerStarts += 1
+            while true {
+                if shouldSynchronise {
+                    let generation = acceptedGeneration
+                    condition.unlock()
+                    let succeeded = synchronise()
+                    condition.lock()
+                    if succeeded {
+                        synchronisedGeneration = max(synchronisedGeneration, generation)
+                        failedSynchronisationGeneration = nil
+                        completeWaiters(upTo: synchronisedGeneration, with: .synchronised)
+                    } else {
+                        failedSynchronisationGeneration = generation
+                        failWaiters(upTo: generation)
+                    }
+                    continue
+                }
+
+                if shouldTakePending, let entry = gate.takePending() {
+                    pendingDeadline = nil
+                    concurrentWrites += 1
+                    metrics.maximumConcurrentWrites = max(
+                        metrics.maximumConcurrentWrites, concurrentWrites)
+                    metrics.maximumRetainedSnapshots = max(
+                        metrics.maximumRetainedSnapshots, gate.retainedRequestCount + 1)
+                    condition.unlock()
+                    let succeeded = write(entry.value)
+                    condition.lock()
+                    concurrentWrites -= 1
+                    precondition(gate.finish(entry.generation))
+                    if succeeded {
+                        acceptedGeneration = max(acceptedGeneration, entry.generation)
+                    } else if gate.pending == nil {
+                        failWaiters(upTo: entry.generation)
+                    }
+                    continue
+                }
+
+                if closesAfterDrain, gate.active == nil, gate.pending == nil,
+                    waiters.isEmpty
+                {
+                    workerHasExited = true
+                    condition.broadcast()
+                    condition.unlock()
+                    return
+                }
+
+                switch PreferenceWorkerWaitPolicy.decide(
+                    hasPending: gate.pending != nil,
+                    deadline: pendingDeadline,
+                    now: now()
+                ) {
+                case .waitForSignal:
+                    pendingDeadline = nil
+                    condition.wait()
+                case .waitNanoseconds(let nanoseconds):
+                    let interval = Double(nanoseconds) / 1_000_000_000
+                    condition.wait(until: Date(timeIntervalSinceNow: interval))
+                case .runNow:
+                    continue
+                }
+            }
+        }
+
+        private var highestFlushTarget: UInt64? {
+            waiters.values.map(\.targetGeneration).max()
+        }
+
+        private var shouldSynchronise: Bool {
+            guard let target = highestFlushTarget else {
+                return closesAfterDrain && acceptedGeneration > synchronisedGeneration
+                    && failedSynchronisationGeneration != acceptedGeneration
+            }
+            return acceptedGeneration >= target && synchronisedGeneration < target
+                && failedSynchronisationGeneration != acceptedGeneration
+        }
+
+        private var shouldTakePending: Bool {
+            guard let pending = gate.pending else { return false }
+            if closesAfterDrain { return true }
+            if let target = highestFlushTarget, target >= pending.generation { return true }
+            return pendingDeadline.map { now() >= $0 } ?? false
+        }
+
+        private func timeOutWaiter(_ id: UInt64) {
+            condition.lock()
+            guard let waiter = waiters.removeValue(forKey: id) else {
+                condition.unlock()
+                return
+            }
+            condition.signal()
+            condition.unlock()
+            deliver(.timedOut, to: waiter.completion)
+        }
+
+        private func completeWaiters(
+            upTo generation: UInt64,
+            with result: PreferenceFlushResult
+        ) {
+            let completed = waiters.values.filter { $0.targetGeneration <= generation }
+            for waiter in completed { waiters.removeValue(forKey: waiter.id) }
+            for waiter in completed { deliver(result, to: waiter.completion) }
+        }
+
+        private func failWaiters(upTo generation: UInt64) {
+            completeWaiters(upTo: generation, with: .failed)
+        }
+
+        private func deliver(
+            _ result: PreferenceFlushResult,
+            to completion: @escaping @MainActor @Sendable (PreferenceFlushResult) -> Void
+        ) {
+            MainRunLoopDelivery.perform { completion(result) }
+        }
+
+        private static func addingClamped(_ lhs: UInt64, to rhs: UInt64) -> UInt64 {
+            let (sum, overflowed) = lhs.addingReportingOverflow(rhs)
+            return overflowed ? UInt64.max : sum
+        }
+    }
+
+    private let core: Core
+
+    /// A sink that cannot report failure, retained for small in-memory users.
+    convenience init(
+        delay: Duration,
+        queue: DispatchQueue = DispatchQueue(
+            label: "com.yuhuanstudio.yunaudio.preferences", qos: .utility),
+        write: @escaping @Sendable (Value) -> Void
+    ) {
+        self.init(
+            delay: delay, queue: queue,
+            durableWrite: {
+                write($0)
+                return true
+            },
+            synchronise: { true })
+    }
+
+    /// Injectable encoder, sink, synchronisation barrier and clock.
+    convenience init<Payload: Sendable>(
+        delay: Duration,
+        queue: DispatchQueue = DispatchQueue(
+            label: "com.yuhuanstudio.yunaudio.preferences", qos: .utility),
+        now: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        encode: @escaping @Sendable (Value) -> Payload?,
+        sink: @escaping @Sendable (Payload) -> Bool,
+        synchronise: @escaping @Sendable () -> Bool
+    ) {
+        self.init(
+            delay: delay, queue: queue, now: now,
+            durableWrite: { value in
+                guard let payload = encode(value) else { return false }
+                return sink(payload)
+            },
+            synchronise: synchronise)
+    }
+
+    init(
+        delay: Duration,
+        queue: DispatchQueue = DispatchQueue(
+            label: "com.yuhuanstudio.yunaudio.preferences", qos: .utility),
+        now: @escaping @Sendable () -> UInt64 = {
+            DispatchTime.now().uptimeNanoseconds
+        },
+        durableWrite: @escaping @Sendable (Value) -> Bool,
+        synchronise: @escaping @Sendable () -> Bool
+    ) {
+        core = Core(
+            delayNanoseconds: Self.nanoseconds(delay),
+            now: now,
+            write: durableWrite,
+            synchronise: synchronise,
+            completionQueue: DispatchQueue(
+                label: "com.yuhuanstudio.yunaudio.preferences.flush-timeout",
+                qos: .utility))
+        let core = core
+        queue.async { core.run() }
+    }
+
+    deinit {
+        core.closeAfterDrain()
+    }
+
+    var pendingValue: Value? { core.snapshot().pending }
+    var latestValue: Value? { core.snapshot().latest }
+    var hasScheduledWrite: Bool { core.snapshot().hasScheduledWrite }
+    var hasUncommittedValue: Bool { core.snapshot().hasUncommittedValue }
+    var metrics: Metrics { core.snapshot().metrics }
+
+    func submit(_ value: Value) {
+        core.submit(value)
+    }
+
+    @MainActor
+    func flush(
+        timeout: Duration = .seconds(1),
+        completion: @escaping @MainActor @Sendable (PreferenceFlushResult) -> Void
+    ) {
+        if let immediate = core.requestFlush(
+            timeoutNanoseconds: Self.nanoseconds(timeout), completion: completion)
+        {
+            completion(immediate)
+        }
+    }
+
+    private static func nanoseconds(_ duration: Duration) -> UInt64 {
+        let components = duration.components
+        guard components.seconds >= 0, components.attoseconds >= 0 else { return 0 }
+        let seconds = UInt64(components.seconds)
+        let nanoseconds = UInt64(components.attoseconds / 1_000_000_000)
+        let (wholeSeconds, secondsOverflowed) = seconds.multipliedReportingOverflow(
+            by: 1_000_000_000)
+        guard !secondsOverflowed else { return UInt64.max }
+        let (total, totalOverflowed) = wholeSeconds.addingReportingOverflow(nanoseconds)
+        return totalOverflowed ? UInt64.max : total
+    }
+}
+
+private let preferencesStoreKey = "com.yuhuanstudio.yunaudio.preferences"
+
 @MainActor
 enum PreferencesStore {
-    private static let key = "com.yuhuanstudio.yunaudio.preferences"
     private static let writer = CoalescedPreferenceWriter<PendingPreferencesSnapshot>(
-        delay: .milliseconds(150)
-    ) { snapshot in
-        let preferences = snapshot.materialised()
-        guard let data = try? JSONEncoder().encode(preferences) else { return }
-        UserDefaults.standard.set(data, forKey: key)
-    }
-    private static var terminationObserver: NSObjectProtocol?
+        delay: .milliseconds(150),
+        encode: { snapshot in
+            try? JSONEncoder().encode(snapshot.materialised())
+        },
+        sink: { data in
+            UserDefaults.standard.set(data, forKey: preferencesStoreKey)
+            return UserDefaults.standard.data(forKey: preferencesStoreKey) == data
+        },
+        synchronise: { UserDefaults.standard.synchronize() })
 
     /// Whether anything has ever been saved.
     ///
@@ -353,86 +884,51 @@ enum PreferencesStore {
     /// all: a first launch and a launch where every value happens to equal its
     /// default are indistinguishable from the outside.
     static var hasStoredPreferences: Bool {
-        writer.pendingValue != nil || UserDefaults.standard.data(forKey: key) != nil
+        writer.latestValue != nil
+            || UserDefaults.standard.data(forKey: preferencesStoreKey) != nil
     }
 
     static func load() -> Preferences {
-        // A caller explicitly asking to load the preferences is asking about
-        // the durable form, not merely the latest slider value in memory.
-        // Flushing here keeps the relaunch checks from passing for the wrong
-        // reason while ordinary high-rate controls still never call `load`.
-        writer.flush()
-        guard let data = UserDefaults.standard.data(forKey: key),
+        // Runtime callers need the latest event-time snapshot even while its
+        // background write is in flight. Materialising an explicit read is
+        // intentionally synchronous; slider publication never calls `load`,
+        // and the encoder and preferences-domain IO always stay on the worker.
+        if let latest = writer.latestValue { return latest.materialised() }
+        return loadPersisted()
+    }
+
+    /// Decodes only the preferences domain, for evidence across a durability
+    /// boundary. Ordinary model code wants `load()`: using this without first
+    /// awaiting `flush` would merely exchange one stale answer for another.
+    static func loadPersisted() -> Preferences {
+        guard let data = UserDefaults.standard.data(forKey: preferencesStoreKey),
             let decoded = try? JSONDecoder().decode(Preferences.self, from: data)
         else { return .default }
         return decoded
     }
 
     static func save(_ preferences: Preferences) {
-        installTerminationObserver()
         writer.submit(PendingPreferencesSnapshot(preferences))
     }
 
     static func save(_ snapshot: PendingPreferencesSnapshot) {
-        installTerminationObserver()
         writer.submit(snapshot)
     }
 
-    private static func installTerminationObserver() {
-        guard terminationObserver == nil else { return }
-        terminationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
-        ) { _ in
-            // NotificationCenter promised the main queue above. Flushing here
-            // means a value changed just before Quit is not left behind in the
-            // coalescing window.
-            onTheMainThread { writer.flush() }
-        }
-    }
-}
-
-/// Keeps high-rate controls out of the preferences encoder.
-///
-/// A slider can publish sixty values a second. Audio applies every one, but a
-/// preferences file only needs the last: serialising the whole model for the
-/// intermediate values stalls the same main actor that is drawing the drag.
-/// The window is fixed from its first value, so continuous movement still
-/// reaches disk periodically rather than postponing the write indefinitely.
-@MainActor
-final class CoalescedPreferenceWriter<Value> {
-    private let delay: Duration
-    private let write: (Value) -> Void
-    private var task: Task<Void, Never>?
-    private(set) var pendingValue: Value?
-    var hasScheduledWrite: Bool { task != nil }
-
-    init(delay: Duration, write: @escaping (Value) -> Void) {
-        self.delay = delay
-        self.write = write
-    }
-
-    func submit(_ value: Value) {
-        pendingValue = value
-        guard task == nil else { return }
-        task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: delay)
-            guard !Task.isCancelled else { return }
-            task = nil
-            writePending()
+    static func flush(timeout: Duration = .seconds(1)) async -> PreferenceFlushResult {
+        await withCheckedContinuation { continuation in
+            writer.flush(timeout: timeout) { result in
+                continuation.resume(returning: result)
+            }
         }
     }
 
-    func flush() {
-        task?.cancel()
-        task = nil
-        writePending()
-    }
-
-    private func writePending() {
-        guard let value = pendingValue else { return }
-        pendingValue = nil
-        write(value)
+    /// Registers the durability boundary before entering AppKit's nested Quit loop.
+    static func flush(
+        timeout: Duration = .seconds(1),
+        completion: @escaping @MainActor @Sendable (PreferenceFlushResult) -> Void
+    ) {
+        writer.flush(timeout: timeout, completion: completion)
     }
 }
 
@@ -475,7 +971,7 @@ enum InterfaceOptions {
 /// the system owns the state, so it is read back rather than mirrored locally.
 @MainActor
 enum LoginItem {
-    enum State: Equatable {
+    enum State: Equatable, Sendable {
         case enabled
         case requiresApproval
         case notRegistered
@@ -483,6 +979,11 @@ enum LoginItem {
     }
 
     static var state: State {
+        readState()
+    }
+
+    /// Reads ServiceManagement without making MainActor wait for its daemon.
+    nonisolated static func readState() -> State {
         switch SMAppService.mainApp.status {
         case .enabled: .enabled
         case .requiresApproval: .requiresApproval

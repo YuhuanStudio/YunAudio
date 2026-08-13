@@ -42,11 +42,13 @@ struct EchoCancellationRetryBacklogTests {
             encoding: .utf8)
         let start = try #require(source.range(of: "public func start() -> Bool"))
         let stop = try #require(
-            source.range(of: "public func stop()", range: start.upperBound..<source.endIndex))
+            source.range(
+                of: "public func stop(timeout:", range: start.upperBound..<source.endIndex))
         let body = source[start.lowerBound..<stop.lowerBound]
 
         #expect(body.contains("for _ in 0..<2"))
-        #expect(body.contains("capture.stop()"))
+        #expect(body.contains("capture.pauseForRetry(until: lifecycleDeadline)"))
+        #expect(body.ranges(of: "HALTeardownDeadline(timeout: 2)").count == 1)
         let drain = try #require(body.range(of: "discardBufferedFrames"))
         let startUnit = try #require(body.range(of: "capture.start"))
         #expect(drain.lowerBound < startUnit.lowerBound)

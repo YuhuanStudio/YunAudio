@@ -171,40 +171,90 @@ echo "Shazam catalogue: unavailable in this ad-hoc build."
 echo "QQ Music and NetEase audio can be captured, but automatic song identification"
 echo "needs a signed App ID with the ShazamKit App Service enabled and runtime verification."
 
-if [[ "${VERIFY}" == "1" ]]; then
-	# The one check that matters for shipping, and the only one that can find
-	# this class of defect: run a copy of the app with the build tree moved out
-	# of reach. SwiftPM's `Bundle.module` quietly falls back to the build
-	# directory, so an app missing its resource bundle entirely works on the
-	# machine that built it and dies on launch everywhere else.
-	echo "verifying the bundle is self-contained…"
-	ISOLATED="$(mktemp -d)"
-	cp -R "${BUNDLE}" "${ISOLATED}/"
-	mv .build "${ISOLATED}/.build-hidden"
-	set +e
-	YUNAUDIO_FLOWCHECK=1 "${ISOLATED}/YunAudio.app/Contents/MacOS/YunAudioApp" \
-		>"${ISOLATED}/out.txt" 2>&1
-	STATUS=$?
-	set -e
-	mv "${ISOLATED}/.build-hidden" .build
-	if [[ "${STATUS}" != "0" ]]; then
-		# The isolated run is the flow check, so a non-zero exit means either
-		# the bundle is incomplete or a flow failed. Saying "not
-		# self-contained" for both sent an hour chasing a missing resource
-		# bundle that was present all along.
-		if grep -q "flow(s) failed" "${ISOLATED}/out.txt"; then
-			echo "error: the bundle is fine, but flows failed:" >&2
-			sed -n '/flow(s) failed/,$p' "${ISOLATED}/out.txt" >&2
-		else
-			echo "error: the app is not self-contained" >&2
-			head -5 "${ISOLATED}/out.txt" >&2
+verify_self_contained_bundle() (
+	# A subshell gives this operation its own EXIT trap. The build tree has to
+	# disappear for the probe, but it must come back even if the copied app
+	# crashes, hangs or the caller interrupts the check.
+	set -euo pipefail
+	local isolated hidden_parent hidden_build isolated_bundle output
+	local check_pid="" waited=0 status=0
+	isolated="$(mktemp -d)"
+	hidden_parent="$(mktemp -d "${PWD}/.yunaudio-bundle-check.XXXXXX")"
+	hidden_build="${hidden_parent}/build-tree"
+	isolated_bundle="${isolated}/$(basename "${BUNDLE}")"
+	output="${isolated}/out.txt"
+
+	cleanup_bundle_check() {
+		local cleanup_status=$?
+		trap - EXIT HUP INT TERM
+		if [[ -n "${check_pid}" ]] && kill -0 "${check_pid}" 2>/dev/null; then
+			kill "${check_pid}" 2>/dev/null || true
+			local stopping=0
+			while kill -0 "${check_pid}" 2>/dev/null && [[ "${stopping}" -lt 5 ]]; do
+				sleep 1
+				stopping=$((stopping + 1))
+			done
+			if kill -0 "${check_pid}" 2>/dev/null; then
+				kill -KILL "${check_pid}" 2>/dev/null || true
+			fi
+			wait "${check_pid}" 2>/dev/null || true
 		fi
-		rm -rf "${ISOLATED}"
+		if [[ -e "${hidden_build}" ]]; then
+			if [[ -e .build ]]; then
+				echo "error: another .build appeared while the bundle check ran" >&2
+				echo "error: the original build tree is preserved at ${hidden_build}" >&2
+				cleanup_status=1
+			elif ! mv "${hidden_build}" .build; then
+				echo "error: could not restore .build from ${hidden_build}" >&2
+				cleanup_status=1
+			fi
+		fi
+		rm -rf "${isolated}"
+		if [[ ! -e "${hidden_build}" ]]; then
+			rmdir "${hidden_parent}" 2>/dev/null || true
+		fi
+		exit "${cleanup_status}"
+	}
+	trap cleanup_bundle_check EXIT
+	trap 'exit 129' HUP
+	trap 'exit 130' INT
+	trap 'exit 143' TERM
+
+	cp -R "${BUNDLE}" "${isolated_bundle}"
+	mv .build "${hidden_build}"
+	YUNAUDIO_BUNDLE_CHECK=1 \
+		"${isolated_bundle}/Contents/MacOS/YunAudioApp" >"${output}" 2>&1 &
+	check_pid=$!
+	while kill -0 "${check_pid}" 2>/dev/null && [[ "${waited}" -lt 15 ]]; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 "${check_pid}" 2>/dev/null; then
+		echo "error: the bundle smoke check did not exit within ${waited}s" >&2
 		exit 1
 	fi
-	grep -E "keys in each table" "${ISOLATED}/out.txt" || true
-	rm -rf "${ISOLATED}"
-	echo "self-contained: it runs with the build tree out of reach"
+	wait "${check_pid}" || status=$?
+	check_pid=""
+	if [[ "${status}" -ne 0 ]]; then
+		echo "error: the app is not self-contained" >&2
+		head -20 "${output}" >&2
+		exit 1
+	fi
+	if ! grep -q '^bundle check:' "${output}"; then
+		echo "error: the isolated app exited without completing its bundle check" >&2
+		head -20 "${output}" >&2
+		exit 1
+	fi
+	grep '^bundle check:' "${output}"
+	echo "self-contained: every shipped resource loaded with the build tree out of reach"
+)
+
+if [[ "${VERIFY}" == "1" ]]; then
+	# This is deliberately not the flow check. Shippability is a filesystem
+	# claim and must neither reserve audio hardware nor inherit coreaudiod's
+	# health. The model-free probe validates every module bundle and language.
+	echo "verifying the bundle is self-contained…"
+	verify_self_contained_bundle
 fi
 
 if [[ "${LAUNCH}" == "1" ]]; then

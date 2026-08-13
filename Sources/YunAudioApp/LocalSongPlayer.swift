@@ -1,6 +1,6 @@
 import AVFoundation
-import AppKit
 import Foundation
+import YunAudioHAL
 import YunAudioObjC
 
 /// Where a song is, when the song is ours to play.
@@ -47,6 +47,65 @@ struct LocalSongClock: Equatable, Sendable {
     }
 }
 
+/// The callback-facing graph whose lifetime must cross a termination timeout.
+///
+/// `AVAudioEngine` and its nodes are used only on MainActor until this owner is
+/// detached. Afterwards the sole shutdown worker is the only code allowed to
+/// touch them; `@unchecked` records that ownership handover rather than making
+/// AVFoundation generally thread-safe.
+private final class LocalSongOutputOwner: @unchecked Sendable {
+    let engine = AVAudioEngine()
+    let node = AVAudioPlayerNode()
+    let transpose = AVAudioUnitTimePitch()
+
+    init() {
+        engine.attach(node)
+        engine.attach(transpose)
+    }
+}
+
+/// Everything an already-scheduled node callback can reach after Quit.
+private final class LocalSongTerminationOwner: @unchecked Sendable {
+    private let output: LocalSongOutputOwner
+    private let file: AVAudioFile?
+    private let decoder: LocalSongCentreDecoder?
+
+    init(
+        output: LocalSongOutputOwner,
+        file: AVAudioFile?,
+        decoder: LocalSongCentreDecoder?
+    ) {
+        self.output = output
+        self.file = file
+        self.decoder = decoder
+    }
+
+    func stop(using gate: OwnedResourceShutdownGate) -> Bool {
+        // Callback publication was revoked before this capsule crossed actors.
+        // Repeating shutdown here orders the decoder's worker before graph
+        // release without relying on the MainActor-side call for ownership.
+        decoder?.shutdown()
+        guard
+            gate.perform({
+                output.node.stop()
+                return true
+            }) == true
+        else { return false }
+        guard let isRunning = gate.perform({ output.engine.isRunning }) else {
+            return false
+        }
+        if isRunning,
+            gate.perform({
+                output.engine.stop()
+                return true
+            }) != true
+        {
+            return false
+        }
+        return gate.perform({ !output.engine.isRunning }) ?? false
+    }
+}
+
 /// A song this application plays itself.
 ///
 /// **Not the routing engine's path, and deliberately not on it.**
@@ -62,8 +121,7 @@ struct LocalSongClock: Equatable, Sendable {
 /// mixed, monitored, scored and recorded exactly as a captured player would be;
 /// if it is the speakers, it simply plays. Both are correct and neither needs a
 /// setting, because both are what "play this file" already means on this Mac.
-@MainActor
-final class LocalSongPlayer {
+final class LocalSongPlayer: @unchecked Sendable {
 
     struct Song: Equatable, Sendable {
         var url: URL
@@ -79,8 +137,7 @@ final class LocalSongPlayer {
     /// and the list is only for the open panel.
     static let openableTypes: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav, .aiff]
 
-    private let engine = AVAudioEngine()
-    private let node = AVAudioPlayerNode()
+    private var output: LocalSongOutputOwner? = LocalSongOutputOwner()
     /// The transpose, which only exists because the song is ours.
     ///
     /// `AVAudioUnitTimePitch` wraps `kAudioUnitSubType_NewTimePitch` — the same
@@ -90,25 +147,53 @@ final class LocalSongPlayer {
     /// of effects with one set of parameters, so raising the key would have
     /// raised the singer and left the backing track where it was. This chain has
     /// exactly one thing in it and the microphone is not in it.
-    private let transpose = AVAudioUnitTimePitch()
     private var file: AVAudioFile?
     private var clock = LocalSongClock()
     /// Where the song was when it was paused. A node that is not running has no
     /// time at all, so this is the only thing that knows.
     private var restingPosition: Double = 0
 
+    /// The file decoder is built only for the processed accompaniment path.
+    /// It owns no player or node, so a read which outlives Stop is a detached
+    /// capsule rather than a late writer into released audio state.
+    private var centreDecoder: LocalSongCentreDecoder?
+    private var isPreparingCentrePlayback = false
+    private var normalOperationQueue: DispatchQueue?
+
     private(set) var song: Song?
     private(set) var isPlaying = false
 
-    init() {
-        engine.attach(node)
-        engine.attach(transpose)
+    private let terminationWorker = BoundedOwnerShutdownWorker<LocalSongTerminationOwner>(
+        label: "com.yuhuanstudio.yunaudio.local-song-shutdown",
+        audioQuarantine: .shared,
+        quarantineReason: "local song output teardown is unresolved",
+        operation: { $0.stop(using: $1) })
+    private var terminationFence: OwnedResourceTeardownFence?
+
+    init() {}
+
+    deinit { centreDecoder?.shutdown() }
+
+    /// Routes decoder publications back to the sole normal-operation owner.
+    func installNormalOperationQueue(_ queue: DispatchQueue) {
+        precondition(normalOperationQueue == nil)
+        normalOperationQueue = queue
+    }
+
+    /// Adopts tags loaded through AVFoundation's asynchronous property API.
+    func applyMetadata(_ metadata: LocalSongMetadataSnapshot) {
+        guard var song, song.url == metadata.url else { return }
+        song.title = metadata.title ?? song.title
+        song.artist = metadata.artist ?? ""
+        song.album = metadata.album ?? ""
+        song.artwork = metadata.artwork
+        self.song = song
     }
 
     /// The transpose in cents, positive up. Takes effect on the next buffer.
     var pitchCents: Float {
-        get { transpose.pitch }
-        set { transpose.pitch = newValue }
+        get { output?.transpose.pitch ?? 0 }
+        set { output?.transpose.pitch = newValue }
     }
 
     /// Whether the lead vocal is being taken out of the mix.
@@ -151,7 +236,8 @@ final class LocalSongPlayer {
         // Only while it is doing something. The unit reports its window
         // whether or not the pitch is being moved, and a stage set to the
         // original key must not be corrected for work nobody asked for.
-        transpose.pitch == 0 ? 0 : transpose.latency
+        guard let transpose = output?.transpose else { return 0 }
+        return transpose.pitch == 0 ? 0 : transpose.latency
     }
 
     /// Why the last song would not open, when the reason was the engine rather
@@ -198,6 +284,7 @@ final class LocalSongPlayer {
     /// - Returns: The song, or nil when nothing on this system can decode it.
     @discardableResult
     func open(_ url: URL) -> Song? {
+        guard let output else { return nil }
         stop()
         guard let opened = try? AVAudioFile(forReading: url) else { return nil }
         let format = opened.processingFormat
@@ -217,8 +304,8 @@ final class LocalSongPlayer {
         // `AVAudioEngineGraph::UpdateGraphAfterReconfig` — an Objective-C
         // exception, which Swift cannot catch, so it took the process with it.
         // A KTV evening is one song after another; this is the second one.
-        engine.disconnectNodeOutput(node)
-        engine.disconnectNodeOutput(transpose)
+        output.engine.disconnectNodeOutput(output.node)
+        output.engine.disconnectNodeOutput(output.transpose)
         // Behind the barrier, because `connect` reports failure by *raising*.
         //
         // The disconnect above was the fix for one instance of this — a stereo
@@ -239,17 +326,17 @@ final class LocalSongPlayer {
         // playing and the time-pitch unit reported no latency, which is what an
         // engine that never started looks like.
         if let raised = catchingObjCException({
-            self.engine.connect(self.node, to: self.transpose, format: format)
-            self.engine.connect(
-                self.transpose, to: self.engine.mainMixerNode, format: format)
+            output.engine.connect(output.node, to: output.transpose, format: format)
+            output.engine.connect(
+                output.transpose, to: output.engine.mainMixerNode, format: format)
         }) {
             // The graph is now half-built, so it is taken down before the
             // second attempt rather than connected on top of itself — which is
             // the mistake that produced the first exception.
-            engine.disconnectNodeOutput(node)
-            engine.disconnectNodeOutput(transpose)
+            output.engine.disconnectNodeOutput(output.node)
+            output.engine.disconnectNodeOutput(output.transpose)
             if let again = Self.connectAtTheMixersOwnFormat(
-                engine: engine, node: node, transpose: transpose)
+                engine: output.engine, node: output.node, transpose: output.transpose)
             {
                 openingError = again
                 self.file = nil
@@ -261,14 +348,13 @@ final class LocalSongPlayer {
         } else {
             openingError = nil
         }
-        let tags = Self.metadata(of: url)
         let song = Song(
             url: url,
-            title: tags.title ?? url.deletingPathExtension().lastPathComponent,
-            artist: tags.artist ?? "",
-            album: tags.album ?? "",
+            title: url.deletingPathExtension().lastPathComponent,
+            artist: "",
+            album: "",
             duration: clock.duration,
-            artwork: tags.artwork)
+            artwork: nil)
         self.song = song
         restingPosition = 0
         return song
@@ -281,7 +367,7 @@ final class LocalSongPlayer {
     ///   worth saying rather than silently doing nothing.
     @discardableResult
     func play(from seconds: Double? = nil) -> Bool {
-        guard let file else { return false }
+        guard let output, let file else { return false }
         let target = seconds ?? restingPosition
         let startFrame = clock.frame(forSeconds: target)
         let remaining = file.length - startFrame
@@ -290,32 +376,49 @@ final class LocalSongPlayer {
             // than as a failure: scheduling zero frames succeeds and then
             // nothing ever happens, which looks like a fault.
             restingPosition = clock.duration
+            scheduleGeneration &+= 1
+            output.node.stop()
+            if output.engine.isRunning { output.engine.pause() }
+            isPreparingCentrePlayback = false
+            retireCentreDecoder()
             isPlaying = false
             return false
         }
-        node.stop()
+
+        // The first seek stops the old run. Another ten thousand seeks while
+        // its replacement is decoding only replace the worker's one pending
+        // slot; none of them reconnects a node or queues another file read.
+        if !isPreparingCentrePlayback { output.node.stop() }
         scheduleGeneration &+= 1
         clock.startFrame = startFrame
         if isCancellingCentre {
-            // Read and processed a second at a time. The alternative is the
-            // whole file in memory — eighty-five megabytes for a four-minute
-            // stereo song — for a mode somebody switches on and off mid-verse.
-            chunkCursor = startFrame
-            for _ in 0..<Self.chunksInFlight { scheduleNextChunk() }
+            guard let url = song?.url else {
+                isPreparingCentrePlayback = false
+                isPlaying = false
+                return false
+            }
+            isPreparingCentrePlayback = true
+            decoderForCentreCancellation().start(
+                url: url, frame: startFrame, generation: scheduleGeneration)
         } else {
-            node.scheduleSegment(
+            isPreparingCentrePlayback = false
+            retireCentreDecoder()
+            output.node.scheduleSegment(
                 file, startingFrame: startFrame, frameCount: AVAudioFrameCount(remaining),
                 at: nil)
         }
-        if !engine.isRunning {
-            engine.prepare()
-            guard (try? engine.start()) != nil else {
+        if !output.engine.isRunning {
+            output.engine.prepare()
+            guard (try? output.engine.start()) != nil else {
+                scheduleGeneration &+= 1
+                isPreparingCentrePlayback = false
+                retireCentreDecoder()
                 isPlaying = false
                 return false
             }
         }
-        node.play()
-        restingPosition = target
+        if !isCancellingCentre { output.node.play() }
+        restingPosition = Double(startFrame) / max(1, clock.sampleRate)
         isPlaying = true
         return true
     }
@@ -336,23 +439,74 @@ final class LocalSongPlayer {
     }
 
     func pause() {
-        guard isPlaying else { return }
+        guard isPlaying, let output else { return }
         scheduleGeneration &+= 1
         restingPosition = position
-        node.pause()
-        engine.pause()
+        if isCancellingCentre {
+            // The old buffers cannot be resumed: their completion ordinals
+            // belong to the decoder lifetime which Pause is retiring.
+            output.node.stop()
+            isPreparingCentrePlayback = false
+            retireCentreDecoder()
+        } else {
+            output.node.pause()
+        }
+        output.engine.pause()
         isPlaying = false
     }
 
     func stop() {
         scheduleGeneration &+= 1
-        node.stop()
-        if engine.isRunning { engine.stop() }
+        if let output {
+            output.node.stop()
+            if output.engine.isRunning { output.engine.stop() }
+        }
+        isPreparingCentrePlayback = false
+        retireCentreDecoder()
         file = nil
         song = nil
         clock = LocalSongClock()
         restingPosition = 0
         isPlaying = false
+    }
+
+    /// Revokes UI and callback publication, then transfers the output graph.
+    ///
+    /// This method performs no AVFoundation stop call. The decoder shutdown is
+    /// lock/atomic-only and makes every already-scheduled node callback inert;
+    /// the graph, file and decoder then move together to the one bounded lane.
+    func requestTerminationStop() -> OwnedResourceTeardownFence {
+        if let terminationFence {
+            guard terminationFence.result?.permitsSameOwnerRetry == true,
+                let retry = terminationWorker.retryAfterTimeoutBeforeEntry()
+            else { return terminationFence }
+            self.terminationFence = retry
+            return retry
+        }
+        scheduleGeneration &+= 1
+        isPreparingCentrePlayback = false
+        isPlaying = false
+        restingPosition = 0
+        clock = LocalSongClock()
+        song = nil
+
+        let decoder = centreDecoder
+        centreDecoder = nil
+        decoder?.shutdown()
+
+        let retainedFile = file
+        file = nil
+        guard let output else {
+            let fence = OwnedResourceTeardownFence(completedWith: .complete)
+            terminationFence = fence
+            return fence
+        }
+        self.output = nil
+        let fence = terminationWorker.submit(
+            LocalSongTerminationOwner(
+                output: output, file: retainedFile, decoder: decoder))
+        terminationFence = fence
+        return fence
     }
 
     /// Seconds into the song, from the samples the output has consumed.
@@ -363,7 +517,7 @@ final class LocalSongPlayer {
     /// ahead of the music by the unit's latency the moment somebody changed
     /// key — and it would read as the lyric file being wrong.
     var position: Double {
-        guard isPlaying,
+        guard let node = output?.node, isPlaying, !isPreparingCentrePlayback,
             let nodeTime = node.lastRenderTime,
             let played = node.playerTime(forNodeTime: nodeTime)
         else { return restingPosition }
@@ -377,82 +531,94 @@ final class LocalSongPlayer {
         return position >= clock.duration - 0.05
     }
 
-    /// A second of audio per chunk, three in flight.
-    ///
-    /// One would leave the output waiting on the main thread between chunks —
-    /// the completion handler arrives on an audio thread and the refill has to
-    /// hop back — and any gap is a click. Three seconds of lead survives a busy
-    /// main thread and is short enough that a seek throws little away.
-    private static let chunkSeconds: Double = 1
-    private static let chunksInFlight = 3
-    private var chunkCursor: AVAudioFramePosition = 0
     /// Bumped wherever scheduling restarts, so a chunk that was already in
     /// flight cannot refill the queue after a seek, a pause or a new song.
-    private var scheduleGeneration = 0
+    private var scheduleGeneration: UInt32 = 0
 
-    private func scheduleNextChunk() {
-        guard isCancellingCentre, let file else { return }
-        let format = file.processingFormat
-        let frames = AVAudioFrameCount(Self.chunkSeconds * format.sampleRate)
-        let remaining = file.length - chunkCursor
-        guard remaining > 0, frames > 0, format.channelCount >= 2,
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
-        else { return }
-        file.framePosition = chunkCursor
-        guard
-            (try? file.read(
-                into: buffer, frameCount: min(frames, AVAudioFrameCount(remaining)))) != nil,
-            buffer.frameLength > 0, let channels = buffer.floatChannelData
-        else { return }
-        CentreCancel.apply(
-            left: channels[0], right: channels[1], frames: Int(buffer.frameLength),
-            amount: CentreCancel.defaultAmount)
-        chunkCursor += AVAudioFramePosition(buffer.frameLength)
-        let generation = scheduleGeneration
-        node.scheduleBuffer(buffer, completionCallbackType: .dataConsumed) { [weak self] _ in
-            // The callback arrives on an audio thread; everything this touches
-            // belongs to the main actor. The generation is what stops a chunk
-            // scheduled before a seek from refilling after one.
-            Task { @MainActor [weak self] in
-                guard let self, self.scheduleGeneration == generation else { return }
-                self.scheduleNextChunk()
+    struct Snapshot: Sendable {
+        let song: Song?
+        let isPlaying: Bool
+        let position: Double
+        let hasFinished: Bool
+        let canCancelCentre: Bool
+        let isCancellingCentre: Bool
+        let pitchCents: Float
+        let transposeLatency: Double
+        let openingError: String?
+        let reconnectionsAtTheMixersFormat: UInt64
+
+        static let empty = Snapshot(
+            song: nil, isPlaying: false, position: 0, hasFinished: false,
+            canCancelCentre: false, isCancellingCentre: false, pitchCents: 0,
+            transposeLatency: 0, openingError: nil,
+            reconnectionsAtTheMixersFormat: 0)
+    }
+
+    /// Value-only state sampled on the player's sole normal-operation lane.
+    func snapshot() -> Snapshot {
+        Snapshot(
+            song: song, isPlaying: isPlaying, position: position,
+            hasFinished: hasFinished, canCancelCentre: canCancelCentre,
+            isCancellingCentre: isCancellingCentre, pitchCents: pitchCents,
+            transposeLatency: transposeLatency, openingError: openingError,
+            reconnectionsAtTheMixersFormat: reconnectionsAtTheMixersFormat)
+    }
+
+    private func decoderForCentreCancellation() -> LocalSongCentreDecoder {
+        if let centreDecoder { return centreDecoder }
+        // Capture the owner once. Reading `normalOperationQueue` from the main
+        // actor while transport mutates the player on that queue would itself
+        // be a race, even though the only action here is handing the value on.
+        let operationQueue = normalOperationQueue
+        let decoder = LocalSongCentreDecoder { @MainActor [weak self, operationQueue] batch in
+            guard let owner = self else { return }
+            if let operationQueue {
+                operationQueue.async { owner.adoptCentreDecoded(batch) }
+            } else {
+                owner.adoptCentreDecoded(batch)
             }
         }
+        centreDecoder = decoder
+        return decoder
     }
 
-    private static func metadata(
-        of url: URL
-    ) -> (
-        title: String?, artist: String?, album: String?, artwork: Data?
-    ) {
-        // The synchronous accessor, deliberately, and the deprecation warnings
-        // it leaves in the build are the price of that. It is deprecated in
-        // favour of an async load; what it buys by staying synchronous is that
-        // `open(_:)` returns a song with its title already in it, so the words
-        // and the lyric lookup have a name to work from at the moment the song
-        // starts rather than a filename that changes under them a beat later.
-        //
-        // The cost is what makes that defensible, and it is now measured rather
-        // than asserted: **0.300 ms** per song on this machine, warm — see
-        // `SongMetadataCostTests`. The comment here used to say "tens of
-        // microseconds", which was an order of magnitude out and nobody had
-        // checked. Against a queue advancing between songs it is still nothing;
-        // against a claim made up, it is the difference the test exists for.
-        let asset = AVURLAsset(url: url)
-        let items = asset.commonMetadata
-        func string(_ key: AVMetadataKey) -> String? {
-            let value = AVMetadataItem.metadataItems(
-                from: items, withKey: key, keySpace: .common
-            ).first?.stringValue
-            let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return (trimmed?.isEmpty ?? true) ? nil : trimmed
-        }
-        let artwork = AVMetadataItem.metadataItems(
-            from: items, withKey: AVMetadataKey.commonKeyArtwork, keySpace: .common
-        ).first?.dataValue
-        return (
-            string(.commonKeyTitle), string(.commonKeyArtist),
-            string(.commonKeyAlbumName), artwork
-        )
+    private func retireCentreDecoder() {
+        centreDecoder?.shutdown()
+        centreDecoder = nil
     }
+
+    private func adoptCentreDecoded(_ batch: LocalSongCentreDecodeBatch) {
+        guard let output, batch.generation == scheduleGeneration, isPlaying,
+            isCancellingCentre,
+            let decoder = centreDecoder
+        else { return }
+        guard !batch.failed, !batch.chunks.isEmpty else {
+            if isPreparingCentrePlayback {
+                isPreparingCentrePlayback = false
+                isPlaying = false
+                if output.engine.isRunning { output.engine.pause() }
+                retireCentreDecoder()
+            }
+            return
+        }
+
+        let mailbox = decoder.completionMailbox
+        for chunk in batch.chunks {
+            let generation = batch.generation
+            let ordinal = chunk.ordinal
+            // The closure is allocated here. Its audio-context invocation is
+            // one atomic publication into a preallocated mailbox and nothing
+            // else — no Task, lock, Objective-C call or buffer allocation.
+            output.node.scheduleBuffer(
+                chunk.buffer, completionCallbackType: .dataConsumed
+            ) { _ in
+                mailbox.completed(generation: generation, ordinal: ordinal)
+            }
+        }
+        if isPreparingCentrePlayback {
+            isPreparingCentrePlayback = false
+            output.node.play()
+        }
+    }
+
 }

@@ -32,8 +32,9 @@ public final class OutputLimiterBank: @unchecked Sendable {
         lookAheadSeconds: Double = 0.001,
         releaseSeconds: Double = 0.05
     ) {
-        guard !channelCounts.isEmpty, channelCounts.allSatisfy({ $0 > 0 && $0 <= 64 }),
-            sampleRate.isFinite, sampleRate >= 8_000, sampleRate <= 384_000,
+        guard !channelCounts.isEmpty, channelCounts.allSatisfy({ $0 > 0 }),
+            AudioProcessingContract.admittedChannelTotal(channelCounts) != nil,
+            AudioProcessingContract.supports(sampleRate: sampleRate),
             ceilingDecibels.isFinite, ceilingDecibels <= 0, ceilingDecibels >= -60,
             lookAheadSeconds.isFinite, lookAheadSeconds >= 0, lookAheadSeconds <= 0.1,
             releaseSeconds.isFinite, releaseSeconds > 0, releaseSeconds <= 10

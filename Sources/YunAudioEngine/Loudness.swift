@@ -47,7 +47,8 @@ public struct LoudnessMeter: Sendable {
     private var shortTermWriteIndex = 0
     private var shortTermCount = 0
 
-    public init(sampleRate: Double) {
+    public init?(sampleRate: Double) {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate) else { return nil }
         self.sampleRate = sampleRate
         blockFrames = Int(sampleRate * 0.4)
         hopFrames = max(1, blockFrames / 4)
@@ -61,7 +62,8 @@ public struct LoudnessMeter: Sendable {
     /// Array headers and allocator metadata are deliberately excluded; this is
     /// the portable lower bound whose lifecycle the analyser can assert.
     static func retainedArrayBytes(sampleRate: Double) -> Int {
-        LoudnessDistribution.retainedArrayBytes
+        guard AudioProcessingContract.supports(sampleRate: sampleRate) else { return 0 }
+        return LoudnessDistribution.retainedArrayBytes
             + Int(sampleRate * 0.4) * MemoryLayout<Double>.stride
             + 30 * MemoryLayout<Double>.stride
     }
@@ -70,6 +72,7 @@ public struct LoudnessMeter: Sendable {
     /// caller with the standard's channel weights; for a microphone there is
     /// one channel and its weight is one.
     public mutating func add(_ samples: UnsafePointer<Float>, count: Int) {
+        guard count > 0 else { return }
         for index in 0..<count {
             let sample = Double(samples[index])
             let magnitude = abs(sample)

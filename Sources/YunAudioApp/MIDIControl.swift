@@ -424,6 +424,275 @@ final class MIDISourceRefreshGate: @unchecked Sendable {
     }
 }
 
+/// Fixed storage for MIDI edges which must retain their arrival order.
+private struct MIDIBoundedRing<Element: Sendable>: Sendable {
+    private var storage: [Element?]
+    private var head = 0
+    private(set) var count = 0
+
+    init(capacity: Int) {
+        precondition(capacity > 0)
+        storage = Array(repeating: nil, count: capacity)
+    }
+
+    mutating func append(_ element: Element) -> Bool {
+        guard count < storage.count else { return false }
+        storage[(head + count) % storage.count] = element
+        count += 1
+        return true
+    }
+
+    mutating func popFirst() -> Element? {
+        guard count > 0 else { return nil }
+        let element = storage[head]
+        storage[head] = nil
+        head = (head + 1) % storage.count
+        count -= 1
+        return element
+    }
+
+    mutating func removeAll() {
+        while popFirst() != nil {}
+    }
+}
+
+/// Coalesces CoreMIDI traffic before it becomes MainActor work.
+///
+/// Notes and controls bound to commands are ordered edges. Continuous CC and
+/// pitch controls keep only their latest value by physical address. Both stores
+/// are finite: overflow is counted rather than disguised as successful delivery.
+final class MIDIMainActorDeliveryMailbox: @unchecked Sendable {
+    static let maximumPendingContinuousAddresses = 256
+    static let maximumPendingEdges = 1_024
+    static let messagesPerDrain = 128
+
+    struct Statistics: Sendable, Equatable {
+        let submittedMessages: UInt64
+        let deliveredMessages: UInt64
+        let scheduledDrains: UInt64
+        let supersededContinuousMessages: UInt64
+        let continuousAddressOverflows: UInt64
+        let edgeOverflows: UInt64
+        let revokedMessages: UInt64
+        let pendingContinuousAddresses: Int
+        let pendingEdges: Int
+        let maximumObservedPendingContinuousAddresses: Int
+        let maximumObservedPendingEdges: Int
+    }
+
+    typealias ScheduledOperation = @MainActor @Sendable () -> Void
+    typealias Schedule = @Sendable (@escaping ScheduledOperation) -> Void
+
+    struct Delivery: Sendable, Equatable {
+        enum Disposition: Sendable, Equatable {
+            case bound(MIDITarget)
+            case learning(MIDITarget)
+            case diagnosticOnly
+        }
+
+        let message: MIDIMessage
+        let disposition: Disposition
+    }
+
+    typealias Deliver = @MainActor @Sendable (UInt64, [Delivery]) -> Void
+
+    private let lock = NSLock()
+    private let schedule: Schedule
+    private let deliver: Deliver
+    private let drainBudget: Int
+    private var activeGeneration: UInt64 = 0
+    private var targetsByAddress: [MIDIAddress: MIDITarget] = [:]
+    private var learningTarget: MIDITarget?
+    private var edges: MIDIBoundedRing<Delivery>
+    private var continuousOrder: MIDIBoundedRing<MIDIAddress>
+    private var latestContinuous: [MIDIAddress: Delivery] = [:]
+    private var drainIsScheduled = false
+    private var submittedMessages: UInt64 = 0
+    private var deliveredMessages: UInt64 = 0
+    private var scheduledDrains: UInt64 = 0
+    private var supersededContinuousMessages: UInt64 = 0
+    private var continuousAddressOverflows: UInt64 = 0
+    private var edgeOverflows: UInt64 = 0
+    private var revokedMessages: UInt64 = 0
+    private var maximumObservedPendingContinuousAddresses = 0
+    private var maximumObservedPendingEdges = 0
+
+    init(
+        maximumPendingContinuousAddresses: Int = maximumPendingContinuousAddresses,
+        maximumPendingEdges: Int = maximumPendingEdges,
+        messagesPerDrain: Int = messagesPerDrain,
+        schedule: @escaping Schedule = { operation in
+            Task { @MainActor in operation() }
+        },
+        deliver: @escaping Deliver
+    ) {
+        precondition(maximumPendingContinuousAddresses > 0)
+        precondition(maximumPendingEdges > 0)
+        precondition(messagesPerDrain > 0)
+        edges = MIDIBoundedRing(capacity: maximumPendingEdges)
+        continuousOrder = MIDIBoundedRing(
+            capacity: maximumPendingContinuousAddresses)
+        drainBudget = messagesPerDrain
+        self.schedule = schedule
+        self.deliver = deliver
+        latestContinuous.reserveCapacity(maximumPendingContinuousAddresses)
+    }
+
+    /// Revokes everything from an earlier CoreMIDI client generation.
+    @MainActor
+    func activate(
+        generation: UInt64, targetsByAddress: [MIDIAddress: MIDITarget],
+        learningTarget: MIDITarget?
+    ) {
+        lock.withLock {
+            revokedMessages &+= UInt64(edges.count + latestContinuous.count)
+            edges.removeAll()
+            continuousOrder.removeAll()
+            latestContinuous.removeAll(keepingCapacity: true)
+            activeGeneration = generation
+            self.targetsByAddress = targetsByAddress
+            self.learningTarget = learningTarget
+        }
+    }
+
+    /// Changes the policy snapshotted by future events.
+    ///
+    /// Pending events keep their original disposition. Clearing them here
+    /// would also erase the diagnostic evidence that the controller sent them.
+    @MainActor
+    func updatePolicy(
+        generation: UInt64, targetsByAddress: [MIDIAddress: MIDITarget],
+        learningTarget: MIDITarget?
+    ) {
+        lock.withLock {
+            guard generation == activeGeneration else { return }
+            self.targetsByAddress = targetsByAddress
+            self.learningTarget = learningTarget
+        }
+    }
+
+    func submit(generation: UInt64, messages: [MIDIMessage]) {
+        let needsSchedule = lock.withLock { () -> Bool in
+            guard generation == activeGeneration else {
+                revokedMessages &+= UInt64(messages.count)
+                return false
+            }
+            for message in messages {
+                submittedMessages &+= 1
+                let disposition: Delivery.Disposition
+                if let learningTarget {
+                    disposition = .learning(learningTarget)
+                } else if let target = targetsByAddress[message.address] {
+                    disposition = .bound(target)
+                } else {
+                    disposition = .diagnosticOnly
+                }
+                let delivery = Delivery(message: message, disposition: disposition)
+                if isEdgeLocked(delivery) {
+                    guard edges.append(delivery) else {
+                        edgeOverflows &+= 1
+                        continue
+                    }
+                    maximumObservedPendingEdges = max(
+                        maximumObservedPendingEdges, edges.count)
+                } else if latestContinuous.updateValue(
+                    delivery, forKey: message.address) != nil
+                {
+                    supersededContinuousMessages &+= 1
+                } else if continuousOrder.append(message.address) {
+                    maximumObservedPendingContinuousAddresses = max(
+                        maximumObservedPendingContinuousAddresses,
+                        latestContinuous.count)
+                } else {
+                    latestContinuous.removeValue(forKey: message.address)
+                    continuousAddressOverflows &+= 1
+                }
+            }
+            guard !drainIsScheduled,
+                edges.count > 0 || !latestContinuous.isEmpty
+            else { return false }
+            drainIsScheduled = true
+            scheduledDrains &+= 1
+            return true
+        }
+        if needsSchedule { scheduleDrain() }
+    }
+
+    var statistics: Statistics {
+        lock.withLock {
+            Statistics(
+                submittedMessages: submittedMessages,
+                deliveredMessages: deliveredMessages,
+                scheduledDrains: scheduledDrains,
+                supersededContinuousMessages: supersededContinuousMessages,
+                continuousAddressOverflows: continuousAddressOverflows,
+                edgeOverflows: edgeOverflows,
+                revokedMessages: revokedMessages,
+                pendingContinuousAddresses: latestContinuous.count,
+                pendingEdges: edges.count,
+                maximumObservedPendingContinuousAddresses:
+                    maximumObservedPendingContinuousAddresses,
+                maximumObservedPendingEdges: maximumObservedPendingEdges)
+        }
+    }
+
+    private func isEdgeLocked(_ delivery: Delivery) -> Bool {
+        if case .note = delivery.message.kind { return true }
+        return switch delivery.disposition {
+        case .bound(let target), .learning(let target): !target.isContinuous
+        case .diagnosticOnly: false
+        }
+    }
+
+    private func scheduleDrain() {
+        schedule { [weak self] in self?.drainOnMainActor() }
+    }
+
+    @MainActor
+    private func drainOnMainActor() {
+        let delivery: (generation: UInt64, deliveries: [Delivery]) = lock.withLock {
+            var deliveries: [Delivery] = []
+            deliveries.reserveCapacity(drainBudget)
+
+            // Reserve half a turn for each class so an edge storm cannot starve
+            // a final fader value, nor a fader storm delay a mute command.
+            let firstEdgeBudget = min(edges.count, drainBudget / 2)
+            for _ in 0..<firstEdgeBudget {
+                if let delivery = edges.popFirst() { deliveries.append(delivery) }
+            }
+            while deliveries.count < drainBudget,
+                let address = continuousOrder.popFirst()
+            {
+                if let delivery = latestContinuous.removeValue(forKey: address) {
+                    deliveries.append(delivery)
+                }
+            }
+            while deliveries.count < drainBudget, let delivery = edges.popFirst() {
+                deliveries.append(delivery)
+            }
+            return (activeGeneration, deliveries)
+        }
+
+        let isCurrent = lock.withLock { delivery.generation == activeGeneration }
+        if isCurrent {
+            deliver(delivery.generation, delivery.deliveries)
+            lock.withLock { deliveredMessages &+= UInt64(delivery.deliveries.count) }
+        } else {
+            lock.withLock { revokedMessages &+= UInt64(delivery.deliveries.count) }
+        }
+
+        let needsAnotherDrain = lock.withLock { () -> Bool in
+            guard edges.count > 0 || !latestContinuous.isEmpty else {
+                drainIsScheduled = false
+                return false
+            }
+            scheduledDrains &+= 1
+            return true
+        }
+        if needsAnotherDrain { scheduleDrain() }
+    }
+}
+
 /// Owns every CoreMIDI object on one serial queue.
 ///
 /// `MIDIClientCreateWithBlock`, port creation and source enumeration are all
@@ -612,6 +881,7 @@ final class MIDIController {
     var learningTarget: MIDITarget? {
         didSet {
             guard oldValue != learningTarget else { return }
+            updateMessageDeliveryPolicy()
             publishClientDemand()
         }
     }
@@ -664,16 +934,21 @@ final class MIDIController {
     /// by target, but incoming messages arrive by address; keeping both indices
     /// avoids scanning every bound fader for every MIDI word.
     @ObservationIgnored private var targetsByAddress: [MIDIAddress: MIDITarget] = [:]
-    @ObservationIgnored private lazy var clientWorker = MIDIClientWorker(
-        onUpdate: { [weak self] publication in
-            Task { @MainActor in self?.applyClientUpdate(publication) }
-        },
-        onMessages: { [weak self] generation, messages in
-            Task { @MainActor in
-                guard self?.clientDemandGeneration == generation else { return }
-                for message in messages { self?.receive(message) }
-            }
+    @ObservationIgnored private lazy var messageMailbox = MIDIMainActorDeliveryMailbox(
+        deliver: { [weak self] generation, deliveries in
+            guard self?.clientDemandGeneration == generation else { return }
+            for delivery in deliveries { self?.receive(delivery) }
         })
+    @ObservationIgnored private lazy var clientWorker: MIDIClientWorker = {
+        let messageMailbox = messageMailbox
+        return MIDIClientWorker(
+            onUpdate: { [weak self] publication in
+                Task { @MainActor in self?.applyClientUpdate(publication) }
+            },
+            onMessages: { generation, messages in
+                messageMailbox.submit(generation: generation, messages: messages)
+            })
+    }()
     @ObservationIgnored private var clientDemandGeneration: UInt64 = 0
     @ObservationIgnored private var clientIsDemanded = false
 
@@ -700,6 +975,7 @@ final class MIDIController {
         // A fresh binding starts disengaged, so the first thing a newly
         // learned fader does is nothing.
         pickups[target] = MIDIPickup()
+        updateMessageDeliveryPolicy()
         onBindingsChanged?()
         publishClientDemand()
     }
@@ -708,6 +984,7 @@ final class MIDIController {
         guard let address = bindings.removeValue(forKey: target) else { return }
         targetsByAddress[address] = nil
         pickups[target] = nil
+        updateMessageDeliveryPolicy()
         onBindingsChanged?()
         publishClientDemand()
     }
@@ -742,12 +1019,51 @@ final class MIDIController {
         bindings = restored
         targetsByAddress = restored.reduce(into: [:]) { $0[$1.value] = $1.key }
         pickups = restored.keys.reduce(into: [:]) { $0[$1] = MIDIPickup() }
+        updateMessageDeliveryPolicy()
     }
 
     // MARK: Receiving
 
     /// One decoded message, from the hardware or from the flow check.
     func receive(_ message: MIDIMessage) {
+        recordDiagnostic(message)
+
+        if let target = learningTarget {
+            receiveForLearning(message, target: target)
+            return
+        }
+
+        let address = message.address
+        guard let target = target(for: address) else { return }
+        receive(message, as: target)
+    }
+
+    /// Applies the disposition captured on the CoreMIDI callback thread.
+    ///
+    /// Every delivery remains diagnostic evidence, while an unbound event can
+    /// never acquire a binding merely because its MainActor drain ran later.
+    func receive(_ delivery: MIDIMainActorDeliveryMailbox.Delivery) {
+        recordDiagnostic(delivery.message)
+        switch delivery.disposition {
+        case .bound(let target):
+            // A binding edited while this delivery waited revokes its action.
+            // Checking both indices prevents the old event from acting on its
+            // former target or being redirected to the replacement target.
+            guard bindings[target] == delivery.message.address,
+                targetsByAddress[delivery.message.address] == target
+            else { return }
+            receive(delivery.message, as: target)
+        case .learning(let target):
+            // Ending or moving learn mode revokes the old action, but not the
+            // diagnostic. In particular, it must not bind the new row.
+            guard learningTarget == target else { return }
+            receiveForLearning(delivery.message, target: target)
+        case .diagnosticOnly:
+            return
+        }
+    }
+
+    private func recordDiagnostic(_ message: MIDIMessage) {
         let now = DispatchTime.now().uptimeNanoseconds
         latestDiagnostic = Diagnostic(message: message, receivedAt: Date())
         if Self.shouldPublishDiagnostics(
@@ -756,19 +1072,21 @@ final class MIDIController {
         {
             publishLatestDiagnostic(now: now)
         }
+    }
 
-        if let target = learningTarget {
-            // Learn on the press, so holding a pad down does not bind and then
-            // immediately act. A knob is bound by the first value it sends,
-            // which is what moving it produces.
-            guard message.isOn else { return }
-            bind(message.address, to: target)
-            learningTarget = nil
-            return
-        }
+    private func receiveForLearning(_ message: MIDIMessage, target: MIDITarget) {
+        // Learn on the press, so holding a pad down does not bind and then
+        // immediately act. A knob is bound by the first value it sends, which
+        // is what moving it produces.
+        guard message.isOn else { return }
+        bind(message.address, to: target)
+        learningTarget = nil
+    }
 
-        let address = message.address
-        guard let target = target(for: address) else { return }
+    /// Uses the target snapshotted when the CoreMIDI callback enqueued this
+    /// message. A binding changed while a MainActor drain waited must not turn
+    /// an old knob movement into a newly assigned mute command.
+    private func receive(_ message: MIDIMessage, as target: MIDITarget) {
         var pickup = pickups[target] ?? MIDIPickup()
         let action = MIDIAction.decide(
             for: message, target: target,
@@ -833,6 +1151,9 @@ final class MIDIController {
         guard !clientIsDemanded else { return }
         clientIsDemanded = true
         clientDemandGeneration &+= 1
+        messageMailbox.activate(
+            generation: clientDemandGeneration,
+            targetsByAddress: targetsByAddress, learningTarget: learningTarget)
         clientWorker.start(
             generation: clientDemandGeneration,
             waitUntilReady: waitUntilReady)
@@ -864,6 +1185,9 @@ final class MIDIController {
         guard clientIsDemanded else { return }
         clientIsDemanded = false
         clientDemandGeneration &+= 1
+        messageMailbox.activate(
+            generation: clientDemandGeneration,
+            targetsByAddress: targetsByAddress, learningTarget: learningTarget)
         clientWorker.stop(
             generation: clientDemandGeneration,
             waitUntilFinished: waitUntilFinished)
@@ -873,6 +1197,16 @@ final class MIDIController {
         _ publication: UInt64, current: UInt64
     ) -> Bool {
         publication == current
+    }
+
+    var deliveryStatistics: MIDIMainActorDeliveryMailbox.Statistics {
+        messageMailbox.statistics
+    }
+
+    private func updateMessageDeliveryPolicy() {
+        messageMailbox.updatePolicy(
+            generation: clientDemandGeneration,
+            targetsByAddress: targetsByAddress, learningTarget: learningTarget)
     }
 }
 
@@ -935,7 +1269,7 @@ extension RouterModel {
             // Through the same door the URL scheme comes in by, so a pad and a
             // Stream Deck key that say the same thing do the same thing.
             guard let parsed = URL(string: url).flatMap(RemoteCommand.parse) else { return }
-            perform(parsed)
+            submitRemoteCommand(parsed) { _ in }
         default:
             return
         }

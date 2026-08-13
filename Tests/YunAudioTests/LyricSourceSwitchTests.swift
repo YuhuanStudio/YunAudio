@@ -25,16 +25,24 @@ struct LyricSourceSwitchTests {
         }
     }
 
-    @Test("a new song starts with no alternatives")
+    @Test("structural lint clears the previous song before adopting the next one")
     func adoptingATrackClearsTheAnswers() throws {
         let source = try model
         let adopt = try #require(source.range(of: "private func adopt(_ track:"))
-        // The first thing it does, before any await can let the button be
-        // pressed against a list belonging to the song that just ended.
-        let opening = source[adopt.lowerBound...].prefix(600)
-        #expect(opening.contains("lyricAnswers = []"))
-        #expect(opening.contains("lyricAlternatives = []"))
-        #expect(opening.contains("lyricSource = nil"))
+        let end = try #require(
+            source.range(
+                of: "private func adoptNowPlayingResources(",
+                range: adopt.upperBound..<source.endIndex))
+        let body = source[adopt.lowerBound..<end.lowerBound]
+        // This is wiring lint, not behavioural evidence: the executable lyric
+        // worker tests own generation and late-publication acceptance.
+        let answers = try #require(body.range(of: "lyricAnswers = []"))
+        let alternatives = try #require(body.range(of: "lyricAlternatives = []"))
+        let sourceReset = try #require(body.range(of: "lyricSource = nil"))
+        let track = try #require(body.range(of: "nowPlaying = track"))
+        #expect(answers.lowerBound < alternatives.lowerBound)
+        #expect(alternatives.lowerBound < sourceReset.lowerBound)
+        #expect(sourceReset.lowerBound < track.lowerBound)
     }
 
     @Test("the button reads this song's answers, not the last lookup's")

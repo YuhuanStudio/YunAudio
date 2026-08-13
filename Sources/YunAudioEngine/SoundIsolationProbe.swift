@@ -1,6 +1,7 @@
 import AudioToolbox
 import AVFoundation
 import Foundation
+import YunAudioHAL
 
 /// What `AUSoundIsolation` actually costs, measured rather than assumed.
 ///
@@ -63,6 +64,23 @@ public enum SoundIsolation {
         blockFrames: Int = 128,
         iterations: Int = 400
     ) -> SoundIsolationReport {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate),
+            AudioProcessingContract.supports(framesPerSlice: blockFrames),
+            (1...10_000).contains(iterations)
+        else {
+            return .init(
+                isAvailable: false, sampleRate: 0, blockFrames: 0,
+                latencySeconds: 0, tailSeconds: 0,
+                medianRenderSeconds: 0, worstRenderSeconds: 0)
+        }
+        var graphAdmission = BoundedAudioUnitDisposer.shared.acquireGraphAdmission()
+        guard graphAdmission != nil else {
+            return .init(
+                isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
+                latencySeconds: 0, tailSeconds: 0,
+                medianRenderSeconds: 0, worstRenderSeconds: 0)
+        }
+        defer { graphAdmission?.release() }
         var description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
             componentSubType: componentSubType,
@@ -78,15 +96,38 @@ public enum SoundIsolation {
         }
 
         var instance: AudioComponentInstance?
-        guard AudioComponentInstanceNew(component, &instance) == noErr,
-            let unit = instance
-        else {
+        let status = AudioComponentInstanceNew(component, &instance)
+        let ownership = AudioComponentCreationOwnership(
+            status: status, instance: instance)
+        guard let unit = ownership.createdInstance else {
+            if let orphaned = ownership.orphanedInstance,
+                let admission = graphAdmission
+            {
+                let capsule = AudioUnitResourceCapsule(
+                    units: [.init(instance: orphaned, initialised: false)])
+                _ = admission.handOffForDisposal(
+                    capsule, until: HALTeardownDeadline(timeout: 2))
+                graphAdmission = nil
+            }
             return .init(
                 isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
                 latencySeconds: 0, tailSeconds: 0,
                 medianRenderSeconds: 0, worstRenderSeconds: 0)
         }
-        defer { AudioComponentInstanceDispose(unit) }
+        var teardownState = AudioUnitTeardownState()
+        var releaseStorage: () -> Void = {}
+        defer {
+            let capsule = AudioUnitResourceCapsule(
+                units: [.init(instance: unit, state: teardownState)],
+                releaseStorage: releaseStorage)
+            if let admission = graphAdmission {
+                _ = admission.handOffForDisposal(
+                    capsule, until: HALTeardownDeadline(timeout: 2))
+                graphAdmission = nil
+            } else {
+                BoundedAudioUnitDisposer.shared.disposeAfterFence(capsule)
+            }
+        }
 
         // Mono float32, non-interleaved: the capsule is mono and isolation is a
         // per-voice operation, so there is nothing to gain from feeding it two
@@ -100,22 +141,36 @@ public enum SoundIsolation {
             mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
 
         let formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-            &format, formatSize)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
-            &format, formatSize)
+        guard
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                &format, formatSize) == noErr,
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
+                &format, formatSize) == noErr
+        else {
+            return .init(
+                isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
+                latencySeconds: 0, tailSeconds: 0,
+                medianRenderSeconds: 0, worstRenderSeconds: 0)
+        }
 
         var maximumFrames = UInt32(blockFrames)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
-            &maximumFrames, UInt32(MemoryLayout<UInt32>.size))
+        guard
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
+                &maximumFrames, UInt32(MemoryLayout<UInt32>.size)) == noErr
+        else {
+            return .init(
+                isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
+                latencySeconds: 0, tailSeconds: 0,
+                medianRenderSeconds: 0, worstRenderSeconds: 0)
+        }
 
         // Feed it band-limited noise. Silence would let a model that gates on
         // input level skip its work entirely and report a flattering time.
         let input = UnsafeMutablePointer<Float>.allocate(capacity: blockFrames)
-        defer { input.deallocate() }
+        releaseStorage = { input.deallocate() }
         var state: UInt32 = 0x1234_5678
         for index in 0..<blockFrames {
             state = state &* 1_664_525 &+ 1_013_904_223
@@ -131,27 +186,48 @@ public enum SoundIsolation {
             }
         }
         let context = RenderContext(source: input, frames: blockFrames)
+        releaseStorage = {
+            input.deallocate()
+            withExtendedLifetime(context) {}
+        }
 
         var callback = AURenderCallbackStruct(
-            inputProc: { refCon, _, _, _, frameCount, ioData in
+            inputProc: { refCon, actionFlags, _, _, frameCount, ioData in
                 let context = Unmanaged<RenderContext>
                     .fromOpaque(refCon).takeUnretainedValue()
-                guard let ioData else { return noErr }
+                guard let count = Int(exactly: frameCount), count <= context.frames,
+                    let byteCount = UInt32(
+                        exactly: count * MemoryLayout<Float>.size),
+                    let ioData
+                else {
+                    actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+                    return kAudioUnitErr_TooManyFramesToProcess
+                }
                 let buffers = UnsafeMutableAudioBufferListPointer(ioData)
                 for index in 0..<buffers.count {
-                    if let data = buffers[index].mData {
-                        let destination = data.assumingMemoryBound(to: Float.self)
-                        let count = min(Int(frameCount), context.frames)
-                        destination.update(from: context.source, count: count)
+                    guard buffers[index].mDataByteSize >= byteCount,
+                        let data = buffers[index].mData
+                    else {
+                        actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+                        return kAudio_ParamError
                     }
+                    let destination = data.assumingMemoryBound(to: Float.self)
+                    destination.update(from: context.source, count: count)
                 }
                 return noErr
             },
             inputProcRefCon: Unmanaged.passUnretained(context).toOpaque())
 
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-            &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+        guard
+            AudioUnitSetProperty(
+                unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
+                &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)) == noErr
+        else {
+            return .init(
+                isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
+                latencySeconds: 0, tailSeconds: 0,
+                medianRenderSeconds: 0, worstRenderSeconds: 0)
+        }
 
         guard AudioUnitInitialize(unit) == noErr else {
             return .init(
@@ -159,7 +235,7 @@ public enum SoundIsolation {
                 latencySeconds: 0, tailSeconds: 0,
                 medianRenderSeconds: 0, worstRenderSeconds: 0)
         }
-        defer { AudioUnitUninitialize(unit) }
+        teardownState.didInitialise()
 
         var latency: Float64 = 0
         var latencySize = UInt32(MemoryLayout<Float64>.size)
@@ -175,9 +251,13 @@ public enum SoundIsolation {
 
         // Render repeatedly and time each pass.
         let outputStorage = UnsafeMutablePointer<Float>.allocate(capacity: blockFrames)
-        defer { outputStorage.deallocate() }
         let bufferList = AudioBufferList.allocate(maximumBuffers: 1)
-        defer { free(bufferList.unsafeMutablePointer) }
+        releaseStorage = {
+            input.deallocate()
+            outputStorage.deallocate()
+            free(bufferList.unsafeMutablePointer)
+            withExtendedLifetime(context) {}
+        }
         bufferList[0] = AudioBuffer(
             mNumberChannels: 1,
             mDataByteSize: UInt32(blockFrames * MemoryLayout<Float>.size),

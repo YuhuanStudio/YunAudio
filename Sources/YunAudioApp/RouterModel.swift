@@ -92,9 +92,273 @@ struct DuckingAllowedGate {
     }
 }
 
+/// Admits one process-local observer restoration for one refused Quit epoch.
+///
+/// Routing teardown can fail after the UI poll and analyser have already been
+/// stopped. The graph then remains the engine's actual retained graph, so those
+/// observers must return without creating another HAL owner. Other teardown
+/// failures happen only after routing is proven down and must restore nothing.
+struct TerminationObserverRecoveryGate: Sendable {
+    struct Demand: Equatable, Sendable {
+        let epoch: UInt64
+        let needsPolling: Bool
+        let analysisSampleRate: Double?
+    }
+
+    private(set) var epoch: UInt64 = 0
+    private var demand: Demand?
+    private var consumedEpoch: UInt64?
+
+    mutating func begin(needsPolling: Bool, analysisSampleRate: Double?) -> UInt64 {
+        epoch &+= 1
+        demand = Demand(
+            epoch: epoch,
+            needsPolling: needsPolling,
+            analysisSampleRate: analysisSampleRate)
+        consumedEpoch = nil
+        return epoch
+    }
+
+    mutating func consume(epoch: UInt64, routingFailed: Bool) -> Demand? {
+        guard routingFailed, epoch == self.epoch, consumedEpoch != epoch,
+            let demand, demand.epoch == epoch
+        else { return nil }
+        consumedEpoch = epoch
+        return demand
+    }
+}
+
+/// Submits teardown to its serial owner and publishes only after it drains.
+///
+/// Kept as a small boundary so a test can hold the work open and prove the
+/// caller returns before it does. The production queue is `RouterModel`'s
+/// engine queue, preserving every start, graph edit and stop in one order.
+private final class EngineShutdownDelivery<Result: Sendable>: @unchecked Sendable {
+    private enum Phase: Equatable {
+        case queued
+        case entered
+        case settled
+    }
+
+    private let lock = NSLock()
+    private var phase = Phase.queued
+    private let completion: @MainActor @Sendable (Result) -> Void
+
+    init(completion: @escaping @MainActor @Sendable (Result) -> Void) {
+        self.completion = completion
+    }
+
+    /// Moves the queued request into its synchronous owner call exactly once.
+    func enter() -> Bool {
+        lock.withLock {
+            guard phase == .queued else { return false }
+            phase = .entered
+            return true
+        }
+    }
+
+    /// Settles a request which actually entered its owner operation.
+    func complete(_ result: Result) {
+        let accepted = lock.withLock {
+            guard phase == .entered else { return false }
+            phase = .settled
+            return true
+        }
+        guard accepted else { return }
+        MainRunLoopDelivery.perform { self.completion(result) }
+    }
+
+    /// Withdraws work which missed queue admission before any operation began.
+    /// A closure already entered is allowed to finish and owns the sole result.
+    func timeOutBeforeEntry(with result: Result) {
+        let accepted = lock.withLock {
+            guard phase == .queued else { return false }
+            phase = .settled
+            return true
+        }
+        guard accepted else { return }
+        MainRunLoopDelivery.perform { self.completion(result) }
+    }
+}
+
+enum EngineShutdownDispatcher {
+    static let routingQueueWaitTimeout: TimeInterval = 2.25
+
+    private static let deadlineQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.engine-shutdown-deadline",
+        qos: .userInitiated)
+
+    static func submit<Result: Sendable>(
+        on queue: DispatchQueue,
+        timeout: TimeInterval? = nil,
+        timeoutResult: Result? = nil,
+        work: @escaping @Sendable () -> Result,
+        completion: @escaping @MainActor @Sendable (Result) -> Void
+    ) {
+        let delivery = EngineShutdownDelivery(completion: completion)
+        queue.async {
+            guard delivery.enter() else { return }
+            delivery.complete(work())
+        }
+        if let timeout, let timeoutResult {
+            deadlineQueue.asyncAfter(deadline: .now() + max(0, timeout)) {
+                delivery.timeOutBeforeEntry(with: timeoutResult)
+            }
+        }
+    }
+}
+
+/// Five-second cadence for replacing an abnormal-exit incident checkpoint.
+///
+/// The twenty-hertz UI poll is already the route's bounded clock. Counting it
+/// avoids another resident timer, while this value type makes the cadence and
+/// its refusal during teardown numerically testable without audio hardware.
+struct AudioIncidentCheckpointCadence: Sendable, Equatable {
+    static let pollInterval = 100
+
+    private(set) var polls = 0
+
+    mutating func advance(isEligible: Bool) -> Bool {
+        guard isEligible else { return false }
+        polls += 1
+        guard polls >= Self.pollInterval else { return false }
+        polls = 0
+        return true
+    }
+
+    mutating func reset() { polls = 0 }
+}
+
+private typealias RouterSystemQueryDelivery = @MainActor @Sendable () -> Void
+
+private struct RouterSystemQueryWork: Sendable {
+    let operation: @Sendable () -> RouterSystemQueryDelivery
+    let deadline: RouterSystemQueryDelivery
+}
+
+/// Lazily owns one bounded serial lane per synchronous system-service domain.
+///
+/// An empty owner is safe in synthetic models: no queue or framework owner is
+/// constructed until a live call site submits work. Invalidation and shutdown
+/// touch only lanes which actually exist, so evidence modes never create a
+/// service merely to tear it down.
+@MainActor
+private final class RouterSystemQueryOwners {
+    private typealias Lane = BoundedSystemQueryLane<
+        RouterSystemQueryWork, RouterSystemQueryDelivery
+    >
+
+    private var lanes: [SystemQuerySubsystem: Lane] = [:]
+
+    @discardableResult
+    func submit(
+        to subsystem: SystemQuerySubsystem,
+        operation: @escaping @Sendable () -> RouterSystemQueryDelivery,
+        deadline: @escaping RouterSystemQueryDelivery
+    ) -> Bool {
+        lane(for: subsystem).submit(
+            RouterSystemQueryWork(operation: operation, deadline: deadline))
+    }
+
+    func invalidate(_ subsystem: SystemQuerySubsystem) {
+        _ = lanes[subsystem]?.invalidate()
+    }
+
+    func invalidateAll() {
+        for lane in lanes.values { _ = lane.invalidate() }
+    }
+
+    func shutdownAll() {
+        for lane in lanes.values { _ = lane.shutdown() }
+    }
+
+    private func lane(for subsystem: SystemQuerySubsystem) -> Lane {
+        if let lane = lanes[subsystem] { return lane }
+        let lane = Lane(
+            subsystem: subsystem,
+            apply: { work, _ in work.operation() },
+            deadlineResponse: { $0.deadline },
+            publish: { delivery in delivery() })
+        lanes[subsystem] = lane
+        return lane
+    }
+}
+
 @Observable
 @MainActor
-final class RouterModel: ScriptTarget {
+final class RouterModel {
+    /// The teardown verdict and the exact graph truth observed after it.
+    ///
+    /// A failed Stop is not permission to keep displaying the pre-stop graph:
+    /// the IOProc may already be gone while an aggregate or tap still refuses
+    /// release. Carrying the snapshot beside the verdict preserves that partial
+    /// truth without asking the engine again on MainActor.
+    private struct EngineStopReport: Sendable {
+        let teardown: RoutingTeardownResult
+        let snapshot: RoutingEngine.EngineUISnapshot
+    }
+
+    /// Identity constraints attached to one queued engine mutation.
+    private struct EngineSnapshotExpectation: Sendable {
+        let routeGeneration: UInt64?
+        let minimumGraphGeneration: UInt64?
+        let requiresStoppedGraph: Bool
+
+        static let any = EngineSnapshotExpectation(
+            routeGeneration: nil, minimumGraphGeneration: nil,
+            requiresStoppedGraph: false)
+    }
+
+    /// Pure admission rule for immutable engine publications.
+    ///
+    /// Generation orders reports which can arrive on MainActor out of order;
+    /// route and graph identities prevent an older mutation from being mistaken
+    /// for the graph which happened to be current when its callback was delivered.
+    nonisolated static func engineSnapshotIsAdmissible(
+        currentGeneration: UInt64,
+        incoming: RoutingEngine.EngineUISnapshot,
+        expectedRouteGeneration: UInt64? = nil,
+        minimumGraphGeneration: UInt64? = nil,
+        requiresStoppedGraph: Bool = false
+    ) -> Bool {
+        guard incoming.generation > currentGeneration else { return false }
+        if let expectedRouteGeneration,
+            incoming.routeGeneration != expectedRouteGeneration
+        {
+            return false
+        }
+        if let minimumGraphGeneration,
+            incoming.graphGeneration < minimumGraphGeneration
+        {
+            return false
+        }
+        if requiresStoppedGraph,
+            incoming.graphGeneration != 0 || !incoming.routes.isEmpty
+        {
+            return false
+        }
+        return true
+    }
+
+    /// Stops one route and hands its value-only evidence to the independent
+    /// first/latest writer before the engine can start another generation.
+    nonisolated private static func stopEngineAndRecord(
+        _ engine: RoutingEngine
+    ) -> EngineStopReport {
+        let teardown = engine.stop()
+        recordPendingEngineIncident(engine)
+        return EngineStopReport(
+            teardown: teardown,
+            snapshot: engine.engineUISnapshot)
+    }
+
+    nonisolated private static func recordPendingEngineIncident(
+        _ engine: RoutingEngine
+    ) {
+        _ = LatestAudioIncidentWriter.shared.submit(
+            engine.takePendingAudioIncidentBundle())
+    }
+
     // MARK: Devices
 
     private(set) var inputDevices: [AudioDevice] = []
@@ -105,6 +369,19 @@ final class RouterModel: ScriptTarget {
     /// Without a third state, those empty launch arrays briefly rendered the
     /// missing-driver warning and then took it back when discovery completed.
     private(set) var deviceInventoryIsReady = false
+    /// Metadata from the last complete inventory, never queried by a view body.
+    ///
+    /// Choosing the default echo speaker used to construct a complete device on
+    /// every SwiftUI evaluation. That both blocked MainActor and asked a
+    /// Bluetooth plug-in for topology merely to find a row already in this list.
+    private var cachedDefaultInputUID: String?
+    private var cachedDefaultOutputUID: String?
+    /// Immutable profiles loaded by the same background owner as the inventory.
+    ///
+    /// Leaving this nil for the first frame is intentional. A view getter may
+    /// return numbered channels briefly; it must never become the lazy trigger
+    /// which walks profile directories on MainActor.
+    private var deviceProfileLibrary: DeviceProfileLibrary?
 
     private struct RestoredDeviceIntent: Sendable {
         let source: String?
@@ -133,6 +410,11 @@ final class RouterModel: ScriptTarget {
     private struct DeviceSelectionWork: Sendable {
         var active: PendingDeviceSelection
         var latest: PendingDeviceSelection? = nil
+    }
+
+    private struct HydratedSelectionRequest: Sendable {
+        let pending: PendingDeviceSelection
+        let target: DeviceSelectionTarget
     }
 
     /// A metadata-only Bluetooth row is not a route yet. The old selection stays
@@ -198,24 +480,22 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    /// Verification is unattended and must neither open saved hardware nor
-    /// rewrite the person's saved route while it drives a temporary one.
-    private static let isVerificationProcess: Bool = {
-        let environment = ProcessInfo.processInfo.environment
-        return environment["YUNAUDIO_FLOWCHECK"] != nil
-            || environment["YUNAUDIO_SCREENSHOT"] != nil
-            || environment["YUNAUDIO_RENDER"] != nil
-            || environment["YUNAUDIO_ICON"] != nil
-            || environment["YUNAUDIO_UI_BENCHMARK"] != nil
-    }()
-
-    /// The UI benchmark is deliberately more constrained than other verification.
+    /// Resolved before the first owner with machine-wide effects is constructed.
     ///
-    /// Render and flow verification need a real inventory. This one exists to
-    /// separate SwiftUI work from the router, so even enumerating HAL or starting
-    /// MIDI would put an unknown system cost back into the number it reports.
-    private static let isUIBenchmarkProcess =
-        ProcessInfo.processInfo.environment["YUNAUDIO_UI_BENCHMARK"] != nil
+    /// Keeping this as an injected value also lets tests execute the zero-owner
+    /// boundary without setting process-global environment variables.
+    private let startupPolicy: AppStartup.ModelPolicy
+
+    /// Verification never rewrites the person's saved route while using a fixture.
+    private var isVerificationProcess: Bool { startupPolicy.isVerification }
+
+    /// The exact number of launch paths authorised to wake machine-owned state.
+    ///
+    /// Kept on the model as executable evidence that the policy resolved before
+    /// construction is the one this instance actually received.
+    var startupLiveServiceAdmissionCount: Int {
+        startupPolicy.liveServiceAdmissionCount
+    }
 
     /// The user's real input choices while a verification route is temporary.
     @ObservationIgnored private var verificationSourceUID: String?
@@ -228,7 +508,7 @@ final class RouterModel: ScriptTarget {
     /// a local input or decline to open audio at all.
     @discardableResult
     func prepareForAutomatedAudioUse() -> Bool {
-        if Self.isVerificationProcess, verificationAdditionalSourceUIDs == nil {
+        if isVerificationProcess, verificationAdditionalSourceUIDs == nil {
             verificationSourceUID = selectedSourceUID
             verificationAdditionalSourceUIDs = additionalSourceUIDs
         }
@@ -270,6 +550,7 @@ final class RouterModel: ScriptTarget {
             // The gain and the monitor belong to whichever microphone this now
             // is, and a stale reading would put the last device's slider under
             // the new device's name until the next poll.
+            invalidateHardwareControlWrites()
             pendingHardwareGain = nil
             pendingHardwareMonitor = nil
             publish(nil, to: \.hardwareGainReading)
@@ -278,6 +559,7 @@ final class RouterModel: ScriptTarget {
             if !isRestoring, !isCommittingHydratedDeviceSelection {
                 hydrateConfiguredDevicesAsynchronously()
             }
+            if !isRestoring { refreshVoiceActivityAvailability() }
             persist()
             rerouteAfterDeviceChange()
         }
@@ -347,6 +629,20 @@ final class RouterModel: ScriptTarget {
     /// Every output the send is written to, the primary first.
     var activeDestinationUIDs: [String] {
         (selectedDestinationUID.map { [$0] } ?? []) + additionalDestinationUIDs
+    }
+
+    /// Process taps which can still fit beside one route's hardware members.
+    ///
+    /// Taps are created before `RoutingEngine.start`, because their channel
+    /// formats are part of the route. Admission inside the engine is therefore
+    /// too late to prevent an oversized selection from issuing many synchronous
+    /// `AudioHardwareCreateProcessTap` calls. Keep this calculation pure and
+    /// apply it before capture preparation touches HAL.
+    nonisolated static func captureTapCapacity(hardwareEndpointUIDs: [String]) -> Int {
+        let hardwareCount = Set(hardwareEndpointUIDs.filter { !$0.isEmpty }).count
+        return min(
+            RoutingEngine.maximumProcessTaps,
+            max(0, RoutingEngine.maximumAggregateEndpoints - hardwareCount))
     }
 
     /// Inputs that could still be added: present, with channels, and not
@@ -519,7 +815,13 @@ final class RouterModel: ScriptTarget {
     /// problem, and worse than the file for somebody's exact unit.
     private(set) var headphoneProfiles: [ParametricEQ] = []
     @ObservationIgnored private var headphoneProfilesWereRequested = false
-    @ObservationIgnored private var headphoneProfileRefreshGate = LatestRefreshGate()
+    @ObservationIgnored private(set) var headphoneProfileRefreshRevision: UInt64 = 0
+    @ObservationIgnored private lazy var headphoneProfileWorker =
+        HeadphoneProfileWorker { [weak self] snapshot in
+            guard let self else { return }
+            self.headphoneProfileRefreshRevision &+= 1
+            self.applyHeadphoneProfiles(snapshot.profiles)
+        }
 
     /// Ten slider positions per bus, in decibels, at the band centres in
     /// `ParametricEQ`, keyed by the bus's output device UID.
@@ -547,6 +849,18 @@ final class RouterModel: ScriptTarget {
         let graphic: [String: [Float]]
         let profileNames: [String: String]
         let profiles: [ParametricEQ]
+    }
+
+    private struct CorrectionUpdateRequest: Sendable {
+        let corrections: CorrectionSnapshot
+        let routeGeneration: UInt64
+        let graphGeneration: UInt64
+    }
+
+    private struct CorrectionUpdateReport: Sendable {
+        let request: CorrectionUpdateRequest
+        let reached: Int
+        let snapshot: RoutingEngine.EngineUISnapshot
     }
 
     /// The tone control for one bus, ten bands, flat when it has never been set.
@@ -668,60 +982,22 @@ final class RouterModel: ScriptTarget {
     }
 
     func refreshHeadphoneProfiles() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         headphoneProfilesWereRequested = true
-        headphoneProfileRefreshGate.invalidate()
-        applyHeadphoneProfiles(Self.readHeadphoneProfiles())
+        _ = headphoneProfileWorker.submit(
+            HeadphoneProfileWorker.Request(directory: Self.headphoneDirectory))
     }
 
     func refreshHeadphoneProfilesIfNeeded() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard !headphoneProfilesWereRequested else { return }
         refreshHeadphoneProfilesAsynchronously()
     }
 
     func refreshHeadphoneProfilesAsynchronously() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         headphoneProfilesWereRequested = true
-        guard let token = headphoneProfileRefreshGate.request() else { return }
-        runHeadphoneProfileRefresh(token)
-    }
-
-    nonisolated private static func readHeadphoneProfiles() -> [ParametricEQ] {
-        guard let directory = Self.headphoneDirectory,
-            let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
-        else { return [] }
-        return
-            names
-            .filter { $0.lowercased().hasSuffix(".txt") }
-            .sorted()
-            .compactMap { file in
-                guard
-                    let text = try? String(
-                        contentsOf: directory.appendingPathComponent(file), encoding: .utf8)
-                else { return nil }
-                // Named after the file rather than after anything inside it:
-                // AutoEq's exports carry no name, and the file is called after
-                // the headphone because that is how somebody downloaded it.
-                return ParametricEQ.parse(
-                    text, name: (file as NSString).deletingPathExtension)
-            }
-    }
-
-    private func runHeadphoneProfileRefresh(_ token: LatestRefreshGate.Token) {
-        systemDiscoveryQueue.async {
-            let profiles = Self.readHeadphoneProfiles()
-            Task { @MainActor in
-                self.finishHeadphoneProfileRefresh(profiles, token: token)
-            }
-        }
-    }
-
-    private func finishHeadphoneProfileRefresh(
-        _ profiles: [ParametricEQ], token: LatestRefreshGate.Token
-    ) {
-        guard headphoneProfileRefreshGate.accepts(token) else { return }
-        applyHeadphoneProfiles(profiles)
-        if case .start(let next) = headphoneProfileRefreshGate.finish(token) {
-            runHeadphoneProfileRefresh(next)
-        }
+        refreshHeadphoneProfiles()
     }
 
     private func applyHeadphoneProfiles(_ profiles: [ParametricEQ]) {
@@ -761,8 +1037,18 @@ final class RouterModel: ScriptTarget {
     /// model reinstalls them afterwards and the model never did. What is
     /// tracked is what actually reached the graph, so a check can ask.
     @discardableResult
-    func applyCorrections() -> Int {
-        correctionApplier.flush(correctionSnapshot)
+    func applyCorrections() async -> Int {
+        let request = makeCorrectionUpdateRequest()
+        let engine = engine
+        return await withCheckedContinuation { continuation in
+            engineQueue.async {
+                let report = Self.applyCorrectionUpdate(request, to: engine)
+                MainRunLoopDelivery.perform {
+                    self.publishCorrectionUpdate(report)
+                    continuation.resume(returning: report.reached)
+                }
+            }
+        }
     }
 
     /// One cheap COW snapshot per gesture event. Curves and coefficients are
@@ -813,11 +1099,11 @@ final class RouterModel: ScriptTarget {
     /// Which buses have a curve, and which the graph can actually reach.
     var correctionBusReport: String {
         let wanted = Self.correctionCurves(from: correctionSnapshot).keys.sorted()
-        return "curve on \(wanted), graph has \(engine.outputDeviceUIDs)"
+        return "curve on \(wanted), graph has \(engineSnapshot.outputDeviceUIDs)"
     }
 
     /// Why the last correction install did nothing, straight from the engine.
-    var lastCorrectionOutcome: String { engine.lastCorrectionOutcome.rawValue }
+    var lastCorrectionOutcome: String { engineSnapshot.correctionOutcome.rawValue }
 
     /// How many live buses actually have a curve to push.
     ///
@@ -830,7 +1116,37 @@ final class RouterModel: ScriptTarget {
     }
 
     private func scheduleCorrections() {
-        correctionApplier.submit(correctionSnapshot)
+        correctionApplier.submit(makeCorrectionUpdateRequest())
+    }
+
+    private func makeCorrectionUpdateRequest() -> CorrectionUpdateRequest {
+        CorrectionUpdateRequest(
+            corrections: correctionSnapshot,
+            routeGeneration: engineSnapshot.routeGeneration,
+            graphGeneration: engineSnapshot.graphGeneration)
+    }
+
+    nonisolated private static func applyCorrectionUpdate(
+        _ request: CorrectionUpdateRequest,
+        to engine: RoutingEngine
+    ) -> CorrectionUpdateReport {
+        let reached = engine.setCorrections(
+            correctionCurves(from: request.corrections))
+        return CorrectionUpdateReport(
+            request: request,
+            reached: reached,
+            snapshot: engine.engineUISnapshot)
+    }
+
+    private func publishCorrectionUpdate(_ report: CorrectionUpdateReport) {
+        let adopted = adoptEngineSnapshot(
+            report.snapshot,
+            expecting: EngineSnapshotExpectation(
+                routeGeneration: report.request.routeGeneration,
+                minimumGraphGeneration: report.request.graphGeneration,
+                requiresStoppedGraph: false))
+        guard adopted else { return }
+        publishCorrectionCount(report.reached)
     }
 
     private func publishCorrectionCount(_ reached: Int) {
@@ -892,10 +1208,43 @@ final class RouterModel: ScriptTarget {
     /// The same, in frames, which is what the HAL is told.
     private var outputLatencyFrames: [String: Int] {
         let rate = pathQuality?.sampleRate ?? preferredSampleRate
-        return outputDelays.compactMapValues { milliseconds in
-            let frames = Int((milliseconds / 1000) * rate)
-            return frames > 0 ? frames : nil
+        let active = Set(
+            activeDestinationUIDs + (monitorDeviceUID.map { [$0] } ?? []))
+        return Self.outputLatencyFrames(
+            delays: outputDelays, sampleRate: rate, activeUIDs: active)
+    }
+
+    nonisolated static func outputLatencyFrames(
+        delays: [String: Double], sampleRate: Double, activeUIDs: Set<String>
+    ) -> [String: Int] {
+        guard AudioHardwareValuePolicy.supports(sampleRate: sampleRate) else { return [:] }
+        var admitted: [String: Int] = [:]
+        admitted.reserveCapacity(min(delays.count, activeUIDs.count))
+        for (uid, milliseconds) in delays where activeUIDs.contains(uid) {
+            guard milliseconds.isFinite, milliseconds > 0,
+                milliseconds <= maximumOutputDelay,
+                !uid.isEmpty, uid.utf8.count <= maximumOutputDelayIdentifierBytes
+            else { continue }
+            let value = milliseconds * sampleRate / 1_000
+            guard value.isFinite, value >= 1,
+                value <= Double(RoutingEngine.maximumExtraOutputLatencyFrames)
+            else { continue }
+            admitted[uid] = Int(value.rounded(.towardZero))
         }
+        return admitted
+    }
+
+    nonisolated static func sanitisedOutputDelays(
+        _ delays: [String: Double]
+    ) -> [String: Double] {
+        let admitted = delays.filter { uid, value in
+            !uid.isEmpty && uid.utf8.count <= maximumOutputDelayIdentifierBytes
+                && value.isFinite && value > 0 && value <= maximumOutputDelay
+        }
+        return Dictionary(
+            uniqueKeysWithValues: admitted.sorted { $0.key < $1.key }
+                .prefix(RoutingEngine.maximumAggregateEndpoints)
+                .map { ($0.key, $0.value) })
     }
 
     /// True when the system's volume keys will not move the selected output.
@@ -941,6 +1290,52 @@ final class RouterModel: ScriptTarget {
         let destinationHasVolumeControl: Bool
     }
 
+    private enum HardwareControlKind: Sendable {
+        case inputGain
+        case playThrough
+    }
+
+    private struct HardwareControlWrite: Sendable {
+        let device: AudioDevice
+        let scalar: Float
+        let kind: HardwareControlKind
+        let elements: [AudioObjectPropertyElement]
+    }
+
+    private struct HardwareControlWriteResult: Sendable {
+        let succeeded: Bool
+    }
+
+    private struct HardwareControlWriteBatch: Sendable {
+        let gain: HardwareControlWrite?
+        let monitor: HardwareControlWrite?
+
+        var writes: [HardwareControlWrite] { [gain, monitor].compactMap { $0 } }
+    }
+
+    /// One HAL write with no MainActor state attached to it.
+    nonisolated private static func writeHardwareControl(
+        _ request: HardwareControlWrite
+    ) -> HardwareControlWriteResult {
+        do {
+            switch request.kind {
+            case .inputGain:
+                try request.device.setHardwareGain(
+                    scalar: request.scalar,
+                    scope: kAudioObjectPropertyScopeInput,
+                    elements: request.elements)
+            case .playThrough:
+                try request.device.setHardwareGain(
+                    scalar: request.scalar,
+                    scope: kAudioDevicePropertyScopePlayThrough,
+                    elements: request.elements)
+            }
+            return HardwareControlWriteResult(succeeded: true)
+        } catch {
+            return HardwareControlWriteResult(succeeded: false)
+        }
+    }
+
     /// True when a window that draws any of them is on screen.
     ///
     /// The menu bar panel reads none of these and the inspector reads all of
@@ -972,6 +1367,7 @@ final class RouterModel: ScriptTarget {
     /// Schedules the HAL reads; this method itself is safe to call from a view
     /// lifecycle or a selection observer on MainActor.
     func refreshDeviceControls() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard let token = deviceControlRefreshGate.request() else { return }
         runDeviceControlRefresh(token)
     }
@@ -979,22 +1375,38 @@ final class RouterModel: ScriptTarget {
     private func runDeviceControlRefresh(_ token: LatestRefreshGate.Token) {
         let source = selectedSource
         let destination = selectedDestination
-        let queue = engineQueue
-        queue.async { [weak self] in
-            let snapshot = Self.readDeviceControlSnapshot(
-                sourceUID: source?.uid,
-                destinationUID: destination?.uid,
-                readsHardwareGain: { _ in
-                    source?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
-                },
-                readsHardwareMonitor: { _ in source?.playThrough() },
-                readsDestinationVolumeControl: { _ in
-                    destination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput)
-                        ?? true
-                })
-            Task { @MainActor in
-                self?.finishDeviceControlRefresh(snapshot, token: token)
-            }
+        let admitted = systemQueryOwners.submit(
+            to: .hardwareRead,
+            operation: { [weak self] in
+                let snapshot = Self.readDeviceControlSnapshot(
+                    sourceUID: source?.uid,
+                    destinationUID: destination?.uid,
+                    readsHardwareGain: { _ in
+                        source?.hardwareGain(scope: kAudioObjectPropertyScopeInput)
+                    },
+                    readsHardwareMonitor: { _ in source?.playThrough() },
+                    readsDestinationVolumeControl: { _ in
+                        destination?.hasSettableVolume(
+                            scope: kAudioObjectPropertyScopeOutput) ?? true
+                    })
+                return { [weak self] in
+                    self?.finishDeviceControlRefresh(snapshot, token: token)
+                }
+            },
+            deadline: { [weak self] in
+                self?.finishDeviceControlRefreshWithoutSnapshot(token)
+            })
+        if !admitted {
+            finishDeviceControlRefreshWithoutSnapshot(token)
+        }
+    }
+
+    private func finishDeviceControlRefreshWithoutSnapshot(
+        _ token: LatestRefreshGate.Token
+    ) {
+        guard deviceControlRefreshGate.accepts(token) else { return }
+        if case .start(let next) = deviceControlRefreshGate.finish(token) {
+            runDeviceControlRefresh(next)
         }
     }
 
@@ -1063,8 +1475,17 @@ final class RouterModel: ScriptTarget {
     var hardwareMonitorScalar: Float {
         get { pendingHardwareMonitor ?? hardwareMonitorReading?.scalar ?? 0 }
         set {
-            pendingHardwareMonitor = newValue
-            try? selectedSource?.setPlayThrough(scalar: max(0, min(1, newValue)))
+            guard newValue.isFinite else { return }
+            let scalar = max(0, min(1, newValue))
+            pendingHardwareMonitor = scalar
+            guard let device = selectedSource,
+                let reading = hardwareMonitorReading,
+                !reading.settableElements.isEmpty
+            else { return }
+            latestHardwareMonitorWrite = HardwareControlWrite(
+                device: device, scalar: scalar, kind: .playThrough,
+                elements: reading.settableElements)
+            submitHardwareControlBatch()
         }
     }
     private var pendingHardwareMonitor: Float?
@@ -1087,7 +1508,28 @@ final class RouterModel: ScriptTarget {
     // MARK: Singing
 
     /// What a music player is playing right now, when the panel is open.
-    private(set) var nowPlaying: NowPlaying.Track?
+    private(set) var nowPlaying: NowPlaying.Track? {
+        didSet {
+            if oldValue?.application != nowPlaying?.application
+                || oldValue?.identity != nowPlaying?.identity
+            {
+                refreshNowPlayingControlTarget()
+            }
+        }
+    }
+    /// Constructed only after a live process submits an external player command.
+    /// Synthetic render and screenshot models therefore retain zero blocking
+    /// Apple-event owners even when they carry fixture track metadata.
+    @ObservationIgnored private var madeNowPlayingControlWorker: NowPlayingControlWorker?
+    @ObservationIgnored private var nowPlayingControlTarget: NowPlayingControlTarget?
+
+    var nowPlayingControlOwnerCountForDiagnostics: Int {
+        madeNowPlayingControlWorker == nil ? 0 : 1
+    }
+
+    var nowPlayingControlStatisticsForDiagnostics: NowPlayingControlWorker.Statistics? {
+        madeNowPlayingControlWorker?.statistics
+    }
     /// Why source-independent audio recognition could not answer.
     private(set) var musicRecognitionProblem: String?
     /// Nil until captured audio from a player without scripting support needs
@@ -1165,6 +1607,11 @@ final class RouterModel: ScriptTarget {
     /// feature is broken. Both presentations show it now; only one used to.
     var lyricsAreTimed: Bool { lyrics?.lines.contains { $0.time > 0 } ?? false }
     @ObservationIgnored private var lyricsLookupTask: Task<Void, Never>?
+    @ObservationIgnored private var nowPlayingResourceGeneration: UInt64 = 0
+    @ObservationIgnored private lazy var nowPlayingResourceWorker =
+        NowPlayingResourceWorker { [weak self] snapshot in
+            self?.adoptNowPlayingResources(snapshot)
+        }
     /// Which line is being sung, and how far through it.
     private(set) var lyricLine: Int?
     private(set) var lyricProgress: Double = 0
@@ -1216,7 +1663,15 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != isSingingVisible else { return }
             refreshAnalysisNeeds()
-            if isSingingVisible { refreshNowPlaying(); updateSinging() } else { clearSinging() }
+            if isSingingVisible {
+                if startupPolicy.startsLiveServicesAfterLaunch {
+                    refreshNowPlaying()
+                    updateSinging()
+                }
+            } else {
+                clearSinging()
+            }
+            requestSourceTapTopology()
             // The poll has to exist for the words to move.
             //
             // `startPolling` was called from one place — the completion of a
@@ -1256,12 +1711,8 @@ final class RouterModel: ScriptTarget {
     /// The pitch track of whoever is singing — the first source that is a real
     /// input rather than a captured application, since a captured application
     /// is the backing track by definition.
-    private var singerTrack: SingerPitch? {
-        for (index, track) in singerTracks.enumerated()
-        where index < scoringIsBackingTrack.count && !scoringIsBackingTrack[index] {
-            return track
-        }
-        return nil
+    private var singerTrack: SingingAnalysedSource? {
+        singingAnalysisSnapshot?.sources.first { $0.role == .voice }
     }
 
     /// Folds the current chroma into the key estimate.
@@ -1275,6 +1726,9 @@ final class RouterModel: ScriptTarget {
     /// opened. See `KeyDetector.leastWindowsForAKey`.
     @ObservationIgnored private(set) var chromaWindows = 0
     @ObservationIgnored private var pollsSinceChroma = 0
+    /// Prevents the same background FFT snapshot being folded several times
+    /// merely because MainActor polled faster than the analysis worker.
+    @ObservationIgnored private var lastChromaGeneration: UInt64 = 0
 
     /// Total spectral magnitude folded into the current key estimate.
     ///
@@ -1304,7 +1758,10 @@ final class RouterModel: ScriptTarget {
         pollsSinceChroma += 1
         guard pollsSinceChroma >= Self.chromaEveryNPolls else { return }
         pollsSinceChroma = 0
-        guard let chroma = analyser?.chroma(), chroma.count == 12 else { return }
+        let snapshot = analysisSnapshot
+        guard snapshot.latestGeneration != lastChromaGeneration else { return }
+        lastChromaGeneration = snapshot.latestGeneration
+        guard let chroma = snapshot.chroma, chroma.count == 12 else { return }
         for index in 0..<12 { chromaTotal[index] += chroma[index] }
         chromaWindows += 1
         // Nothing is published until enough of the piece has gone in. The first
@@ -1346,18 +1803,20 @@ final class RouterModel: ScriptTarget {
 
     private func clearSinging() {
         cancelLyricsLookup()
+        invalidateHandWordsResourceRequest()
         releaseMusicRecognition()
         nowPlayingSessionGeneration &+= 1
         isAskingThePlayer = false
         recognisedApplication = nil
         recognitionSourceUID = nil
         musicRecognitionProblem = nil
-        isScoringSinging = false
+        setScoringActive(false, preservingWish: true)
         songKey = nil
         suggestedShift = nil
         chromaTotal = [Double](repeating: 0, count: 12)
         chromaWindows = 0
         pollsSinceChroma = 0
+        lastChromaGeneration = 0
         nowPlaying = nil
         nowPlayingFailure = nil
         lyrics = nil
@@ -1365,7 +1824,9 @@ final class RouterModel: ScriptTarget {
         lyricsSourceName = nil
         lyricsCopyright = nil
         lyricsRegion = nil
+        localWordsError = nil
         melody = nil
+        fileLyricOffset = 0
         lyricLine = nil
         lyricProgress = 0
         lyricPlaybackAnchor = nil
@@ -1374,7 +1835,7 @@ final class RouterModel: ScriptTarget {
         trackClock.stop()
         pollsSinceNowPlaying = Self.nowPlayingEveryNPolls
         pollsSinceLyricFrame = Self.lyricFrameEveryNPolls
-        releaseSingerTracks()
+        requestSourceTapTopology()
     }
 
     // MARK: Scoring, and duets
@@ -1496,31 +1957,8 @@ final class RouterModel: ScriptTarget {
         guard isScoringSinging, let finished,
             singers.contains(where: { $0.score.isMeaningful })
         else { return }
-        // The alignment happens here and nowhere else, and the timing is why.
-        //
-        // The live score is incremental — it has to be, four times a second
-        // over a growing performance — and an incremental score cannot be
-        // realigned, because the alignment of the whole is not the sum of the
-        // alignments of the parts. Doing it at the end costs one pass over a
-        // finished performance, on a main thread that has just stopped having
-        // anything else to do, and gives the reading somebody actually keeps.
-        //
-        // Beside the live number rather than replacing it: what somebody
-        // watches while singing and what they are told at the end must agree
-        // about what they did, and they would not if one were aligned.
-        let lines = lyrics?.lines ?? []
-        let aligned = singers.enumerated().map { index, singer -> Singer in
-            guard singerTracks.indices.contains(index) else { return singer }
-            let timing = KaraokeScore.timing(
-                sung: singerTracks[index].samples,
-                reference: scoringReference,
-                lyrics: lines)
-            return Singer(
-                uid: singer.uid, name: singer.name, hertz: singer.hertz,
-                score: singer.score.withTiming(timing))
-        }
         lastPerformance = Performance(
-            title: finished.title, artist: finished.artist, singers: aligned)
+            title: finished.title, artist: finished.artist, singers: singers)
     }
     /// Set when scoring could not start, in words somebody can act on.
     private(set) var singingError: String?
@@ -1557,41 +1995,64 @@ final class RouterModel: ScriptTarget {
     /// person.
     @ObservationIgnored private var isRefusingToScore = false
 
+    /// Changes the live switch for an internal lifecycle transition without
+    /// erasing the persisted wish which should resume on the next route.
+    private func setScoringActive(_ active: Bool, preservingWish: Bool) {
+        guard active != isScoringSinging else { return }
+        if preservingWish, !active {
+            var state = ScoringWishState(
+                requested: wantsScoring, active: isScoringSinging)
+            state.suspend()
+            wantsScoring = state.requested
+        }
+        if preservingWish { isRefusingToScore = true }
+        isScoringSinging = active
+        if preservingWish { isRefusingToScore = false }
+    }
+
+    /// The switch represents the persisted request, not whether admission is
+    /// currently possible. An internal failure can suspend scoring without
+    /// making it impossible for somebody to turn their request off.
+    var isScoringRequested: Bool { wantsScoring }
+
+    func setScoringRequested(_ requested: Bool) {
+        var state = ScoringWishState(
+            requested: wantsScoring, active: isScoringSinging)
+        guard state.setByUser(requested, routeIsRunning: isRunning) else { return }
+        wantsScoring = state.requested
+        persist()
+        setScoringActive(state.active, preservingWish: true)
+        if requested, !isRunning {
+            singingError = loc("Start routing before it can score you.")
+        }
+    }
+
     /// Whether somebody asked for scoring, as opposed to whether it is running.
     ///
     /// The two differ for the whole of a launch: the wish survives, and the
     /// route it needs does not exist until `start`. Kept separately so that
     /// wanting to be scored is remembered even on the evenings the route never
     /// comes up.
-    @ObservationIgnored private(set) var wantsScoring = false
+    private(set) var wantsScoring = false
 
+    @ObservationIgnored private var pollsSinceScore = 0
+    @ObservationIgnored private var singingResetToken: UInt64 = 0
+    @ObservationIgnored private var singingReferenceVersion: UInt64 = 0
+    @ObservationIgnored private var singingAnalysisSnapshot: SingingAnalysisSnapshot?
+    // Retained only until the final-score alignment lane is moved off-main.
+    // Live construction, adding, sampling and scoring no longer use these.
     @ObservationIgnored private var singerTracks: [SingerPitch] = []
     @ObservationIgnored private var scoringNames: [String] = []
     @ObservationIgnored private var scoringUIDs: [String] = []
     @ObservationIgnored private var scoringApplicationIDs: [String?] = []
-    /// Which of them is a captured application rather than somebody's
-    /// microphone. A captured application is the backing track by definition,
-    /// so it is not who "you are singing" is about.
     @ObservationIgnored private var scoringIsBackingTrack: [Bool] = []
-    /// The melody sampled once, rather than on every poll: it is seven thousand
-    /// samples for a five-minute song and it does not change while it plays.
     @ObservationIgnored private var scoringReference: [PitchSample] = []
-    @ObservationIgnored private var pollsSinceScore = 0
-    /// A few minutes of raw pitch is ample for a four-hertz incremental
-    /// consumer to catch up after a busy main actor. `SingerPitch` compacts at
-    /// twice this count, bounding each source below 128 KiB.
-    private static let scoringHistoryCapacity = 4_096
 
     private struct KeyScoreConfiguration: Equatable {
         let sungStep: Double
         let key: KeyDetector.Key
         let lines: [Lyrics.Line]
     }
-
-    @ObservationIgnored private var keyScoreConfigurations: [String: KeyScoreConfiguration] =
-        [:]
-    @ObservationIgnored private var keyScorers: [String: KaraokeScore.IncrementalKeyScorer] =
-        [:]
 
     private struct ExactScoreConfiguration: Equatable {
         let sungStep: Double
@@ -1602,19 +2063,24 @@ final class RouterModel: ScriptTarget {
         let lines: [Lyrics.Line]
     }
 
-    @ObservationIgnored private var exactScoreConfigurations:
-        [String: ExactScoreConfiguration] = [:]
-    @ObservationIgnored private var exactScorers:
-        [String: KaraokeScore.IncrementalExactScorer] = [:]
-
     private struct CapturedScoringReference {
         let samples: [PitchSample]
         let step: Double
     }
 
+    @ObservationIgnored private var keyScoreConfigurations: [String: KeyScoreConfiguration] =
+        [:]
+    @ObservationIgnored private var keyScorers: [String: KaraokeScore.IncrementalKeyScorer] =
+        [:]
+    @ObservationIgnored private var exactScoreConfigurations:
+        [String: ExactScoreConfiguration] = [:]
+    @ObservationIgnored private var exactScorers:
+        [String: KaraokeScore.IncrementalExactScorer] = [:]
+    private static let scoringHistoryCapacity = 4_096
+
     /// True when the score is against an exact MIDI tune rather than the
     /// detected-key fallback used by ordinary streaming tracks.
-    var hasExactScoringReference: Bool { !scoringReference.isEmpty }
+    var hasExactScoringReference: Bool { melody?.melody.isEmpty == false }
 
     /// The exact note under the playhead, when a MIDI reference supplies one.
     ///
@@ -1622,28 +2088,7 @@ final class RouterModel: ScriptTarget {
     /// target bar when there is no exact written note would turn a useful guess
     /// into a confident lie.
     var scoringTargetMidi: Double? {
-        guard !scoringReference.isEmpty else { return nil }
-        let position = songPosition
-        var lower = 0
-        var upper = scoringReference.count
-        while lower < upper {
-            let middle = lower + (upper - lower) / 2
-            if scoringReference[middle].time < position {
-                lower = middle + 1
-            } else {
-                upper = middle
-            }
-        }
-        let candidates = [lower - 1, lower].filter { scoringReference.indices.contains($0) }
-        guard
-            let index = candidates.min(by: {
-                abs(scoringReference[$0].time - position)
-                    < abs(scoringReference[$1].time - position)
-            }),
-            abs(scoringReference[index].time - position)
-                <= KaraokeScore.referenceInterval * 1.5
-        else { return nil }
-        return scoringReference[index].midi
+        melody?.midi(at: songPosition)
     }
 
     enum ScoringReferenceMode: Equatable {
@@ -1704,48 +2149,13 @@ final class RouterModel: ScriptTarget {
     @discardableResult
     private func refreshSingerTracks() -> Bool {
         guard isSingingVisible || isScoringSinging, isRunning else { return false }
-        let opened = openSourceTaps()
-        guard opened > 0 else { return false }
-        let allGroups = sourceGroups
-        let groupCount = min(opened, allGroups.count)
-        guard
-            !Self.sourceUIDsMatch(
-                groups: allGroups, prefixCount: groupCount, cached: scoringUIDs)
-                || singerTracks.count != groupCount
-        else {
-            return !singerTracks.isEmpty
-        }
-        let groups = Array(allGroups.prefix(groupCount))
-        scoringUIDs = groups.map(\.uid)
-        scoringNames = groups.map {
-            representative(of: $0).map(routeTitle) ?? loc("Source")
-        }
-        scoringIsBackingTrack = groups.map {
-            representative(of: $0).flatMap(application(of:)) != nil
-        }
-        scoringApplicationIDs = groups.map {
-            representative(of: $0).flatMap(application(of:))?.bundleID
-        }
-        singerTracks = groups.compactMap { _ in SingerPitch(sampleRate: transcriptRate) }
-        for track in singerTracks {
-            track.keepsHistory = isScoringSinging
-            track.historyCapacity = nil
-            track.reset(at: songPosition)
-        }
-        return !singerTracks.isEmpty
+        return singingAnalysisSnapshot?.admittedVoiceCount ?? 0 > 0
     }
 
     private func releaseSingerTracks() {
-        singerTracks = []
-        keyScoreConfigurations = [:]
-        keyScorers = [:]
-        exactScoreConfigurations = [:]
-        exactScorers = [:]
-        scoringUIDs = []
-        scoringNames = []
-        scoringIsBackingTrack = []
-        scoringApplicationIDs = []
-        closeSourceTapsIfIdle()
+        singingAnalysisSnapshot = nil
+        sourceTapWorkersIfConstructed?.analysis.invalidate()
+        requestSourceTapTopology()
     }
 
     private func startScoring() {
@@ -1758,17 +2168,10 @@ final class RouterModel: ScriptTarget {
             isRefusingToScore = false
             return
         }
-        guard refreshSingerTracks() else {
-            singingError = loc("Could not listen to any source.")
-            isRefusingToScore = true
-            isScoringSinging = false
-            isRefusingToScore = false
-            return
-        }
         restartScore()
         singingError = nil
         pollsSinceScore = Self.scoreEveryNPolls
-        refreshSingers()
+        requestSourceTapTopology()
     }
 
     /// Puts every singer back at the start of their attempt.
@@ -1779,121 +2182,29 @@ final class RouterModel: ScriptTarget {
     /// score becomes meaningless — and toggling the switch was the only remedy,
     /// which also loses the tune, the taps and the words.
     func restartScore() {
-        for track in singerTracks {
-            track.keepsHistory = true
-            track.historyCapacity = nil
-            track.reset(at: songPosition)
-        }
-        keyScoreConfigurations = [:]
-        keyScorers = [:]
-        exactScoreConfigurations = [:]
-        exactScorers = [:]
+        singingResetToken &+= 1
         rebuildScoringReference()
-        scoringReferenceMode = scoringReference.isEmpty ? .waiting : .midi
+        scoringReferenceMode = hasExactScoringReference ? .midi : .waiting
         singers = []
         pollsSinceScore = Self.scoreEveryNPolls
+        pumpSourceTaps()
     }
 
     private func stopScoring() {
-        scoringReference = []
         scoringReferenceMode = .waiting
         singers = []
         singingError = nil
-        // The trackers stay open while the panel is: the note at the top of it
-        // is live whether or not anybody asked for a score.
-        for track in singerTracks {
-            track.keepsHistory = false
-            track.historyCapacity = nil
-            track.reset(at: songPosition)
-        }
-        keyScoreConfigurations = [:]
-        keyScorers = [:]
-        exactScoreConfigurations = [:]
-        exactScorers = [:]
-        if !isSingingVisible { releaseSingerTracks() }
+        singingResetToken &+= 1
+        requestSourceTapTopology()
     }
 
     private func rebuildScoringReference() {
-        scoringReference = melody?.samples(every: KaraokeScore.referenceInterval) ?? []
+        singingReferenceVersion &+= 1
     }
 
     /// Recomputes what the interface shows for each singer.
     private func refreshSingers() {
-        guard !singerTracks.isEmpty else {
-            if !singers.isEmpty { singers = [] }
-            return
-        }
-        pollsSinceScore += 1
-        let expectedSingerCount = singerTracks.indices.reduce(into: 0) { count, index in
-            if index >= scoringIsBackingTrack.count || !scoringIsBackingTrack[index] {
-                count += 1
-            }
-        }
-        let rescore =
-            pollsSinceScore >= Self.scoreEveryNPolls || singers.count != expectedSingerCount
-        if rescore { pollsSinceScore = 0 }
-
-        // An `.lrc` offset says the words are late against the recording, so a
-        // line the file stamps at 30 s is sung at 30 s minus the offset — and
-        // the melody file is on the recording's clock, not the words'.
-        let shift = lyrics?.offset ?? 0
-        // Lyrics do not change between tuner refreshes. Building the whole
-        // shifted list at 20 Hz made the four-Hz score cadence mostly cosmetic
-        // on a song with hundreds of lines.
-        let lines =
-            rescore
-            ? (lyrics?.lines ?? []).map {
-                Lyrics.Line(time: $0.time - shift, text: $0.text)
-            }
-            : []
-
-        let previous = Dictionary(uniqueKeysWithValues: singers.map { ($0.uid, $0) })
-        let capturedReference =
-            rescore && scoringReference.isEmpty
-            ? automaticCapturedReference(lines: lines)
-            : nil
-        if rescore {
-            let mode: ScoringReferenceMode
-            if !scoringReference.isEmpty {
-                mode = .midi
-            } else if capturedReference != nil {
-                mode = .capturedPlayer
-            } else if songKey != nil {
-                mode = .key
-            } else {
-                mode = .waiting
-            }
-            publish(mode, to: \.scoringReferenceMode)
-        }
-        var updated: [Singer] = []
-        for (index, track) in singerTracks.enumerated() {
-            // Captured applications are the accompaniment. Showing Spotify or
-            // QQ Music as a singer gave the original recording its own score
-            // row and made a silent microphone look successful.
-            guard index >= scoringIsBackingTrack.count || !scoringIsBackingTrack[index]
-            else { continue }
-            let uid = index < scoringUIDs.count ? scoringUIDs[index] : "\(index)"
-            let score: KaraokeScore
-            if !rescore, let held = previous[uid] {
-                score = held.score
-            } else {
-                score = scoreForTrack(
-                    track,
-                    uid: uid,
-                    lines: lines,
-                    capturedReference: capturedReference)
-            }
-            let hertz = Self.singerDisplayHertz(
-                measured: track.hertz,
-                previous: previous[uid],
-                rescore: rescore)
-            updated.append(
-                Singer(
-                    uid: uid,
-                    name: index < scoringNames.count ? scoringNames[index] : loc("Source"),
-                    hertz: hertz, score: score))
-        }
-        if updated != singers { singers = updated }
+        pumpSourceTaps()
     }
 
     /// Keeps raw tuner jitter from becoming view state.
@@ -1921,23 +2232,9 @@ final class RouterModel: ScriptTarget {
     /// through a real process tap and measure the number without turning that
     /// backing track into a person on screen.
     func scoringSource(uid: String) -> Singer? {
-        guard let index = scoringUIDs.firstIndex(of: uid), index < singerTracks.count else {
-            return nil
-        }
-        let shift = lyrics?.offset ?? 0
-        let lines = (lyrics?.lines ?? []).map {
-            Lyrics.Line(time: $0.time - shift, text: $0.text)
-        }
-        let reference =
-            scoringReference.isEmpty ? automaticCapturedReference(lines: lines) : nil
-        let score = scoreForTrack(
-            singerTracks[index],
-            uid: uid,
-            lines: lines,
-            capturedReference: reference)
-        return Singer(
-            uid: uid, name: index < scoringNames.count ? scoringNames[index] : loc("Source"),
-            hertz: singerTracks[index].hertz, score: score)
+        guard let source = singingAnalysisSnapshot?.sources.first(where: { $0.uid == uid })
+        else { return nil }
+        return Singer(uid: uid, name: source.name, hertz: source.hertz, score: source.score)
     }
 
     private func scoreForTrack(
@@ -2062,12 +2359,15 @@ final class RouterModel: ScriptTarget {
     /// poll would hand the score whatever jitter an Apple event round trip
     /// happened to have.
     private func reanchorIfSeeked(to seconds: Double) {
-        guard isScoringSinging, trackClock.isPlaying, let first = singerTracks.first else {
+        guard isScoringSinging, trackClock.isPlaying,
+            let first = singingAnalysisSnapshot?.sources.first(where: { $0.role == .voice })
+        else {
             return
         }
         guard abs(seconds - first.elapsed) > Self.seekToleranceSeconds else { return }
-        for singer in singerTracks { singer.reset(at: seconds) }
+        singingResetToken &+= 1
         singers = []
+        pumpSourceTaps()
     }
 
     /// Where lyrics are read from.
@@ -2090,7 +2390,7 @@ final class RouterModel: ScriptTarget {
         // Free, so it happens every poll rather than once a second: the answer
         // is a counter in this process, not a question put to another one.
         adoptOwnSongPosition()
-        if !isHandRun {
+        if startupPolicy.startsLiveServicesAfterLaunch, !isHandRun {
             // Counted rather than conditioned on there being an answer yet. A
             // running player with nothing loaded answers nil every time, and
             // "ask again until it says something" would be the old cost back
@@ -2138,6 +2438,22 @@ final class RouterModel: ScriptTarget {
     /// Whether hand-run words are moving.
     var isRunningWords: Bool { isHandRun && trackClock.isPlaying }
 
+    /// Why the most recently selected local words could not be adopted.
+    private(set) var localWordsError: String?
+    private(set) var isLoadingLocalWords = false
+
+    @ObservationIgnored private var handWordsResourceGeneration: UInt64 = 0
+    @ObservationIgnored private var madeHandWordsResourceWorker: HandWordsResourceWorker?
+
+    private var handWordsResourceWorker: HandWordsResourceWorker {
+        if let madeHandWordsResourceWorker { return madeHandWordsResourceWorker }
+        let made = HandWordsResourceWorker { [weak self] snapshot in
+            self?.adoptHandWordsResources(snapshot)
+        }
+        madeHandWordsResourceWorker = made
+        return made
+    }
+
     static let maximumHandLyricsFieldLength = 200
 
     /// Builds the same bounded track whether it came from a text field, a
@@ -2168,6 +2484,8 @@ final class RouterModel: ScriptTarget {
         guard let track = Self.handRunTrack(title: title, artist: artist) else {
             return false
         }
+        invalidateHandWordsResourceRequest()
+        localWordsError = nil
         isHandRun = true
         trackClock.stop()
         lyricLine = nil
@@ -2194,16 +2512,52 @@ final class RouterModel: ScriptTarget {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Takes an `.lrc` chosen by hand, with the tune beside it if there is one.
+    /// Queues an `.lrc` chosen by hand, with exact-name sidecars if present.
     ///
-    /// - Returns: False when nothing in the file carried a timestamp, which is
-    ///   the honest answer for a page of words with no timing.
+    /// The caller never waits for a network volume. One utility owner performs
+    /// the bounded read and publishes only if this is still the latest choice.
+    ///
+    /// - Returns: Whether the bounded owner accepted the request.
     @discardableResult
     func openWords(at url: URL) -> Bool {
-        guard let text = try? String(contentsOf: url, encoding: .utf8),
-            let parsed = Lyrics.parse(text)
-        else { return false }
+        handWordsResourceGeneration &+= 1
+        localWordsError = nil
+        isLoadingLocalWords = true
+        let request = HandWordsResourceRequest(
+            generation: handWordsResourceGeneration, url: url)
+        // Verification asserts the adopted values immediately after this call.
+        // Its fixture is local and bounded by the same loader; keeping the
+        // synchronous exception behind the existing process-only guard avoids
+        // weakening production while preserving deterministic flow evidence.
+        if isVerificationProcess {
+            let snapshot = HandWordsResourceLoader.load(request)
+            adoptHandWordsResources(snapshot)
+            return snapshot.failure == nil
+        }
+        let accepted = handWordsResourceWorker.submit(
+            request)
+        if !accepted {
+            isLoadingLocalWords = false
+            localWordsError = loc("The selected lyrics file could not be read.")
+        }
+        return accepted
+    }
+
+    private func adoptHandWordsResources(_ snapshot: HandWordsResourceSnapshot) {
+        guard snapshot.generation == handWordsResourceGeneration else { return }
+        isLoadingLocalWords = false
+        if let failure = snapshot.failure {
+            localWordsError = Self.describeHandWordsFailure(failure)
+            return
+        }
+        guard let parsed = snapshot.lyrics else {
+            localWordsError = loc("The selected lyrics file could not be read.")
+            return
+        }
+
         cancelLyricsLookup()
+        nowPlayingResourceGeneration &+= 1
+        nowPlayingResourceWorker.invalidate()
         isHandRun = true
         lyrics = parsed
         plainLyrics = nil
@@ -2211,13 +2565,15 @@ final class RouterModel: ScriptTarget {
         lyricsCopyright = nil
         lyricsRegion = nil
         lyricsLookupStatus = .local
-        melody =
-            ["mid", "midi"]
-            .lazy
-            .map { url.deletingPathExtension().appendingPathExtension($0) }
-            .compactMap { try? Data(contentsOf: $0) }
-            .compactMap(MidiMelody.parse)
-            .first
+        melody = snapshot.melody
+        if snapshot.rejectedOversizedSidecar {
+            localWordsError = loc(
+                "The MIDI beside these words exceeds 8 MiB, so scoring was not loaded.")
+        } else if snapshot.timedOutBesideLyrics {
+            localWordsError = loc("Some files beside these words took too long to read.")
+        } else {
+            localWordsError = nil
+        }
         // Where the words run out. The last line is given the four seconds
         // `Lyrics.progress(at:)` gives it, and the tune wins when it is longer
         // — a hand-run clock with nothing to stop it would sweep on past the
@@ -2226,10 +2582,11 @@ final class RouterModel: ScriptTarget {
             melody?.duration ?? 0, (parsed.lines.last?.time ?? 0) - parsed.offset + 4)
         nowPlaying = NowPlaying.Track(
             application: loc("By hand"),
-            title: parsed.title ?? url.deletingPathExtension().lastPathComponent,
+            title: parsed.title ?? snapshot.url.deletingPathExtension().lastPathComponent,
             artist: parsed.artist ?? "", album: parsed.album ?? "",
             position: 0, duration: ends, isPlaying: false,
-            artworkURL: Self.artworkBesideWords(at: url))
+            artworkURL: snapshot.artworkURL,
+            identity: "hand-file:\(snapshot.url.path)")
         trackClock.stop()
         trackClock.duration = ends
         lyricLine = nil
@@ -2237,7 +2594,27 @@ final class RouterModel: ScriptTarget {
         lyricPlaybackAnchor = nil
         songSecond = 0
         if isScoringSinging { rebuildScoringReference() }
-        return true
+    }
+
+    private func invalidateHandWordsResourceRequest() {
+        handWordsResourceGeneration &+= 1
+        madeHandWordsResourceWorker?.invalidate()
+        isLoadingLocalWords = false
+    }
+
+    private static func describeHandWordsFailure(
+        _ failure: HandWordsResourceFailure
+    ) -> String {
+        switch failure {
+        case .unreadable:
+            loc("The selected lyrics file could not be read.")
+        case .lyricsTooLarge:
+            loc("The selected lyrics file exceeds the 2 MiB safety limit.")
+        case .timedOut:
+            loc("Reading the selected lyrics file took too long.")
+        case .noTimedLyrics:
+            loc("The selected lyrics file contains no timed lines.")
+        }
     }
 
     // MARK: A song this application plays itself
@@ -2281,6 +2658,28 @@ final class RouterModel: ScriptTarget {
     /// player yet" is the same as the answer for "player with nothing in it",
     /// so that merely asking cannot build one.
     private var madeSongPlayer: LocalSongPlayer?
+    @ObservationIgnored private var madeLocalSongOperations: LocalSongOperationWorker?
+    @ObservationIgnored private var localSongOperationGeneration: UInt64 = 0
+    @ObservationIgnored private var localSongState: LocalSongPlayer.Snapshot?
+    @ObservationIgnored private var pendingLocalSongPlay: Double?
+    @ObservationIgnored private var localSongMetadataGeneration: UInt64 = 0
+    @ObservationIgnored private lazy var localSongMetadataWorker =
+        LocalSongMetadataWorker { [weak self] metadata in
+            self?.adoptLocalSongMetadata(metadata)
+        }
+
+    private var localSongOperations: LocalSongOperationWorker {
+        if let madeLocalSongOperations { return madeLocalSongOperations }
+        let made = LocalSongOperationWorker(
+            publish: { [weak self] result in self?.finishLocalSongOperation(result) })
+        madeLocalSongOperations = made
+        return made
+    }
+    @ObservationIgnored private var localSongResourceGeneration: UInt64 = 0
+    @ObservationIgnored private lazy var localSongResourceWorker =
+        LocalSongResourceWorker { [weak self] resources in
+            self?.adoptLocalSongResources(resources)
+        }
 
     /// The songs that have been put on. See `KTVQueue` for what its verbs mean.
     ///
@@ -2293,8 +2692,31 @@ final class RouterModel: ScriptTarget {
     private(set) var songQueue = KTVQueue() {
         didSet {
             guard oldValue != songQueue else { return }
+            if !isRestoring, queuedSongRestore != nil {
+                queuedSongRestore = nil
+                ktvQueueRestoreWorker.invalidate()
+            }
             persist()
         }
+    }
+    @ObservationIgnored private var queuedSongRestore: (paths: [String], index: Int?)?
+    @ObservationIgnored private lazy var ktvQueueRestoreWorker =
+        KTVQueueRestoreWorker { [weak self] snapshot in
+            self?.finishKTVQueueRestore(snapshot)
+        }
+
+    private func finishKTVQueueRestore(_ snapshot: KTVQueueRestoreSnapshot) {
+        guard queuedSongRestore != nil else { return }
+        let repeats = songQueue.repeatsOne
+        isRestoring = true
+        songQueue = KTVQueue.restored(
+            songs: snapshot.songs, currentIndex: snapshot.currentIndex)
+        songQueue.repeatsOne = repeats
+        isRestoring = false
+        // A late network volume may have made only a prefix observable. Keep
+        // the original preference value until the person edits the queue; an
+        // unrelated setting save must not turn an I/O timeout into data loss.
+        if !snapshot.timedOut { queuedSongRestore = nil }
     }
 
     /// Whether the song being sung comes round again instead of the next one.
@@ -2378,7 +2800,9 @@ final class RouterModel: ScriptTarget {
     }
 
     /// True while the song on the stage is a file this application is playing.
-    var isPlayingOwnSong: Bool { madeSongPlayer?.song != nil }
+    var isPlayingOwnSong: Bool {
+        isVerificationProcess ? madeSongPlayer?.song != nil : localSongState?.song != nil
+    }
 
     /// Where the media keys, Control Centre and the button on a pair of AirPods
     /// go. Built on the first song rather than at launch: claiming the now
@@ -2405,7 +2829,9 @@ final class RouterModel: ScriptTarget {
             NowPlayingBroadcast.forOurOwnSong(
                 title: player.title, artist: player.artist, album: player.album,
                 duration: player.duration, elapsed: songPosition,
-                isPlaying: madeSongPlayer?.isPlaying ?? false,
+                isPlaying: isVerificationProcess
+                    ? madeSongPlayer?.isPlaying ?? false
+                    : localSongState?.isPlaying ?? false,
                 hasQueuedSong: hasAnotherSongQueued, repeatsOne: songQueue.repeatsOne,
                 hasPreviousSong: songQueue.hasSongBefore,
                 hasArtwork: player.artwork?.isEmpty == false),
@@ -2413,7 +2839,9 @@ final class RouterModel: ScriptTarget {
             identity: player.url.path)
     }
 
-    private var madeNowPlayingSong: LocalSongPlayer.Song? { madeSongPlayer?.song }
+    private var madeNowPlayingSong: LocalSongPlayer.Song? {
+        isVerificationProcess ? madeSongPlayer?.song : localSongState?.song
+    }
 
     private var nowPlayingStage: NowPlayingStage {
         if let stage = madeNowPlayingStage { return stage }
@@ -2440,7 +2868,7 @@ final class RouterModel: ScriptTarget {
             runWords(from: 0)
             return
         }
-        if previous == madeSongPlayer?.song?.url {
+        if previous == madeNowPlayingSong?.url {
             runWords(from: 0)
         } else {
             openSong(at: previous, keepingQueue: true)
@@ -2462,15 +2890,57 @@ final class RouterModel: ScriptTarget {
             songQueue.clear()
             songQueue.append([url])
         }
-        guard let song = songPlayer.open(url) else { return false }
+        if isVerificationProcess {
+            guard let song = songPlayer.open(url) else { return false }
+            localSongState = songPlayer.snapshot()
+            adoptOpenedSong(song, at: url)
+            return true
+        }
+        let operations = localSongOperations
+        localSongOperationGeneration &+= 1
+        pendingLocalSongPlay = nil
+        localSongState = nil
+        beginOpeningSong(at: url)
+        return operations.open(
+            LocalSongOperationWorker.OpenRequest(
+                generation: localSongOperationGeneration, url: url))
+    }
+
+    private func beginOpeningSong(at url: URL) {
         cancelLyricsLookup()
+        invalidateHandWordsResourceRequest()
+        localWordsError = nil
         isHandRun = true
         lyrics = nil
         plainLyrics = nil
         melody = nil
+        fileLyricOffset = 0
         lyricsSourceName = nil
         lyricsCopyright = nil
         lyricsRegion = nil
+        nowPlaying = NowPlaying.Track(
+            application: loc("This song"),
+            title: url.deletingPathExtension().lastPathComponent,
+            artist: "", album: "", position: 0, duration: 0,
+            isPlaying: false, identity: "file:\(url.path)")
+        trackClock.stop()
+        lyricLine = nil
+        lyricProgress = 0
+        lyricPlaybackAnchor = nil
+        songSecond = 0
+    }
+
+    private func adoptOpenedSong(_ song: LocalSongPlayer.Song, at url: URL) {
+        localSongMetadataGeneration &+= 1
+        _ = localSongMetadataWorker.submit(
+            LocalSongMetadataRequest(
+                generation: localSongMetadataGeneration, url: url))
+        localSongResourceGeneration &+= 1
+        _ = localSongResourceWorker.submit(
+            LocalSongResourceRequest(
+                generation: localSongResourceGeneration, url: url,
+                embeddedArtwork: song.artwork))
+        beginOpeningSong(at: url)
         let track = NowPlaying.Track(
             application: loc("This song"),
             title: song.title,
@@ -2479,7 +2949,7 @@ final class RouterModel: ScriptTarget {
             position: 0,
             duration: song.duration,
             isPlaying: false,
-            artworkURL: Self.artwork(for: song),
+            artworkURL: nil,
             identity: "file:\(url.path)")
         nowPlaying = track
         trackClock.stop()
@@ -2488,64 +2958,120 @@ final class RouterModel: ScriptTarget {
         lyricProgress = 0
         lyricPlaybackAnchor = nil
         songSecond = 0
-        let words = ["lrc", "LRC"]
-            .lazy
-            .map { url.deletingPathExtension().appendingPathExtension($0) }
-            .first { FileManager.default.fileExists(atPath: $0.path) }
         // The key this person sings this song in, from the last time. Applied
         // before a note is played, so nobody hears the original key and then
         // the transpose arriving a beat later.
-        songPlayer.pitchCents = SongKeys.cents(
-            forSemitones: SongKeys.semitones(for: track.identity))
-        if let words {
-            adoptWordsBeside(words, keepingDuration: song.duration)
+        setLocalSongPitch(
+            SongKeys.cents(forSemitones: SongKeys.semitones(for: track.identity)))
+        if isScoringSinging { rebuildScoringReference() }
+    }
+
+    private func finishLocalSongOperation(_ result: LocalSongOperationSnapshot) {
+        guard result.generation == localSongOperationGeneration else { return }
+        localSongState = result.state
+        switch result.kind {
+        case .open(let url):
+            guard result.operationSucceeded, let song = result.state.song else {
+                lastError = loc("The selected song could not be opened.")
+                closeWords()
+                return
+            }
+            adoptOpenedSong(song, at: url)
+            if let seconds = pendingLocalSongPlay {
+                pendingLocalSongPlay = nil
+                submitLocalSongControl(.play(seconds))
+            }
+        case .control(let request):
+            if case .metadata = request {
+                applyLocalSongMetadataToInterface()
+            } else if case .sample = request {
+                adoptLocalSongSnapshot(result.state)
+            }
+        }
+    }
+
+    private func submitLocalSongControl(_ request: LocalSongControlRequest) {
+        guard let operations = madeLocalSongOperations else { return }
+        _ = operations.submit(
+            LocalSongOperationWorker.ControlEnvelope(
+                generation: localSongOperationGeneration, request: request))
+    }
+
+    private func setLocalSongPitch(_ cents: Float) {
+        if isVerificationProcess {
+            songPlayer.pitchCents = cents
+            localSongState = songPlayer.snapshot()
         } else {
-            startLyricsLookup(for: track)
+            submitLocalSongControl(.pitch(cents))
+        }
+    }
+
+    private func adoptLocalSongMetadata(_ metadata: LocalSongMetadataSnapshot) {
+        guard metadata.generation == localSongMetadataGeneration,
+            nowPlaying?.identity == "file:\(metadata.url.path)"
+        else { return }
+        if !isVerificationProcess {
+            submitLocalSongControl(.metadata(metadata))
+            return
+        }
+        madeSongPlayer?.applyMetadata(metadata)
+        localSongState = madeSongPlayer?.snapshot()
+        applyLocalSongMetadataToInterface()
+    }
+
+    private func applyLocalSongMetadataToInterface() {
+        guard let song = localSongState?.song ?? madeSongPlayer?.song else { return }
+        nowPlaying?.title = song.title
+        nowPlaying?.artist = song.artist
+        nowPlaying?.album = song.album
+        if nowPlaying?.artworkURL == nil, song.artwork != nil {
+            localSongResourceGeneration &+= 1
+            _ = localSongResourceWorker.submit(
+                LocalSongResourceRequest(
+                    generation: localSongResourceGeneration, url: song.url,
+                    embeddedArtwork: song.artwork))
+        }
+        tellTheSystemWhatIsPlaying()
+    }
+
+    private func adoptLocalSongResources(_ snapshot: LocalSongResourceSnapshot) {
+        guard snapshot.generation == localSongResourceGeneration,
+            nowPlaying?.identity == "file:\(snapshot.url.path)"
+        else { return }
+        if let artwork = snapshot.artworkURL { nowPlaying?.artworkURL = artwork }
+        if let lyrics = snapshot.lyrics, snapshot.lyricsURL != nil {
+            self.lyrics = lyrics
+            lyricsSourceName = loc("Local file")
+            lyricsLookupStatus = .local
+            melody = snapshot.melody
+            fileLyricOffset = lyrics.offset
+            applyLyricOffset()
+        } else {
+            melody = snapshot.melody
+            if let track = nowPlaying { startLyricsLookup(for: track) }
         }
         if isScoringSinging { rebuildScoringReference() }
-        return true
+        tellTheSystemWhatIsPlaying()
     }
 
-    /// Words found next to the audio file, which beat every online index.
-    ///
-    /// The song's own length is kept: a `.lrc` says when its last line starts,
-    /// not when the recording ends, and the file we are playing knows the
-    /// second of those exactly.
-    private func adoptWordsBeside(_ url: URL, keepingDuration duration: Double) {
-        guard let text = try? String(contentsOf: url, encoding: .utf8),
-            let parsed = Lyrics.parse(text)
-        else { return }
-        lyrics = parsed
-        lyricsSourceName = loc("Local file")
-        lyricsLookupStatus = .local
-        melody =
-            ["mid", "midi"]
-            .lazy
-            .map { url.deletingPathExtension().appendingPathExtension($0) }
-            .compactMap { try? Data(contentsOf: $0) }
-            .compactMap(MidiMelody.parse)
-            .first
-        trackClock.duration = duration
-        applyLyricOffset()
-    }
-
-    /// Embedded artwork, written where a view can point an image at it.
-    ///
-    /// A tag block is bytes inside the audio file and `NowPlaying.Track` speaks
-    /// in URLs, so the bytes go to a file named after their own content: the
-    /// same song opened twice writes nothing the second time, and two songs
-    /// never collide.
-    private static func artwork(for song: LocalSongPlayer.Song) -> URL? {
-        if let beside = artworkBesideWords(at: song.url) { return beside }
-        guard let data = song.artwork, !data.isEmpty else { return nil }
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("YunAudio-artwork", isDirectory: true)
-        let file = directory.appendingPathComponent("\(data.count)-\(data.hashValue).img")
-        if FileManager.default.fileExists(atPath: file.path) { return file }
-        try? FileManager.default.createDirectory(
-            at: directory, withIntermediateDirectories: true)
-        guard (try? data.write(to: file)) != nil else { return nil }
-        return file
+    private func adoptLocalSongSnapshot(_ snapshot: LocalSongPlayer.Snapshot) {
+        localSongState = snapshot
+        let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
+        trackClock.adopt(
+            snapshot.position, isPlaying: snapshot.isPlaying, trueAt: now)
+        if nowPlaying?.isPlaying != snapshot.isPlaying {
+            nowPlaying?.isPlaying = snapshot.isPlaying
+        }
+        if snapshot.hasFinished {
+            nowPlaying?.isPlaying = false
+            if let next = songQueue.advance() {
+                openSong(at: next, keepingQueue: true)
+                pendingLocalSongPlay = 0
+            }
+        }
+        if ProcessInfo.processInfo.environment["YUNAUDIO_NO_NOW_PLAYING"] == nil {
+            tellTheSystemWhatIsPlaying()
+        }
     }
 
     /// How far the song has been transposed, in semitones.
@@ -2576,31 +3102,42 @@ final class RouterModel: ScriptTarget {
     func shiftSongKey(by delta: Int) {
         guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return }
         let updated = SongKeys.shift(identity, by: delta)
-        songPlayer.pitchCents = SongKeys.cents(forSemitones: updated)
+        setLocalSongPitch(SongKeys.cents(forSemitones: updated))
         settingsRevision &+= 1
     }
 
     /// Whether the lead vocal is being taken out of the song we are playing.
     var isCancellingLeadVocal: Bool {
         _ = settingsRevision
-        return madeSongPlayer?.isCancellingCentre == true
+        return isVerificationProcess
+            ? madeSongPlayer?.isCancellingCentre == true
+            : localSongState?.isCancellingCentre == true
     }
 
     /// Whether the button would do anything: our own song, and in stereo.
     var canCancelLeadVocal: Bool {
-        isPlayingOwnSong && madeSongPlayer?.canCancelCentre == true
+        isPlayingOwnSong
+            && (isVerificationProcess
+                ? madeSongPlayer?.canCancelCentre == true
+                : localSongState?.canCancelCentre == true)
     }
 
     func toggleLeadVocal() {
         guard canCancelLeadVocal else { return }
-        songPlayer.setCancellingCentre(!songPlayer.isCancellingCentre)
+        let enabled = !isCancellingLeadVocal
+        if isVerificationProcess {
+            songPlayer.setCancellingCentre(enabled)
+            localSongState = songPlayer.snapshot()
+        } else {
+            submitLocalSongControl(.cancelCentre(enabled))
+        }
         settingsRevision &+= 1
     }
 
     func resetSongKey() {
         guard isPlayingOwnSong, let identity = nowPlaying?.identity else { return }
         SongKeys.clear(identity)
-        songPlayer.pitchCents = 0
+        setLocalSongPitch(0)
         settingsRevision &+= 1
     }
 
@@ -2611,7 +3148,12 @@ final class RouterModel: ScriptTarget {
     /// `lastCorrection` reads as the render quantum rather than as the tens of
     /// milliseconds an extrapolated answer drifts by.
     private func adoptOwnSongPosition() {
-        guard isPlayingOwnSong, let songPlayer = madeSongPlayer else { return }
+        guard isPlayingOwnSong else { return }
+        if !isVerificationProcess {
+            submitLocalSongControl(.sample)
+            return
+        }
+        guard let songPlayer = madeSongPlayer else { return }
         let now = Double(DispatchTime.now().uptimeNanoseconds) / 1e9
         // A song that has run out stops rather than sitting at the end
         // pretending to play, which is what leaves the scoreboard waiting.
@@ -2641,7 +3183,16 @@ final class RouterModel: ScriptTarget {
     /// breakdown belongs to different lines than the ones it names.
     func runWords(from seconds: Double = 0) {
         guard isHandRun else { return }
-        if isPlayingOwnSong { songPlayer.play(from: seconds) }
+        if isPlayingOwnSong {
+            if isVerificationProcess {
+                songPlayer.play(from: seconds)
+                localSongState = songPlayer.snapshot()
+            } else {
+                submitLocalSongControl(.play(seconds))
+            }
+        } else if madeLocalSongOperations != nil {
+            pendingLocalSongPlay = seconds
+        }
         trackClock.adopt(
             seconds, isPlaying: true,
             trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
@@ -2656,7 +3207,19 @@ final class RouterModel: ScriptTarget {
     /// Stops them where they are.
     func stopWords() {
         guard isHandRun else { return }
-        if isPlayingOwnSong { songPlayer.pause() }
+        // A pause pressed while the file is still opening cancels the queued
+        // play intent. There is no player state to pause yet, but allowing the
+        // deferred Play through would make the button appear to reverse itself
+        // as soon as the decoder answered.
+        pendingLocalSongPlay = nil
+        if isPlayingOwnSong {
+            if isVerificationProcess {
+                songPlayer.pause()
+                localSongState = songPlayer.snapshot()
+            } else {
+                submitLocalSongControl(.pause)
+            }
+        }
         let held = songPosition
         trackClock.adopt(
             held, isPlaying: false,
@@ -2672,10 +3235,21 @@ final class RouterModel: ScriptTarget {
     func closeWords() {
         guard isHandRun else { return }
         cancelLyricsLookup()
+        invalidateHandWordsResourceRequest()
         // Before the state is cleared: the engine holds a file open and an
         // output device running, and handing the panel back to somebody else's
         // player while still playing our own would put two songs in the room.
-        madeSongPlayer?.stop()
+        if isVerificationProcess {
+            madeSongPlayer?.stop()
+        } else if madeLocalSongOperations != nil {
+            localSongOperationGeneration &+= 1
+            submitLocalSongControl(.stop)
+        }
+        localSongState = nil
+        localSongMetadataGeneration &+= 1
+        localSongMetadataWorker.invalidate()
+        localSongResourceGeneration &+= 1
+        localSongResourceWorker.invalidate()
         // Before anything else clears: the keys go back the moment the song
         // stops being ours, or pressing pause would pause a player we are only
         // watching.
@@ -2689,6 +3263,7 @@ final class RouterModel: ScriptTarget {
         lyricsSourceName = nil
         lyricsCopyright = nil
         lyricsRegion = nil
+        localWordsError = nil
         melody = nil
         lyricLine = nil
         lyricProgress = 0
@@ -2929,6 +3504,61 @@ final class RouterModel: ScriptTarget {
 
     // MARK: Transport
 
+    private func externalNowPlayingControlTarget(
+        for track: NowPlaying.Track?
+    ) -> NowPlayingControlTarget? {
+        guard !isPlayingOwnSong, let track, !track.identity.isEmpty,
+            let candidate = NowPlaying.automationTargetCandidates.first(where: {
+                $0.name == track.application
+            })
+        else { return nil }
+        return NowPlayingControlTarget(
+            application: candidate.name,
+            bundleIdentifier: candidate.bundleID,
+            trackIdentity: track.identity)
+    }
+
+    private func refreshNowPlayingControlTarget() {
+        let target = externalNowPlayingControlTarget(for: nowPlaying)
+        guard target != nowPlayingControlTarget else { return }
+        nowPlayingControlTarget = target
+        madeNowPlayingControlWorker?.replaceTarget(target)
+    }
+
+    private func nowPlayingControlWorker() -> NowPlayingControlWorker? {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return nil }
+        if let madeNowPlayingControlWorker { return madeNowPlayingControlWorker }
+        let worker = NowPlayingControlWorker(
+            apply: NowPlaying.apply,
+            publish: { [weak self] completion in
+                guard let self else { return }
+                if !completion.succeeded {
+                    self.nowPlayingFailure = .failed(
+                        application: completion.application.context.target.application,
+                        code: -1)
+                }
+            })
+        madeNowPlayingControlWorker = worker
+        worker.replaceTarget(nowPlayingControlTarget)
+        return worker
+    }
+
+    private func submitExternalTransport(_ transport: NowPlaying.Transport) {
+        refreshNowPlayingControlTarget()
+        let edge: NowPlayingControlEdge =
+            switch transport {
+            case .playPause: .playPause
+            case .next: .next
+            case .previous: .previous
+            }
+        _ = nowPlayingControlWorker()?.submitEdge(edge)
+    }
+
+    private func submitExternalSeek(_ seconds: Double) {
+        refreshNowPlayingControlTarget()
+        _ = nowPlayingControlWorker()?.submitSeek(seconds: seconds)
+    }
+
     /// Asks the player the stage is showing to do something.
     ///
     /// Off the main actor: an Apple event to Music or Spotify was measured at
@@ -2940,13 +3570,16 @@ final class RouterModel: ScriptTarget {
     /// waiting for that means the glyph changes a twentieth of a second after
     /// the click, which reads as the click not having landed.
     func sendTransport(_ transport: NowPlaying.Transport) {
-        guard let track = nowPlaying else { return }
+        guard nowPlaying != nil else { return }
         // Our own song is not asked; it is told. No Apple event, no round trip,
         // and the button takes effect in the same turn it was pressed.
         if isPlayingOwnSong {
             switch transport {
             case .playPause:
-                if songPlayer.isPlaying {
+                let isPlaying =
+                    isVerificationProcess
+                    ? songPlayer.isPlaying : localSongState?.isPlaying == true
+                if isPlaying {
                     stopWords()
                 } else {
                     runWords(from: songPosition)
@@ -2990,10 +3623,7 @@ final class RouterModel: ScriptTarget {
                 Double(songSecond), isPlaying: nowPlaying?.isPlaying ?? false,
                 trueAt: Double(DispatchTime.now().uptimeNanoseconds) / 1e9)
         }
-        let application = track.application
-        Task.detached(priority: .userInitiated) {
-            NowPlaying.send(transport, to: application)
-        }
+        submitExternalTransport(transport)
     }
 
     /// Moves the playhead to a fraction of the track.
@@ -3029,13 +3659,15 @@ final class RouterModel: ScriptTarget {
             // Exact, and immediate. A seek sent to another player is a request
             // whose result arrives at the next poll; this one is the file being
             // scheduled from a frame.
-            songPlayer.seek(to: seconds)
+            if isVerificationProcess {
+                songPlayer.seek(to: seconds)
+                localSongState = songPlayer.snapshot()
+            } else {
+                submitLocalSongControl(.seek(seconds))
+            }
             return
         }
-        let application = track.application
-        Task.detached(priority: .userInitiated) {
-            NowPlaying.seek(to: seconds, in: application)
-        }
+        submitExternalSeek(seconds)
     }
 
     /// Jumps the music to a line somebody pointed at.
@@ -3390,6 +4022,8 @@ final class RouterModel: ScriptTarget {
         // Before anything is replaced: this is the last moment the song that
         // has just finished still has its scores.
         if nowPlaying?.identity != track?.identity { keepPerformance(of: nowPlaying) }
+        invalidateHandWordsResourceRequest()
+        localWordsError = nil
         cancelLyricsLookup()
         // A new song is not the song somebody was reading ahead in.
         lyricBrowse.stop()
@@ -3397,43 +4031,56 @@ final class RouterModel: ScriptTarget {
         lyricAnswers = []
         lyricAlternatives = []
         lyricSource = nil
-        let track = track.map { incoming in
-            var resolved = incoming
-            if resolved.artworkURL == nil {
-                resolved.artworkURL = Self.findArtwork(for: incoming)
-            }
-            return resolved
-        }
         nowPlaying = track
-        let localLyrics = track.flatMap(Self.findLyricsMatch)
-        lyrics = localLyrics?.lyrics
-        let localPlain = track.flatMap(Self.findPlainLyricsMatch)
+        lyrics = nil
+        plainLyrics = track?.nativeLyrics
+        lyricsSourceName = track?.nativeLyrics == nil ? nil : loc("Music")
+        lyricsCopyright = nil
+        lyricsRegion = nil
+        melody = nil
+        fileLyricOffset = 0
+        nowPlayingResourceGeneration &+= 1
+        if let track {
+            lyricsLookupStatus = plainLyrics == nil ? .loading : .native
+            _ = nowPlayingResourceWorker.submit(
+                NowPlayingResourceRequest(
+                    generation: nowPlayingResourceGeneration, track: track,
+                    directory: Self.lyricsDirectory,
+                    needsArtwork: track.artworkURL == nil))
+        } else {
+            nowPlayingResourceWorker.invalidate()
+            lyricsLookupStatus = .idle
+        }
+        if isScoringSinging { rebuildScoringReference() }
+    }
+
+    private func adoptNowPlayingResources(_ snapshot: NowPlayingResourceSnapshot) {
+        guard snapshot.generation == nowPlayingResourceGeneration,
+            var track = nowPlaying,
+            track.identity == snapshot.trackIdentity
+        else { return }
+        if track.artworkURL == nil { track.artworkURL = snapshot.artworkURL }
+        nowPlaying = track
+        lyrics = snapshot.timedLyrics
         plainLyrics =
-            lyrics == nil
-            ? localPlain?.text ?? track?.nativeLyrics
+            snapshot.timedLyrics == nil
+            ? snapshot.plainLyrics ?? track.nativeLyrics
             : nil
+        let localURL = snapshot.timedLyricsURL ?? snapshot.plainLyricsURL
         lyricsSourceName =
-            localLyrics.map { Self.lyricsSourceName(forLocalURL: $0.url) }
-            ?? localPlain.map { Self.lyricsSourceName(forLocalURL: $0.url) }
-            ?? (track?.nativeLyrics == nil ? nil : loc("Music"))
-        let cachedAttribution = (localLyrics?.url ?? localPlain?.url)
-            .flatMap(Self.cachedLyricsAttribution)
-        lyricsCopyright = cachedAttribution?.copyright
-        lyricsRegion = cachedAttribution?.region
-        // The file's own declared shift, kept apart so that clearing a nudge
-        // restores it rather than zero — then the remembered nudge on top.
+            localURL.map(Self.lyricsSourceName(forLocalURL:))
+            ?? (track.nativeLyrics == nil ? nil : loc("Music"))
+        lyricsCopyright = snapshot.attribution?.copyright
+        lyricsRegion = snapshot.attribution?.region
+        melody = snapshot.melody
         fileLyricOffset = lyrics?.offset ?? 0
         applyLyricOffset()
-        melody = track.flatMap(Self.findMelody)
-        if let track {
-            if let localURL = localLyrics?.url ?? localPlain?.url {
-                lyricsLookupStatus = Self.lyricsStatus(forLocalURL: localURL)
-            } else {
-                lyricsLookupStatus = plainLyrics == nil ? .loading : .native
-                startLyricsLookup(for: track)
-            }
+        if let localURL {
+            lyricsLookupStatus = Self.lyricsStatus(forLocalURL: localURL)
+        } else if plainLyrics == nil {
+            startLyricsLookup(for: track)
         } else {
-            lyricsLookupStatus = .idle
+            lyricsLookupStatus = .native
         }
         if isScoringSinging { rebuildScoringReference() }
     }
@@ -3661,44 +4308,6 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    /// Finds an `.lrc` for a track by name.
-    static func findLyrics(for track: NowPlaying.Track) -> Lyrics? {
-        findLyricsMatch(for: track)?.lyrics
-    }
-
-    private struct LocalLyricsMatch {
-        let lyrics: Lyrics
-        let url: URL
-    }
-
-    private static func findLyricsMatch(for track: NowPlaying.Track) -> LocalLyricsMatch? {
-        guard let url = bestFile(for: track, extensions: ["lrc"]),
-            let text = try? String(contentsOf: url, encoding: .utf8)
-        else { return nil }
-        guard let lyrics = Lyrics.parse(text) else { return nil }
-        return LocalLyricsMatch(lyrics: lyrics, url: url)
-    }
-
-    /// Finds locally cached or user-supplied words with no timing.
-    static func findPlainLyrics(for track: NowPlaying.Track) -> String? {
-        findPlainLyricsMatch(for: track)?.text
-    }
-
-    private struct LocalPlainLyricsMatch {
-        let text: String
-        let url: URL
-    }
-
-    private static func findPlainLyricsMatch(
-        for track: NowPlaying.Track
-    ) -> LocalPlainLyricsMatch? {
-        guard let url = bestFile(for: track, extensions: ["txt"]),
-            let text = try? String(contentsOf: url, encoding: .utf8)
-        else { return nil }
-        let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return words.isEmpty ? nil : LocalPlainLyricsMatch(text: words, url: url)
-    }
-
     /// A downloaded cache keeps its provider; only user files say local.
     static func lyricsSourceName(forLocalURL url: URL) -> String {
         OnlineLyrics.cachedSource(for: url).map { Self.lyricsSourceName(for: $0) }
@@ -3708,79 +4317,6 @@ final class RouterModel: ScriptTarget {
     /// A provider cache is online evidence even though it is now read from disk.
     static func lyricsStatus(forLocalURL url: URL) -> LyricsLookupStatus {
         OnlineLyrics.cachedSource(for: url) == nil ? .local : .online
-    }
-
-    /// Restores bounded provider attribution beside a downloaded cache.
-    ///
-    /// The provider in the sidecar must agree with the provider encoded in the
-    /// cache filename. A stale or hand-edited sidecar must not relabel another
-    /// catalogue's words on the next play.
-    static func cachedLyricsAttribution(
-        for lyricsURL: URL
-    ) -> OnlineLyrics.CacheAttribution? {
-        guard let source = OnlineLyrics.cachedSource(for: lyricsURL) else { return nil }
-        let url = OnlineLyrics.cacheAttributionURL(for: lyricsURL)
-        guard let data = try? Data(contentsOf: url),
-            let attribution = try? OnlineLyrics.decodeCacheAttribution(data),
-            attribution.provider == source
-        else { return nil }
-        return attribution
-    }
-
-    /// Finds the tune, which lives beside the words under the same name.
-    ///
-    /// Beside rather than inside: an `.lrc` has nowhere to put a pitch, and
-    /// inventing an extension to the format would mean nobody's existing files
-    /// worked. A karaoke MIDI is older than the `.lrc` and people already have
-    /// them.
-    static func findMelody(for track: NowPlaying.Track) -> MidiMelody? {
-        guard let url = bestFile(for: track, extensions: ["mid", "midi"]),
-            let data = try? Data(contentsOf: url)
-        else { return nil }
-        return MidiMelody.parse(data)
-    }
-
-    /// Finds cover artwork beside local words and melody files.
-    ///
-    /// This is the final source in the cover chain: the player and recognition
-    /// catalogue stay authoritative, while a user-supplied image makes local
-    /// and hand-curated Chinese karaoke libraries complete without a network
-    /// service or an embedded API key.
-    static func findArtwork(for track: NowPlaying.Track) -> URL? {
-        bestFile(
-            for: track,
-            extensions: ["jpg", "jpeg", "png", "heic", "webp"])
-    }
-
-    /// The exact-name cover beside a hand-selected `.lrc`.
-    static func artworkBesideWords(at words: URL) -> URL? {
-        let stem = words.deletingPathExtension()
-        return ["jpg", "jpeg", "png", "heic", "webp"]
-            .lazy
-            .map(stem.appendingPathExtension)
-            .first { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
-    /// Picks the file in the lyrics folder that best matches a track.
-    ///
-    /// Matched loosely on purpose. A file somebody downloaded is called
-    /// whatever the person who made it called it — "Artist - Title.lrc",
-    /// "Title.lrc", with or without accents — and refusing to find it because
-    /// of a hyphen would make the feature useless in exactly the case it exists
-    /// for.
-    ///
-    /// - Parameters:
-    ///   - track: What is playing.
-    ///   - extensions: Which suffixes count, without the dot.
-    /// - Returns: The best match, or nil when nothing in the folder looks like
-    ///   this song.
-    static func bestFile(for track: NowPlaying.Track, extensions: [String]) -> URL? {
-        guard let directory = lyricsDirectory,
-            let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path)
-        else { return nil }
-        return bestFileName(for: track, names: names, extensions: extensions).map {
-            directory.appendingPathComponent($0)
-        }
     }
 
     /// Pure half of local asset matching, shared by words, melody and artwork.
@@ -3934,7 +4470,14 @@ final class RouterModel: ScriptTarget {
 
     @discardableResult
     private func updateOutputDelay(_ milliseconds: Double, for uid: String) -> Bool {
-        let clamped = max(0, min(Self.maximumOutputDelay, milliseconds))
+        guard milliseconds.isFinite, !uid.isEmpty,
+            uid.utf8.count <= Self.maximumOutputDelayIdentifierBytes
+        else { return false }
+        let rate = pathQuality?.sampleRate ?? preferredSampleRate
+        guard AudioHardwareValuePolicy.supports(sampleRate: rate) else { return false }
+        let frameBound =
+            Double(RoutingEngine.maximumExtraOutputLatencyFrames) / rate * 1_000
+        let clamped = max(0, min(Self.maximumOutputDelay, min(frameBound, milliseconds)))
         guard outputDelays[uid] != clamped else { return false }
         if clamped == 0 { outputDelays[uid] = nil } else { outputDelays[uid] = clamped }
         outputDelaysNeedCommit = true
@@ -3944,7 +4487,8 @@ final class RouterModel: ScriptTarget {
     /// Half a second. Beyond that it is not alignment any more, and a delay
     /// somebody set by accident should not be able to make the application look
     /// broken.
-    static let maximumOutputDelay: Double = 500
+    nonisolated static let maximumOutputDelay: Double = 500
+    nonisolated private static let maximumOutputDelayIdentifierBytes = 1_024
 
     /// Devices chosen before, most recent first. See `Preferences`.
     private(set) var recentSourceUIDs: [String] = []
@@ -4047,8 +4591,11 @@ final class RouterModel: ScriptTarget {
     /// Registered with the system, not mirrored locally — the login item state
     /// belongs to `SMAppService`.
     var launchesAtLogin: Bool {
-        get { LoginItem.isEnabled }
-        set { loginItemError = LoginItem.setEnabled(newValue) }
+        get { PermissionCentre.shared.loginItem == .allowed }
+        set {
+            loginItemError = LoginItem.setEnabled(newValue)
+            PermissionCentre.shared.refreshSafeStatuses()
+        }
     }
     private(set) var loginItemError: String?
 
@@ -4065,7 +4612,7 @@ final class RouterModel: ScriptTarget {
     var autoStart: Bool = false {
         didSet {
             guard oldValue != autoStart else { return }
-            if !isRestoring, !Self.isVerificationProcess, autoStart {
+            if !isRestoring, startupPolicy.permitsAutomaticStart, autoStart {
                 UserDefaults.standard.set(
                     Self.autoStartConsentVersion,
                     forKey: Self.autoStartConsentVersionKey)
@@ -4115,9 +4662,12 @@ final class RouterModel: ScriptTarget {
         } else {
             // Same stages, different numbers: push them without a rebuild.
             let preset = voicePreset
-            applyLiveControl { engine in
-                engine.setEffectParameter("cents", of: .pitch, to: preset.cents)
-                engine.setEffectParameter("shift", of: .formant, to: preset.formantPercent)
+            applyLiveControl(key: .effect(.pitch, "cents")) {
+                $0.setEffectParameter("cents", of: .pitch, to: preset.cents)
+            }
+            applyLiveControl(key: .effect(.formant, "shift")) {
+                $0.setEffectParameter(
+                    "shift", of: .formant, to: preset.formantPercent)
             }
         }
     }
@@ -4155,49 +4705,33 @@ final class RouterModel: ScriptTarget {
     /// Ones that were asked for and would not load, with why.
     private(set) var failedPlugins: [AudioUnitLoadFailure] = []
     @ObservationIgnored private var pluginParameterCache: [String: [EffectParameter]] = [:]
-    @ObservationIgnored private var pluginRefreshGate = LatestRefreshGate()
     @ObservationIgnored private var pluginRegistryWasRequested = false
-    private let systemDiscoveryQueue = DispatchQueue(
-        label: "com.yuhuanstudio.yunaudio.system-discovery", qos: .utility)
+    @ObservationIgnored private(set) var pluginRefreshRevision: UInt64 = 0
+    @ObservationIgnored private lazy var pluginRegistryWorker =
+        PluginRegistryWorker { [weak self] snapshot in
+            guard let self, !snapshot.timedOut else { return }
+            self.pluginRefreshRevision &+= 1
+            self.applyPluginRefresh(snapshot.plugins)
+        }
+    /// Independent bounded owners for optional synchronous system queries.
+    @ObservationIgnored private let systemQueryOwners = RouterSystemQueryOwners()
 
     func refreshPlugins() {
-        // An explicit Rescan is deterministic: when it returns, the window
-        // shows the answer. It also makes an older launch scan obsolete.
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         pluginRegistryWasRequested = true
-        pluginRefreshGate.invalidate()
-        applyPluginRefresh(AudioUnitPlugins.installed())
+        _ = pluginRegistryWorker.submit()
     }
 
     /// Loads the registry when a route or the plug-in page first needs it.
     func refreshPluginsIfNeeded() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard !pluginRegistryWasRequested else { return }
         pluginRegistryWasRequested = true
         refreshPluginsAsynchronously()
     }
 
     private func refreshPluginsAsynchronously() {
-        guard let token = pluginRefreshGate.request() else { return }
-        runPluginRefresh(token)
-    }
-
-    private func runPluginRefresh(_ token: LatestRefreshGate.Token) {
-        let queue = systemDiscoveryQueue
-        queue.async {
-            let installed = AudioUnitPlugins.installed()
-            Task { @MainActor in
-                self.finishPluginRefresh(installed, token: token)
-            }
-        }
-    }
-
-    private func finishPluginRefresh(
-        _ installed: [AudioUnitPlugin], token: LatestRefreshGate.Token
-    ) {
-        guard pluginRefreshGate.accepts(token) else { return }
-        applyPluginRefresh(installed)
-        if case .start(let next) = pluginRefreshGate.finish(token) {
-            runPluginRefresh(next)
-        }
+        refreshPlugins()
     }
 
     /// MainActor half of registry discovery: comparisons and value publication.
@@ -4212,8 +4746,35 @@ final class RouterModel: ScriptTarget {
     }
 
     func addPlugin(_ plugin: AudioUnitPlugin) {
-        guard !enabledPlugins.contains(plugin) else { return }
+        guard !enabledPlugins.contains(where: { $0.id == plugin.id }) else { return }
+        guard plugin.loadsInProcess, !plugin.requiresAsyncInstantiation,
+            enabledPlugins.count < RoutingEngine.maximumHostedPlugins,
+            plugin.name.utf8.count <= 1_024,
+            plugin.manufacturerName.utf8.count <= 1_024
+        else {
+            lastError = loc(
+                "This Audio Unit cannot be added safely to the realtime route.")
+            return
+        }
         enabledPlugins.append(plugin)
+    }
+
+    nonisolated static func admittedPlugins(
+        _ plugins: [AudioUnitPlugin]
+    ) -> [AudioUnitPlugin] {
+        var identities = Set<String>()
+        var admitted: [AudioUnitPlugin] = []
+        admitted.reserveCapacity(min(plugins.count, RoutingEngine.maximumHostedPlugins))
+        for plugin in plugins {
+            guard admitted.count < RoutingEngine.maximumHostedPlugins,
+                plugin.loadsInProcess, !plugin.requiresAsyncInstantiation,
+                plugin.name.utf8.count <= 1_024,
+                plugin.manufacturerName.utf8.count <= 1_024,
+                identities.insert(plugin.id).inserted
+            else { continue }
+            admitted.append(plugin)
+        }
+        return admitted
     }
 
     func removePlugin(_ plugin: AudioUnitPlugin) {
@@ -4235,7 +4796,7 @@ final class RouterModel: ScriptTarget {
         pluginValues["\(plugin.id).\(parameter.id)"] = value
         let parameterID = parameter.id
         let pluginID = plugin.id
-        applyLiveControl {
+        applyLiveControl(key: .plugin(pluginID, parameterID)) {
             $0.setPluginParameter(parameterID, ofPlugin: pluginID, to: value)
         }
         persist()
@@ -4294,7 +4855,7 @@ final class RouterModel: ScriptTarget {
             guard oldValue != voiceIsolationMix else { return }
             persist()
             let mix = voiceIsolationMix
-            applyLiveControl {
+            applyLiveControl(key: .effect(.voiceIsolation, "mix")) {
                 $0.setEffectParameter("mix", of: .voiceIsolation, to: mix)
             }
         }
@@ -4332,14 +4893,22 @@ final class RouterModel: ScriptTarget {
     var quickConfigs: [QuickConfig] = [] {
         didSet {
             guard oldValue != quickConfigs else { return }
-            QuickConfigStore.save(quickConfigs)
+            guard case .refused = QuickConfigStore.save(quickConfigs) else { return }
+            // Normal save paths preflight before assignment. This fallback
+            // also keeps a future direct mutation from publishing a value the
+            // bounded store has truthfully refused.
+            quickConfigs = oldValue
         }
     }
+
+    /// Owns the bounded serial lane for macOS default-device reads and writes.
+    @ObservationIgnored let quickConfigSystemControl = QuickConfigSystemControl()
 
     var userPresets: [RoutePreset] = [] {
         didSet {
             guard oldValue != userPresets else { return }
-            UserPresets.save(userPresets)
+            guard case .refused = UserPresets.save(userPresets) else { return }
+            userPresets = oldValue
         }
     }
 
@@ -4665,19 +5234,54 @@ final class RouterModel: ScriptTarget {
             // same source is a separate switch on a separate window, and the
             // failure it produces is the one nobody notices in time.
             let muted = isInputMuted
-            Task { await obsLink.mirrorMute(muted) }
+            obsLink.requestMuteMirror(muted)
             fire(isInputMuted ? .muted : .unmuted)
         }
     }
 
     // MARK: Speaking while muted
 
-    /// CoreAudio's own detector, watching the source device.
+    /// An explicit opt-in to CoreAudio's device-global voice detector.
     ///
-    /// Kept for the lifetime of a route rather than made on demand: switching
-    /// detection on is a write to the device, and doing that per question would
-    /// be writing to somebody's hardware twenty times a second.
-    @ObservationIgnored private var voiceWatcher: VoiceActivityWatcher?
+    /// Off by default because starting a route is not permission to change a
+    /// global device property. Persisted so the switch reflects a decision the
+    /// user made, rather than an incidental fact about the current route.
+    var warnsWhenSpeakingWhileMuted = false {
+        didSet {
+            guard oldValue != warnsWhenSpeakingWhileMuted else { return }
+            persist()
+            guard !isRestoring else { return }
+            if warnsWhenSpeakingWhileMuted {
+                if isRunning {
+                    startVoiceActivity()
+                } else {
+                    refreshVoiceActivityAvailability()
+                }
+            } else {
+                voiceActivityAvailability = nil
+                stopVoiceActivity()
+            }
+        }
+    }
+
+    /// The only lane allowed to make detector HAL calls.
+    ///
+    /// It is deliberately independent of `engineQueue`: a vendor property call
+    /// which never returns may consume this one worker, but it cannot stand in
+    /// front of IOProc, echo-cancellation, tap or aggregate teardown.
+    @ObservationIgnored private lazy var voiceActivityWorker =
+        VoiceActivityLifecycleWorker<VoiceActivityWatcher>.live { [weak self] event in
+            Task { @MainActor in self?.applyVoiceActivityEvent(event) }
+        }
+    @ObservationIgnored private var voiceActivityRequestToken: VoiceActivityLifecycleToken?
+    @ObservationIgnored private var voiceActivityRequestUID: String?
+
+    /// Cached capability of the selected source; nil means it has not been read.
+    ///
+    /// HAL answers only on the bounded detector worker. Diagnostics can therefore
+    /// evaluate this property as often as SwiftUI asks without synchronously
+    /// making `coreaudiod` do work on MainActor.
+    private(set) var voiceActivityAvailability: Bool?
 
     /// True when the microphone is muted and somebody is talking into it.
     ///
@@ -4697,45 +5301,93 @@ final class RouterModel: ScriptTarget {
     /// on the global scope reports that not one of them does. An interface that
     /// showed an indicator which could never light would be worse than one that
     /// says the device cannot do it.
-    var canDetectVoiceActivity: Bool {
-        guard let source = selectedSource else { return false }
-        return VoiceActivityWatcher.isAvailable(on: source.id)
-    }
+    var canDetectVoiceActivity: Bool { voiceActivityAvailability == true }
 
     /// True while the detector this route built is actually running.
     ///
-    /// `VoiceActivityWatcher` reports this and nothing in the application asked
-    /// — which is the one question that decides whether "not speaking" means
-    /// anything. Its initialiser returns a live object even when the write that
-    /// switches detection on failed, and then the state reads 0 for ever,
-    /// `isSpeakingWhileMuted` never becomes true, and the "muted, but talking"
-    /// pill cannot appear, with nothing anywhere saying the detector is not
-    /// running. Asked of the watcher rather than of the device, because it is
-    /// the watcher's own claim that is being checked.
-    var isDetectingVoiceActivity: Bool { voiceWatcher?.isObserving ?? false }
+    /// Cached lifecycle state of this route's watcher.
+    ///
+    /// Never derived from a HAL read in a view body. It becomes true only after
+    /// the background activation succeeded and is cleared before cleanup is
+    /// submitted.
+    private(set) var isDetectingVoiceActivity = false
 
-    private func startVoiceActivity() {
-        guard voiceWatcher == nil, let source = selectedSource else { return }
-        voiceWatcher = VoiceActivityWatcher(device: source.id) { [weak self] speaking in
-            Task { @MainActor in
-                guard let self else { return }
-                // Only ever a warning about a mute. Publishing "somebody is
-                // talking" while unmuted would be a meter, and there is a real
-                // one two rows up that measures the signal rather than asking
-                // the system about it.
-                let wanted = speaking && self.isInputMuted
-                let changed = wanted != self.isSpeakingWhileMuted
-                self.isSpeakingWhileMuted = wanted
-                // Only on the edge. A script told once a second that somebody
-                // is still talking cannot tell that from somebody starting.
-                if changed, wanted { self.fire(.speakingWhileMuted) }
-            }
+    private func refreshVoiceActivityAvailability() {
+        voiceActivityRequestToken = nil
+        voiceActivityRequestUID = nil
+        voiceActivityAvailability = nil
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        guard warnsWhenSpeakingWhileMuted, let source = selectedSource else { return }
+        voiceActivityRequestUID = source.uid
+        voiceActivityRequestToken = voiceActivityWorker.requestAvailability(on: source.id)
+        if voiceActivityRequestToken == nil {
+            voiceActivityAvailability = false
         }
     }
 
-    private func stopVoiceActivity() {
-        voiceWatcher = nil
+    private func startVoiceActivity() {
+        voiceActivityRequestToken = nil
+        voiceActivityRequestUID = nil
+        isDetectingVoiceActivity = false
         isSpeakingWhileMuted = false
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        guard warnsWhenSpeakingWhileMuted, isRunning, let source = selectedSource else {
+            return
+        }
+        voiceActivityRequestUID = source.uid
+        voiceActivityRequestToken = voiceActivityWorker.requestStart(
+            on: source.id, activation: .enableIfNeeded)
+        if voiceActivityRequestToken == nil {
+            voiceActivityAvailability = false
+        }
+    }
+
+    private func applyVoiceActivityEvent(_ event: VoiceActivityLifecycleEvent) {
+        let token: VoiceActivityLifecycleToken
+        switch event {
+        case .availability(let value, _), .started(let value, _, _),
+            .speaking(let value, _), .timedOut(let value, _):
+            token = value
+        }
+        guard token == voiceActivityRequestToken, warnsWhenSpeakingWhileMuted,
+            selectedSourceUID == voiceActivityRequestUID
+        else { return }
+
+        switch event {
+        case .availability(_, let available):
+            voiceActivityAvailability = available
+        case .started(_, let available, let observing):
+            guard isRunning else { return }
+            voiceActivityAvailability = available
+            isDetectingVoiceActivity = observing
+        case .speaking(_, let speaking):
+            guard isRunning, isDetectingVoiceActivity else { return }
+            // Only ever a warning about a mute. Publishing "somebody is
+            // talking" while unmuted would be a meter, and there is already
+            // one measuring the routed signal.
+            let wanted = speaking && isInputMuted
+            let changed = wanted != isSpeakingWhileMuted
+            isSpeakingWhileMuted = wanted
+            if changed, wanted { fire(.speakingWhileMuted) }
+        case .timedOut:
+            voiceActivityAvailability = false
+            isDetectingVoiceActivity = false
+            isSpeakingWhileMuted = false
+        }
+    }
+
+    /// Cancels publication synchronously; the returned fence owns asynchronous
+    /// HAL cleanup without putting any of it ahead of route teardown.
+    private func requestVoiceActivityCleanup() -> VoiceActivityStopFence {
+        voiceActivityRequestToken = nil
+        voiceActivityRequestUID = nil
+        isDetectingVoiceActivity = false
+        isSpeakingWhileMuted = false
+        return voiceActivityWorker.requestStop()
+    }
+
+    private func stopVoiceActivity() {
+        _ = requestVoiceActivityCleanup()
     }
     var outputDecibels: Float = 0 {
         didSet {
@@ -4760,25 +5412,25 @@ final class RouterModel: ScriptTarget {
     /// is exactly the bookkeeping this is here to make impossible.
     private func applyInputGain() {
         let gain = Self.gain(fromDecibels: inputDecibels)
-        applyLiveControl { $0.setInputGain(gain) }
+        applyLiveControl(key: .inputGain) { $0.setInputGain(gain) }
         appliedToGraph.insert(.inputGain)
     }
 
     private func applyInputMute() {
         let muted = isInputMuted
-        applyLiveControl { $0.setInputMuted(muted) }
+        applyLiveControl(key: .inputMute) { $0.setInputMuted(muted) }
         appliedToGraph.insert(.inputMute)
     }
 
     private func applyOutputGain() {
         let gain = Self.gain(fromDecibels: outputDecibels)
-        applyLiveControl { $0.setOutputGain(gain) }
+        applyLiveControl(key: .outputGain) { $0.setOutputGain(gain) }
         appliedToGraph.insert(.outputGain)
     }
 
     private func applyOutputMute() {
         let muted = isOutputMuted
-        applyLiveControl { $0.setOutputMuted(muted) }
+        applyLiveControl(key: .outputMute) { $0.setOutputMuted(muted) }
         appliedToGraph.insert(.outputMute)
     }
 
@@ -4842,7 +5494,10 @@ final class RouterModel: ScriptTarget {
 
     /// Takes a monitor the engine gave up on out of the interface, and says
     /// which one it was and what it said.
-    private func monitorWasDropped(_ dropped: RoutingEngine.DroppedMonitor) {
+    private func monitorWasDropped(
+        _ dropped: RoutingEngine.DroppedMonitor,
+        installedRoutes: [Route]? = nil
+    ) {
         // The name while it is still in the list; the remembered one after that.
         // "PG32UCDM would not start" is a sentence somebody can act on and
         // "AppleGFXHDAEngineOutputDP:…" is not.
@@ -4854,10 +5509,9 @@ final class RouterModel: ScriptTarget {
         isDroppingMonitor = true
         monitorDeviceUID = nil
         isDroppingMonitor = false
-        // Faders are positions in the engine's route list and that list is now
-        // shorter than the one this model handed over. Re-read rather than
-        // adjusted here: the engine is the only thing that knows what it built.
-        let installed = engine.currentRoutes
+        // Faders are positions in the complete engine publication and that list
+        // is now shorter than the one this model handed over.
+        let installed = installedRoutes ?? engineSnapshot.routes
         if installed != activeRoutes {
             activeRoutes = installed
             routeGains = installed.map(\.gain)
@@ -4884,7 +5538,10 @@ final class RouterModel: ScriptTarget {
 
     /// Takes the extras the engine could not bring up out of the interface, and
     /// names them.
-    private func extrasWereDropped(_ dropped: [RoutingEngine.DroppedMonitor]) {
+    private func extrasWereDropped(
+        _ dropped: [RoutingEngine.DroppedMonitor],
+        installedRoutes: [Route]? = nil
+    ) {
         guard !dropped.isEmpty else { return }
         let gone = Set(dropped.map(\.uid))
         // Read before the removals below, or every dropped device looks like
@@ -4897,9 +5554,9 @@ final class RouterModel: ScriptTarget {
         additionalSourceUIDs.removeAll { gone.contains($0) }
         additionalDestinationUIDs.removeAll { gone.contains($0) }
         persist()
-        // Same reason as the monitor: the engine built a shorter route list
-        // than this model handed it, and only the engine knows what it built.
-        let installed = engine.currentRoutes
+        // Same reason as the monitor: the complete engine publication carries
+        // the shorter route list which was actually built.
+        let installed = installedRoutes ?? engineSnapshot.routes
         if installed != activeRoutes {
             activeRoutes = installed
             routeGains = installed.map(\.gain)
@@ -5055,8 +5712,10 @@ final class RouterModel: ScriptTarget {
         let gain = Self.gain(fromDecibels: decibels)
         let keys = indices.compactMap(routeKey(at:))
         for key in keys { rememberGain(gain, for: key) }
-        applyLiveControl { engine in
-            for key in keys { engine.setGain(gain, for: key) }
+        for key in keys {
+            applyLiveControl(key: .routeGain(key)) {
+                $0.setGain(gain, for: key)
+            }
         }
     }
 
@@ -5102,8 +5761,10 @@ final class RouterModel: ScriptTarget {
         let gain = Self.gain(fromDecibels: monitorDecibels)
         let keys = indices.compactMap(routeKey(at:))
         for key in keys { rememberGain(gain, for: key) }
-        applyLiveControl { engine in
-            for key in keys { engine.setGain(gain, for: key) }
+        for key in keys {
+            applyLiveControl(key: .routeGain(key)) {
+                $0.setGain(gain, for: key)
+            }
         }
     }
 
@@ -5124,16 +5785,32 @@ final class RouterModel: ScriptTarget {
     /// every animation is computed on the host and pushed — which turns the
     /// ring into a twelve-pixel display this application already has something
     /// to put on.
-    let lighting = LightingController()
+    private(set) var lighting = LightingController()
 
     var lightingMode: LightingMode {
         get { lighting.mode }
         set {
             guard lighting.mode != newValue else { return }
             lighting.mode = newValue
-            if newValue != .off { lighting.refreshDeviceAsynchronously() }
+            if startupPolicy.permitsLightingHardwareDiscovery,
+                newValue != .off
+            {
+                lighting.refreshDeviceAsynchronously()
+            }
             persist()
         }
+    }
+
+    /// Refreshes HID only for a launch authorised to inspect the light ring.
+    func refreshLightingDeviceIfPermitted() {
+        guard startupPolicy.permitsLightingHardwareDiscovery else { return }
+        lighting.refreshDeviceAsynchronously()
+    }
+
+    /// Potential animated HID workers for the current restored mode.
+    var lightingRenderThreadAdmissionCountForDiagnostics: Int {
+        LightingController.workerInterval(mode: lighting.mode, isSignalActive: true) == nil
+            ? 0 : 1
     }
 
     /// The ring's colour, as a hue from 0 to 1.
@@ -5176,10 +5853,17 @@ final class RouterModel: ScriptTarget {
     var hardwareGainScalar: Float {
         get { pendingHardwareGain ?? hardwareGain?.scalar ?? 0 }
         set {
-            pendingHardwareGain = newValue
-            guard let source = selectedSource else { return }
-            try? source.setHardwareGain(
-                scalar: newValue, scope: kAudioObjectPropertyScopeInput)
+            guard newValue.isFinite else { return }
+            let scalar = max(0, min(1, newValue))
+            pendingHardwareGain = scalar
+            guard let source = selectedSource,
+                let gain = hardwareGain,
+                !gain.settableElements.isEmpty
+            else { return }
+            latestHardwareGainWrite = HardwareControlWrite(
+                device: source, scalar: scalar, kind: .inputGain,
+                elements: gain.settableElements)
+            submitHardwareControlBatch()
         }
     }
     private var pendingHardwareGain: Float?
@@ -5224,14 +5908,16 @@ final class RouterModel: ScriptTarget {
 
     var resolvedEchoSpeaker: AudioDevice? {
         echoSpeakerOptions.first { $0.uid == echoSpeakerUID }
-            ?? (try? AudioDevices.defaultOutput()).flatMap { device in
-                device.transport.isVirtual ? nil : device
-            }
+            ?? echoSpeakerOptions.first { $0.uid == cachedDefaultOutputUID }
             ?? echoSpeakerOptions.first
     }
 
     /// What the canceller is doing, or nil when it is not in the path.
-    var echoStatus: EchoCancellationStatus? { engine.echoCancellationStatus }
+    ///
+    /// Updated from the lifecycle snapshot and the coherent telemetry poll; a
+    /// view read never tries the engine lock and therefore never turns temporary
+    /// contention into a disappearing status row.
+    private(set) var echoStatus: EchoCancellationStatus?
 
     /// Why the canceller is not in the path, when it was asked for.
     ///
@@ -5239,7 +5925,7 @@ final class RouterModel: ScriptTarget {
     /// command-line harness ever asked. Somebody who switched echo
     /// cancellation on in the menu bar, and got none, was told nothing at all.
     var echoCancellationMessage: String? {
-        guard cancelsEcho, isRunning, let reason = engine.lastEchoCancellationError
+        guard cancelsEcho, isRunning, let reason = engineSnapshot.echoCancellationError
         else { return nil }
         return Self.echoMessage(reason)
     }
@@ -5250,7 +5936,7 @@ final class RouterModel: ScriptTarget {
     /// code with when the speaker was not the problem.
     var echoCancellationDetail: String? {
         guard cancelsEcho, isRunning else { return nil }
-        return engine.lastEchoCancellationDetail
+        return engineSnapshot.echoCancellationDetail
     }
 
     /// Split out for the reason `isolationMessage` is: the failure cannot be
@@ -5313,6 +5999,12 @@ final class RouterModel: ScriptTarget {
     private(set) var isRecording = false
     private(set) var recordingURL: URL?
     private(set) var recordingSeconds: TimeInterval = 0
+    /// Latest requested state, including work which has not reached the engine.
+    ///
+    /// Toggling from `isRecording` would turn two quick Start clicks into two
+    /// starts while the first file was still opening. Intent is the value the
+    /// first/latest mailbox coalesces, so an even burst ends where it began.
+    @ObservationIgnored private var recordingIntentTarget = false
 
     /// Where files go. The user's Music folder rather than a folder of our own:
     /// a recording is theirs, and burying it somewhere only this app knows
@@ -5336,7 +6028,7 @@ final class RouterModel: ScriptTarget {
         guard isRecording else { return }
         isRecordingPaused.toggle()
         let paused = isRecordingPaused
-        applyLiveControl { $0.setRecordingPaused(paused) }
+        applyLiveControl(key: .recordingPaused) { $0.setRecordingPaused(paused) }
     }
 
     /// Write a separate file per source alongside the mix.
@@ -5353,58 +6045,112 @@ final class RouterModel: ScriptTarget {
     /// Samples any stem had to drop. Non-zero means a file has gaps in it.
     var engineStemDrops: UInt64 { engine.stemDroppedSamples }
 
+    /// Recorder transport evidence used only by the live verification harness.
+    var engineRecordingSnapshotForFlowCheck: RoutingEngine.RecordingSnapshot {
+        engine.recordingSnapshot
+    }
+
+    var engineRecordingAttachmentForFlowCheck: RoutingEngine.RecordingAttachmentDiagnostics {
+        engine.recordingAttachmentDiagnostics
+    }
+
+    var audioQuarantineReasonsForFlowCheck: [String] {
+        ProcessLifetimeAudioQuarantine.shared.reasons
+    }
+
     /// How many sources are being listened to for transcription. One per
     /// source is the whole mechanism, so it is worth being able to check.
     var engineTranscriptTaps: Int { engine.transcriptTapCount }
 
     func toggleRecording() {
-        if isRecording {
-            isRecordingPaused = false
-            engine.setRecordingPaused(false)
-            engine.stopStemRecording()
-            // Read the duration first: stopping releases the recorder, and
-            // asking a released recorder how long it ran returns zero, so the
-            // elapsed time snapped back to 00:00 exactly when someone would
-            // look at it.
-            recordingSeconds = engine.recordingDuration
-            engine.stopRecording()
-            isRecording = false
-            // `recordStart` and `recordStop` were declared in `ScriptHost.Event`
-            // and raised by nothing, which is worse than absent: the event names
-            // are listed in the scripting help, and `installEvents` refuses an
-            // unknown name precisely so that a typo cannot become a handler that
-            // never fires. So `yun.on('recordStop', …)` was accepted, listed and
-            // never called — the one failure that guard exists to prevent.
-            fire(
-                .recordingStopped,
-                ["file": recordingURL?.path ?? "", "seconds": recordingSeconds])
-            return
-        }
-        guard isRunning else {
+        requestRecording(!recordingIntentTarget)
+    }
+
+    /// Submits one complete desired state; no engine lock or file API runs here.
+    private func requestRecording(_ wanted: Bool) {
+        guard wanted != recordingIntentTarget else { return }
+        guard !wanted || isRunning else {
             lastError = loc("Start routing before recording.")
             return
         }
-        do {
-            recordingURL = try engine.startRecording(
-                to: recordingDirectory, format: recordingFormat)
-            if recordsStems {
-                let groups = sourceGroups
-                stemURLs =
-                    (try? engine.startStemRecording(
-                        to: recordingDirectory,
-                        groups: groups.map(\.routes),
-                        names: groups.map { group in
-                            representative(of: group).map(routeTitle) ?? ""
-                        },
-                        format: recordingFormat)) ?? []
-            }
+        recordingIntentTarget = wanted
+        if !wanted { isRecordingPaused = false }
+        let groups = wanted && recordsStems ? sourceGroups : []
+        let request = RecordingLifecycleRequest(
+            wantsRecording: wanted,
+            directory: recordingDirectory,
+            format: recordingFormat,
+            stemGroups: groups.map(\.routes),
+            stemNames: groups.map { group in
+                representative(of: group).map(routeTitle) ?? ""
+            })
+        if !recordingLifecycleWorker.submit(request) {
+            recordingIntentTarget = isRecording
+            lastError = loc("Recording lifecycle is no longer available.")
+        }
+    }
+
+    private func finishRecordingLifecycle(_ event: RecordingLifecycleEvent) {
+        switch event {
+        case .started(let mix, let stems):
+            guard recordingIntentTarget else { return }
+            recordingURL = mix
+            stemURLs = stems
             isRecording = true
             isRecordingPaused = false
             recordingSeconds = 0
             lastError = nil
-            fire(.recordingStarted, ["file": recordingURL?.path ?? ""])
-        } catch {
-            lastError = String(describing: error)
+            let causality = pendingRecordingScriptCausality
+            fire(
+                .recordingStarted,
+                .object(["file": .string(recordingURL?.path ?? "")]),
+                causality: causality)
+            if pendingRecordingScriptTarget == true {
+                pendingRecordingScriptCausality = nil
+                pendingRecordingScriptTarget = nil
+            }
+
+        case .stopped(let mix, let duration, let finalisation):
+            if finalisation == .detachmentFailed {
+                recordingIntentTarget = true
+                isRecording = true
+                lastError = loc(
+                    "The recording could not detach safely. Stop routing before trying again."
+                )
+                return
+            }
+            recordingIntentTarget = false
+            recordingURL = mix ?? recordingURL
+            recordingSeconds = duration
+            isRecording = false
+            isRecordingPaused = false
+            // `recordStart` and `recordStop` were declared in
+            // Declared as script events and raised by nothing. Publish only after the
+            // producer detached, so a revoked late result cannot fire either.
+            fire(
+                .recordingStopped,
+                .object([
+                    "file": .string(recordingURL?.path ?? ""),
+                    "seconds": .double(recordingSeconds),
+                ]),
+                causality: pendingRecordingScriptCausality)
+            if pendingRecordingScriptTarget == false {
+                pendingRecordingScriptCausality = nil
+                pendingRecordingScriptTarget = nil
+            }
+            if finalisation == .writerTimedOut {
+                lastError = loc(
+                    "The recording stopped, but its file writer did not finish before the deadline."
+                )
+            }
+
+        case .failed(let reason):
+            pendingRecordingScriptCausality = nil
+            pendingRecordingScriptTarget = nil
+            recordingIntentTarget = false
+            isRecording = false
+            isRecordingPaused = false
+            lastError = reason
         }
     }
 
@@ -5419,8 +6165,9 @@ final class RouterModel: ScriptTarget {
     /// comes from frames actually written rather than from a wall clock that
     /// would keep counting through a stalled writer.
     private func refreshRecordingState() {
-        guard isRecording else { return }
-        publish(engine.recordingDuration, to: \.recordingSeconds)
+        guard isRecording, recordingIntentTarget else { return }
+        let snapshot = engine.recordingSnapshot
+        publish(snapshot.duration, to: \.recordingSeconds)
         // The writer stops itself on a file-system error. Left unnoticed, the
         // button would go on saying "recording" over a file that stopped
         // growing minutes ago — which is what it did, because the writer
@@ -5428,11 +6175,11 @@ final class RouterModel: ScriptTarget {
         // stayed true. The reason is asked for first now, and it is the
         // system's own sentence about what went wrong rather than this
         // application's guess at it.
-        if let reason = engine.recordingError {
-            engine.stopRecording()
-            isRecording = false
+        if let reason = snapshot.error {
+            requestRecording(false)
             lastError = String(format: loc("Recording stopped: %@"), reason)
-        } else if !engine.isRecording {
+        } else if !snapshot.isRecording {
+            recordingIntentTarget = false
             isRecording = false
             lastError = loc("Recording stopped: the file could not be written.")
         }
@@ -5441,7 +6188,12 @@ final class RouterModel: ScriptTarget {
     /// Populates the model with representative state for the offscreen design
     /// captures. Not called by the running app.
     func prepareForRendering(refreshesApplications: Bool = true) {
-        if refreshesApplications { refreshAppsForVerification() }
+        if refreshesApplications, startupPolicy.startsLiveServicesAfterLaunch {
+            refreshAppsForVerification()
+        }
+        let wasRestoring = isRestoring
+        isRestoring = true
+        defer { isRestoring = wasRestoring }
         // So the two key buttons are in a picture. Every other control on that
         // row is, and a control nobody has ever looked at is the one that comes
         // out cut off at the window edge.
@@ -5560,11 +6312,14 @@ final class RouterModel: ScriptTarget {
                 score: Self.previewScore(percentage: 54, error: 0.42)),
         ]
 
-        guard let source = selectedSource else { return }
+        // Pure value fixtures are intentional. Constructing a placeholder
+        // `AudioDevice` would still create a HAL-shaped owner and make the
+        // no-hardware proof depend on an implementation detail of that type.
+        let sourceUID = selectedSource?.uid ?? "preview-source"
         let destinationUID = selectedDestination?.uid ?? "preview-destination"
         activeRoutes = (0..<2).map { channel in
             Route(
-                source: ChannelRef(deviceUID: source.uid, channel: 0),
+                source: ChannelRef(deviceUID: sourceUID, channel: 0),
                 destination: ChannelRef(deviceUID: destinationUID, channel: channel))
         }
         routeGains = [1.0, 0.7]
@@ -5691,12 +6446,23 @@ final class RouterModel: ScriptTarget {
 
     private(set) var driverMessage: String?
     private(set) var isInstallingDriver = false
+    private static let driverInstallationQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.driver-installation", qos: .userInitiated)
+    private(set) var canInstallDriver = false
+    private(set) var driverStatusRevision: UInt64 = 0
+    @ObservationIgnored private lazy var driverStatusWorker =
+        DriverStatusWorker { [weak self] snapshot in
+            guard let self else { return }
+            self.driverStatusRevision &+= 1
+            self.canInstallDriver = snapshot.bundledDriverURL != nil
+            if let isOutOfDate = snapshot.isOutOfDate {
+                self.driverIsOutOfDate = isOutOfDate
+            }
+        }
 
     /// True when the driver can be installed from here, rather than only
     /// described. False means the app was launched without the driver beside
     /// it — running from a build directory, usually.
-    var canInstallDriver: Bool { DriverInstaller.bundledDriverURL != nil }
-
     /// True when the installed driver is not the one this app ships.
     ///
     /// Worth saying out loud: an older driver is missing whatever the newer one
@@ -5707,27 +6473,57 @@ final class RouterModel: ScriptTarget {
     /// — and the window's body asked for it on every redraw, which is twenty
     /// times a second while a route is up. Nothing can change it except this
     /// application installing a driver, which is the one place it is recomputed.
-    private(set) var driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
+    private(set) var driverIsOutOfDate = false
+
+    private func refreshDriverStatus() {
+        _ = driverStatusWorker.submit(
+            DriverStatusProbe.Request(
+                installedDriverURL: URL(fileURLWithPath: DriverInstaller.installPath),
+                bundledCandidates: DriverInstaller.bundledDriverCandidates))
+    }
 
     func installDriver() {
+        guard !isInstallingDriver else { return }
+        guard !isBusy else {
+            driverMessage = loc(
+                "Wait for the audio route to finish changing, then try again.")
+            return
+        }
         isInstallingDriver = true
         driverMessage = nil
-        let outcome = DriverInstaller.install()
+        let install: @MainActor () -> Void = { [weak self] in
+            self?.performDriverInstallation()
+        }
+        // Installation restarts coreaudiod. The route's completion fence must
+        // run first; otherwise the daemon disappears while our aggregate still
+        // owns devices and taps, which is exactly the system-wide stall this
+        // lifecycle is meant to prevent.
+        if isRunning || teardownNeedsRetry {
+            stop(then: install)
+        } else {
+            install()
+        }
+    }
+
+    private func performDriverInstallation() {
+        Self.driverInstallationQueue.async {
+            let outcome = DriverInstaller.install()
+            MainRunLoopDelivery.perform { self.finishDriverInstallation(outcome) }
+        }
+    }
+
+    private func finishDriverInstallation(_ outcome: DriverInstaller.Outcome) {
         isInstallingDriver = false
         // The one thing that can change the answer, so the one place it is
         // asked again.
-        driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
+        refreshDriverStatus()
         switch outcome {
         case .installed:
             driverMessage = nil
             // coreaudiod needs a moment to publish the new device.
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
-                self.refreshDevices()
-                self.selectedDestinationUID =
-                    self.outputDevices
-                    .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
-                    ?? self.selectedDestinationUID
+                self.requestDeviceChangeRefresh(after: .selectInstalledDriver)
             }
         case .cancelled:
             driverMessage = nil
@@ -5750,12 +6546,34 @@ final class RouterModel: ScriptTarget {
     /// `coreaudiod`, and a route running through the device that is about to
     /// stop existing is an aggregate whose member disappears underneath it.
     func removeDriver() {
-        if isRunning { stop() }
+        guard !isInstallingDriver else { return }
+        guard !isBusy else {
+            driverMessage = loc(
+                "Wait for the audio route to finish changing, then try again.")
+            return
+        }
         isInstallingDriver = true
         driverMessage = nil
-        let outcome = DriverInstaller.uninstall()
+        let remove: @MainActor () -> Void = { [weak self] in
+            self?.performDriverRemoval()
+        }
+        if isRunning || teardownNeedsRetry {
+            stop(then: remove)
+        } else {
+            remove()
+        }
+    }
+
+    private func performDriverRemoval() {
+        Self.driverInstallationQueue.async {
+            let outcome = DriverInstaller.uninstall()
+            MainRunLoopDelivery.perform { self.finishDriverRemoval(outcome) }
+        }
+    }
+
+    private func finishDriverRemoval(_ outcome: DriverInstaller.Outcome) {
         isInstallingDriver = false
-        driverIsOutOfDate = DriverInstaller.installedIsOutOfDate
+        refreshDriverStatus()
         switch outcome {
         case .removed:
             driverMessage = nil
@@ -5763,11 +6581,7 @@ final class RouterModel: ScriptTarget {
             // go rather than left as a UID that resolves to nothing.
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(2))
-                self.refreshDevices()
-                if self.selectedDestinationUID == ClockAnchorPublisher.driverDeviceUID {
-                    self.selectedDestinationUID = nil
-                    self.selectDefaults()
-                }
+                self.requestDeviceChangeRefresh(after: .clearRemovedDriverSelection)
             }
         case let .failed(reason):
             driverMessage = reason
@@ -5782,6 +6596,7 @@ final class RouterModel: ScriptTarget {
     /// process enumeration behind `grouped` is 12–27 ms warm and 118 ms cold,
     /// which is a dropped frame before the list has drawn its first row.
     func refreshApps() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         if appRefreshInFlight {
             // A person pressing Refresh should not be ignored, but neither
             // should ten presses queue ten identical HAL enumerations.
@@ -5789,42 +6604,120 @@ final class RouterModel: ScriptTarget {
             return
         }
         appRefreshInFlight = true
-        let workspace = AudioApplications.workspaceSnapshot()
-        let keeping = capturedAppBundleIDs
-        let revision = appListRevision
-        engineQueue.async {
-            let applications =
-                (try? AudioApplications.grouped(keeping: keeping, workspace: workspace)) ?? []
-            Task { @MainActor in
-                // A route start can publish a newer enumeration while this
-                // request is crossing back to MainActor. The old list must not
-                // win merely because its unstructured task ran second.
-                if self.appListRevision == revision {
-                    self.appListRevision &+= 1
-                    self.availableApps = applications
-                    self.appsRefreshedAt = Date()
-                }
-                self.appRefreshInFlight = false
+        appWorkspaceSnapshotMaximumTurnNanoseconds = 0
+        Task { @MainActor [weak self] in self?.beginAppWorkspaceSnapshot() }
+    }
 
-                // A selection changed while HAL was answering, or a manual
-                // refresh arrived. One latest rerun is enough for both.
-                if self.capturedAppBundleIDs != keeping { self.appRefreshPending = true }
-                guard self.appRefreshPending else { return }
-                self.appRefreshPending = false
-                self.refreshApps()
+    private struct AppWorkspaceSnapshotConstruction {
+        let applications: [NSRunningApplication]
+        var index = 0
+        var foreground: [String: AudioApplications.ApplicationInfo] = [:]
+        var named: [String: AudioApplications.ApplicationInfo] = [:]
+    }
+
+    private func beginAppWorkspaceSnapshot() {
+        guard appRefreshInFlight, appWorkspaceSnapshotConstruction == nil else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        appWorkspaceSnapshotConstruction = AppWorkspaceSnapshotConstruction(
+            applications: NSWorkspace.shared.runningApplications)
+        recordAppWorkspaceSnapshotTurn(since: started)
+        continueAppWorkspaceSnapshot()
+    }
+
+    private func continueAppWorkspaceSnapshot() {
+        guard var construction = appWorkspaceSnapshotConstruction else { return }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let end = min(construction.index + 4, construction.applications.count)
+        while construction.index < end {
+            let application = construction.applications[construction.index]
+            construction.index += 1
+            guard let bundle = application.bundleIdentifier else { continue }
+            let info = AudioApplications.ApplicationInfo(
+                name: application.localizedName ?? bundle,
+                bundleURL: application.bundleURL)
+            construction.named[bundle] = info
+            if application.activationPolicy == .regular {
+                construction.foreground[bundle] = info
             }
         }
+        recordAppWorkspaceSnapshotTurn(since: started)
+        guard construction.index == construction.applications.count else {
+            appWorkspaceSnapshotConstruction = construction
+            MainRunLoopDelivery.perform { [weak self] in self?.continueAppWorkspaceSnapshot() }
+            return
+        }
+        appWorkspaceSnapshotConstruction = nil
+        submitAppRefresh(
+            workspace: AudioApplications.WorkspaceSnapshot(
+                foreground: construction.foreground,
+                named: construction.named))
+    }
+
+    private func recordAppWorkspaceSnapshotTurn(since started: UInt64) {
+        appWorkspaceSnapshotMaximumTurnNanoseconds = max(
+            appWorkspaceSnapshotMaximumTurnNanoseconds,
+            DispatchTime.now().uptimeNanoseconds - started)
+    }
+
+    private func submitAppRefresh(workspace: AudioApplications.WorkspaceSnapshot) {
+        let keeping = capturedAppBundleIDs
+        let revision = appListRevision
+        let admitted = systemQueryOwners.submit(
+            to: .applicationInventory,
+            operation: { [weak self] in
+                let applications =
+                    (try? AudioApplications.grouped(
+                        keeping: keeping, workspace: workspace)) ?? []
+                return { [weak self] in
+                    self?.finishAppRefresh(
+                        applications, keeping: keeping, revision: revision)
+                }
+            },
+            deadline: { [weak self] in self?.finishAppRefreshWithoutSnapshot() })
+        if !admitted { finishAppRefreshWithoutSnapshot() }
+    }
+
+    private func finishAppRefresh(
+        _ applications: [AudioApplication],
+        keeping: Set<String>,
+        revision: Int
+    ) {
+        // A route start can publish a newer enumeration while this request is
+        // crossing back to MainActor. The old list must not win merely because
+        // its delivery ran second.
+        if appListRevision == revision {
+            appListRevision &+= 1
+            availableApps = applications
+            appsRefreshedAt = Date()
+        }
+        if capturedAppBundleIDs != keeping { appRefreshPending = true }
+        finishAppRefreshWithoutSnapshot()
+    }
+
+    private func finishAppRefreshWithoutSnapshot() {
+        guard appRefreshInFlight else { return }
+        appRefreshInFlight = false
+        appWorkspaceSnapshotConstruction = nil
+        guard appRefreshPending else { return }
+        appRefreshPending = false
+        refreshApps()
     }
 
     @ObservationIgnored private var appRefreshInFlight = false
     @ObservationIgnored private var appRefreshPending = false
     @ObservationIgnored private var appListRevision = 0
+    @ObservationIgnored private var appWorkspaceSnapshotConstruction:
+        AppWorkspaceSnapshotConstruction?
+    @ObservationIgnored private(set) var appWorkspaceSnapshotMaximumTurnNanoseconds: UInt64 = 0
+
+    var appRefreshIsInFlightForFlowCheck: Bool { appRefreshInFlight }
 
     /// The deterministic, blocking form used only by rendering and flow checks.
     ///
     /// Their next assertion has to see the completed list. Production controls
     /// call `refreshApps()` above and never pay for HAL on the main actor.
     func refreshAppsForVerification() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         // Anything already captured is listed whether or not it happens to be
         // audible at this instant. A process with no bundle identifier is listed
         // only while the HAL says it is running output, and that property blinks
@@ -5840,22 +6733,32 @@ final class RouterModel: ScriptTarget {
     }
 
     private func refreshHeadsetQualityAsynchronously() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         let outputs = outputDevices
         let preferred = [selectedDestinationUID, monitorDeviceUID].compactMap { $0 }
+        let destinationUID = selectedDestinationUID
+        let monitorUID = monitorDeviceUID
         let monitor = monitorDeviceUID.flatMap { uid in
             outputs.first(where: { $0.uid == uid })
         }
-        engineQueue.async {
-            let headset = Self.headsetInCallQuality(
-                outputDevices: outputs,
-                preferredUIDs: preferred)
-            let latency =
-                monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
-            Task { @MainActor in
-                self.publish(headset, to: \.headsetInCallQuality)
-                self.publish(latency, to: \.monitorLatencyFrames)
-            }
-        }
+        _ = systemQueryOwners.submit(
+            to: .diagnostics,
+            operation: { [weak self] in
+                let headset = Self.headsetInCallQuality(
+                    outputDevices: outputs,
+                    preferredUIDs: preferred)
+                let latency =
+                    monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+                return { [weak self] in
+                    guard let self,
+                        self.selectedDestinationUID == destinationUID,
+                        self.monitorDeviceUID == monitorUID
+                    else { return }
+                    self.publish(headset, to: \.headsetInCallQuality)
+                    self.publish(latency, to: \.monitorLatencyFrames)
+                }
+            },
+            deadline: {})
     }
 
     /// Resolves the saved bundle identifiers to the processes running right now.
@@ -5939,7 +6842,7 @@ final class RouterModel: ScriptTarget {
     /// is a latch nobody sees.
     func clearClipping() {
         clipped = clipped.map { _ in false }
-        applyLiveControl { $0.clearOutputClipping() }
+        applyLiveControl(key: .clearClipping) { $0.clearOutputClipping() }
         outputClippedSamples = 0
         let cleared = Self.classifyOutput(peak: outputPeak, clippedSamples: 0)
         if outputVerdict != cleared { outputVerdict = cleared }
@@ -6140,6 +7043,18 @@ final class RouterModel: ScriptTarget {
     /// old-run result after the next Start.
     @ObservationIgnored private var routeUpdatesAreAccepted = false
 
+    /// True when Core Audio has not proved the previous route unreachable.
+    ///
+    /// The Stop control deliberately remains available in this state while a
+    /// new Start is refused. Treating a failed destroy request as though the
+    /// route were gone is how one abandoned tap or aggregate becomes a second,
+    /// then eventually makes the system Sound menu wait behind our leftovers.
+    private(set) var teardownNeedsRetry = false
+
+    /// The exact lifecycle boundary for diagnostics; `lastError` carries the
+    /// localised action somebody can take rather than an opaque OSStatus.
+    private(set) var teardownFailureDetail: String?
+
     private var desiredTopologyRoutes: [Route] {
         applyingLatestRouteControls(to: pendingTopologyRoutes ?? activeRoutes)
     }
@@ -6154,26 +7069,42 @@ final class RouterModel: ScriptTarget {
         }
         guard routeUpdatesAreAccepted else { return }
         pendingTopologyRoutes = routes
-        routeApplier.submit(routes)
+        routeApplier.submit(
+            RouteUpdateRequest(
+                routes: routes,
+                routeGeneration: engineSnapshot.routeGeneration,
+                graphGeneration: engineSnapshot.graphGeneration))
+    }
+
+    private struct RouteUpdateRequest: Sendable {
+        let routes: [Route]
+        let routeGeneration: UInt64
+        let graphGeneration: UInt64
     }
 
     private struct RouteUpdateResult: Sendable {
-        let requested: [Route]
-        let installed: [Route]?
+        let request: RouteUpdateRequest
+        let didUpdate: Bool
+        let snapshot: RoutingEngine.EngineUISnapshot
     }
 
     private func finishRouteUpdate(_ result: RouteUpdateResult) {
         guard routeUpdatesAreAccepted else { return }
-        if pendingTopologyRoutes == result.requested { pendingTopologyRoutes = nil }
+        if pendingTopologyRoutes == result.request.routes { pendingTopologyRoutes = nil }
         guard isRunning else { return }
-        guard let installed = result.installed else {
+        guard result.didUpdate else {
             restartIfRunning()
             return
         }
-        let controlled = applyingLatestRouteControls(to: installed)
-        activeRoutes = controlled
-        routeGains = controlled.map(\.gain)
-        routeMutes = controlled.map(\.isMuted)
+        guard
+            adoptEngineSnapshot(
+                result.snapshot,
+                expecting: EngineSnapshotExpectation(
+                    routeGeneration: result.request.routeGeneration,
+                    minimumGraphGeneration: result.request.graphGeneration,
+                    requiresStoppedGraph: false))
+        else { return }
+        adoptEngineRoutes(result.snapshot, preservingLatestControls: true)
         rebuiltRoutes()
     }
 
@@ -6309,9 +7240,9 @@ final class RouterModel: ScriptTarget {
             }
         }
         for entry in mutes { rememberMute(entry.muted, for: entry.key) }
-        applyLiveControl { engine in
-            for entry in mutes {
-                engine.setMuted(entry.muted, for: entry.key)
+        for entry in mutes {
+            applyLiveControl(key: .routeMute(entry.key)) {
+                $0.setMuted(entry.muted, for: entry.key)
             }
         }
     }
@@ -6322,7 +7253,7 @@ final class RouterModel: ScriptTarget {
         }
         routeGains[index] = gain
         rememberGain(gain, for: key)
-        applyLiveControl { $0.setGain(gain, for: key) }
+        applyLiveControl(key: .routeGain(key)) { $0.setGain(gain, for: key) }
         persist()
     }
 
@@ -6663,7 +7594,7 @@ final class RouterModel: ScriptTarget {
         }
         routeMutes[index] = muted
         rememberMute(muted, for: key)
-        applyLiveControl { $0.setMuted(muted, for: key) }
+        applyLiveControl(key: .routeMute(key)) { $0.setMuted(muted, for: key) }
         persist()
     }
 
@@ -6700,7 +7631,7 @@ final class RouterModel: ScriptTarget {
         // an option; remember that the latest model state needs one more swap.
         // Returning true keeps each intermediate toggle from ordering a full
         // stop/start while the current live swap is already doing useful work.
-        if effectSwapIsInFlight {
+        if effectSwapIsInFlight || effectSwapIsPending {
             effectSwapIsPending = true
             return true
         }
@@ -6713,9 +7644,14 @@ final class RouterModel: ScriptTarget {
         let isolation =
             enabledEffects.contains(.voiceIsolation)
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
+        let expectation = EngineSnapshotExpectation(
+            routeGeneration: engineSnapshot.routeGeneration,
+            minimumGraphGeneration: engineSnapshot.graphGeneration,
+            requiresStoppedGraph: false)
         engineQueue.async {
             let swapped = engine.updateEffects(
                 kinds, plugins: pluginList, voiceIsolation: isolation)
+            let snapshot = engine.engineUISnapshot
             Task { @MainActor in
                 self.isBusy = false
                 self.effectSwapIsInFlight = false
@@ -6735,6 +7671,24 @@ final class RouterModel: ScriptTarget {
                     self.restartIfRunning()
                     return
                 }
+                guard self.adoptEngineSnapshot(snapshot, expecting: expectation) else {
+                    self.refreshEngineSnapshotAsynchronously()
+                    if self.effectSwapIsPending {
+                        self.effectSwapIsPending = false
+                        if !self.swapChainIfPossible() { self.restartIfRunning() }
+                    }
+                    return
+                }
+                let refusal = snapshot.effectUpdateRefusal
+                if refusal == .transitionInFlight || refusal == .resourcesBusy {
+                    // The first handover is still the audible A/B blend. Retry
+                    // the latest model state after another few callbacks. The
+                    // sole Audio Unit disposer can impose the same temporary
+                    // backpressure after a run of edits; neither condition is
+                    // permission for system-wide HAL teardown.
+                    self.retryEffectSwapAfterTransition()
+                    return
+                }
                 // The result belongs to the snapshot captured above. If the
                 // model moved while it was building, neither its plugin errors
                 // nor its default parameters are the current answer. Coalesce
@@ -6744,11 +7698,23 @@ final class RouterModel: ScriptTarget {
                     if !self.swapChainIfPossible() { self.restartIfRunning() }
                     return
                 }
+                if case let .unsupportedLatency(requested, maximum) = refusal {
+                    self.lastError = String(
+                        format: loc(
+                            "Processing was not changed because it reports %lld frames of latency; this route can align at most %lld."
+                        ),
+                        Int64(requested), Int64(maximum))
+                    return
+                }
+                if case .invalidConfiguration = refusal {
+                    self.lastError = loc(
+                        "Processing was not changed because its configuration is unsafe.")
+                    return
+                }
                 guard swapped else {
                     self.restartIfRunning()
                     return
                 }
-                self.failedPlugins = engine.failedPlugins
                 // A freshly built chain comes up at each stage's own defaults,
                 // so the stored knob positions have to be pushed back — the
                 // same reason a restart does it.
@@ -6759,22 +7725,49 @@ final class RouterModel: ScriptTarget {
         return true
     }
 
+    /// Coalesces every edit made during an audible handover into one later
+    /// attempt without occupying the engine queue or delaying Stop.
+    private func retryEffectSwapAfterTransition() {
+        effectSwapIsPending = true
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(10))
+            guard let self, self.effectSwapIsPending,
+                !self.effectSwapIsInFlight
+            else { return }
+            // A full engine operation which arrived during the delay owns the
+            // newer model snapshot and outranks this effect-only replay.
+            guard !self.isBusy else {
+                self.effectSwapIsPending = false
+                return
+            }
+            if self.honourPendingStop() {
+                self.effectSwapIsPending = false
+                return
+            }
+            if self.restartIsPending {
+                self.restartIsPending = false
+                self.effectSwapIsPending = false
+                self.restartIfRunning()
+                return
+            }
+            self.effectSwapIsPending = false
+            if !self.swapChainIfPossible() { self.restartIfRunning() }
+        }
+    }
+
     /// A chain build already on `engineQueue`, and whether its captured state
     /// has since been superseded.
     @ObservationIgnored private var effectSwapIsInFlight = false
     @ObservationIgnored private var effectSwapIsPending = false
 
+    var effectSwapIsSettledForFlowCheck: Bool {
+        !effectSwapIsInFlight && !effectSwapIsPending
+    }
+
     /// The stages actually rendering. Not the same as `enabledEffects`: one
     /// that will not instantiate is dropped, and until recently a single
     /// enabled stage built no chain at all.
-    @ObservationIgnored private var activeEffectStageCache: [EffectKind] = []
-
-    var activeEffectStages: [EffectKind] {
-        if let current = engine.activeEffectStagesIfAvailable {
-            activeEffectStageCache = current
-        }
-        return activeEffectStageCache
-    }
+    var activeEffectStages: [EffectKind] { engineSnapshot.activeEffectStages }
 
     /// How much each dynamics stage is pulling the signal down, in decibels.
     ///
@@ -6844,7 +7837,7 @@ final class RouterModel: ScriptTarget {
         // Audio Unit parameter writes are realtime-safe, so this takes effect
         // immediately without rebuilding anything.
         let parameterID = parameter.id
-        applyLiveControl {
+        applyLiveControl(key: .effect(kind, parameterID)) {
             $0.setEffectParameter(parameterID, of: kind, to: value)
         }
         persist()
@@ -6884,17 +7877,17 @@ final class RouterModel: ScriptTarget {
     /// Latency every enabled stage adds together, in milliseconds.
     var addedLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
-        return engine.processingLatency.totalMilliseconds(sampleRate: rate)
+        return engineSnapshot.processingLatency.totalMilliseconds(sampleRate: rate)
     }
 
     /// What the chain costs, and what the paths that skipped it are held back
     /// by to meet it. The two are the same number or something is adrift.
     var chainAlignment: (chain: Int, applied: Int) {
-        (engine.sourceProcessingLatencyFrames, engine.alignmentFrames)
+        (engineSnapshot.processingLatency.sourceFrames, engineSnapshot.alignmentFrames)
     }
 
     /// Source and final-output processing together, in graph frames.
-    var totalProcessingLatencyFrames: Int { engine.totalProcessingLatencyFrames }
+    var totalProcessingLatencyFrames: Int { engineSnapshot.totalProcessingLatencyFrames }
 
     /// What the whole path costs, in milliseconds.
     ///
@@ -6924,7 +7917,7 @@ final class RouterModel: ScriptTarget {
     var voiceIsolationLatencyMilliseconds: Double {
         let rate = pathQuality?.sampleRate ?? 48000
         guard rate > 0 else { return 0 }
-        return Double(engine.voiceIsolationLatencyFrames) / rate * 1000
+        return Double(engineSnapshot.voiceIsolationLatencyFrames) / rate * 1000
     }
 
     // MARK: Runtime
@@ -6948,6 +7941,8 @@ final class RouterModel: ScriptTarget {
                 loc("this system does not offer it")
             case RoutingEngine.IsolationFailure.chainNotBuilt:
                 loc("the processing chain could not be built")
+            case RoutingEngine.IsolationFailure.latencyExceedsRealtimeLimit:
+                loc("its latency exceeds the safe routing limit")
             default: reason
             }
         return String(format: loc("Voice isolation is not running: %@."), explained)
@@ -6974,12 +7969,17 @@ final class RouterModel: ScriptTarget {
                 liveKeys.contains($0.key)
             }
             latestRouteControls.reserveCapacity(activeRouteKeys.count)
+            if sourceTapRequestGate.acceptsRequests,
+                isRunning && (isTranscribing || isScoringSinging || isSingingVisible)
+            {
+                requestSourceTapTopology()
+            }
         }
     }
 
     /// Whether the running route has taken the driver's clock. Not
     /// `isClockLocked`, which is whether the anchor has converged yet.
-    var holdsClockLock: Bool { engine.holdsClockLock }
+    var holdsClockLock: Bool { engineSnapshot.holdsClockLock }
 
     /// Provokes the clock-lock recovery, for the flow check.
     ///
@@ -7014,7 +8014,96 @@ final class RouterModel: ScriptTarget {
     private(set) var activeShortcuts: [HotkeyManager.Action: HotkeyManager.Shortcut] = [:]
 
     private let engine = RoutingEngine()
-    private let hotkeys = HotkeyManager()
+    /// The only engine-owned graph truth read by the interface.
+    ///
+    /// Every lifecycle mutation captures this value on `engineQueue`; MainActor
+    /// only compares identities and publishes the immutable value. In particular,
+    /// view getters never reach back through `RoutingEngine.stateLock`.
+    private var engineSnapshot = RoutingEngine.EngineUISnapshot.empty
+
+    /// Monotonic identity exposed to executable integration checks.
+    var engineSnapshotGenerationForDiagnostics: UInt64 { engineSnapshot.generation }
+
+    @discardableResult
+    func installEngineSnapshotForDiagnostics(
+        _ snapshot: RoutingEngine.EngineUISnapshot
+    ) -> Bool {
+        adoptEngineSnapshot(snapshot)
+    }
+
+    nonisolated func withEngineStateLockForDiagnostics(_ body: () -> Void) {
+        engine.withStateLockForTesting(body)
+    }
+
+    /// Installs one complete engine publication if it still belongs to the
+    /// mutation which produced it.
+    @discardableResult
+    private func adoptEngineSnapshot(
+        _ snapshot: RoutingEngine.EngineUISnapshot,
+        expecting expectation: EngineSnapshotExpectation = .any
+    ) -> Bool {
+        guard
+            Self.engineSnapshotIsAdmissible(
+                currentGeneration: engineSnapshot.generation,
+                incoming: snapshot,
+                expectedRouteGeneration: expectation.routeGeneration,
+                minimumGraphGeneration: expectation.minimumGraphGeneration,
+                requiresStoppedGraph: expectation.requiresStoppedGraph)
+        else { return false }
+
+        engineSnapshot = snapshot
+        failedPlugins = snapshot.failedPlugins
+        echoStatus = snapshot.echoCancellationStatus
+        return true
+    }
+
+    /// Publishes the routes from an already-admitted complete snapshot.
+    private func adoptEngineRoutes(
+        _ snapshot: RoutingEngine.EngineUISnapshot,
+        preservingLatestControls: Bool
+    ) {
+        let routes =
+            preservingLatestControls
+            ? applyingLatestRouteControls(to: snapshot.routes)
+            : snapshot.routes
+        activeRoutes = routes
+        routeGains = routes.map(\.gain)
+        routeMutes = routes.map(\.isMuted)
+    }
+
+    /// Captures asynchronous engine-originated rebuilds, such as clock recovery.
+    /// The value read is non-blocking, but still runs on the single engine owner
+    /// so every ordinary production path has the same publication boundary.
+    private func refreshEngineSnapshotAsynchronously() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        let engine = engine
+        engineQueue.async {
+            let snapshot = engine.engineUISnapshot
+            MainRunLoopDelivery.perform {
+                guard self.adoptEngineSnapshot(snapshot) else { return }
+                self.adoptEngineRoutes(snapshot, preservingLatestControls: true)
+            }
+        }
+    }
+    /// File creation, graph attachment and writer finalisation never execute
+    /// on MainActor or the route lifecycle queue.
+    @ObservationIgnored private lazy var recordingLifecycleWorker =
+        RecordingLifecycleWorker.live(engine: engine) { [weak self] event in
+            self?.finishRecordingLifecycle(event)
+        }
+    /// FFT, pitch, classification and loudness draining never execute on
+    /// MainActor. The worker is lazy so merely opening the menu-bar app does
+    /// not construct any analysis resource or background lane.
+    @ObservationIgnored private lazy var analysisWorker = SignalAnalysisWorker(engine: engine)
+    /// The source-ring topology and its sole consumer share `engineQueue`.
+    /// Keeping the pair optional preserves the synthetic zero-owner contract.
+    @ObservationIgnored private var madeSourceTapWorkers: SourceTapSingingWorkerPair?
+    @ObservationIgnored private let sourceTapPCMForwarder = SourceTapPCMForwarder()
+    /// Nil for synthetic evidence: even constructing this owner installs a
+    /// process-wide Carbon event handler before `installHotkeys()` is called.
+    private var hotkeys: HotkeyManager?
+    /// Carbon owners actually constructed by this model.
+    var globalShortcutOwnerCountForDiagnostics: Int { hotkeys == nil ? 0 : 1 }
     /// Engine start and stop go here rather than running inline.
     ///
     /// Measured: bringing a route up takes about 108 ms and tearing it down
@@ -7022,35 +8111,156 @@ final class RouterModel: ScriptTarget {
     /// main actor that is a visible stall every time someone hits the button.
     private let engineQueue = DispatchQueue(
         label: "com.yuhuanstudio.yunaudio.engine", qos: .userInitiated)
+    private enum LiveControlKey: Hashable, Sendable {
+        case inputGain
+        case inputMute
+        case outputGain
+        case outputMute
+        case routeGain(RouteOccurrenceKey)
+        case routeMute(RouteOccurrenceKey)
+        case effect(EffectKind, String)
+        case plugin(String, String)
+        case recordingPaused
+        case clearClipping
+        case ducking
+        case duckingAllowed
+        case analysisEnabled
+    }
+
+    private typealias LiveControlWork = @Sendable (RoutingEngine) -> Void
+
+    /// A blocked route start retains one newest command per independent
+    /// control, never one closure per pointer event. Stop invalidates this map
+    /// before entering the queue, so it cannot sit behind a delayed gesture
+    /// replay after `coreaudiod` becomes responsive again.
+    @ObservationIgnored private lazy var liveControlApplier =
+        KeyedLatestValueApplier<LiveControlKey, LiveControlWork>(
+            queue: engineQueue,
+            apply: { [engine] work in work(engine) })
+    /// Hardware sliders sample one complete desired state at most twenty times
+    /// per second before entering the sole deadline-bound HAL write owner.
+    ///
+    /// Batching gain and monitoring is what preserves both final values while a
+    /// slow property setter occupies the lane. A global latest-only scalar would
+    /// let one slider erase the other; the newest batch always carries both.
+    private let hardwareControlAdmissionQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.hardware-control-admission", qos: .utility)
+    @ObservationIgnored private lazy var hardwareControlApplier =
+        RateLimitedLatestValueApplier<HardwareControlWriteBatch, HardwareControlWriteBatch>(
+            queue: hardwareControlAdmissionQueue,
+            interval: .milliseconds(50),
+            apply: { $0 },
+            publish: { [weak self] batch in self?.applyHardwareControlBatch(batch) })
+    @ObservationIgnored private var latestHardwareGainWrite: HardwareControlWrite?
+    @ObservationIgnored private var latestHardwareMonitorWrite: HardwareControlWrite?
+    /// Failed newest-value writes are visible to diagnostics instead of being
+    /// swallowed by `try?`, while the slider remains responsive.
+    @ObservationIgnored private(set) var hardwareControlWriteFailures: UInt64 = 0
+
+    private func submitHardwareControlBatch() {
+        hardwareControlApplier.submit(
+            HardwareControlWriteBatch(
+                gain: latestHardwareGainWrite,
+                monitor: latestHardwareMonitorWrite))
+    }
+
+    private func invalidateHardwareControlWrites() {
+        hardwareControlApplier.invalidate()
+        systemQueryOwners.invalidate(.hardwareWrite)
+        latestHardwareGainWrite = nil
+        latestHardwareMonitorWrite = nil
+    }
+
+    private func applyHardwareControlBatch(_ batch: HardwareControlWriteBatch) {
+        let admitted = systemQueryOwners.submit(
+            to: .hardwareWrite,
+            operation: { [weak self] in
+                var succeeded = true
+                for write in batch.writes where !Self.writeHardwareControl(write).succeeded {
+                    succeeded = false
+                }
+                let result = HardwareControlWriteResult(succeeded: succeeded)
+                return { [weak self] in self?.finishHardwareControlWrite(result) }
+            },
+            deadline: { [weak self] in
+                self?.finishHardwareControlWrite(
+                    HardwareControlWriteResult(succeeded: false))
+            })
+        if !admitted {
+            finishHardwareControlWrite(HardwareControlWriteResult(succeeded: false))
+        }
+    }
+
+    private func finishHardwareControlWrite(_ result: HardwareControlWriteResult) {
+        if !result.succeeded { hardwareControlWriteFailures &+= 1 }
+    }
     /// Builds and installs only the newest output curve in a slider burst.
     ///
     /// Lazy because its completion publishes back into this model, which does
     /// not exist to capture during stored-property initialisation.
     @ObservationIgnored private lazy var correctionApplier = LatestValueApplier<
-        CorrectionSnapshot, Int
+        CorrectionUpdateRequest, CorrectionUpdateReport
     >(
         queue: engineQueue,
-        apply: { [engine] snapshot in
-            engine.setCorrections(Self.correctionCurves(from: snapshot))
-        },
-        publish: { [weak self] reached in
-            self?.publishCorrectionCount(reached)
-        })
+        apply: { [engine] request in Self.applyCorrectionUpdate(request, to: engine) },
+        publish: { [weak self] report in self?.publishCorrectionUpdate(report) })
     /// Keeps cable and channel edits off MainActor and collapses a burst to its
     /// newest complete topology.
     @ObservationIgnored private lazy var routeApplier = LatestValueApplier<
-        [Route], RouteUpdateResult
+        RouteUpdateRequest, RouteUpdateResult
     >(
         queue: engineQueue,
-        apply: { [engine] requested in
-            let didUpdate = engine.updateRoutes(requested)
+        apply: { [engine] request in
+            let didUpdate = engine.updateRoutes(request.routes)
             return RouteUpdateResult(
-                requested: requested,
-                installed: didUpdate ? engine.currentRoutes : nil)
+                request: request,
+                didUpdate: didUpdate,
+                snapshot: engine.engineUISnapshot)
         },
         publish: { [weak self] result in
             self?.finishRouteUpdate(result)
         })
+    /// The sole owner of calibration mutations, on the engine lifecycle queue.
+    @ObservationIgnored private lazy var calibrationLifecycleWorker =
+        CalibrationLifecycleWorker<RoutingEngine.CalibrationMutationResult>(
+            lifecycleQueue: engineQueue,
+            apply: { [engine] intent, permit in
+                engine.setCalibrationActive(
+                    intent.desiredState == .active,
+                    ifCurrent: { permit.mayMutateEngine })
+            },
+            publish: { [weak self] completion in
+                self?.finishCalibrationMutation(completion)
+            })
+    /// Calibration telemetry is first/latest on the same owner as mutation.
+    @ObservationIgnored private lazy var calibrationLevelApplier = LatestValueApplier<
+        CalibrationLevelRequest, CalibrationLevelReport
+    >(
+        queue: engineQueue,
+        apply: { [engine] request in
+            CalibrationLevelReport(
+                request: request,
+                levels: engine.calibrationLevels(sampleRate: request.sampleRate))
+        },
+        publish: { [weak self] report in self?.finishCalibrationLevelRead(report) })
+
+    /// Replaces the live abnormal-exit evidence at most once every five seconds.
+    ///
+    /// An occupied engine queue retains one active and one latest request in
+    /// `LatestValueApplier`; it cannot grow a queue of snapshots behind a hung
+    /// Core Audio call. The write itself crosses another first/latest boundary,
+    /// and a later Stop result therefore always supersedes an earlier live one.
+    @ObservationIgnored private lazy var audioIncidentCheckpointApplier =
+        LatestValueApplier<UInt64, Bool>(
+            queue: engineQueue,
+            apply: { [engine] _ in
+                engine.checkpointLiveAudioIncidentBundle()
+                Self.recordPendingEngineIncident(engine)
+                return true
+            },
+            publish: { _ in })
+    @ObservationIgnored private var audioIncidentCheckpointCadence =
+        AudioIncidentCheckpointCadence()
 
     /// Applies a live control without ever taking an engine lock on MainActor.
     ///
@@ -7060,22 +8270,41 @@ final class RouterModel: ScriptTarget {
     /// `start` or `updateEffects` held the lock therefore froze every control
     /// for the whole CoreAudio or Audio Unit operation. `isBusy` covers starts
     /// and effect swaps, but not route publication or automatic clock recovery.
-    /// Always using the serial queue preserves order across all four and keeps
-    /// a 200 ms graph-retirement wait out of a fader gesture.
+    /// Keying the work is as important as leaving MainActor: while a synchronous
+    /// HAL call occupies the serial owner, ten thousand positions of one fader
+    /// become one pending value rather than ten thousand closures ahead of
+    /// Stop. Independent controls retain independent keys, so coalescing a gain
+    /// can never discard a mute.
     private func applyLiveControl(
+        key: LiveControlKey,
         _ work: @escaping @Sendable (RoutingEngine) -> Void
     ) {
-        let engine = engine
-        engineQueue.async { work(engine) }
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        liveControlApplier.submit(work, for: key)
     }
 
     /// Set while a start or stop is in flight so the button cannot be pressed
     /// twice into a half-built route.
     private(set) var isBusy = false
+    /// Prevents any queued model completion from starting a new route after
+    /// AppKit has begun its deferred termination handshake.
+    @ObservationIgnored private var terminationIsPending = false
+    /// Snapshot paired with the route result in the current termination join.
+    @ObservationIgnored private var terminationEngineStopSnapshot:
+        RoutingEngine.EngineUISnapshot?
+    @ObservationIgnored private var retriedLocalSongTerminationOwner: ObjectIdentifier?
+    @ObservationIgnored private var retriedLightingTerminationOwner: ObjectIdentifier?
+    @ObservationIgnored private var terminationObserverRecovery =
+        TerminationObserverRecoveryGate()
     private var levelTimer: Timer?
     private var deviceWatcher: DeviceChangeWatcher?
     @ObservationIgnored private var deviceRefreshGate = LatestRefreshGate()
     @ObservationIgnored private var deviceHydrationGate = LatestRefreshGate()
+    private enum DeviceRefreshAction {
+        case selectInstalledDriver
+        case clearRemovedDriverSelection
+    }
+    @ObservationIgnored private var pendingDeviceRefreshAction: DeviceRefreshAction?
 
     var selectedSource: AudioDevice? {
         inputDevices.first { $0.uid == selectedSourceUID }
@@ -7095,8 +8324,9 @@ final class RouterModel: ScriptTarget {
     /// versions of the same microphone, and picking the wrong one gets a signal
     /// that sounds nearly right.
     var sourceChannelNames: [DeviceChannelNames.Channel]? {
-        guard let source = selectedSource else { return nil }
+        guard let source = selectedSource, let deviceProfileLibrary else { return nil }
         return DeviceChannelNames.channels(
+            in: deviceProfileLibrary,
             modelUID: source.modelUID, name: source.name,
             scope: kAudioObjectPropertyScopeInput)
     }
@@ -7111,8 +8341,11 @@ final class RouterModel: ScriptTarget {
     /// Names belonging to a device the row has nothing to do with, on a control
     /// whose entire job is saying which signal is which.
     func channelNames(ofDeviceUID uid: String) -> [DeviceChannelNames.Channel]? {
-        guard let device = inputDevices.first(where: { $0.uid == uid }) else { return nil }
+        guard let device = inputDevices.first(where: { $0.uid == uid }),
+            let deviceProfileLibrary
+        else { return nil }
         return DeviceChannelNames.channels(
+            in: deviceProfileLibrary,
             modelUID: device.modelUID, name: device.name,
             scope: kAudioObjectPropertyScopeInput)
     }
@@ -7174,42 +8407,70 @@ final class RouterModel: ScriptTarget {
 
     private var isRestoring = false
 
-    init() {
+    convenience init() {
+        self.init(
+            startupPolicy: AppStartup.modelPolicy(
+                environment: ProcessInfo.processInfo.environment))
+    }
+
+    /// Constructs one model under authority resolved before any system owner.
+    ///
+    /// Internal policy injection is the executable no-hardware seam. A test can
+    /// construct the complete synthetic model and count its owners without
+    /// changing process-global environment or touching the live HAL.
+    init(startupPolicy: AppStartup.ModelPolicy) {
+        self.startupPolicy = startupPolicy
+        hotkeys = startupPolicy.makeGlobalShortcutOwner { HotkeyManager() }
         // The verification harness expects a complete model immediately and
         // explicitly owns the hardware. Production construction must instead
         // reach its first live run-loop turn without a HAL read or even a
         // queued HAL job; applicationDidFinishLaunching starts discovery.
-        if Self.isVerificationProcess, !Self.isUIBenchmarkProcess { refreshDevices() }
+        if startupPolicy.refreshesDevicesDuringConstruction { refreshDevices() }
         userPresets = UserPresets.load()
         quickConfigs = QuickConfigStore.load()
         restore()
+        refreshDriverStatus()
         // Registry discovery walks every installed Audio Unit. It was one
         // synchronous MainActor operation before the first frame, and it ran
         // before restore — when there were no enabled plug-ins to prune anyway.
         // Verification asks explicitly where it needs a deterministic answer.
-        if !Self.isVerificationProcess {
+        if startupPolicy.discoversOptionalServicesDuringConstruction {
             // Optional system registries stay completely asleep for the
             // default configuration. A saved feature still becomes available
             // without waiting for its settings page to be opened.
             if !enabledPlugins.isEmpty { refreshPluginsIfNeeded() }
             if !busHeadphoneProfiles.isEmpty { refreshHeadphoneProfilesIfNeeded() }
-            if lighting.mode != .off { lighting.refreshDeviceAsynchronously() }
+        }
+        if startupPolicy.refreshesLightingHardwareDuringConstruction,
+            lighting.mode != .off
+        {
+            lighting.refreshDeviceAsynchronously()
         }
         // After `restore`, so loading the file does not immediately write it
         // back — and `restore` is guarded anyway, which is belt and braces on
         // the one path where a setting arriving from disk looked like a change.
         obsLink.persist = { [weak self] in self?.persist() }
 
-        engine.onClockLockFailure = { [weak self] in
-            Task { @MainActor in self?.clockLockFailed = true }
+        engine.onAudioIncidentBundle = { bundle in
+            _ = LatestAudioIncidentWriter.shared.submit(bundle)
         }
 
-        installHotkeys()
-        installMIDI(
-            startsClientImmediately:
-                Self.isVerificationProcess && !Self.isUIBenchmarkProcess)
+        engine.onClockLockFailure = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.clockLockFailed = true
+                Self.recordPendingEngineIncident(self.engine)
+                self.refreshEngineSnapshotAsynchronously()
+            }
+        }
 
-        if Self.isVerificationProcess, !Self.isUIBenchmarkProcess {
+        if hotkeys != nil { installHotkeys() }
+        if startupPolicy.startsLiveServicesAfterLaunch {
+            installMIDI(
+                startsClientImmediately: startupPolicy.startsMIDIImmediatelyDuringConstruction)
+        }
+
+        if startupPolicy.permitsAutomaticStart {
             requestAutomaticStartIfConfigured()
         }
     }
@@ -7220,6 +8481,7 @@ final class RouterModel: ScriptTarget {
     /// inventory there still lets coreaudiod contention delay the first frame,
     /// and `Task.yield()` does not promise that AppKit has presented one.
     func beginInitialDeviceDiscovery() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard !deviceDiscoveryHasBegun else { return }
         deviceDiscoveryHasBegun = true
 
@@ -7259,7 +8521,7 @@ final class RouterModel: ScriptTarget {
     /// upgraded to exact topology. Starting sooner would build an empty route
     /// from the intentional zero channel counts.
     private func requestAutomaticStartIfConfigured() {
-        guard !Self.isVerificationProcess, autoStart,
+        guard startupPolicy.permitsAutomaticStart, autoStart,
             selectedSource != nil, selectedDestination != nil,
             !persistedRouteRequiresManualStart
         else { return }
@@ -7350,6 +8612,7 @@ final class RouterModel: ScriptTarget {
             // Work down the candidates until one is free. Another application
             // owning the first choice is common — both of the originals were
             // taken on the machine this was written on.
+            guard let hotkeys else { return }
             let taken = action.candidateShortcuts.first { candidate in
                 hotkeys.register(action, shortcut: candidate, handler: handler)
             }
@@ -7400,6 +8663,10 @@ final class RouterModel: ScriptTarget {
     /// Physical faders and pads. Everything it does lives in `MIDIControl.swift`;
     /// what is here is the ownership and the two lines of persistence.
     let midiControl = MIDIController()
+    /// CoreMIDI demand bridges actually installed by this model.
+    var midiDemandHandlerCountForDiagnostics: Int {
+        midiControl.onClientDemandChanged == nil ? 0 : 1
+    }
 
     // MARK: OBS
 
@@ -7416,13 +8683,13 @@ final class RouterModel: ScriptTarget {
     /// should show it whether or not anybody is streaming.
     var obsSyncOffsetMilliseconds: Double {
         OBSSyncOffset.forProcessingLatency(
-            frames: engine.totalProcessingLatencyFrames,
+            frames: engineSnapshot.totalProcessingLatencyFrames,
             sampleRate: pathQuality?.sampleRate ?? preferredSampleRate)
     }
 
     /// Tells OBS what the complete processing path costs now.
     func pushOBSSyncOffset() {
-        let frames = engine.totalProcessingLatencyFrames
+        let frames = engineSnapshot.totalProcessingLatencyFrames
         let rate = pathQuality?.sampleRate ?? preferredSampleRate
         Task { await obsLink.pushSyncOffset(latencyFrames: frames, sampleRate: rate) }
     }
@@ -7481,9 +8748,12 @@ final class RouterModel: ScriptTarget {
         enabledEffects = Set(saved.enabledEffects.compactMap(EffectKind.init(rawValue:)))
         effectValues = saved.effectValues
         cancelsEcho = saved.cancelsEcho ?? false
+        warnsWhenSpeakingWhileMuted = saved.warnsWhenSpeakingWhileMuted ?? false
         echoSpeakerUID = saved.echoSpeakerUID
-        lighting.mode =
+        let restoredLightingMode =
             saved.lightingMode.flatMap(LightingMode.init(rawValue:)) ?? .off
+        lighting.mode =
+            startupPolicy.startsLiveServicesAfterLaunch ? restoredLightingMode : .off
         lightingHue = saved.lightingHue ?? 0.55
         lighting.colour = RazerRing.hue(lightingHue)
         lightingBrightness = saved.lightingBrightness ?? 1
@@ -7493,7 +8763,7 @@ final class RouterModel: ScriptTarget {
         isOutputMuted = saved.isOutputMuted ?? false
         loudnessTarget =
             saved.loudnessTarget.flatMap(LoudnessTarget.init(rawValue:)) ?? .discord
-        outputDelays = saved.outputDelays ?? [:]
+        outputDelays = Self.sanitisedOutputDelays(saved.outputDelays ?? [:])
         let processing = Self.busProcessing(from: saved)
         busGraphicEQ = processing.graphic
         busHeadphoneProfiles = processing.profiles
@@ -7506,7 +8776,7 @@ final class RouterModel: ScriptTarget {
         sourceRoles = (saved.sourceRoles ?? [:]).compactMapValues(
             LevelCalibration.Role.init(rawValue:))
         isPushToTalkEnabled = saved.isPushToTalkEnabled ?? false
-        enabledPlugins = saved.plugins ?? []
+        enabledPlugins = Self.admittedPlugins(saved.plugins ?? [])
         pluginValues = saved.pluginValues ?? [:]
         voicePreset = saved.voicePreset.flatMap(VoicePreset.init(rawValue:)) ?? .none
         recordsStems = saved.recordsStems ?? false
@@ -7556,8 +8826,12 @@ final class RouterModel: ScriptTarget {
         // its own note; a process-wide allocation hook that survives a relaunch
         // is a machine that is quietly slower with nothing on screen to say so.
         // The list, before the switch that belongs to it.
-        if let paths = saved.queuedSongPaths, !paths.isEmpty {
-            songQueue = KTVQueue.restored(paths: paths, currentIndex: saved.queuedSongIndex)
+        if startupPolicy.startsLiveServicesAfterLaunch,
+            let paths = saved.queuedSongPaths, !paths.isEmpty
+        {
+            queuedSongRestore = (paths, saved.queuedSongIndex)
+            _ = ktvQueueRestoreWorker.submit(
+                KTVQueueRestoreRequest(paths: paths, currentIndex: saved.queuedSongIndex))
         }
         songQueue.repeatsOne = saved.repeatsOneSong ?? false
         showsBackgroundApps = saved.showsBackgroundApps ?? false
@@ -7571,9 +8845,9 @@ final class RouterModel: ScriptTarget {
         wantsScoring = saved.isScoringSinging ?? false
 
         if deviceInventoryIsReady {
-            resolveRestoredDeviceIntent(defaultInputUID: try? AudioDevices.defaultInputUID())
+            resolveRestoredDeviceIntent(defaultInputUID: cachedDefaultInputUID)
         }
-        reloadResidentScript()
+        if startupPolicy.startsLiveServicesAfterLaunch { reloadResidentScript() }
     }
 
     private func persist() {
@@ -7596,6 +8870,7 @@ final class RouterModel: ScriptTarget {
                     enabledEffects: [],
                     effectValues: effectValues,
                     cancelsEcho: cancelsEcho,
+                    warnsWhenSpeakingWhileMuted: warnsWhenSpeakingWhileMuted,
                     echoSpeakerUID: echoSpeakerUID,
                     style: style.rawValue,
                     iconStyle: iconStyle,
@@ -7664,8 +8939,8 @@ final class RouterModel: ScriptTarget {
                     inspectorTab: inspectorTab.rawValue,
                     showsBackgroundApps: showsBackgroundApps,
                     isSoundIdentificationEnabled: isSoundIdentificationEnabled,
-                    queuedSongPaths: songQueue.songs.map(\.path),
-                    queuedSongIndex: songQueue.index),
+                    queuedSongPaths: queuedSongRestore?.paths ?? songQueue.songs.map(\.path),
+                    queuedSongIndex: queuedSongRestore?.index ?? songQueue.index),
                 capturedAppBundleIDs: capturedAppBundleIDs,
                 excludedAppBundleIDs: excludedAppBundleIDs,
                 enabledEffects: enabledEffects,
@@ -7681,6 +8956,7 @@ final class RouterModel: ScriptTarget {
         _ uid: String,
         for target: DeviceSelectionTarget
     ) {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         deviceSelectionSerial &+= 1
         let pending = PendingDeviceSelection(uid: uid, token: deviceSelectionSerial)
         if var work = deviceSelectionWork[target] {
@@ -7701,12 +8977,22 @@ final class RouterModel: ScriptTarget {
         _ pending: PendingDeviceSelection,
         for target: DeviceSelectionTarget
     ) {
-        let queue = engineQueue
-        queue.async { [weak self] in
-            let device = try? AudioDevices.device(uid: pending.uid)
-            Task { @MainActor in
-                self?.finishHydratedSelection(device, pending: pending, for: target)
-            }
+        let request = HydratedSelectionRequest(pending: pending, target: target)
+        let admitted = systemQueryOwners.submit(
+            to: .deviceHydration,
+            operation: { [weak self] in
+                let device = try? AudioDevices.device(uid: request.pending.uid)
+                return { [weak self] in
+                    self?.finishHydratedSelection(
+                        device, pending: request.pending, for: request.target)
+                }
+            },
+            deadline: { [weak self] in
+                self?.finishHydratedSelection(
+                    nil, pending: request.pending, for: request.target)
+            })
+        if !admitted {
+            finishHydratedSelection(nil, pending: request.pending, for: request.target)
         }
     }
 
@@ -7843,15 +9129,21 @@ final class RouterModel: ScriptTarget {
     }
 
     struct DeviceRefreshSnapshot: Sendable {
+        struct SystemDefaults: Sendable {
+            let inputUID: String?
+            let outputUID: String?
+        }
+
         let all: [AudioDevice]
         let inventoryIDs: Set<AudioObjectID>
         let selectedSourceUID: String?
         let selectedDestinationUID: String?
         let detailUIDs: Set<String>
-        let defaultInputUID: String?
+        let systemDefaults: SystemDefaults?
         let hardwareGain: AudioDevice.HardwareGain?
         let hardwareMonitor: AudioDevice.HardwareGain?
         let destinationHasVolumeControl: Bool
+        let deviceProfiles: DeviceChannelNames.Loaded
     }
 
     /// Reads every HAL-backed value before crossing to MainActor.
@@ -7861,7 +9153,7 @@ final class RouterModel: ScriptTarget {
     /// turn nor wake an unrelated Bluetooth capability provider.
     nonisolated static func readDeviceRefreshSnapshot(
         selectedSourceUID: String?, selectedDestinationUID: String?,
-        detailUIDs: Set<String>, readsDefaultInput: Bool = false
+        detailUIDs: Set<String>, readsSystemDefaults: Bool = false
     ) -> DeviceRefreshSnapshot {
         // Only Bluetooth endpoints the user placed in this route earn live
         // capability reads. RoutingEngine resolves its own full devices again
@@ -7870,17 +9162,30 @@ final class RouterModel: ScriptTarget {
             (try? AudioDevices.inventory(loadingBluetoothCapabilitiesFor: detailUIDs)) ?? []
         let source = selectedSourceUID.flatMap { uid in all.first { $0.uid == uid } }
         let destination = selectedDestinationUID.flatMap { uid in all.first { $0.uid == uid } }
+        let systemDefaults: DeviceRefreshSnapshot.SystemDefaults?
+        if readsSystemDefaults {
+            systemDefaults = try? DeviceRefreshSnapshot.SystemDefaults(
+                inputUID: AudioDevices.defaultInputUID(),
+                outputUID: AudioDevices.defaultOutputUID())
+        } else {
+            systemDefaults = nil
+        }
+        // `shared` is intentionally first touched on this discovery owner in a
+        // production process. It walks bundled and user profile directories
+        // once; the immutable result then crosses with the HAL snapshot.
+        let deviceProfiles = DeviceChannelNames.shared
         return DeviceRefreshSnapshot(
             all: all,
             inventoryIDs: Set(all.map(\.id)),
             selectedSourceUID: selectedSourceUID,
             selectedDestinationUID: selectedDestinationUID,
             detailUIDs: detailUIDs,
-            defaultInputUID: readsDefaultInput ? (try? AudioDevices.defaultInputUID()) : nil,
+            systemDefaults: systemDefaults,
             hardwareGain: source?.hardwareGain(scope: kAudioObjectPropertyScopeInput),
             hardwareMonitor: source?.playThrough(),
             destinationHasVolumeControl:
-                destination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput) ?? true)
+                destination?.hasSettableVolume(scope: kAudioObjectPropertyScopeOutput) ?? true,
+            deviceProfiles: deviceProfiles)
     }
 
     /// Applies an immutable device answer without asking HAL another question.
@@ -7892,6 +9197,11 @@ final class RouterModel: ScriptTarget {
 
     private func applyDeviceInventory(_ snapshot: DeviceRefreshSnapshot) {
         lastInventoryIDs = snapshot.inventoryIDs
+        deviceProfileLibrary = snapshot.deviceProfiles.library
+        if let defaults = snapshot.systemDefaults {
+            cachedDefaultInputUID = defaults.inputUID
+            cachedDefaultOutputUID = defaults.outputUID
+        }
         // This snapshot already contains full details for every configured UID.
         // A direct hydration queued from an older picker state must not replace
         // any member of it after publication.
@@ -7918,6 +9228,7 @@ final class RouterModel: ScriptTarget {
     }
 
     func refreshDevices() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         // This deterministic form is for launch and explicit verification.
         // It supersedes an older event answer that may already be crossing back
         // from the serial queue.
@@ -7926,12 +9237,20 @@ final class RouterModel: ScriptTarget {
             selectedSourceUID: selectedSourceUID,
             selectedDestinationUID: selectedDestinationUID,
             detailUIDs: deviceDetailUIDs,
-            readsDefaultInput: !deviceInventoryIsReady)
+            readsSystemDefaults: true)
         applyDeviceRefreshSnapshot(snapshot)
         if !deviceInventoryIsReady {
             deviceInventoryIsReady = true
-            resolveRestoredDeviceIntent(defaultInputUID: snapshot.defaultInputUID)
+            resolveRestoredDeviceIntent(defaultInputUID: cachedDefaultInputUID)
         }
+        refreshVoiceActivityAvailability()
+        performPendingDeviceRefreshAction()
+    }
+
+    /// Refreshes an explicit UI request without putting HAL on MainActor.
+    func requestDeviceRefresh() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        requestDeviceChangeRefresh()
     }
 
     /// Endpoints whose live format is relevant to the configured route.
@@ -7960,6 +9279,7 @@ final class RouterModel: ScriptTarget {
     /// and the first/latest gate bounds a rapid sequence of picker changes to
     /// two queue jobs.
     private func hydrateConfiguredDevicesAsynchronously() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard !deviceDetailUIDs.isEmpty else {
             // Clearing the final endpoint also makes an in-flight answer stale.
             // With no route configured, launch now schedules zero hydration
@@ -7973,13 +9293,21 @@ final class RouterModel: ScriptTarget {
 
     private func runConfiguredDeviceHydration(_ token: LatestRefreshGate.Token) {
         let expectedUIDs = deviceDetailUIDs
-        let queue = engineQueue
-        queue.async {
-            let devices = expectedUIDs.compactMap { try? AudioDevices.device(uid: $0) }
-            Task { @MainActor in
-                self.finishConfiguredDeviceHydration(
-                    devices, expectedUIDs: expectedUIDs, token: token)
-            }
+        let admitted = systemQueryOwners.submit(
+            to: .deviceHydration,
+            operation: { [weak self] in
+                let devices = expectedUIDs.compactMap { try? AudioDevices.device(uid: $0) }
+                return { [weak self] in
+                    self?.finishConfiguredDeviceHydration(
+                        devices, expectedUIDs: expectedUIDs, token: token)
+                }
+            },
+            deadline: { [weak self] in
+                self?.finishConfiguredDeviceHydration(
+                    [], expectedUIDs: expectedUIDs, token: token)
+            })
+        if !admitted {
+            finishConfiguredDeviceHydration([], expectedUIDs: expectedUIDs, token: token)
         }
     }
 
@@ -8040,7 +9368,7 @@ final class RouterModel: ScriptTarget {
     }
 
     func selectDefaults() {
-        selectDefaults(defaultInputUID: try? AudioDevices.defaultInputUID())
+        selectDefaults(defaultInputUID: cachedDefaultInputUID)
     }
 
     private func selectDefaults(defaultInputUID: String?) {
@@ -8173,26 +9501,63 @@ final class RouterModel: ScriptTarget {
 
     /// Starts one background enumeration for the first notification and keeps
     /// at most one latest rerun behind it.
-    private func requestDeviceChangeRefresh() {
+    private func requestDeviceChangeRefresh(
+        after action: DeviceRefreshAction? = nil
+    ) {
+        // The watcher generation revokes results which finish after suspension.
+        // This second edge covers a callback that published immediately before
+        // Quit and whose MainActor task was already queued behind `shutDown`.
+        guard startupPolicy.startsLiveServicesAfterLaunch, !terminationIsPending else { return }
+        if let action { pendingDeviceRefreshAction = action }
         guard let token = deviceRefreshGate.request() else { return }
         runDeviceChangeRefresh(token)
     }
 
+    private func performPendingDeviceRefreshAction() {
+        guard let action = pendingDeviceRefreshAction else { return }
+        pendingDeviceRefreshAction = nil
+        switch action {
+        case .selectInstalledDriver:
+            selectedDestinationUID =
+                outputDevices.first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
+                ?? selectedDestinationUID
+        case .clearRemovedDriverSelection:
+            guard selectedDestinationUID == ClockAnchorPublisher.driverDeviceUID else { return }
+            selectedDestinationUID = nil
+            selectDefaults(defaultInputUID: cachedDefaultInputUID)
+        }
+    }
+
     private func runInitialDeviceRefresh(_ token: LatestRefreshGate.Token) {
-        let queue = engineQueue
-        queue.async {
-            // Launch is inventory only. A persisted Bluetooth microphone is a
-            // remembered row, not consent to open its input profile and drop
-            // the headset out of high-quality playback. Picker inspection or
-            // an explicit Start performs the direct topology hydration later.
-            let snapshot = Self.readDeviceRefreshSnapshot(
-                selectedSourceUID: nil,
-                selectedDestinationUID: nil,
-                detailUIDs: [],
-                readsDefaultInput: true)
-            Task { @MainActor in
-                self.finishInitialDeviceRefresh(snapshot, token: token)
-            }
+        let admitted = systemQueryOwners.submit(
+            to: .deviceInventory,
+            operation: { [weak self] in
+                // Launch is inventory only. A persisted Bluetooth microphone is a
+                // remembered row, not consent to open its input profile and drop
+                // the headset out of high-quality playback. Picker inspection or
+                // an explicit Start performs the direct topology hydration later.
+                let snapshot = Self.readDeviceRefreshSnapshot(
+                    selectedSourceUID: nil,
+                    selectedDestinationUID: nil,
+                    detailUIDs: [],
+                    readsSystemDefaults: true)
+                return { [weak self] in
+                    self?.finishInitialDeviceRefresh(snapshot, token: token)
+                }
+            },
+            deadline: { [weak self] in self?.finishDeviceRefreshWithoutSnapshot(token) })
+        if !admitted { finishDeviceRefreshWithoutSnapshot(token) }
+    }
+
+    private func finishDeviceRefreshWithoutSnapshot(_ token: LatestRefreshGate.Token) {
+        guard deviceRefreshGate.accepts(token) else { return }
+        switch deviceRefreshGate.finish(token) {
+        case .start(let next):
+            runDeviceChangeRefresh(next)
+        case .idle:
+            performPendingDeviceRefreshAction()
+        case .obsolete:
+            break
         }
     }
 
@@ -8205,14 +9570,20 @@ final class RouterModel: ScriptTarget {
         // observers therefore see value-only metadata and do not schedule their
         // own duplicate HAL reads while the restore flag is held.
         applyDeviceInventory(snapshot)
-        resolveRestoredDeviceIntent(defaultInputUID: snapshot.defaultInputUID)
+        resolveRestoredDeviceIntent(defaultInputUID: cachedDefaultInputUID)
         applyDeviceControlSnapshot(snapshot)
         deviceInventoryIsReady = true
         deviceWatcher?.establishBaseline(snapshot.inventoryIDs)
         refreshRestoredDeviceControlsIfSafe()
+        refreshVoiceActivityAvailability()
 
-        if case .start(let next) = deviceRefreshGate.finish(token) {
+        switch deviceRefreshGate.finish(token) {
+        case .start(let next):
             runDeviceChangeRefresh(next)
+        case .idle:
+            performPendingDeviceRefreshAction()
+        case .obsolete:
+            break
         }
         requestAutomaticStartIfConfigured()
     }
@@ -8231,16 +9602,20 @@ final class RouterModel: ScriptTarget {
         let sourceUID = selectedSourceUID
         let destinationUID = selectedDestinationUID
         let detailUIDs = deviceDetailUIDs
-        let queue = engineQueue
-        queue.async {
-            let snapshot = Self.readDeviceRefreshSnapshot(
-                selectedSourceUID: sourceUID,
-                selectedDestinationUID: destinationUID,
-                detailUIDs: detailUIDs)
-            Task { @MainActor in
-                self.finishDeviceChangeRefresh(snapshot, token: token)
-            }
-        }
+        let admitted = systemQueryOwners.submit(
+            to: .deviceInventory,
+            operation: { [weak self] in
+                let snapshot = Self.readDeviceRefreshSnapshot(
+                    selectedSourceUID: sourceUID,
+                    selectedDestinationUID: destinationUID,
+                    detailUIDs: detailUIDs,
+                    readsSystemDefaults: true)
+                return { [weak self] in
+                    self?.finishDeviceChangeRefresh(snapshot, token: token)
+                }
+            },
+            deadline: { [weak self] in self?.finishDeviceRefreshWithoutSnapshot(token) })
+        if !admitted { finishDeviceRefreshWithoutSnapshot(token) }
     }
 
     private func finishDeviceChangeRefresh(
@@ -8261,23 +9636,33 @@ final class RouterModel: ScriptTarget {
             _ = deviceRefreshGate.request()
         }
 
-        if case .start(let next) = deviceRefreshGate.finish(token) {
+        switch deviceRefreshGate.finish(token) {
+        case .start(let next):
             runDeviceChangeRefresh(next)
+        case .idle:
+            performPendingDeviceRefreshAction()
+        case .obsolete:
+            break
         }
     }
 
     private func handleDeviceChange(_ snapshot: DeviceRefreshSnapshot) {
         let before = Set((inputDevices + outputDevices).map(\.uid))
         applyDeviceRefreshSnapshot(snapshot)
+        refreshVoiceActivityAvailability()
         let after = Set((inputDevices + outputDevices).map(\.uid))
         // Named, because "something changed" is not something a script can act
         // on. Which device arrived is exactly the thing a rule like "when the
         // interface is plugged in, use it" needs.
         for uid in after.subtracting(before) {
-            fire(.deviceAppeared, ["uid": uid, "name": deviceNames[uid] ?? uid])
+            fire(
+                .deviceAppeared,
+                .object(["uid": .string(uid), "name": .string(deviceNames[uid] ?? uid)]))
         }
         for uid in before.subtracting(after) {
-            fire(.deviceDisappeared, ["uid": uid, "name": deviceNames[uid] ?? uid])
+            fire(
+                .deviceDisappeared,
+                .object(["uid": .string(uid), "name": .string(deviceNames[uid] ?? uid)]))
         }
 
         // Taking a device back has to happen before noticing one is missing,
@@ -8312,8 +9697,9 @@ final class RouterModel: ScriptTarget {
         confirmationTask = Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled, let self else { return }
-            let snapshot = await self.readDeviceRefreshSnapshotAsynchronously()
-            guard !Task.isCancelled else { return }
+            guard let snapshot = await self.readDeviceRefreshSnapshotAsynchronously(),
+                !Task.isCancelled
+            else { return }
             // The selected endpoints can change during the background read.
             // A mismatched control snapshot is not safe to publish.
             guard
@@ -8330,19 +9716,22 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    private func readDeviceRefreshSnapshotAsynchronously() async -> DeviceRefreshSnapshot {
+    private func readDeviceRefreshSnapshotAsynchronously() async -> DeviceRefreshSnapshot? {
         let sourceUID = selectedSourceUID
         let destinationUID = selectedDestinationUID
         let detailUIDs = deviceDetailUIDs
-        let queue = engineQueue
         return await withCheckedContinuation { continuation in
-            queue.async {
-                continuation.resume(
-                    returning: Self.readDeviceRefreshSnapshot(
+            let admitted = systemQueryOwners.submit(
+                to: .deviceInventory,
+                operation: {
+                    let snapshot = Self.readDeviceRefreshSnapshot(
                         selectedSourceUID: sourceUID,
                         selectedDestinationUID: destinationUID,
-                        detailUIDs: detailUIDs))
-            }
+                        detailUIDs: detailUIDs)
+                    return { continuation.resume(returning: snapshot) }
+                },
+                deadline: { continuation.resume(returning: nil) })
+            if !admitted { continuation.resume(returning: nil) }
         }
     }
 
@@ -8574,12 +9963,67 @@ final class RouterModel: ScriptTarget {
         let defaultDecibels: Float
     }
 
+    /// Read-only application discovery, before any process tap exists.
+    private struct CaptureResolution: Sendable {
+        let applications: [AudioApplication]
+        let refreshedApplications: Bool
+        let captured: [AudioApplication]
+        let unresolved: [String]
+    }
+
+    private enum CaptureResolutionOutcome: Sendable {
+        case resolved(CaptureResolution)
+        case timedOut
+    }
+
+    /// Values and the generation-bound delivery needed by one capture census.
+    ///
+    /// The closure is MainActor-isolated, so the query lane owns only value
+    /// snapshots while the synchronous Core Audio enumeration is in flight.
+    private struct CaptureResolutionRequest: Sendable {
+        let selected: Set<String>
+        let currentApplications: [AudioApplication]
+        let workspace: AudioApplications.WorkspaceSnapshot
+        let deliver: @MainActor @Sendable (CaptureResolutionOutcome) -> Void
+    }
+
+    private struct CaptureResolutionResponse: Sendable {
+        let outcome: CaptureResolutionOutcome
+        let deliver: @MainActor @Sendable (CaptureResolutionOutcome) -> Void
+    }
+
+    @ObservationIgnored private var madeCaptureResolutionLane:
+        BoundedSystemQueryLane<CaptureResolutionRequest, CaptureResolutionResponse>?
+
+    private var captureResolutionLane:
+        BoundedSystemQueryLane<CaptureResolutionRequest, CaptureResolutionResponse>
+    {
+        if let madeCaptureResolutionLane { return madeCaptureResolutionLane }
+        let lane = BoundedSystemQueryLane<CaptureResolutionRequest, CaptureResolutionResponse>(
+            subsystem: .captureResolution,
+            apply: { request, _ in
+                CaptureResolutionResponse(
+                    outcome: .resolved(
+                        Self.resolveCapture(
+                            selected: request.selected,
+                            currentApplications: request.currentApplications,
+                            workspace: request.workspace)),
+                    deliver: request.deliver)
+            },
+            deadlineResponse: { request in
+                CaptureResolutionResponse(outcome: .timedOut, deliver: request.deliver)
+            },
+            publish: { response in response.deliver(response.outcome) })
+        madeCaptureResolutionLane = lane
+        return lane
+    }
+
     /// Everything built before the engine can start.
     ///
-    /// This value never leaves `engineQueue`. In particular, its taps must not
-    /// cross back to the main actor: their deinitializer synchronously destroys
-    /// a CoreAudio object, so the thread that abandons a cancelled start is as
-    /// important as the thread that creates it.
+    /// This value never leaves `engineQueue`. Before any branch abandons it,
+    /// its taps are transferred to `RoutingEngine` and synchronously censused
+    /// by Stop. `ProcessTap.deinit` is only a last-resort background quarantine;
+    /// it is not a lifecycle boundary after which another route may start.
     private struct CapturePreparation {
         let applications: [AudioApplication]
         let refreshedApplications: Bool
@@ -8592,20 +10036,12 @@ final class RouterModel: ScriptTarget {
         let monitorRouteIndices: [String: [Int]]
     }
 
-    /// Resolves applications, creates their taps and lays out both mixes.
-    ///
-    /// Synchronous deliberately: taps use before/after snapshots of CoreAudio's
-    /// global tap list to recover a missing object identifier, so creating two
-    /// in parallel would make each snapshot contain the other's object.
-    nonisolated private static func prepareCapture(
+    /// Resolves selected application identities without creating a process tap.
+    nonisolated private static func resolveCapture(
         selected: Set<String>,
         currentApplications: [AudioApplication],
-        workspace: AudioApplications.WorkspaceSnapshot,
-        muteBehavior: TapMuteBehavior,
-        destinations: [CaptureDestination],
-        baseRoutes: [Route],
-        monitor: MonitorStartPlan?
-    ) -> CapturePreparation {
+        workspace: AudioApplications.WorkspaceSnapshot
+    ) -> CaptureResolution {
         let refreshed = !selected.isEmpty
         let applications =
             refreshed
@@ -8614,14 +10050,33 @@ final class RouterModel: ScriptTarget {
         let captured = applications.filter {
             selected.contains($0.bundleID) && !$0.processIDs.isEmpty
         }
-        let unresolved = selected.subtracting(captured.map(\.bundleID)).sorted()
+        return CaptureResolution(
+            applications: applications,
+            refreshedApplications: refreshed,
+            captured: captured,
+            unresolved: selected.subtracting(captured.map(\.bundleID)).sorted())
+    }
+
+    /// Creates admitted taps and lays out both mixes.
+    ///
+    /// Synchronous deliberately: taps use before/after snapshots of CoreAudio's
+    /// global tap list to recover a missing object identifier, so creating two
+    /// in parallel would make each snapshot contain the other's object.
+    nonisolated private static func prepareCapture(
+        resolution: CaptureResolution,
+        muteBehavior: TapMuteBehavior,
+        destinations: [CaptureDestination],
+        baseRoutes: [Route],
+        monitor: MonitorStartPlan?,
+        didCreateTap: @Sendable (ProcessTap) -> Void
+    ) -> CapturePreparation {
         var routes = baseRoutes
         var taps: [ProcessTap] = []
         var owners: [String: String] = [:]
         var refused: [String] = []
         var permissionWasDenied = false
 
-        for application in captured {
+        for application in resolution.captured {
             let tap: ProcessTap
             do {
                 tap = try ProcessTap(
@@ -8634,6 +10089,11 @@ final class RouterModel: ScriptTarget {
                     permissionWasDenied || capturePermissionWasDenied(error)
                 continue
             }
+            // A second ProcessTap constructor can block inside Core Audio. Give
+            // the first completed owner to the route teardown transaction before
+            // doing even its format query, so cancellation never depends on this
+            // local array unwinding or on `deinit` scheduling another HAL call.
+            didCreateTap(tap)
             taps.append(tap)
             owners[tap.uid] = application.bundleID
             for destination in destinations {
@@ -8694,12 +10154,12 @@ final class RouterModel: ScriptTarget {
         }
 
         return CapturePreparation(
-            applications: applications,
-            refreshedApplications: refreshed,
+            applications: resolution.applications,
+            refreshedApplications: resolution.refreshedApplications,
             routes: routes,
             taps: taps,
             owners: owners,
-            unresolved: unresolved,
+            unresolved: resolution.unresolved,
             refused: refused,
             permissionWasDenied: permissionWasDenied,
             monitorRouteIndices: monitorIndices)
@@ -8782,7 +10242,18 @@ final class RouterModel: ScriptTarget {
     ///   the routes. It overwrites one destination channel with a known
     ///   sequence, so it is never on for ordinary routing.
     func start(selftest: Bool) {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
+        guard !terminationIsPending else { return }
+        guard !teardownNeedsRetry else {
+            startFailed = true
+            lastError = loc(
+                "YunAudio could not release the audio route completely. Stop again before starting another route."
+            )
+            return
+        }
         guard !isBusy else { return }
+        if !selftest { invalidateIntegrityDiagnostic() }
+        invalidateCalibrationForRouteLifecycle()
         guard deviceSelectionWork.isEmpty, configuredDevicesHaveCompleteTopology else {
             requestedStartAwaitsDeviceHydration = selftest
             if deviceSelectionWork.isEmpty { hydrateConfiguredDevicesAsynchronously() }
@@ -8793,7 +10264,7 @@ final class RouterModel: ScriptTarget {
         // `prepareForAutomatedAudioUse()` chooses a local input before either
         // harness starts. This guard is the last line of defence for a future
         // test that forgets: failing that test is preferable to waking a phone.
-        guard !(Self.isVerificationProcess && routeRequiresExplicitInputSelection) else {
+        guard !(isVerificationProcess && routeRequiresExplicitInputSelection) else {
             startFailed = true
             return
         }
@@ -8836,13 +10307,31 @@ final class RouterModel: ScriptTarget {
         let selectedApplications = capturedAppBundleIDs
         let knownApplications = availableApps
         let muteBehavior = tapMuteBehavior
+        let resolvedSources = activeSourceUIDs.compactMap { uid in
+            inputDevices.first(where: { $0.uid == uid })?.uid
+        }
         let destinations = activeDestinationUIDs.compactMap { uid in
             outputDevices.first(where: { $0.uid == uid }).map {
                 CaptureDestination(uid: uid, outputChannels: $0.outputChannels)
             }
         }
         let baseRoutes = routes
-        let monitorPlan = monitorDeviceUID.flatMap { uid in
+        // A monitor that is the destination is not a monitor, it is the mix.
+        //
+        // Left in, every route into the destination is also a route into the
+        // monitor: the engine builds both, so the signal is summed twice — six
+        // decibels of level nobody asked for — and `remapMonitorRoutes` claims
+        // every main route as a monitor route, so the monitor fader drives what
+        // the far end hears. Both are audible and neither says anything.
+        //
+        // Reachable because the picker now offers a device that is *currently*
+        // the destination when the destination is also the source, which is a
+        // pair that cannot start; change the source afterwards and the pair
+        // becomes valid with the monitor sitting on top of it. So the invariant
+        // is enforced where it matters — at the start — rather than trusted to
+        // a list.
+        let monitorUID = monitorDeviceUID == destination ? nil : monitorDeviceUID
+        let monitorPlan = monitorUID.flatMap { uid in
             outputDevices.first(where: { $0.uid == uid }).map {
                 MonitorStartPlan(
                     uid: uid,
@@ -8859,62 +10348,326 @@ final class RouterModel: ScriptTarget {
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
         let buffer = bufferFrames
-        // A monitor that is the destination is not a monitor, it is the mix.
-        //
-        // Left in, every route into the destination is also a route into the
-        // monitor: the engine builds both, so the signal is summed twice — six
-        // decibels of level nobody asked for — and `remapMonitorRoutes` claims
-        // every main route as a monitor route, so the monitor fader drives what
-        // the far end hears. Both are audible and neither says anything.
-        //
-        // Reachable because the picker now offers a device that is *currently*
-        // the destination when the destination is also the source, which is a
-        // pair that cannot start; change the source afterwards and the pair
-        // becomes valid with the monitor sitting on top of it. So the invariant
-        // is enforced where it matters — at the start — rather than trusted to
-        // a list.
-        let monitorUID = monitorDeviceUID == selectedDestinationUID ? nil : monitorDeviceUID
         let extraSources = additionalSourceUIDs
         let extraDestinations = additionalDestinationUIDs
         let trim = outputLatencyFrames
         let echoIsEnabled = cancelsEcho
         let wantedEchoSpeaker = echoSpeakerUID
         let echoSpeakers = echoSpeakerOptions
+        let defaultEchoSpeakerUID = cachedDefaultOutputUID
         let excludedApplications = excludedAppBundleIDs
         let emptyRouteError =
             selectedSource == nil || selectedDestination == nil
             ? loc("A device in the route was unplugged.")
             : loc("Those two devices share no usable channels.")
+        let incidentCheckpointError = loc(
+            "YunAudio could not secure its audio recovery checkpoint. No audio device was opened. Try again."
+        )
 
         clockLockFailed = false
         routeUpdatesAreAccepted = false
         routeApplier.invalidate()
+        correctionApplier.invalidate()
+        liveControlApplier.invalidate()
         tapOwners = [:]
         unresolvedCaptures = []
         refusedCaptures = []
         monitorRouteIndices = [:]
         isBusy = true
         isStarting = true
-        let intent = StartIntent()
+        let intent = RouteStartIntent()
         currentStartIntent = intent
         let engine = engine
+        let lifecycleQueue = engineQueue
 
-        engineQueue.async {
-            let preparation = Self.prepareCapture(
-                selected: selectedApplications,
-                currentApplications: knownApplications,
-                workspace: workspace,
-                muteBehavior: muteBehavior,
-                destinations: destinations,
-                baseRoutes: baseRoutes,
-                monitor: monitorPlan)
-            guard !intent.isCancelled else {
-                // `preparation` — and therefore every ProcessTap — dies on this
-                // queue after the callback is enqueued, never on MainActor.
-                Task { @MainActor in self.finishCancelledStart(intent) }
+        let runResolvedStart: @Sendable (CaptureResolution) -> Void = { resolution in
+            switch intent.admitEngineLifecycle() {
+            case .admitted:
+                break
+            case .cancelled:
+                MainRunLoopDelivery.perform {
+                    self.finishCancelledStart(intent, teardown: .complete)
+                }
+                return
+            case .alreadyAdmitted:
                 return
             }
-            guard !preparation.routes.isEmpty else {
+            lifecycleQueue.async {
+                guard !intent.isCancelled else {
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, teardown: .complete)
+                    }
+                    return
+                }
+
+                let echo: EchoCancellationSettings?
+                if echoIsEnabled {
+                    let speaker =
+                        echoSpeakers.first { $0.uid == wantedEchoSpeaker }
+                        ?? defaultEchoSpeakerUID.flatMap { uid in
+                            echoSpeakers.first { $0.uid == uid }
+                        }
+                        ?? echoSpeakers.first
+                    if let speaker {
+                        // The far end is every audible application the exclusion
+                        // permits. Empty stays empty: falling back to the excluded
+                        // set would turn "never touch this application" into a rule
+                        // that stops at the echo canceller.
+                        let reference = Self.echoReferenceProcessIDs(
+                            in: resolution.applications,
+                            excluding: excludedApplications)
+                        // Unmuted leaves those applications on their own speaker
+                        // path. Routing them through the canceller would subtract
+                        // better, but would also put YunAudio in the path of
+                        // everything somebody hears without being asked.
+                        echo = EchoCancellationSettings(
+                            speakerUID: speaker.uid,
+                            farEndProcessIDs: reference,
+                            tapMuteBehavior: .unmuted)
+                    } else {
+                        echo = nil
+                    }
+                } else {
+                    echo = nil
+                }
+
+                do {
+                    try RoutingEngine.validateStartPreflight(
+                        .init(
+                            sourceDeviceUID: source,
+                            destinationDeviceUID: destination,
+                            baseRoutes: baseRoutes,
+                            sources: resolvedSources,
+                            captures: resolution.captured.map {
+                                .init(bundleID: $0.bundleID, processIDs: $0.processIDs)
+                            },
+                            destinations: destinations.map {
+                                .init(uid: $0.uid, outputChannels: $0.outputChannels)
+                            },
+                            additionalSourceUIDs: extraSources,
+                            additionalDestinationUIDs: extraDestinations,
+                            monitorDeviceUID: monitorUID,
+                            monitorOutputChannels: monitorPlan?.outputChannels,
+                            effects: effects,
+                            plugins: pluginList,
+                            preferredSampleRate: rate,
+                            bufferFrames: buffer,
+                            voiceIsolation: isolation,
+                            echoCancellation: echo,
+                            outputLatencyTrim: trim))
+                } catch {
+                    let report = StartReport(
+                        applications: resolution.applications,
+                        refreshedApplications: resolution.refreshedApplications,
+                        owners: [:],
+                        unresolved: resolution.unresolved,
+                        refused: [],
+                        permissionWasDenied: false,
+                        monitorRouteIndices: [:],
+                        failure: String(describing: error),
+                        quality: nil,
+                        didStart: false,
+                        teardown: .complete,
+                        snapshot: engine.engineUISnapshot)
+                    Task { @MainActor in self.finishStart(intent, report, isolation: isolation)
+                    }
+                    return
+                }
+                guard !intent.isCancelled else {
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, teardown: .complete)
+                    }
+                    return
+                }
+
+                func reportBeforeAudioOwnership(
+                    _ failure: String,
+                    stop: EngineStopReport? = nil
+                ) {
+                    let report = StartReport(
+                        applications: resolution.applications,
+                        refreshedApplications: resolution.refreshedApplications,
+                        owners: [:],
+                        unresolved: resolution.unresolved,
+                        refused: [],
+                        permissionWasDenied: false,
+                        monitorRouteIndices: [:],
+                        failure: failure,
+                        quality: nil,
+                        didStart: false,
+                        teardown: stop?.teardown ?? .complete,
+                        snapshot: stop?.snapshot ?? engine.engineUISnapshot)
+                    Task { @MainActor in
+                        self.finishStart(intent, report, isolation: isolation)
+                    }
+                }
+
+                let incidentReservation: RoutingEngine.AudioIncidentReservation
+                do {
+                    let quarantine = ProcessLifetimeAudioQuarantine.shared
+                    _ = quarantine.waitForNewAudioOwnership(
+                        timeout: 14.5,
+                        while: { !intent.isCancelled })
+                    incidentReservation = try engine.reserveAudioIncidentBeforeOwnership(
+                        sourceDeviceUID: source,
+                        destinationDeviceUID: destination,
+                        preferredSampleRate: rate,
+                        bufferFrames: buffer,
+                        processTapOwnershipExpected: !resolution.captured.isEmpty)
+                } catch {
+                    reportBeforeAudioOwnership(String(describing: error))
+                    return
+                }
+                let initialReceipt = LatestAudioIncidentWriter.shared.submitCritical(
+                    incidentReservation.constructionBundle)
+                switch initialReceipt.wait(timeout: .seconds(1)) {
+                case .persisted:
+                    break
+                case .timedOut:
+                    // Only this waiter timed out. The serial writer may still
+                    // rename the checkpoint later, so close the same run with a
+                    // terminal bundle instead of abandoning its recorder.
+                    let teardown = Self.stopEngineAndRecord(engine)
+                    reportBeforeAudioOwnership(incidentCheckpointError, stop: teardown)
+                    return
+                case .refused, .writeFailed:
+                    _ = engine.discardAudioIncidentReservation(incidentReservation)
+                    reportBeforeAudioOwnership(incidentCheckpointError)
+                    return
+                }
+                guard !intent.isCancelled else {
+                    let teardown = Self.stopEngineAndRecord(engine)
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, teardown: teardown)
+                    }
+                    return
+                }
+
+                if !resolution.captured.isEmpty {
+                    do {
+                        let ownershipCheckpoint =
+                            try engine.makeProcessTapOwnershipCheckpoint(
+                                reservation: incidentReservation)
+                        let ownershipReceipt =
+                            LatestAudioIncidentWriter.shared.submitCritical(
+                                ownershipCheckpoint)
+                        guard ownershipReceipt.wait(timeout: .seconds(1)) == .persisted
+                        else {
+                            _ = Self.stopEngineAndRecord(engine)
+                            reportBeforeAudioOwnership(incidentCheckpointError)
+                            return
+                        }
+                        guard !intent.isCancelled else {
+                            let teardown = Self.stopEngineAndRecord(engine)
+                            Task { @MainActor in
+                                self.finishCancelledStart(intent, teardown: teardown)
+                            }
+                            return
+                        }
+                        try engine.beginAudioIncidentOwnership(
+                            reservation: incidentReservation)
+                    } catch {
+                        _ = Self.stopEngineAndRecord(engine)
+                        reportBeforeAudioOwnership(String(describing: error))
+                        return
+                    }
+                }
+
+                let preparation = Self.prepareCapture(
+                    resolution: resolution,
+                    muteBehavior: muteBehavior,
+                    destinations: destinations,
+                    baseRoutes: baseRoutes,
+                    monitor: monitorPlan,
+                    didCreateTap: { tap in
+                        engine.adoptTapsForTeardown([tap])
+                    })
+                guard !intent.isCancelled else {
+                    engine.adoptTapsForTeardown(preparation.taps)
+                    let teardown = Self.stopEngineAndRecord(engine)
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, teardown: teardown)
+                    }
+                    return
+                }
+                guard !preparation.routes.isEmpty else {
+                    engine.adoptTapsForTeardown(preparation.taps)
+                    let teardown = Self.stopEngineAndRecord(engine)
+                    let report = StartReport(
+                        applications: preparation.applications,
+                        refreshedApplications: preparation.refreshedApplications,
+                        owners: preparation.owners,
+                        unresolved: preparation.unresolved,
+                        refused: preparation.refused,
+                        permissionWasDenied: preparation.permissionWasDenied,
+                        monitorRouteIndices: preparation.monitorRouteIndices,
+                        failure: emptyRouteError,
+                        quality: nil,
+                        didStart: false,
+                        teardown: teardown.teardown,
+                        snapshot: teardown.snapshot)
+                    Task { @MainActor in self.finishStart(intent, report, isolation: isolation)
+                    }
+                    return
+                }
+
+                engine.allowClockLockRetry()
+                var failure: String?
+                var quality: PathQuality?
+                var didStart = false
+                var failedStartStop: EngineStopReport?
+                do {
+                    try engine.start(
+                        sourceDeviceUID: source,
+                        destinationDeviceUID: destination,
+                        routes: preparation.routes,
+                        taps: preparation.taps,
+                        additionalSourceUIDs: extraSources,
+                        additionalDestinationUIDs: extraDestinations,
+                        monitorDeviceUID: monitorUID,
+                        effects: effects,
+                        plugins: pluginList,
+                        preferredSampleRate: rate,
+                        bufferFrames: buffer,
+                        voiceIsolation: isolation,
+                        echoCancellation: echo,
+                        outputLatencyTrim: trim,
+                        selftest: selftest,
+                        audioIncidentReservation: incidentReservation)
+                    Self.recordPendingEngineIncident(engine)
+                    didStart = true
+                    quality = engine.pathQuality
+                    // Two completed callbacks are already part of start's
+                    // contract. Persist their bounded, explicitly inconclusive
+                    // checkpoint so an abnormal exit still names this run.
+                    engine.checkpointLiveAudioIncidentBundle()
+                    Self.recordPendingEngineIncident(engine)
+                } catch {
+                    failure = String(describing: error)
+                    // A failure before `lastConfiguration` was installed still
+                    // leaves every prepared tap as a live HAL object. Adopt first
+                    // so this Stop and every later retry own the same census.
+                    engine.adoptTapsForTeardown(preparation.taps)
+                    failedStartStop = Self.stopEngineAndRecord(engine)
+                }
+
+                // A stop or settings edit can arrive while CoreAudio is inside its
+                // synchronous start. It cannot interrupt that call, but it can keep
+                // the obsolete graph from ever being published to the interface.
+                if intent.isCancelled {
+                    let stop =
+                        didStart
+                        ? Self.stopEngineAndRecord(engine)
+                        : (failedStartStop
+                            ?? EngineStopReport(
+                                teardown: engine.lastTeardownResult ?? .complete,
+                                snapshot: engine.engineUISnapshot))
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, stop: stop)
+                    }
+                    return
+                }
+
                 let report = StartReport(
                     applications: preparation.applications,
                     refreshedApplications: preparation.refreshedApplications,
@@ -8923,102 +10676,122 @@ final class RouterModel: ScriptTarget {
                     refused: preparation.refused,
                     permissionWasDenied: preparation.permissionWasDenied,
                     monitorRouteIndices: preparation.monitorRouteIndices,
-                    failure: emptyRouteError,
-                    quality: nil,
-                    didStart: false)
+                    failure: failure,
+                    quality: quality,
+                    didStart: didStart,
+                    teardown: failedStartStop?.teardown ?? engine.lastTeardownResult,
+                    snapshot: failedStartStop?.snapshot ?? engine.engineUISnapshot)
                 Task { @MainActor in self.finishStart(intent, report, isolation: isolation) }
-                return
             }
+        }
 
-            let echo: EchoCancellationSettings?
-            if echoIsEnabled {
-                let speaker =
-                    echoSpeakers.first { $0.uid == wantedEchoSpeaker }
-                    ?? (try? AudioDevices.defaultOutput()).flatMap {
-                        $0.transport.isVirtual ? nil : $0
+        // Resolving application identities performs a synchronous process-list
+        // HAL read. It owns no tap or route yet, so it must not stand in front
+        // of Stop on the lifecycle queue. With no application capture selected,
+        // the pure cached branch starts immediately and cannot be delayed by an
+        // unrelated optional discovery which has already wedged its worker.
+        if selectedApplications.isEmpty {
+            runResolvedStart(
+                Self.resolveCapture(
+                    selected: selectedApplications,
+                    currentApplications: knownApplications,
+                    workspace: workspace))
+        } else {
+            let request = CaptureResolutionRequest(
+                selected: selectedApplications,
+                currentApplications: knownApplications,
+                workspace: workspace,
+                deliver: { outcome in
+                    switch outcome {
+                    case .resolved(let resolution):
+                        runResolvedStart(resolution)
+                    case .timedOut:
+                        self.failCaptureResolution(intent)
                     }
-                    ?? echoSpeakers.first
-                if let speaker {
-                    // The far end is every audible application the exclusion
-                    // permits. Empty stays empty: falling back to the excluded
-                    // set would turn "never touch this application" into a rule
-                    // that stops at the echo canceller.
-                    let reference = Self.echoReferenceProcessIDs(
-                        in: preparation.applications,
-                        excluding: excludedApplications)
-                    // Unmuted leaves those applications on their own speaker
-                    // path. Routing them through the canceller would subtract
-                    // better, but would also put YunAudio in the path of
-                    // everything somebody hears without being asked.
-                    echo = EchoCancellationSettings(
-                        speakerUID: speaker.uid,
-                        farEndProcessIDs: reference,
-                        tapMuteBehavior: .unmuted)
-                } else {
-                    echo = nil
-                }
-            } else {
-                echo = nil
+                })
+            if !captureResolutionLane.submit(request) {
+                failCaptureResolution(intent)
             }
+        }
+    }
 
-            engine.allowClockLockRetry()
-            var failure: String?
-            var quality: PathQuality?
-            var didStart = false
-            do {
-                try engine.start(
-                    sourceDeviceUID: source,
-                    destinationDeviceUID: destination,
-                    routes: preparation.routes,
-                    taps: preparation.taps,
-                    additionalSourceUIDs: extraSources,
-                    additionalDestinationUIDs: extraDestinations,
-                    monitorDeviceUID: monitorUID,
-                    effects: effects,
-                    plugins: pluginList,
-                    preferredSampleRate: rate,
-                    bufferFrames: buffer,
-                    voiceIsolation: isolation,
-                    echoCancellation: echo,
-                    outputLatencyTrim: trim,
-                    selftest: selftest)
-                didStart = true
-                quality = engine.pathQuality
-            } catch {
-                failure = String(describing: error)
+    /// Retires Start when application discovery misses its response budget.
+    ///
+    /// The synchronous HAL census may still own its isolated lane. No second
+    /// census is opened beside it, and no engine work has been admitted, so UI
+    /// state can become truthful immediately without pretending the system call
+    /// was cancelled.
+    private func failCaptureResolution(_ intent: RouteStartIntent) {
+        guard currentStartIntent === intent else { return }
+        guard intent.cancel() == .finishWithoutEngine else { return }
+        lastError = loc("Reading the selected applications took too long.")
+        startFailed = true
+        finishCancelledStart(intent, teardown: .complete)
+    }
+
+    /// Cancels capture discovery immediately or leaves completion to the engine.
+    ///
+    /// The handover decision and cancellation share one lock in
+    /// `RouteStartIntent`. That is the boundary which prevents Stop from
+    /// clearing `isBusy` just as discovery has already admitted a route open.
+    private func cancelCurrentStart() {
+        guard let intent = currentStartIntent else { return }
+        switch intent.cancel() {
+        case .finishWithoutEngine:
+            let finish: @MainActor @Sendable () -> Void = { [weak self] in
+                self?.finishCancelledStart(intent, teardown: .complete)
             }
-
-            // A stop or settings edit can arrive while CoreAudio is inside its
-            // synchronous start. It cannot interrupt that call, but it can keep
-            // the obsolete graph from ever being published to the interface.
-            if intent.isCancelled {
-                if didStart { engine.stop() }
-                Task { @MainActor in self.finishCancelledStart(intent) }
-                return
+            if madeCaptureResolutionLane?.invalidate(notifying: finish) != true {
+                MainRunLoopDelivery.perform(finish)
             }
-
-            let report = StartReport(
-                applications: preparation.applications,
-                refreshedApplications: preparation.refreshedApplications,
-                owners: preparation.owners,
-                unresolved: preparation.unresolved,
-                refused: preparation.refused,
-                permissionWasDenied: preparation.permissionWasDenied,
-                monitorRouteIndices: preparation.monitorRouteIndices,
-                failure: failure,
-                quality: quality,
-                didStart: didStart)
-            Task { @MainActor in self.finishStart(intent, report, isolation: isolation) }
+        case .awaitEngineOwner, .alreadyCancelled:
+            break
         }
     }
 
     /// Finishes a start made obsolete before its result reached the main actor.
-    private func finishCancelledStart(_ intent: StartIntent) {
+    private func finishCancelledStart(
+        _ intent: RouteStartIntent,
+        teardown: RoutingTeardownResult
+    ) {
+        finishCancelledStart(
+            intent,
+            stop: EngineStopReport(teardown: teardown, snapshot: engineSnapshot))
+    }
+
+    /// Retires a cancelled generation from the stop report captured by its
+    /// engine owner.
+    private func finishCancelledStart(
+        _ intent: RouteStartIntent,
+        teardown stop: EngineStopReport
+    ) {
+        finishCancelledStart(intent, stop: stop)
+    }
+
+    private func finishCancelledStart(
+        _ intent: RouteStartIntent,
+        stop: EngineStopReport
+    ) {
         guard currentStartIntent === intent else { return }
         currentStartIntent = nil
+        _ = adoptEngineSnapshot(
+            stop.snapshot,
+            expecting: EngineSnapshotExpectation(
+                routeGeneration: nil, minimumGraphGeneration: nil,
+                requiresStoppedGraph: stop.teardown.isComplete))
+        guard stop.teardown.isComplete else {
+            retainFailedTeardown(stop.teardown, snapshot: stop.snapshot)
+            return
+        }
+        guard stop.snapshot.graphGeneration == 0, stop.snapshot.routes.isEmpty else {
+            retainFailedTeardown(.lifecycleQueueTimedOut, snapshot: stop.snapshot)
+            return
+        }
         isBusy = false
         isStarting = false
         isRunning = false
+        teardownNeedsRetry = false
+        teardownFailureDetail = nil
         routeUpdatesAreAccepted = false
         if honourPendingStop() { return }
         if restartIsPending {
@@ -9030,7 +10803,7 @@ final class RouterModel: ScriptTarget {
 
     /// Publishes only the report belonging to the current start generation.
     private func finishStart(
-        _ intent: StartIntent,
+        _ intent: RouteStartIntent,
         _ report: StartReport,
         isolation: VoiceIsolationSettings?
     ) {
@@ -9042,22 +10815,30 @@ final class RouterModel: ScriptTarget {
             if report.didStart {
                 let engine = engine
                 engineQueue.async {
-                    engine.stop()
-                    Task { @MainActor in self.finishCancelledStart(intent) }
+                    let teardown = Self.stopEngineAndRecord(engine)
+                    Task { @MainActor in
+                        self.finishCancelledStart(intent, teardown: teardown)
+                    }
                 }
             } else {
-                finishCancelledStart(intent)
+                finishCancelledStart(
+                    intent,
+                    stop: EngineStopReport(
+                        teardown: report.teardown ?? .complete,
+                        snapshot: report.snapshot))
             }
             return
         }
 
         currentStartIntent = nil
+        _ = adoptEngineSnapshot(report.snapshot)
         if report.refreshedApplications {
             appListRevision &+= 1
             availableApps = report.applications
             appsRefreshedAt = Date()
         }
-        tapOwners = report.didStart ? report.owners : [:]
+        let teardownWasIncomplete = report.teardown?.isComplete == false
+        tapOwners = report.didStart || teardownWasIncomplete ? report.owners : [:]
         unresolvedCaptures = report.unresolved
         refusedCaptures = report.refused
         PermissionCentre.shared.refreshSafeStatuses()
@@ -9066,12 +10847,22 @@ final class RouterModel: ScriptTarget {
         } else if report.permissionWasDenied {
             PermissionCentre.shared.recordSystemAudioAttempt(succeeded: false)
         }
-        monitorRouteIndices = report.didStart ? report.monitorRouteIndices : [:]
+        monitorRouteIndices =
+            report.didStart || teardownWasIncomplete ? report.monitorRouteIndices : [:]
         isBusy = false
         isStarting = false
 
+        if let teardown = report.teardown, !teardown.isComplete {
+            retainFailedTeardown(teardown, snapshot: report.snapshot)
+            return
+        }
+
         if let failure = report.failure {
+            pendingRoutingScriptCausality = nil
+            pendingRoutingScriptTarget = nil
             isRunning = false
+            teardownNeedsRetry = false
+            teardownFailureDetail = nil
             routeUpdatesAreAccepted = false
             lastError = failure
             startFailed = true
@@ -9090,7 +10881,10 @@ final class RouterModel: ScriptTarget {
         }
 
         ioContinuity.reset()
+        audioIncidentCheckpointCadence.reset()
         isRunning = true
+        teardownNeedsRetry = false
+        teardownFailureDetail = nil
         lighting.setSignalActive(true)
         routeUpdatesAreAccepted = true
         lastError =
@@ -9099,7 +10893,11 @@ final class RouterModel: ScriptTarget {
             : String(
                 format: loc("%@ could not be captured."),
                 report.refused.joined(separator: ", "))
-        fire(.routingStarted)
+        fire(.routingStarted, causality: pendingRoutingScriptCausality)
+        if pendingRoutingScriptTarget == true {
+            pendingRoutingScriptCausality = nil
+            pendingRoutingScriptTarget = nil
+        }
         startFailed = false
         startVoiceActivity()
         appliedToGraph = []
@@ -9109,15 +10907,20 @@ final class RouterModel: ScriptTarget {
         applyOutputMute()
         applyDucking()
         applyEffectValues()
-        let installed = engine.currentRoutes
-        activeRoutes = installed
-        routeGains = installed.map(\.gain)
-        routeMutes = installed.map(\.isMuted)
-        if let dropped = engine.droppedMonitor { monitorWasDropped(dropped) }
-        extrasWereDropped(engine.droppedExtras)
+        adoptEngineRoutes(report.snapshot, preservingLatestControls: false)
+        sourceTapRequestGate.activate()
+        if isTranscribing || isScoringSinging || isSingingVisible {
+            requestSourceTapTopology()
+        }
+        if let dropped = report.snapshot.droppedMonitor {
+            monitorWasDropped(dropped, installedRoutes: report.snapshot.routes)
+        }
+        extrasWereDropped(
+            report.snapshot.droppedExtras,
+            installedRoutes: report.snapshot.routes)
         applySourceLevels()
         applyOutputTrims()
-        if isolation != nil, let reason = engine.lastIsolationError {
+        if isolation != nil, let reason = report.snapshot.isolationError {
             lastError = Self.isolationMessage(reason)
         }
         pathQuality = report.quality
@@ -9162,32 +10965,69 @@ final class RouterModel: ScriptTarget {
         stop(then: nil)
     }
 
-    /// - Parameter completion: Runs on the main actor once the engine is fully
-    ///   down and `isBusy` has been cleared, so a caller can start again. It is
-    ///   skipped when somebody asked for the route to stay down in the meantime:
-    ///   the completion exists to chain a rebuild behind a teardown, and a
-    ///   rebuild is the one thing a stop request rules out.
-    func stop(then completion: (@MainActor () -> Void)? = nil) {
+    /// - Parameters:
+    ///   - completion: Runs on the main actor once the engine is fully down and
+    ///     `isBusy` has been cleared, so a caller can start again. It is skipped
+    ///     when somebody asked for the route to stay down in the meantime: the
+    ///     completion exists to chain a rebuild behind a teardown, and a rebuild
+    ///     is the one thing a stop request rules out.
+    ///   - preservingIntegrityDiagnostic: Keeps the current selftest run admitted
+    ///     while its private graph is being installed or retired.
+    func stop(
+        then completion: (@MainActor () -> Void)? = nil,
+        preservingIntegrityDiagnostic: Bool = false
+    ) {
         requestedStartAwaitsDeviceHydration = nil
         automaticStartAwaitsDeviceHydration = false
+        if !preservingIntegrityDiagnostic { invalidateIntegrityDiagnostic() }
         // Invalidate before the busy guard. The engine may still be rendering,
         // but no route result from this lifetime may reach the interface or
         // trigger a fallback restart after Stop has been asked for.
         lighting.setSignalActive(false)
+        invalidateCalibrationForRouteLifecycle()
         routeUpdatesAreAccepted = false
         routeApplier.invalidate()
+        correctionApplier.invalidate()
+        audioIncidentCheckpointApplier.invalidate()
+        liveControlApplier.invalidate()
+        quickConfigSystemControl.invalidate()
+        revokeSourceTapRequestsBeforeRouteStop()
+        recordingLifecycleWorker.invalidate()
+        recordingIntentTarget = false
+        invalidateHardwareControlWrites()
+        systemQueryOwners.invalidate(.hardwareRead)
+        systemQueryOwners.invalidate(.diagnostics)
+        deviceControlRefreshGate.invalidate()
+        pathQualityReadInFlight = false
+        pendingHardwareGain = nil
+        pendingHardwareMonitor = nil
+        _ = requestVoiceActivityCleanup()
         guard !isBusy else {
             stopIsPending = true
-            if isStarting { currentStartIntent?.cancel() }
+            if isStarting { cancelCurrentStart() }
             return
         }
         isBusy = true
         let engine = engine
         engineQueue.async {
-            engine.stop()
-            Task { @MainActor in
+            let stop = Self.stopEngineAndRecord(engine)
+            MainRunLoopDelivery.perform {
                 self.isBusy = false
-                self.finishStop()
+                _ = self.adoptEngineSnapshot(
+                    stop.snapshot,
+                    expecting: EngineSnapshotExpectation(
+                        routeGeneration: nil, minimumGraphGeneration: nil,
+                        requiresStoppedGraph: stop.teardown.isComplete))
+                guard stop.teardown.isComplete else {
+                    self.retainFailedTeardown(stop.teardown, snapshot: stop.snapshot)
+                    return
+                }
+                guard stop.snapshot.graphGeneration == 0, stop.snapshot.routes.isEmpty else {
+                    self.retainFailedTeardown(
+                        .lifecycleQueueTimedOut, snapshot: stop.snapshot)
+                    return
+                }
+                self.finishStop(snapshot: stop.snapshot)
                 // Read before it is cleared, because the completion below is
                 // usually a start and this is the only thing standing between a
                 // stop somebody pressed and the route coming straight back up.
@@ -9205,10 +11045,66 @@ final class RouterModel: ScriptTarget {
         }
     }
 
-    private func finishStop() {
+    /// Keeps the old route visible and admits only another Stop after Core
+    /// Audio refused to prove that all of its callbacks and objects are gone.
+    ///
+    /// This is internal so the state transition can be asserted without
+    /// provoking a real device failure. The engine still owns every lifetime
+    /// involved; this method only makes that truth explicit to the interface.
+    func retainFailedTeardown(
+        _ result: RoutingTeardownResult,
+        snapshot: RoutingEngine.EngineUISnapshot? = nil
+    ) {
+        precondition(!result.isComplete)
+        if let snapshot {
+            _ = adoptEngineSnapshot(snapshot)
+            adoptEngineRoutes(snapshot, preservingLatestControls: true)
+        }
+        currentStartIntent = nil
+        isBusy = false
+        isStarting = false
+        isRunning = true
+        startFailed = true
+        teardownNeedsRetry = true
+        teardownFailureDetail = String(describing: result)
+        routeUpdatesAreAccepted = false
+        restartIsPending = false
+        stopIsPending = false
+        lighting.setSignalActive(false)
+        let message = loc(
+            "YunAudio could not release the audio route completely. Stop again before starting another route."
+        )
+        lastError = message
+        if isInstallingDriver {
+            isInstallingDriver = false
+            driverMessage = message
+        }
+    }
+
+    private func finishStop(
+        snapshot: RoutingEngine.EngineUISnapshot? = nil
+    ) {
+        if let snapshot {
+            guard snapshot.graphGeneration == 0, snapshot.routes.isEmpty else {
+                retainFailedTeardown(.lifecycleQueueTimedOut, snapshot: snapshot)
+                return
+            }
+            _ = adoptEngineSnapshot(
+                snapshot,
+                expecting: EngineSnapshotExpectation(
+                    routeGeneration: nil, minimumGraphGeneration: nil,
+                    requiresStoppedGraph: true))
+        }
         isRunning = false
-        fire(.routingStopped)
-        stopVoiceActivity()
+        recordingIntentTarget = false
+        audioIncidentCheckpointCadence.reset()
+        teardownNeedsRetry = false
+        teardownFailureDetail = nil
+        fire(.routingStopped, causality: pendingRoutingScriptCausality)
+        if pendingRoutingScriptTarget == false {
+            pendingRoutingScriptCausality = nil
+            pendingRoutingScriptTarget = nil
+        }
         // The engine tore the recorder down with the route, so the flag has to
         // follow or the button would claim a recording is still running against
         // a file nothing is writing to.
@@ -9230,7 +11126,7 @@ final class RouterModel: ScriptTarget {
         if isTranscribing { stopTranscribing() }
         // The score goes with it for the same reason and not the same one: the
         // rings it reads are the route's, so there is nothing left to hear.
-        isScoringSinging = false
+        setScoringActive(false, preservingWish: true)
         levels = []
         peakHolds = []
         clipped = []
@@ -9252,7 +11148,7 @@ final class RouterModel: ScriptTarget {
         restartIsPending = false
     }
 
-    func toggle() { isRunning ? stop() : start() }
+    func toggle() { isRunning || teardownNeedsRetry ? stop() : start() }
 
     // MARK: Scripting
 
@@ -9263,68 +11159,197 @@ final class RouterModel: ScriptTarget {
     /// milliseconds apart. Plain values only — a script has to keep working
     /// across versions, and handing it a model object would make every internal
     /// rename somebody else's breaking change.
-    var scriptStatus: [String: Any] {
-        var status: [String: Any] = [
-            "running": isRunning,
-            "busy": isBusy,
-            "muted": isInputMuted,
-            "outputMuted": isOutputMuted,
-            "recording": isRecording,
-            "transcribing": isTranscribing,
-            "inputDecibels": Double(inputDecibels),
-            "outputDecibels": Double(outputDecibels),
-            "effects": enabledEffects.map(\.rawValue).sorted(),
-            "routes": activeRoutes.count,
+    var scriptStatus: JSONValue {
+        var status: [String: JSONValue] = [
+            "running": .bool(isRunning),
+            "busy": .bool(isBusy),
+            "muted": .bool(isInputMuted),
+            "outputMuted": .bool(isOutputMuted),
+            "recording": .bool(isRecording),
+            "transcribing": .bool(isTranscribing),
+            "inputDecibels": .double(Double(inputDecibels)),
+            "outputDecibels": .double(Double(outputDecibels)),
+            "effects": .array(enabledEffects.map(\.rawValue).sorted().map(JSONValue.string)),
+            "routes": .int(activeRoutes.count),
+            "teardownNeedsRetry": .bool(teardownNeedsRetry),
         ]
+        if let teardownFailureDetail {
+            status["teardownFailure"] = .string(teardownFailureDetail)
+        }
         if let source = selectedSource {
-            status["source"] = source.name
-            status["sourceUID"] = source.uid
+            status["source"] = .string(source.name)
+            status["sourceUID"] = .string(source.uid)
         }
         if let destination = selectedDestination {
-            status["destination"] = destination.name
-            status["destinationUID"] = destination.uid
+            status["destination"] = .string(destination.name)
+            status["destinationUID"] = .string(destination.uid)
         }
         if let quality = pathQuality {
-            status["sampleRate"] = quality.sampleRate
-            status["bufferFrames"] = Int(quality.bufferFrames)
+            status["sampleRate"] = .double(quality.sampleRate)
+            status["bufferFrames"] = .int(Int(quality.bufferFrames))
         }
         if isRunning {
-            status["peak"] = Double(peakLevel)
-            status["outputPeak"] = Double(outputPeak)
-            status["loudness"] = analysis.shortTerm.isFinite ? analysis.shortTerm : -70
+            status["peak"] = .double(Double(peakLevel))
+            status["outputPeak"] = .double(Double(outputPeak))
+            status["loudness"] = .double(
+                analysis.shortTerm.isFinite ? analysis.shortTerm : -70)
             if let cycles = ioContinuity.cycleCount {
-                status["cycles"] = Int(clamping: cycles)
+                status["cycles"] = .int(Int(clamping: cycles))
             }
-            status["cycleStallEvents"] = ioContinuity.stallEvents
-            status["cycleStallPolls"] = ioContinuity.stalledPolls
-            status["cycleStalled"] = ioContinuity.isStalled
-            status["clockLocked"] = isClockLocked
-            status["clockRatio"] = measuredRateRatio
-            status["ioAllocations"] = Int(clamping: allocationViolations)
+            status["cycleStallEvents"] = .int(Int(clamping: ioContinuity.stallEvents))
+            status["cycleStallPolls"] = .int(Int(clamping: ioContinuity.stalledPolls))
+            status["cycleStalled"] = .bool(ioContinuity.isStalled)
+            status["clockLocked"] = .bool(isClockLocked)
+            status["clockRatio"] = .double(measuredRateRatio)
+            status["ioAllocations"] = .int(Int(clamping: allocationViolations))
         }
-        return status
+        return .object(status)
     }
 
     var scriptPresetNames: [String] { allPresets.map { loc($0.name) } }
     var scriptConfigNames: [String] { quickConfigs.map(\.name) }
 
-    /// Set by `perform`, read by whatever front end wants an exit status
-    /// rather than a sentence.
-    private(set) var lastCommandFailed = false
+    @ObservationIgnored private var madeScriptService: ScriptService?
+    @ObservationIgnored private var scriptServiceFactory: (@MainActor () -> ScriptService)?
+    @ObservationIgnored private var madeScriptCommandLane: ScriptCommandAdmissionLane?
+    @ObservationIgnored private var scriptCommandScheduler:
+        ScriptCommandAdmissionLane.Scheduler?
+    @ObservationIgnored private var scriptReloadToken: UInt64 = 0
+    @ObservationIgnored private var currentScriptCausality: ScriptService.Causality?
+    @ObservationIgnored private var pendingRoutingScriptCausality: ScriptService.Causality?
+    @ObservationIgnored private var pendingRoutingScriptTarget: Bool?
+    @ObservationIgnored private var pendingRecordingScriptCausality: ScriptService.Causality?
+    @ObservationIgnored private var pendingRecordingScriptTarget: Bool?
 
-    /// Runs a script against this model.
-    ///
-    /// A fresh host per run: it holds nothing between runs by design — one
-    /// script must not leave a global behind that changes what the next one
-    /// means — so there is nothing to keep.
-    func runScript(_ source: String) -> ScriptHost.Result {
-        // Keep the host strongly alive through the call. Its target is weak to
-        // avoid the resident host's ownership cycle; invoking `run` on a
-        // temporary lets an optimised build release that temporary before the
-        // weak target is read, and the script then reports that the application
-        // has gone away.
-        let host = ScriptHost(target: self)
-        return host.run(source)
+    private(set) var isResidentScriptLoading = false
+    private(set) var pendingScriptRuns = 0
+    var isScriptRunPending: Bool { pendingScriptRuns > 0 }
+    var scriptServiceOwnerCountForDiagnostics: Int { madeScriptService == nil ? 0 : 1 }
+
+    private func clearPendingRoutingScriptCausality() {
+        pendingRoutingScriptCausality = nil
+        pendingRoutingScriptTarget = nil
+    }
+
+    private func clearPendingRecordingScriptCausality() {
+        pendingRecordingScriptCausality = nil
+        pendingRecordingScriptTarget = nil
+    }
+
+    func pendingScriptCausalityCountForDiagnostics() -> Int {
+        [pendingRoutingScriptCausality, pendingRecordingScriptCausality]
+            .count(where: { $0 != nil })
+    }
+
+    func clearPendingScriptCausalityForDiagnostics() {
+        clearPendingRoutingScriptCausality()
+        clearPendingRecordingScriptCausality()
+    }
+
+    func installScriptServiceFactoryForDiagnostics(
+        _ factory: @escaping @MainActor () -> ScriptService
+    ) {
+        precondition(madeScriptService == nil)
+        scriptServiceFactory = factory
+    }
+
+    func installScriptCommandSchedulerForDiagnostics(
+        _ scheduler: @escaping ScriptCommandAdmissionLane.Scheduler
+    ) {
+        precondition(madeScriptCommandLane == nil)
+        scriptCommandScheduler = scheduler
+    }
+
+    var scriptCommandAdmissionStatisticsForDiagnostics: ScriptCommandAdmissionLane.Statistics {
+        madeScriptCommandLane?.statistics ?? .init()
+    }
+
+    private func ensureScriptCommandLane() -> ScriptCommandAdmissionLane {
+        if let madeScriptCommandLane { return madeScriptCommandLane }
+        let lane = ScriptCommandAdmissionLane(
+            schedule: scriptCommandScheduler ?? { MainRunLoopDelivery.perform($0) })
+        madeScriptCommandLane = lane
+        return lane
+    }
+
+    private func ensureScriptService() -> ScriptService? {
+        guard startupPolicy.startsLiveServicesAfterLaunch || scriptServiceFactory != nil,
+            !terminationIsPending
+        else {
+            return nil
+        }
+        if let madeScriptService { return madeScriptService }
+        let service =
+            scriptServiceFactory?()
+            ?? ScriptService { [weak self] request, causality in
+                guard let self else {
+                    return .failure(loc("The application is no longer available."))
+                }
+                return self.answerScriptRPC(request, causality: causality)
+            }
+        madeScriptService = service
+        return service
+    }
+
+    private func answerScriptRPC(
+        _ request: ScriptService.RPC, causality: ScriptService.Causality
+    ) -> ScriptService.RPCReply {
+        switch request {
+        case .perform(let command):
+            let outcome = performApplicationCommand(command, causality: causality)
+            return .performed(message: outcome.message, commandFailed: outcome.failed)
+        case .status:
+            return .status(scriptStatus)
+        case .names:
+            return .names(presets: scriptPresetNames, configs: scriptConfigNames)
+        }
+    }
+
+    typealias RemoteCommandCompletion =
+        @MainActor @Sendable (ScriptService.CommandOutcome) -> Void
+
+    /// Submits any command without ever waiting for JavaScript on MainActor.
+    func submitRemoteCommand(
+        _ command: RemoteCommand, deadline: ScriptService.Deadline? = nil,
+        completion: @escaping RemoteCommandCompletion
+    ) {
+        guard case .script(let source) = command else {
+            completion(performApplicationCommand(command))
+            return
+        }
+        guard let service = ensureScriptService() else {
+            completion(.failure(loc("The scripting service is not available.")))
+            return
+        }
+        let submission = service.submitManual(source, deadline: deadline) { result in
+            completion(Self.commandOutcome(for: result))
+        }
+        if case .refused(let reason) = submission {
+            completion(.failure(Self.scriptRefusalMessage(reason)))
+        }
+    }
+
+    /// Runs a script off MainActor and publishes exactly one bounded result.
+    @discardableResult
+    func runScript(
+        _ source: String, deadline: ScriptService.Deadline? = nil,
+        completion: @escaping @MainActor @Sendable (ScriptService.Result) -> Void
+    ) -> ScriptService.Submission {
+        guard let service = ensureScriptService() else {
+            completion(
+                ScriptService.Result(
+                    value: "", log: [],
+                    error: loc("The scripting service is not available.")))
+            return .refused(.stopped)
+        }
+        let submission = service.submitManual(
+            source, deadline: deadline, completion: completion)
+        if case .refused(let reason) = submission {
+            completion(
+                ScriptService.Result(
+                    value: "", log: [], error: Self.scriptRefusalMessage(reason)))
+        }
+        return submission
     }
 
     /// Runs a script once, now, and puts what came back where a person can read
@@ -9339,20 +11364,20 @@ final class RouterModel: ScriptTarget {
     /// with its result routed into the log the tab already shows — otherwise a
     /// run that printed something would print it to nowhere.
     @discardableResult
-    func runScriptNow(_ source: String) -> ScriptHost.Result {
-        let result = runScript(source)
-        for line in result.log { scriptLog.append(line) }
-        // The error goes in the log rather than into `residentScriptError`:
-        // that one means "this script would not load", and a run that threw
-        // halfway through loaded perfectly well. Conflating them would leave a
-        // red syntax error beside a script whose syntax is fine.
-        if let error = result.error {
-            scriptLog.append(loc("Script error:") + " " + error)
-        } else if !result.value.isEmpty {
-            scriptLog.append("→ " + result.value)
+    func runScriptNow(
+        _ source: String,
+        completion: (@MainActor @Sendable (ScriptService.Result) -> Void)? = nil
+    ) -> ScriptService.Submission {
+        pendingScriptRuns += 1
+        return runScript(source) { [weak self] result in
+            guard let self else {
+                completion?(result)
+                return
+            }
+            self.pendingScriptRuns = max(0, self.pendingScriptRuns - 1)
+            self.recordManualScriptResult(result)
+            completion?(result)
         }
-        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
-        return result
     }
 
     /// The script that stays loaded and reacts to things.
@@ -9364,7 +11389,9 @@ final class RouterModel: ScriptTarget {
         didSet {
             guard oldValue != residentScript else { return }
             persist()
-            reloadResidentScript()
+            if startupPolicy.startsLiveServicesAfterLaunch || scriptServiceFactory != nil {
+                reloadResidentScript()
+            }
         }
     }
 
@@ -9372,28 +11399,36 @@ final class RouterModel: ScriptTarget {
     /// the script rather than nowhere.
     private(set) var residentScriptError: String?
 
-    @ObservationIgnored private var residentHost: ScriptHost?
-
     private func reloadResidentScript() {
-        guard !residentScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            residentHost = nil
+        guard let service = ensureScriptService() else {
             residentScriptError = nil
+            isResidentScriptLoading = false
             return
         }
-        let host = ScriptHost(target: self)
-        let result = host.load(residentScript)
+        scriptReloadToken &+= 1
+        let token = scriptReloadToken
+        isResidentScriptLoading = true
+        residentScriptError = nil
+        let source = residentScript.trimmingCharacters(in: .whitespacesAndNewlines)
+        let submission =
+            source.isEmpty
+            ? service.unload { [weak self] result in
+                self?.finishResidentReload(result, token: token)
+            }
+            : service.reload(residentScript) { [weak self] result in
+                self?.finishResidentReload(result, token: token)
+            }
+        if case .refused(let reason) = submission {
+            isResidentScriptLoading = false
+            residentScriptError = Self.scriptRefusalMessage(reason)
+        }
+    }
+
+    private func finishResidentReload(_ result: ScriptService.Result, token: UInt64) {
+        guard token == scriptReloadToken else { return }
+        isResidentScriptLoading = false
         residentScriptError = result.error
-        // What the script said while it was loading goes to the same place as
-        // what its handlers say. It was dropped, so a script whose top level
-        // called `yun.log` wrote to nowhere while the panel above it is headed
-        // "What it has said" — and the top level is exactly where somebody puts
-        // the line that tells them the script is the one they think it is.
-        for line in result.log { scriptLog.append(line) }
-        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
-        // Kept even when it failed to load, so `listens(for:)` is honestly
-        // empty rather than the previous script's handlers going on firing
-        // under the new script's name.
-        residentHost = host
+        appendScriptLog(contentsOf: result.log)
     }
 
     /// Tells the resident script something happened.
@@ -9401,18 +11436,23 @@ final class RouterModel: ScriptTarget {
     /// Silent when nothing is listening, which is almost always: this is called
     /// from the poll and from every state change, so the cost of no script has
     /// to be one dictionary lookup.
-    func fire(_ event: ScriptHost.Event, _ payload: [String: Any] = [:]) {
-        guard let residentHost, residentHost.listens(for: event) else { return }
-        let result = residentHost.dispatch(event, payload)
-        // A handler that threw is reported once, where a person will see it.
-        // Swallowing it would leave somebody's automation silently not running.
-        if let error = result.error {
-            residentScriptError = loc("Script error:") + " " + error
+    func fire(
+        _ event: ScriptService.Event, _ payload: JSONValue = .object([:]),
+        causality: ScriptService.Causality? = nil
+    ) {
+        guard let service = madeScriptService, service.listens(for: event) else { return }
+        let submission = service.submit(
+            event, payload: payload, causality: causality ?? currentScriptCausality
+        ) { [weak self] result in
+            guard let self else { return }
+            if let error = result.error {
+                self.residentScriptError = loc("Script error:") + " " + error
+            }
+            self.appendScriptLog(contentsOf: result.log)
         }
-        for line in result.log { scriptLog.append(line) }
-        // Bounded: a handler on `tick` that logs runs once a second for as long
-        // as the application does.
-        if scriptLog.count > 200 { scriptLog.removeFirst(scriptLog.count - 200) }
+        if case .refused(let reason) = submission {
+            residentScriptError = Self.scriptRefusalMessage(reason)
+        }
     }
 
     /// Which inspector tab is showing.
@@ -9429,13 +11469,60 @@ final class RouterModel: ScriptTarget {
 
     /// What resident handlers have said, most recent last.
     private(set) var scriptLog: [String] = []
+    @ObservationIgnored private var scriptLogBytes = 0
+    @ObservationIgnored private var scriptLogApplications: UInt64 = 0
+
+    var scriptLogUTF8BytesForDiagnostics: Int { scriptLogBytes }
+    var scriptLogApplicationsForDiagnostics: UInt64 { scriptLogApplications }
+
+    func appendScriptLog(_ line: String) {
+        scriptLogApplications &+= 1
+        let bounded = Self.boundedScriptLogLine(line)
+        scriptLog.append(bounded)
+        scriptLogBytes += bounded.utf8.count
+        while scriptLog.count > ScriptService.maximumOutputLines
+            || scriptLogBytes > ScriptService.maximumOutputBytes
+        {
+            scriptLogBytes -= scriptLog.removeFirst().utf8.count
+        }
+    }
+
+    private func appendScriptLog(contentsOf lines: [String]) {
+        for line in lines { appendScriptLog(line) }
+    }
+
+    private func recordManualScriptResult(_ result: ScriptService.Result) {
+        appendScriptLog(contentsOf: result.log)
+        if let error = result.error {
+            appendScriptLog(loc("Script error:") + " " + error)
+        } else if !result.value.isEmpty {
+            appendScriptLog("→ " + result.value)
+        }
+    }
+
+    private static func boundedScriptLogLine(_ line: String) -> String {
+        let maximum = ScriptService.maximumOutputBytes
+        guard line.utf8.count > maximum else { return line }
+        let marker = "…"
+        let budget = maximum - marker.utf8.count
+        var used = 0
+        var end = line.startIndex
+        while end < line.endIndex {
+            let next = line.index(after: end)
+            let width = line[end..<next].utf8.count
+            guard used + width <= budget else { break }
+            used += width
+            end = next
+        }
+        return String(line[..<end]) + marker
+    }
 
     @ObservationIgnored private var pollsSinceScriptTick = 0
     /// Asked once per second rather than per poll. `listens(for:)` is cheap,
     /// but the poll is the hottest path in the interface and the answer cannot
     /// change without a script being loaded.
     private var residentListensForTick: Bool {
-        residentHost?.listens(for: .tick) ?? false
+        madeScriptService?.listens(for: .tick) ?? false
     }
 
     /// Carries out something another program asked for.
@@ -9445,29 +11532,48 @@ final class RouterModel: ScriptTarget {
     ///   rather than swallowing it: a scene renamed since somebody wired a
     ///   button to it should not fail silently.
     @discardableResult
-    func perform(_ command: RemoteCommand) -> String? {
-        lastCommandFailed = false
+    func performApplicationCommand(
+        _ command: RemoteCommand, causality: ScriptService.Causality? = nil
+    ) -> ScriptService.CommandOutcome {
+        let previousCausality = currentScriptCausality
+        currentScriptCausality = causality
+        defer { currentScriptCausality = previousCausality }
         switch command {
         case .routing(let wanted):
             let target = wanted ?? !isRunning
+            if target, teardownNeedsRetry {
+                return .failure(
+                    lastError
+                        ?? loc(
+                            "YunAudio could not release the audio route completely. Stop again before starting another route."
+                        ))
+            }
+            if let causality {
+                pendingRoutingScriptCausality = causality
+                pendingRoutingScriptTarget = target
+            }
             if target != isRunning { target ? start() : stop() }
-            return target ? loc("Routing started.") : loc("Routing stopped.")
+            return .success(target ? loc("Routing started.") : loc("Routing stopped."))
         case .mute(let wanted):
             isInputMuted = wanted ?? !isInputMuted
-            return isInputMuted ? loc("Microphone muted.") : loc("Microphone unmuted.")
+            return .success(
+                isInputMuted ? loc("Microphone muted.") : loc("Microphone unmuted."))
         case .record(let wanted):
-            let target = wanted ?? !isRecording
-            if target != isRecording { toggleRecording() }
-            // "Recording stopped." in answer to "start recording" is a true
-            // sentence about the state and a misleading answer to the
-            // question. Recording needs a running route, and being told so is
-            // the difference between a command that failed and one that was
-            // ignored.
-            if target, !isRecording {
-                lastCommandFailed = true
-                return lastError ?? loc("Recording could not be started.")
+            let target = wanted ?? !recordingIntentTarget
+            // Commands no longer wait for file allocation or a writer join.
+            // Reject the one precondition already known on MainActor; every
+            // storage or graph answer is published by the lifecycle worker.
+            if target, !isRunning {
+                lastError = loc("Start routing before recording.")
+                return .failure(lastError)
             }
-            return isRecording ? loc("Recording.") : loc("Recording stopped.")
+            if let causality {
+                pendingRecordingScriptCausality = causality
+                pendingRecordingScriptTarget = target
+            }
+            requestRecording(target)
+            return .success(
+                target ? loc("Recording requested.") : loc("Recording stop requested."))
         case .transcribe(let wanted):
             let target = wanted ?? !isTranscribing
             if target, !isTranscribing {
@@ -9476,24 +11582,28 @@ final class RouterModel: ScriptTarget {
                 stopTranscribing()
             }
             if target, !isTranscribing {
-                lastCommandFailed = true
-                return transcriptionError ?? loc("Transcription could not be started.")
+                return .failure(
+                    transcriptionError ?? loc("Transcription could not be started."))
             }
-            return isTranscribing ? loc("Transcribing.") : loc("Transcription stopped.")
+            return .success(
+                isTranscribing ? loc("Transcribing.") : loc("Transcription stopped."))
         case .stage(let wanted):
             let target = wanted ?? !isKTVWindowOpen
-            if target != isKTVWindowOpen {
+            guard target != isKTVWindowOpen else {
+                return .success(
+                    isKTVWindowOpen ? loc("KTV window open.") : loc("KTV window closed."))
+            }
+            let submission = ensureScriptCommandLane().submit(.stage) { [weak self] in
+                guard let self else { return }
+                let previousCausality = self.currentScriptCausality
+                self.currentScriptCausality = causality
+                defer { self.currentScriptCausality = previousCausality }
                 if target { _ = KTVWindow.open(model: self) } else { KTVWindow.close() }
             }
-            // Asked afterwards rather than assumed: opening a window can fail —
-            // there may be no screen to put it on — and reporting success for
-            // something that did not happen is the failure this whole
-            // vocabulary exists to avoid.
-            if target, !isKTVWindowOpen {
-                lastCommandFailed = true
-                return loc("The KTV window would not open.")
+            guard submission != .refused else {
+                return .failure(loc("The application command queue is busy."))
             }
-            return isKTVWindowOpen ? loc("KTV window open.") : loc("KTV window closed.")
+            return .success(loc("KTV window change queued."))
         case .score(let wanted):
             let target = wanted ?? !isScoringSinging
             if target != isScoringSinging { isScoringSinging = target }
@@ -9502,36 +11612,26 @@ final class RouterModel: ScriptTarget {
             // the difference between "it did not work" and "start routing
             // first".
             if target, !isScoringSinging {
-                lastCommandFailed = true
-                return singingError ?? loc("Scoring could not be started.")
+                return .failure(singingError ?? loc("Scoring could not be started."))
             }
-            return isScoringSinging ? loc("Scoring the singing.") : loc("Scoring stopped.")
+            return .success(
+                isScoringSinging ? loc("Scoring the singing.") : loc("Scoring stopped."))
         case .config(let name):
             guard
                 let configuration = quickConfigs.first(where: {
                     $0.name.compare(name, options: .caseInsensitive) == .orderedSame
                 })
             else {
-                lastCommandFailed = true
-                return nil
+                return .failure(nil)
             }
-            let outcome = apply(configuration)
-            return outcome.isComplete
-                ? configuration.name
-                : configuration.name + " — " + loc("missing") + " "
-                    + describeMissing(outcome.missing)
-        case .script(let source):
-            // Reported the same way a scene is: what happened, in a sentence.
-            // A script that failed has to say so out loud — a button wired to
-            // one that has since broken must not look like it worked.
-            let result = runScript(source)
-            if let error = result.error {
-                lastCommandFailed = true
-                return loc("Script error:") + " " + error
+            if let causality {
+                pendingRoutingScriptCausality = causality
+                pendingRoutingScriptTarget = configuration.isRouting
             }
-            let said = result.log.joined(separator: " · ")
-            return said.isEmpty
-                ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said
+            requestApplyQuickConfig(configuration)
+            return .success(String(format: loc("%@ queued."), configuration.name))
+        case .script:
+            return .failure(loc("Nested script commands are not allowed."))
         case .preset(let name):
             // Matched without case, because a URL somebody typed will not have
             // the capitals right and refusing over that is pedantry.
@@ -9541,47 +11641,483 @@ final class RouterModel: ScriptTarget {
                         || $0.name.compare(name, options: .caseInsensitive) == .orderedSame
                 })
             else {
-                lastCommandFailed = true
-                return nil
+                return .failure(nil)
             }
-            apply(preset)
-            return loc(preset.name)
+            let submission = ensureScriptCommandLane().submit(.preset) { [weak self] in
+                guard let self else { return }
+                let previousCausality = self.currentScriptCausality
+                self.currentScriptCausality = causality
+                defer { self.currentScriptCausality = previousCausality }
+                if let causality, self.isRunning {
+                    self.pendingRoutingScriptCausality = causality
+                    self.pendingRoutingScriptTarget = true
+                }
+                self.apply(preset)
+            }
+            guard submission != .refused else {
+                return .failure(loc("The application command queue is busy."))
+            }
+            return .success(String(format: loc("%@ queued."), loc(preset.name)))
         }
     }
 
-    /// Tears everything down synchronously.
+    private static func commandOutcome(
+        for result: ScriptService.Result
+    ) -> ScriptService.CommandOutcome {
+        if let error = result.error {
+            return .failure(loc("Script error:") + " " + error)
+        }
+        let said = result.log.joined(separator: " · ")
+        return .success(
+            said.isEmpty
+                ? (result.value.isEmpty ? loc("Script ran.") : result.value) : said)
+    }
+
+    private static func scriptRefusalMessage(_ refusal: ScriptService.Refusal) -> String {
+        switch refusal {
+        case .stopped:
+            return loc("The scripting service is not available.")
+        case .sourceTooLarge:
+            return loc("The script source is larger than 64 KiB.")
+        case .payloadTooLarge:
+            return loc("The script event is larger than 64 KiB.")
+        case .manualQueueFull:
+            return loc("The script queue is busy. Try again shortly.")
+        case .residentEdgeQueueFull:
+            return loc("The resident script event queue is full.")
+        case .causalEventLimit:
+            return loc("The resident script event cascade was stopped at 128 events.")
+        }
+    }
+
+    /// Tears everything down before allowing AppKit to finish termination.
     ///
-    /// Called while the application is quitting, so it cannot hop to a queue and
-    /// hope to be finished — the process may be gone before the closure runs.
-    /// The 17 ms this blocks for is the price of not leaving someone's hardware
-    /// reconfigured.
-    func shutDown() {
-        hotkeys.tearDown()
-        midiControl.tearDown(waitUntilFinished: true)
+    /// AppKit has already returned `terminateLater` when this is called. The
+    /// route, detector, song output and light ring remain on independent serial
+    /// owners. Their bounded join is the process-lifetime fence: a wedged
+    /// secondary owner can neither freeze MainActor nor stand ahead of releasing
+    /// the route used by every other audio client on the machine.
+    func shutDown(
+        then completion: @escaping @MainActor @Sendable (ApplicationAudioTeardownResult) -> Void
+    ) {
+        // Fence device-list callbacks before any teardown owner is submitted.
+        // A HAL notification caused by destroying the route must not enqueue a
+        // competing system-object read while coreaudiod is releasing it.
+        deviceWatcher?.suspend()
+        terminationIsPending = true
+        scriptReloadToken &+= 1
+        isResidentScriptLoading = false
+        pendingScriptRuns = 0
+        pendingRoutingScriptCausality = nil
+        pendingRoutingScriptTarget = nil
+        pendingRecordingScriptCausality = nil
+        pendingRecordingScriptTarget = nil
+        let retiringScriptService = madeScriptService
+        madeScriptService = nil
+        retiringScriptService?.stop()
+        madeScriptCommandLane?.invalidate()
+        guard startupPolicy.startsLiveServicesAfterLaunch else {
+            // A synthetic model never admitted an audio owner. Running the full
+            // join would construct the lazy voice-detector, analysis and HID
+            // teardown lanes solely to prove that the owners they guard do not
+            // exist, defeating the zero-service evidence this launch represents.
+            stopPolling()
+            routeUpdatesAreAccepted = false
+            isRunning = false
+            activeRoutes = []
+            completion(.complete)
+            return
+        }
+        let terminationObserverEpoch = terminationObserverRecovery.begin(
+            needsPolling: levelTimer != nil,
+            analysisSampleRate: analysisIsActive
+                ? (pathQuality?.sampleRate ?? 48_000) : nil)
+        // These two invalidate MainActor publication before either detached
+        // owner can finish. Neither performs a framework teardown call.
         stopPolling()
         stopAnalysis()
+        invalidateIntegrityDiagnostic()
+        invalidateCalibrationForRouteLifecycle()
         routeUpdatesAreAccepted = false
         routeApplier.invalidate()
-        engine.stop()
-        isRunning = false
+        correctionApplier.invalidate()
+        liveControlApplier.invalidate()
+        quickConfigSystemControl.invalidate()
+        revokeSourceTapRequestsBeforeRouteStop()
+        recordingLifecycleWorker.invalidate()
+        recordingIntentTarget = false
+        invalidateHardwareControlWrites()
+        systemQueryOwners.invalidate(.hardwareRead)
+        systemQueryOwners.invalidate(.diagnostics)
+        deviceControlRefreshGate.invalidate()
+        pathQualityReadInFlight = false
+        // Revoke results for the termination attempt, but do not permanently
+        // close process-lifetime workers yet. AppKit can reject Quit when a
+        // device-global Core Audio owner remains unresolved; that leaves this
+        // very model on screen and every non-audio feature must still work.
+        pluginRegistryWorker.invalidate()
+        headphoneProfileWorker.invalidate()
+        driverStatusWorker.invalidate()
+        ktvQueueRestoreWorker.invalidate()
+        nowPlayingResourceWorker.invalidate()
+        localSongMetadataWorker.invalidate()
+        localSongResourceWorker.invalidate()
+        madeHandWordsResourceWorker?.invalidate()
+        madeTranscriptSaveWorker?.invalidate()
+        PermissionCentre.shared.invalidateSafeStatusRefresh()
+        AppIconStore.shared.invalidate()
+        stopIsPending = true
+        cancelCurrentStart()
+        madeCaptureResolutionLane?.invalidate()
+        systemQueryOwners.invalidateAll()
+        isBusy = true
+        terminationEngineStopSnapshot = nil
+
+        let voiceActivity = requestVoiceActivityCleanup()
+        let transcription =
+            madeTranscriberLifecycleWorker?.shutdown(
+                topologyGeneration: sourceTapTopologyGeneration,
+                transcriptGeneration: transcriptSessionGeneration)
+            ?? OwnedResourceTeardownFence(completedWith: .complete)
+        let hadLocalSongOwner = madeLocalSongOperations != nil || madeSongPlayer != nil
+        let localSong =
+            madeLocalSongOperations?.requestTerminationStop()
+            ?? madeSongPlayer?.requestTerminationStop()
+            ?? OwnedResourceTeardownFence(completedWith: .complete)
+        let lightingState = (
+            mode: lighting.mode, colour: lighting.colour,
+            brightness: lighting.brightness
+        )
+        let lightRing = lighting.requestTerminationStop()
+        let engine = engine
+        let join = ApplicationAudioShutdownJoin(reporting: { report in
+            let result = report.result
+            let routingSnapshot = self.terminationEngineStopSnapshot ?? self.engineSnapshot
+            self.isBusy = false
+            switch result {
+            case .complete:
+                self.finishStop(snapshot: routingSnapshot)
+            case .routing(let routing):
+                self.terminationIsPending = false
+                self.retainFailedTeardown(routing, snapshot: routingSnapshot)
+            case .voiceActivity:
+                // The route is already proven down. Keep that truth visible
+                // while refusing a clean process exit for the unresolved
+                // device-global listener/property owner.
+                self.terminationIsPending = false
+                self.finishStop(snapshot: routingSnapshot)
+                self.lastError = loc(
+                    "YunAudio could not release the audio route completely. Stop again before starting another route."
+                )
+            case .transcription:
+                // Speech is process-local. Its final result gets the bounded
+                // deadline, while route release remains independently joined.
+                self.terminationIsPending = false
+                self.finishStop(snapshot: routingSnapshot)
+                self.lastError = loc(
+                    "Transcription did not finish before the deadline. YunAudio will contain it by exiting."
+                )
+            case .localSong:
+                // The route is proven down, while the second AVAudioEngine is
+                // deliberately still retained by its timed-out owner lane.
+                self.terminationIsPending = false
+                self.finishStop(snapshot: routingSnapshot)
+                self.lastError = loc(
+                    "The song output did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting."
+                )
+            case .lighting:
+                // HID cannot hold route teardown in front of it. The failed
+                // result still refuses a clean reply rather than claiming the
+                // hardware ring was darkened when no acknowledgement arrived.
+                self.terminationIsPending = false
+                self.finishStop(snapshot: routingSnapshot)
+                self.lastError = loc(
+                    "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting."
+                )
+            }
+            if !result.allowsProcessExit {
+                self.recoverProcessServicesAfterRefusedTermination(
+                    routingFailed: {
+                        if case .routing = result { return true }
+                        return false
+                    }(),
+                    terminationObserverEpoch: terminationObserverEpoch,
+                    hadLocalSongOwner: hadLocalSongOwner,
+                    transcriptionWasReleased: report.transcription.isComplete,
+                    localSongTeardown: report.localSong,
+                    lightingTeardown: report.lighting,
+                    lightingMode: lightingState.mode,
+                    lightingColour: lightingState.colour,
+                    lightingBrightness: lightingState.brightness)
+            }
+            // The route is already fenced before diagnostics touch storage.
+            // Give the sole writer one short chance to atomically replace the
+            // last bundle; storage failure or a blocked volume must never turn
+            // into a second reason AppKit cannot quit.
+            let incidentWriter = LatestAudioIncidentWriter.shared
+            // AppKit can refuse termination when a device-global owner remains
+            // live. Keep diagnostics admissible in that case because the same
+            // process may recover and run another route after the sheet closes.
+            if result.allowsProcessExit { incidentWriter.shutdown() }
+            incidentWriter.flush(timeout: .milliseconds(250)) { flush in
+                if flush != .complete {
+                    NonBlockingDiagnostic.write(
+                        "audio incident flush before termination: \(flush)\n")
+                }
+                MainRunLoopDelivery.perform { completion(result) }
+            }
+        })
+
+        // Submit every independently blocking owner before touching Carbon,
+        // MediaPlayer or the control listener. A stuck secondary graph or HID
+        // report must never stand in front of returning the shared audio route.
+        EngineShutdownDispatcher.submit(
+            on: engineQueue,
+            timeout: EngineShutdownDispatcher.routingQueueWaitTimeout,
+            timeoutResult: EngineStopReport(
+                teardown: .lifecycleQueueTimedOut,
+                snapshot: engineSnapshot),
+            work: { Self.stopEngineAndRecord(engine) },
+            completion: { stop in
+                self.terminationEngineStopSnapshot = stop.snapshot
+                _ = self.adoptEngineSnapshot(stop.snapshot)
+                join.receive(routing: stop.teardown)
+            })
+        VoiceActivityShutdownDispatcher.submit(
+            voiceActivity,
+            timeout: VoiceActivityLifecycleWorker<VoiceActivityWatcher>.defaultOperationTimeout,
+            completion: { result in join.receive(voiceActivity: result) })
+        OwnedResourceShutdownDispatcher.submit(transcription) {
+            result in join.receive(transcription: result)
+        }
+        OwnedResourceShutdownDispatcher.submit(localSong) {
+            result in join.receive(localSong: result)
+        }
+        OwnedResourceShutdownDispatcher.submit(lightRing) {
+            result in join.receive(lighting: result)
+        }
+
+        // Carbon, CoreMIDI and MediaPlayer are process services rather than
+        // prerequisites for releasing Core Audio. Leave them alive until
+        // AppKit accepts termination; a refused reply keeps the process and
+        // must not leave its controls silently dismantled.
     }
 
-    /// Cancellation shared by the main actor and one engine-queue start.
+    private func recoverProcessServicesAfterRefusedTermination(
+        routingFailed: Bool,
+        terminationObserverEpoch: UInt64,
+        hadLocalSongOwner: Bool,
+        transcriptionWasReleased: Bool,
+        localSongTeardown: OwnedResourceTeardownResult,
+        lightingTeardown: OwnedResourceTeardownResult,
+        lightingMode: LightingMode,
+        lightingColour: RazerRing.Colour,
+        lightingBrightness: UInt8
+    ) {
+        terminationIsPending = false
+        // Reopen the retained listener generation. No listener is installed or
+        // replaced, so a read which entered before Quit remains the sole owner.
+        deviceWatcher?.resume()
+        restoreRouteObserversAfterRefusedTermination(
+            epoch: terminationObserverEpoch,
+            routingFailed: routingFailed)
+        PermissionCentre.shared.refreshSafeStatuses()
+        if transcriptionWasReleased {
+            madeTranscriberLifecycleWorker = nil
+            transcriberConsumers = [:]
+            isTranscribing = false
+            isStoppingTranscription = false
+        }
+        // Only a completed owner may be replaced. A before-entry timeout keeps
+        // this exact owner so the wrapper can retry it once on the next Quit;
+        // an operation which entered remains quarantined and is never re-entered.
+        switch localSongTeardown {
+        case .complete:
+            madeLocalSongOperations = nil
+            madeSongPlayer = nil
+        case .timedOutBeforeEntry:
+            retryLocalSongTeardownAfterRefusedTermination()
+        case .timedOut, .operationFailed:
+            // A framework call entered or failed. Its retained quarantine is the
+            // only safe owner and must not gain a peer in this live process.
+            break
+        }
+        localSongState = nil
+        pendingLocalSongPlay = nil
+        localSongOperationGeneration &+= 1
+        localSongMetadataGeneration &+= 1
+        localSongResourceGeneration &+= 1
+        if hadLocalSongOwner, nowPlaying?.identity.hasPrefix("file:") == true {
+            madeNowPlayingStage?.relinquishPublishedSongAfterRefusedTermination()
+            cancelLyricsLookup()
+            isHandRun = false
+            trackClock.stop()
+            nowPlaying = nil
+            lyrics = nil
+            plainLyrics = nil
+            melody = nil
+            lyricsSourceName = nil
+            lyricsCopyright = nil
+            lyricsRegion = nil
+        }
+
+        switch lightingTeardown {
+        case .complete:
+            restoreLightingAfterRefusedTermination(
+                replacing: lighting,
+                mode: lightingMode, colour: lightingColour,
+                brightness: lightingBrightness)
+        case .timedOutBeforeEntry:
+            retryLightingTeardownAfterRefusedTermination(
+                mode: lightingMode, colour: lightingColour,
+                brightness: lightingBrightness)
+        case .timedOut, .operationFailed:
+            break
+        }
+        if !residentScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            reloadResidentScript()
+        }
+    }
+
+    /// Restores only the process-local observers of the graph which Stop retained.
     ///
-    /// This lock is never touched by the realtime path. It exists because Stop
-    /// and a settings edit must be able to prevent a 118 ms capture preflight
-    /// from going on to seize the audio devices after the request is obsolete.
-    private final class StartIntent: @unchecked Sendable {
-        private let lock = NSLock()
-        private var cancelled = false
-
-        func cancel() {
-            lock.withLock { cancelled = true }
+    /// `startPolling` and `startAnalysis` do not construct a HAL peer. Epoch
+    /// admission makes a repeated or late join publication a no-op, while the
+    /// explicit owner checks make the one admitted restoration idempotent too.
+    private func restoreRouteObserversAfterRefusedTermination(
+        epoch: UInt64,
+        routingFailed: Bool
+    ) {
+        guard
+            let demand = terminationObserverRecovery.consume(
+                epoch: epoch, routingFailed: routingFailed)
+        else { return }
+        if demand.needsPolling, levelTimer == nil { startPolling() }
+        if let sampleRate = demand.analysisSampleRate, !analysisIsActive {
+            startAnalysis(sampleRate: sampleRate)
         }
+    }
 
-        var isCancelled: Bool {
-            lock.withLock { cancelled }
+    /// Retries the same retained song owner once when no framework call entered.
+    /// Completion releases the audio quarantine before a fresh process-local
+    /// owner can be admitted; entered or failed calls remain non-reentrant.
+    private func retryLocalSongTeardownAfterRefusedTermination() {
+        let operations = madeLocalSongOperations
+        let player = madeSongPlayer
+        let ownerID = operations.map(ObjectIdentifier.init) ?? player.map(ObjectIdentifier.init)
+        guard let ownerID, retriedLocalSongTerminationOwner != ownerID else { return }
+        retriedLocalSongTerminationOwner = ownerID
+        let retry =
+            operations?.requestTerminationStop()
+            ?? player?.requestTerminationStop()
+        guard let retry else { return }
+        retry.observe { [weak self, weak operations, weak player] result in
+            MainRunLoopDelivery.perform {
+                guard let self else { return }
+                switch result {
+                case .complete:
+                    if let operations, self.madeLocalSongOperations === operations {
+                        self.madeLocalSongOperations = nil
+                    }
+                    if let player, self.madeSongPlayer === player {
+                        self.madeSongPlayer = nil
+                    }
+                case .timedOutBeforeEntry, .timedOut, .operationFailed:
+                    break
+                }
+            }
         }
+    }
+
+    /// Retries an unentered HID teardown once without constructing a peer owner.
+    private func retryLightingTeardownAfterRefusedTermination(
+        mode: LightingMode,
+        colour: RazerRing.Colour,
+        brightness: UInt8
+    ) {
+        let owner = lighting
+        let ownerID = ObjectIdentifier(owner)
+        guard retriedLightingTerminationOwner != ownerID else { return }
+        retriedLightingTerminationOwner = ownerID
+        owner.requestTerminationStop().observe { [weak self, weak owner] result in
+            MainRunLoopDelivery.perform {
+                guard let self, let owner, result.isComplete else { return }
+                self.restoreLightingAfterRefusedTermination(
+                    replacing: owner, mode: mode, colour: colour,
+                    brightness: brightness)
+            }
+        }
+    }
+
+    private func restoreLightingAfterRefusedTermination(
+        replacing owner: LightingController,
+        mode: LightingMode,
+        colour: RazerRing.Colour,
+        brightness: UInt8
+    ) {
+        guard lighting === owner else { return }
+        let replacement = LightingController()
+        replacement.colour = colour
+        replacement.brightness = brightness
+        replacement.mode =
+            startupPolicy.startsLiveServicesAfterLaunch ? mode : .off
+        lighting = replacement
+        if startupPolicy.permitsLightingHardwareDiscovery, mode != .off {
+            replacement.refreshDeviceAsynchronously()
+        }
+    }
+
+    /// Exercises only the refused-termination service boundary in a no-HAL test.
+    func recoverScriptServiceAfterRefusedTerminationForDiagnostics() {
+        precondition(!startupPolicy.permitsAutomaticStart)
+        terminationIsPending = false
+        if !residentScript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            reloadResidentScript()
+        }
+    }
+
+    /// Releases process services only after AppKit has accepted the audio result.
+    ///
+    /// A refused termination keeps this model live. Keeping this finalisation
+    /// separate from `shutDown` is what lets that process retain hotkeys,
+    /// CoreMIDI, MediaPlayer commands and optional background workers.
+    func finaliseAcceptedTermination() {
+        deviceWatcher?.shutdown()
+        madeScriptService?.stop()
+        madeScriptService = nil
+        madeNowPlayingControlWorker?.shutdown()
+        madeNowPlayingControlWorker = nil
+        nowPlayingControlTarget = nil
+        guard startupPolicy.startsLiveServicesAfterLaunch else {
+            // This bounded filesystem probe is the sole worker constructed by
+            // synthetic initialisation. Do not awaken every other lazy owner in
+            // the name of shutting down something which was never admitted.
+            driverStatusWorker.shutdown()
+            return
+        }
+        recordingLifecycleWorker.shutdown()
+        integrityDiagnosticWorker.shutdown()
+        calibrationLifecycleWorker.shutdown()
+        calibrationLevelApplier.invalidate()
+        pluginRegistryWorker.shutdown()
+        headphoneProfileWorker.shutdown()
+        driverStatusWorker.shutdown()
+        ktvQueueRestoreWorker.shutdown()
+        nowPlayingResourceWorker.shutdown()
+        localSongMetadataWorker.shutdown()
+        localSongResourceWorker.shutdown()
+        madeHandWordsResourceWorker?.shutdown()
+        madeTranscriptSaveWorker?.shutdown()
+        madeSourceTapWorkers?.shutdown()
+        madeCaptureResolutionLane?.shutdown()
+        systemQueryOwners.shutdownAll()
+        musicRecognition?.shutdown()
+        quickConfigSystemControl.shutdown()
+        PermissionCentre.shared.shutDownSafeStatusRefresh()
+        AppIconStore.shared.shutdown()
+        hotkeys?.tearDown()
+        midiControl.tearDown(waitUntilFinished: false)
+        madeNowPlayingStage?.standDown()
     }
 
     /// Plain evidence returned after a start; live taps stay on the engine
@@ -9597,6 +12133,8 @@ final class RouterModel: ScriptTarget {
         let failure: String?
         let quality: PathQuality?
         let didStart: Bool
+        let teardown: RoutingTeardownResult?
+        let snapshot: RoutingEngine.EngineUISnapshot
     }
 
     /// Applies a configuration change to a running route.
@@ -9744,7 +12282,12 @@ final class RouterModel: ScriptTarget {
     }
 
     private func restartIfRunning() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard !isApplyingPreset else { return }
+        // A settings edit must not turn an uncertain teardown into an implicit
+        // retry followed by an automatic Start. The explicit Stop affordance
+        // remains available and is the only operation admitted in this state.
+        guard !teardownNeedsRetry else { return }
         guard !isBusy else {
             // A start in flight has already read every parameter off the model,
             // so a change arriving now is lost — and `isRunning` is still false,
@@ -9753,7 +12296,7 @@ final class RouterModel: ScriptTarget {
             // fresh.
             if isStarting || effectSwapIsInFlight {
                 restartIsPending = true
-                if isStarting { currentStartIntent?.cancel() }
+                if isStarting { cancelCurrentStart() }
             }
             return
         }
@@ -9770,8 +12313,8 @@ final class RouterModel: ScriptTarget {
     /// True while a start is in flight, as opposed to a stop.
     @ObservationIgnored private var isStarting = false
 
-    /// The particular start whose capture preflight owns `engineQueue`.
-    @ObservationIgnored private var currentStartIntent: StartIntent?
+    /// The particular start moving from capture discovery to route ownership.
+    @ObservationIgnored private var currentStartIntent: RouteStartIntent?
 
     /// Carries out a restart that was asked for while a start was in flight.
     ///
@@ -10047,27 +12590,36 @@ final class RouterModel: ScriptTarget {
         guard !pathQualityReadInFlight else { return }
         pathQualityReadInFlight = true
         let engine = engine
+        let destinationUID = selectedDestinationUID
+        let monitorUID = monitorDeviceUID
         let destination = selectedDestination
         let monitor = monitorDeviceUID.flatMap { uid in
             outputDevices.first(where: { $0.uid == uid })
         }
-        engineQueue.async {
-            let quality = engine.pathQuality
-            let latency =
-                destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
-            let monitorLatency =
-                monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
-            Task { @MainActor in
-                self.pathQualityReadInFlight = false
-                // A queued read can finish after Stop. Publishing that route's
-                // verdict again would resurrect a stale "bit-exact" pill over
-                // an idle application.
-                guard self.isRunning else { return }
-                self.publish(quality, to: \.pathQuality)
-                self.publish(latency, to: \.destinationLatencyFrames)
-                self.publish(monitorLatency, to: \.monitorLatencyFrames)
-            }
-        }
+        let admitted = systemQueryOwners.submit(
+            to: .diagnostics,
+            operation: { [weak self] in
+                let quality = engine.pathQuality
+                let latency =
+                    destination?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+                let monitorLatency =
+                    monitor?.latencyFrames(scope: kAudioObjectPropertyScopeOutput) ?? 0
+                return { [weak self] in
+                    guard let self else { return }
+                    self.pathQualityReadInFlight = false
+                    // A queued read can finish after Stop or a different route
+                    // starts. Neither may republish the old graph's verdict.
+                    guard self.isRunning,
+                        self.selectedDestinationUID == destinationUID,
+                        self.monitorDeviceUID == monitorUID
+                    else { return }
+                    self.publish(quality, to: \.pathQuality)
+                    self.publish(latency, to: \.destinationLatencyFrames)
+                    self.publish(monitorLatency, to: \.monitorLatencyFrames)
+                }
+            },
+            deadline: { [weak self] in self?.pathQualityReadInFlight = false })
+        if !admitted { pathQualityReadInFlight = false }
     }
 
     private func poll() {
@@ -10177,14 +12729,9 @@ final class RouterModel: ScriptTarget {
                         clippedSamples: telemetry.outputClippedSamples),
                     to: \.outputVerdict)
             }
-            lap("failedPlugins") {
-                publish(telemetry.failedPlugins, to: \.failedPlugins)
-            }
-            lap("droppedMonitor") {
-                if let dropped = telemetry.droppedMonitor,
-                    dropped.uid == monitorDeviceUID
-                {
-                    monitorWasDropped(dropped)
+            lap("echoCancellation") {
+                if let status = telemetry.echoCancellationStatus {
+                    publish(status, to: \.echoStatus)
                 }
             }
             lap("clipped") {
@@ -10210,22 +12757,31 @@ final class RouterModel: ScriptTarget {
                 lap("deviceControls") { if inspectorIsOnScreen { refreshDeviceControls() } }
             }
         }
-        lap("isClockLocked") { publish(engine.isClockLocked, to: \.isClockLocked) }
-        lap("rateRatio") { publish(engine.measuredRateRatio, to: \.measuredRateRatio) }
+        lap("clock") {
+            let clock = engine.clockTelemetry
+            publish(clock.isLocked, to: \.isClockLocked)
+            publish(clock.rateRatio, to: \.measuredRateRatio)
+        }
+        if audioIncidentCheckpointCadence.advance(
+            isEligible: !isBusy && !teardownNeedsRetry)
+        {
+            audioIncidentCheckpointApplier.submit(
+                UInt64(DispatchTime.now().uptimeNanoseconds))
+        }
         lap("recordingState") { refreshRecordingState() }
-        // Drained every poll whether or not the analysis panel is open. The ring
-        // is finite, so a consumer that only ran while a view was visible would
-        // hand the loudness meter a stream with holes in it and report an
-        // integrated figure for audio it never saw.
+        // Requested every poll while any consumer needs it. Requests coalesce
+        // into one background drain, so a busy UI cannot build an analysis
+        // queue whose obsolete FFTs then keep the whole application busy.
         lap("analysisNeeds") { refreshAnalysisNeeds() }
         lap("analyser") {
-            if let analyser, !analyser.isIdle {
-                analyser.drain(from: engine)
-                publish(analyser.reading(), to: \.analysis)
+            if !analysisNeeds.isEmpty {
+                analysisWorker.requestDrain()
+                let snapshot = analysisWorker.snapshot
+                analysisSnapshot = snapshot
+                publish(snapshot.reading, to: \.analysis)
             }
         }
         if isTranscribing || isScoringSinging || isSingingVisible { pumpSourceTaps() }
-        lap("singers") { if isScoringSinging { refreshSingers() } }
         // `updateSinging` was reached from the tab appearing and from nowhere
         // else, so the key was worked out once, from a single FFT window taken
         // before any audio had reached the analyser — and the singer's range
@@ -10242,12 +12798,13 @@ final class RouterModel: ScriptTarget {
             if residentListensForTick {
                 fire(
                     .tick,
-                    [
-                        "peak": Double(peakLevel),
-                        "loudness": analysis.shortTerm.isFinite ? analysis.shortTerm : -70,
-                        "muted": isInputMuted,
-                        "recording": isRecording,
-                    ])
+                    .object([
+                        "peak": .double(Double(peakLevel)),
+                        "loudness": .double(
+                            analysis.shortTerm.isFinite ? analysis.shortTerm : -70),
+                        "muted": .bool(isInputMuted),
+                        "recording": .bool(isRecording),
+                    ]))
             }
         }
         lap("gainReduction") { refreshGainReduction() }
@@ -10266,10 +12823,28 @@ final class RouterModel: ScriptTarget {
 
     /// True while every source is being written down.
     private(set) var isTranscribing = false
-    /// Everything said so far, from every source, in the order it was said.
+    /// The newest 256 attributed lines, in chronological order, for SwiftUI.
+    /// Complete history belongs only to the off-main paged store.
     private(set) var transcript: [Transcriber.Line] = []
     /// Set when transcription could not start, in words somebody can act on.
     private(set) var transcriptionError: String?
+    /// Set only by the independent transcript storage owner.
+    private(set) var transcriptSaveError: String?
+    private(set) var isSavingTranscript = false
+    /// The last transcript whose atomic replacement completed.
+    private(set) var lastSavedTranscriptURL: URL?
+
+    @ObservationIgnored private var transcriptSaveGeneration: UInt64 = 0
+    @ObservationIgnored private var madeTranscriptSaveWorker: TranscriptSaveWorker?
+
+    private var transcriptSaveWorker: TranscriptSaveWorker {
+        if let madeTranscriptSaveWorker { return madeTranscriptSaveWorker }
+        let made = TranscriptSaveWorker { [weak self] snapshot in
+            self?.finishTranscriptSave(snapshot)
+        }
+        madeTranscriptSaveWorker = made
+        return made
+    }
 
     /// Nil when this system can transcribe, otherwise why it cannot.
     ///
@@ -10277,21 +12852,88 @@ final class RouterModel: ScriptTarget {
     /// an older system is one nobody can find out about — and puts this
     /// underneath it when it is there.
     var transcriptionUnavailableReason: String? {
-        Transcriber.unsupportedReason.map(Self.describe)
+        Self.transcriptionUnavailableReason(
+            liveServicesArePermitted: startupPolicy.startsLiveServicesAfterLaunch,
+            probe: { Transcriber.unsupportedReason })
     }
 
-    @ObservationIgnored private var transcribers: [Transcriber] = []
+    static func transcriptionUnavailableReason(
+        liveServicesArePermitted: Bool,
+        probe: () -> Transcriber.Unavailable?
+    ) -> String? {
+        guard liveServicesArePermitted else { return nil }
+        return probe().map(Self.describe)
+    }
+
+    /// Complete bounded ownership lives on one serial lane. `transcript` below
+    /// is only its newest two-page value snapshot for SwiftUI.
+    @ObservationIgnored private let transcriptQueue = DispatchQueue(
+        label: "com.yuhuanstudio.yunaudio.transcript-store", qos: .utility)
+    @ObservationIgnored private var madeTranscriptStoreWorker: TranscriptStoreWorker?
+    private(set) var transcriptLineCount = 0
+    /// Typed identities and reasons for every routed source outside admission.
+    private(set) var transcriptionAdmissionRefusals: [TranscriptionAdmission.Refusal] = []
+    private(set) var transcriptionAdmissionWarning: String?
+
+    @ObservationIgnored private var madeTranscriptMailbox: TranscriptLineMailbox?
+
+    private var transcriptStoreWorker: TranscriptStoreWorker {
+        if let madeTranscriptStoreWorker { return madeTranscriptStoreWorker }
+        let made = TranscriptStoreWorker(
+            scheduleWork: { [transcriptQueue] work in
+                transcriptQueue.async(execute: work)
+            },
+            publish: { [weak self] snapshot in
+                self?.finishTranscriptStore(snapshot)
+            })
+        madeTranscriptStoreWorker = made
+        return made
+    }
+
+    private var transcriptMailbox: TranscriptLineMailbox {
+        if let madeTranscriptMailbox { return madeTranscriptMailbox }
+        let storeWorker = transcriptStoreWorker
+        let made = TranscriptLineMailbox(
+            schedule: { [transcriptQueue] work in
+                transcriptQueue.async(execute: work)
+            },
+            deliver: { generation, lines in
+                storeWorker.receive(lines, generation: generation)
+            },
+            overflow: { [weak self] generation, _ in
+                self?.receiveTranscriptOverflow(generation: generation)
+            })
+        madeTranscriptMailbox = made
+        return made
+    }
+
+    @ObservationIgnored private var transcriberConsumers:
+        [SourceTapPCMForwarder.Identity: @Sendable ([Float], Double) -> Void] = [:]
+    @ObservationIgnored private var madeTranscriberLifecycleWorker: TranscriberLifecycleWorker?
+    @ObservationIgnored private var isStoppingTranscription = false
     /// Identifies the explicit transcription session a callback belongs to.
     ///
     /// Stopping finalises the last sentence asynchronously. It still belongs
     /// to that session, but if somebody has already started another one its
     /// late callback must not appear among the new conversation.
-    @ObservationIgnored private var transcriptSessionGeneration = 0
-    /// Reused across polls only while a source tap exists. Two seconds at
-    /// 48 kHz is more than the ring behind it holds, so a drain is never cut
-    /// short by this buffer.
-    @ObservationIgnored private var transcriptScratch = SourceTapScratch()
-    @ObservationIgnored private var transcriptRate: Double = 48000
+    @ObservationIgnored private var transcriptSessionGeneration: UInt64 = 0
+
+    /// The requested topology changes only at a route or feature boundary.
+    /// A poll reuses its generation, so it cannot rebuild pitch trackers at
+    /// twenty hertz.
+    @ObservationIgnored private var sourceTapTopologyGeneration: UInt64 = 0
+    @ObservationIgnored private var sourceTapDesiredPlan: SourceTapUnionPlanner.Result?
+    @ObservationIgnored private var sourceTapAppliedSnapshot: SourceTapLifecycleSnapshot?
+    @ObservationIgnored private var sourceTapRecognitionIdentity:
+        SourceTapPCMForwarder.Identity?
+    /// Revoked synchronously before route teardown can begin.
+    @ObservationIgnored private var sourceTapRequestGate = SourceTapRequestGate()
+
+    private struct PlannedSourceTapTopology {
+        let plan: SourceTapUnionPlanner.Result
+        let recognitionIdentity: SourceTapPCMForwarder.Identity?
+        let recognitionApplication: AudioApplication?
+    }
 
     /// Starts writing down what every source says, each under its own name.
     ///
@@ -10301,7 +12943,12 @@ final class RouterModel: ScriptTarget {
     /// name on a line is the wiring rather than a guess that is sometimes
     /// wrong.
     func startTranscribing() {
-        guard !isTranscribing else { return }
+        guard !isTranscribing, !isStoppingTranscription else { return }
+        transcriptSaveGeneration &+= 1
+        madeTranscriptSaveWorker?.invalidate()
+        lastSavedTranscriptURL = nil
+        transcriptSaveError = nil
+        isSavingTranscript = false
         guard isRunning else {
             transcriptionError = loc("Start routing before transcribing.")
             return
@@ -10311,64 +12958,27 @@ final class RouterModel: ScriptTarget {
             return
         }
 
-        let groups = sourceGroups
-        guard !groups.compactMap(\.routes.first).isEmpty else {
+        guard !sourceGroups.isEmpty else {
             transcriptionError = loc("Nothing is routed to transcribe.")
-            return
-        }
-        let opened = openSourceTaps()
-        guard opened > 0 else {
-            transcriptionError = loc("Could not listen to any source.")
             return
         }
 
         transcriptSessionGeneration &+= 1
         let generation = transcriptSessionGeneration
         transcript = []
-        transcribers = groups.prefix(opened).map { group in
-            Transcriber(
-                speaker: representative(of: group).map(routeTitle) ?? loc("Source")
-            ) { [weak self] line in
-                Task { @MainActor [weak self] in
-                    self?.receiveTranscript(line, generation: generation)
-                }
-            }
-        }
+        transcriptLineCount = 0
+        transcriptStoreWorker.activate(generation: generation)
+        transcriptMailbox.activate(generation: generation)
         isTranscribing = true
         transcriptionError = nil
-
-        // Started together rather than one at a time: the first model load
-        // fetches assets, and serialising that would leave the second source
-        // unheard for as long as the first one took.
-        let starting = transcribers
-        let now = Date().timeIntervalSince1970
-        Task { @MainActor in
-            for transcriber in starting {
-                do {
-                    try await transcriber.start(now: now)
-                } catch {
-                    self.transcriptionError = Self.describe(error)
-                    self.stopTranscribing()
-                    return
-                }
-            }
-        }
+        requestSourceTapTopology()
     }
 
     func stopTranscribing() {
         guard isTranscribing else { return }
         isTranscribing = false
-        closeSourceTapsIfIdle()
-        let finishing = transcribers
-        let generation = transcriptSessionGeneration
-        transcribers = []
-        // Finalised rather than dropped: the model is holding the end of the
-        // last sentence, and a transcript that stops mid-word because somebody
-        // pressed a button is not what they asked for.
-        Task { @MainActor in
-            for transcriber in finishing { await transcriber.stop() }
-            await self.collectTranscript(from: finishing, generation: generation)
-        }
+        isStoppingTranscription = true
+        requestSourceTapTopology()
     }
 
     /// True while the per-source rings are open.
@@ -10383,6 +12993,322 @@ final class RouterModel: ScriptTarget {
     /// singing poll used to take it twenty times a second merely to rediscover
     /// an invariant that only changes when a tap opens or the graph stops.
     @ObservationIgnored private var openedSourceTapCount = 0
+
+    private var sourceTapWorkersIfConstructed: SourceTapSingingWorkerPair? {
+        madeSourceTapWorkers
+    }
+
+    /// Constructs Speech models on their detached lifecycle owner. The
+    /// MainActor receives only value snapshots and nonblocking PCM closures.
+    private func transcriberLifecycleWorker() -> TranscriberLifecycleWorker? {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return nil }
+        if let madeTranscriberLifecycleWorker { return madeTranscriberLifecycleWorker }
+        let mailbox = transcriptMailbox
+        let made = TranscriberLifecycleWorker(
+            factory: { source, transcriptGeneration in
+                let transcriber = Transcriber(
+                    speaker: source.name, retainsLines: false,
+                    onLine: { line in
+                        mailbox.submit(line, generation: transcriptGeneration)
+                    })
+                return TranscriberLifecycleWorker.Session(
+                    identity: source.identity,
+                    consume: { samples, sampleRate in
+                        transcriber.add(samples, sampleRate: sampleRate)
+                    },
+                    start: { now in try await transcriber.start(now: now) },
+                    stop: { await transcriber.stop() })
+            },
+            publish: { [weak self] snapshot in
+                self?.finishTranscriberLifecycle(snapshot)
+            })
+        madeTranscriberLifecycleWorker = made
+        return made
+    }
+
+    /// Constructs topology and DSP owners together on the route's existing
+    /// serial executor. A synthetic model never reaches this boundary.
+    private func sourceTapWorkers() -> SourceTapSingingWorkerPair? {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return nil }
+        if let madeSourceTapWorkers { return madeSourceTapWorkers }
+        let engine = engine
+        let forwarder = sourceTapPCMForwarder
+        let made = SourceTapSingingWorkerPair(
+            lifecycleOperations: SourceTapLifecycleWorker.Operations(
+                start: { engine.startTranscriptTaps(routes: $0) },
+                stop: { engine.stopTranscriptTaps() }),
+            analysisOperations: SingingAnalysisWorker.Operations(
+                drain: { slot, destination, capacity in
+                    engine.drainTranscript(slot, into: destination, capacity: capacity)
+                },
+                tapStatistics: { engine.transcriptTapStatistics(at: $0) },
+                forwardPCM: { generation, source, samples, sampleRate in
+                    forwarder.forward(
+                        generation: generation, source: source,
+                        samples: samples, sampleRate: sampleRate)
+                }),
+            queue: engineQueue,
+            publishLifecycle: { [weak self] snapshot in
+                self?.finishSourceTapLifecycle(snapshot)
+            },
+            publishAnalysis: { [weak self] snapshot in
+                self?.finishSourceTapAnalysis(snapshot)
+            })
+        madeSourceTapWorkers = made
+        return made
+    }
+
+    private func plannedSourceTapTopology() -> PlannedSourceTapTopology {
+        guard isRunning else {
+            return PlannedSourceTapTopology(
+                plan: SourceTapUnionPlanner.plan(
+                    transcriptions: [], voices: [], backingReferences: []),
+                recognitionIdentity: nil, recognitionApplication: nil)
+        }
+
+        var entries: [(candidate: SourceTapUnionCandidate, application: AudioApplication?)] = []
+        entries.reserveCapacity(sourceGroups.count)
+        for group in sourceGroups {
+            guard let routeIndex = group.routes.first,
+                activeRoutes.indices.contains(routeIndex),
+                activeRouteKeys.indices.contains(routeIndex)
+            else { continue }
+            let route = activeRoutes[routeIndex]
+            let name = routeTitle(route)
+            entries.append(
+                (
+                    SourceTapUnionCandidate(
+                        route: routeIndex, routeKey: activeRouteKeys[routeIndex],
+                        uid: group.uid, name: name.isEmpty ? loc("Source") : name),
+                    application(of: route)
+                ))
+        }
+
+        let singingIsWanted = isSingingVisible || isScoringSinging
+        let transcriptions = isTranscribing ? entries.map(\.candidate) : []
+        let voices =
+            singingIsWanted
+            ? entries.filter { $0.application == nil }.map(\.candidate) : []
+        let applicationEntries =
+            singingIsWanted
+            ? entries.filter { $0.application != nil } : []
+        let nowPlayingBundleID = nowPlaying.flatMap { track in
+            NowPlaying.automationTargetCandidates.first {
+                $0.name == track.application
+            }?.bundleID
+        }
+        let preferredBackingBundleIDs = [
+            nowPlayingBundleID, recognisedApplication?.bundleID,
+        ].compactMap { $0 }
+        var backing = preferredBackingBundleIDs.lazy.compactMap { bundleID in
+            applicationEntries.first { $0.application?.bundleID == bundleID }
+        }.first
+        if backing == nil {
+            backing =
+                applicationEntries.first { $0.application?.isPlaying == true }
+                ?? applicationEntries.first
+        }
+
+        let scripted = ["com.apple.Music", "com.spotify.client"]
+        let recognition =
+            isSingingVisible
+            ? backing.flatMap {
+                entry -> (
+                    candidate: SourceTapUnionCandidate, application: AudioApplication?
+                )? in
+                guard let bundleID = entry.application?.bundleID,
+                    Self.recognisesScriptedPlayers || !scripted.contains(bundleID)
+                else { return nil }
+                return entry
+            } : nil
+        let plan = SourceTapUnionPlanner.plan(
+            transcriptions: transcriptions, voices: voices,
+            backingReferences: backing.map { [$0.candidate] } ?? [],
+            recognitionReference: recognition?.candidate)
+        let identity = recognition.map {
+            SourceTapPCMForwarder.Identity(
+                uid: $0.candidate.uid, routeKey: $0.candidate.routeKey)
+        }
+        return PlannedSourceTapTopology(
+            plan: plan, recognitionIdentity: identity,
+            recognitionApplication: recognition?.application)
+    }
+
+    /// Publishes one new desired state. Repeated polls never enter this method;
+    /// route and feature observers are the only topology clocks.
+    private func requestSourceTapTopology() {
+        guard sourceTapRequestGate.acceptsRequests else { return }
+        let desired = plannedSourceTapTopology()
+        let refusals = isTranscribing ? desired.plan.transcriptionAdmission.refused : []
+        if transcriptionAdmissionRefusals != refusals {
+            transcriptionAdmissionRefusals = refusals
+            transcriptionAdmissionWarning =
+                refusals.isEmpty
+                ? nil
+                : String(
+                    format: loc("%d routed sources were not transcribed."),
+                    refusals.count)
+        }
+        if desired.recognitionIdentity != sourceTapRecognitionIdentity {
+            musicRecognition?.reset(releasingBuffers: false)
+            musicRecognitionProblem = nil
+        }
+        sourceTapRecognitionIdentity = desired.recognitionIdentity
+        recognitionSourceUID = desired.recognitionIdentity?.uid
+        recognisedApplication = desired.recognitionApplication
+
+        guard sourceTapDesiredPlan != desired.plan else { return }
+        sourceTapDesiredPlan = desired.plan
+        sourceTapTopologyGeneration &+= 1
+        let generation = sourceTapTopologyGeneration
+        sourceTapAppliedSnapshot = nil
+        singingAnalysisSnapshot = nil
+        sourceTapPCMForwarder.invalidate()
+        sourceTapWorkersIfConstructed?.analysis.invalidate()
+
+        guard !desired.plan.sources.isEmpty || madeSourceTapWorkers != nil else { return }
+        guard let workers = sourceTapWorkers() else { return }
+        if desired.plan.sources.isEmpty {
+            workers.lifecycle.submit(.closed(generation: generation))
+        } else {
+            workers.lifecycle.submit(desired.plan.lifecycleRequest(generation: generation))
+        }
+    }
+
+    private func finishSourceTapLifecycle(_ snapshot: SourceTapLifecycleSnapshot) {
+        guard
+            sourceTapRequestGate.accepts(
+                generation: snapshot.generation,
+                currentGeneration: sourceTapTopologyGeneration),
+            let plan = sourceTapDesiredPlan
+        else { return }
+        sourceTapAppliedSnapshot = snapshot
+        sourceTapsOpen = snapshot.isOpen
+        sourceTapsFor = snapshot.sourceUIDs
+        openedSourceTapCount = snapshot.openedCount
+
+        guard snapshot.transitionSucceeded else {
+            sourceTapPCMForwarder.invalidate()
+            scheduleTranscriberReconciliation(
+                plan: plan, openedCount: 0, topologyGeneration: snapshot.generation)
+            if isTranscribing {
+                transcriptionError = loc("Could not listen to any source.")
+            }
+            if isScoringSinging {
+                singingError = loc("Could not listen to any source.")
+            }
+            return
+        }
+
+        if !plan.sources.isEmpty, snapshot.openedCount == 0 {
+            if isTranscribing {
+                isTranscribing = false
+                isStoppingTranscription = true
+                transcriptionError = loc("Could not listen to any source.")
+            }
+            if isScoringSinging {
+                singingError = loc("Could not listen to any source.")
+                setScoringActive(false, preservingWish: true)
+            }
+            requestSourceTapTopology()
+            return
+        }
+
+        installSourceTapPCMEndpoints(
+            plan: plan, openedCount: snapshot.openedCount,
+            topologyGeneration: snapshot.generation)
+        scheduleTranscriberReconciliation(
+            plan: plan, openedCount: snapshot.openedCount,
+            topologyGeneration: snapshot.generation)
+    }
+
+    private func installSourceTapPCMEndpoints(
+        plan: SourceTapUnionPlanner.Result, openedCount: Int,
+        topologyGeneration: UInt64
+    ) {
+        var endpoints: [SourceTapPCMForwarder.Endpoint] = []
+        endpoints.reserveCapacity(min(openedCount, plan.sources.count))
+        for source in plan.sources.prefix(max(0, openedCount)) {
+            let identity = SourceTapPCMForwarder.Identity(
+                uid: source.candidate.uid, routeKey: source.candidate.routeKey)
+            let transcriber = transcriberConsumers[identity]
+            let recognition =
+                source.consumers.contains(.musicRecognition)
+                    && identity == sourceTapRecognitionIdentity
+                ? recognitionService() : nil
+            guard transcriber != nil || recognition != nil else { continue }
+            endpoints.append(
+                SourceTapPCMForwarder.Endpoint(identity: identity) { samples, sampleRate in
+                    transcriber?(samples, sampleRate)
+                    recognition?.add(samples, sampleRate: sampleRate)
+                })
+        }
+        sourceTapPCMForwarder.replace(
+            generation: topologyGeneration, endpoints: endpoints)
+    }
+
+    private func scheduleTranscriberReconciliation(
+        plan: SourceTapUnionPlanner.Result, openedCount: Int,
+        topologyGeneration: UInt64
+    ) {
+        let admitted = plan.sources.prefix(max(0, openedCount)).filter {
+            $0.consumers.contains(.transcription)
+        }
+        let sources =
+            isTranscribing
+            ? admitted.map {
+                TranscriberLifecycleSource(
+                    identity: SourceTapPCMForwarder.Identity(
+                        uid: $0.candidate.uid, routeKey: $0.candidate.routeKey),
+                    name: $0.candidate.name)
+            } : []
+        let request = TranscriberLifecycleRequest(
+            topologyGeneration: topologyGeneration,
+            transcriptGeneration: transcriptSessionGeneration,
+            sources: sources)
+        if let worker = madeTranscriberLifecycleWorker
+            ?? (sources.isEmpty ? nil : transcriberLifecycleWorker())
+        {
+            _ = worker.submit(request)
+        } else if sources.isEmpty, isStoppingTranscription {
+            finishTranscriptMailboxFlush(generation: transcriptSessionGeneration)
+        }
+    }
+
+    private func finishTranscriberLifecycle(
+        _ snapshot: TranscriberLifecycleWorker.Snapshot
+    ) {
+        guard snapshot.transcriptGeneration == transcriptSessionGeneration else { return }
+        if snapshot.finalisedStop {
+            transcriberConsumers = [:]
+            guard !isTranscribing else { return }
+            finishTranscriptMailboxFlush(generation: snapshot.transcriptGeneration)
+            return
+        }
+        guard
+            sourceTapRequestGate.accepts(
+                generation: snapshot.topologyGeneration,
+                currentGeneration: sourceTapTopologyGeneration),
+            let plan = sourceTapDesiredPlan,
+            let applied = sourceTapAppliedSnapshot,
+            applied.generation == snapshot.topologyGeneration
+        else { return }
+        transcriberConsumers = Dictionary(
+            uniqueKeysWithValues: snapshot.bindings.map {
+                ($0.identity, $0.consume)
+            })
+        installSourceTapPCMEndpoints(
+            plan: plan, openedCount: applied.openedCount,
+            topologyGeneration: snapshot.topologyGeneration)
+
+        if let failure = snapshot.failure {
+            transcriptionError = Self.describe(failure)
+            isTranscribing = false
+            isStoppingTranscription = true
+            requestSourceTapTopology()
+            return
+        }
+    }
 
     /// Compares a cached source identity without materialising a mapped array.
     nonisolated static func sourceUIDsMatch(
@@ -10433,6 +13359,7 @@ final class RouterModel: ScriptTarget {
     /// - Returns: How many were opened, or how many are already open.
     @discardableResult
     private func openSourceTaps() -> Int {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return 0 }
         let groups = sourceGroups
         if let count = Self.reusableSourceTapCount(
             isOpen: sourceTapsOpen, openedCount: openedSourceTapCount,
@@ -10442,20 +13369,8 @@ final class RouterModel: ScriptTarget {
         }
         let first = groups.compactMap(\.routes.first)
         guard !first.isEmpty else { return 0 }
-        let uids = groups.map(\.uid)
-        if sourceTapsOpen { engine.stopTranscriptTaps() }
-        invalidateSourceTaps()
-        musicRecognition?.reset(releasingBuffers: true)
-        recognisedApplication = nil
-        recognitionSourceUID = nil
-        musicRecognitionProblem = nil
-        let opened = engine.startTranscriptTaps(routes: first)
-        sourceTapsOpen = opened > 0
-        sourceTapsFor = opened > 0 ? uids : []
-        openedSourceTapCount = opened
-        if opened > 0 { transcriptScratch.activate() }
-        transcriptRate = engine.pathQuality?.sampleRate ?? 48000
-        return opened
+        requestSourceTapTopology()
+        return sourceTapAppliedSnapshot?.openedCount ?? 0
     }
 
     /// Forgets rings the engine has already destroyed with its graph.
@@ -10463,69 +13378,115 @@ final class RouterModel: ScriptTarget {
     /// This deliberately does not call the engine: `finishStop` runs after
     /// `engine.stop()`, when there is no graph left to modify.
     private func invalidateSourceTaps() {
+        if sourceTapRequestGate.acceptsRequests { sourceTapTopologyGeneration &+= 1 }
+        sourceTapDesiredPlan = nil
+        sourceTapAppliedSnapshot = nil
+        sourceTapRecognitionIdentity = nil
+        sourceTapPCMForwarder.invalidate()
+        madeSourceTapWorkers?.analysis.invalidate()
+        madeSourceTapWorkers?.lifecycle.assumeClosedAfterRouteStop()
         sourceTapsOpen = false
         sourceTapsFor = []
         openedSourceTapCount = 0
-        transcriptScratch.release()
+        singingAnalysisSnapshot = nil
+    }
+
+    /// Revokes every route-lifetime callback without touching Core Audio.
+    private func revokeSourceTapRequestsBeforeRouteStop() {
+        sourceTapRequestGate.revoke()
+        sourceTapTopologyGeneration &+= 1
+        sourceTapDesiredPlan = nil
+        sourceTapAppliedSnapshot = nil
+        sourceTapRecognitionIdentity = nil
+        sourceTapPCMForwarder.invalidate()
+        madeSourceTapWorkers?.analysis.invalidate()
+        madeSourceTapWorkers?.lifecycle.invalidate()
+        singingAnalysisSnapshot = nil
+        transcriberConsumers = [:]
+        if isTranscribing {
+            isTranscribing = false
+            isStoppingTranscription = true
+        }
+        setScoringActive(false, preservingWish: true)
+        if let worker = madeTranscriberLifecycleWorker {
+            _ = worker.submit(
+                .closed(
+                    topologyGeneration: sourceTapTopologyGeneration,
+                    transcriptGeneration: transcriptSessionGeneration))
+        }
     }
 
     /// Closes them once nothing is listening. Not before: stopping the
     /// transcript while somebody is being scored would take the scorer's audio
     /// away with it.
     private func closeSourceTapsIfIdle() {
-        // The singing panel counts as a listener whether or not it is scoring:
-        // the note it shows is one of these rings, not the mixed bus.
-        guard sourceTapsOpen, !isTranscribing, !isScoringSinging, !isSingingVisible else {
-            return
-        }
-        engine.stopTranscriptTaps()
-        invalidateSourceTaps()
+        requestSourceTapTopology()
     }
 
     /// Moves audio from the rings to whoever asked for it, and lines back.
     private func pumpSourceTaps() {
-        let rate = transcriptRate
-        let slots = max(transcribers.count, singerTracks.count)
-        guard slots > 0 else { return }
-        for slot in 0..<slots {
-            transcriptScratch.withUnsafeMutableBufferPointer { buffer in
-                // An idle route releases this storage, and the accessor then
-                // hands out an empty buffer whose base address is nil — which
-                // this force-unwrapped. The poll timer only has to fall in the
-                // window where the scratch is already gone and the transcribers
-                // are not yet cleared, and the main thread dies: "Unexpectedly
-                // found nil while unwrapping an Optional value", in the middle
-                // of a line of flow-check output.
-                guard let base = buffer.baseAddress, buffer.count > 0 else { return }
-                let taken = engine.drainTranscript(
-                    slot, into: base, capacity: buffer.count)
-                guard taken > 0 else { return }
-                let borrowed = UnsafeBufferPointer(start: base, count: taken)
-                if slot < singerTracks.count {
-                    // Keep the tuner live while paused without moving the score
-                    // clock or recording the voice as part of the performance.
-                    let advancesTimeline = !isScoringSinging || trackClock.isPlaying
-                    singerTracks[slot].add(
-                        borrowed, advancesTimeline: advancesTimeline)
-                }
+        guard sourceTapRequestGate.acceptsRequests, isRunning,
+            let plan = sourceTapDesiredPlan,
+            let applied = sourceTapAppliedSnapshot,
+            applied.generation == sourceTapTopologyGeneration,
+            applied.transitionSucceeded, applied.openedCount > 0,
+            let workers = sourceTapWorkersIfConstructed
+        else { return }
 
-                let application =
-                    isSingingVisible ? recognitionApplication(for: slot) : nil
-                // Pitch tracking consumes the scratch buffer synchronously, so
-                // the ordinary singing panel allocates nothing per drain. The
-                // two asynchronous consumers need ownership; when both are
-                // active they share one copy rather than making one each.
-                if slot < transcribers.count || application != nil {
-                    let owned = Array(borrowed)
-                    if slot < transcribers.count {
-                        transcribers[slot].add(owned, sampleRate: rate)
-                    }
-                    if let application {
-                        recognisedApplication = application
-                        recognitionService().add(owned, sampleRate: rate)
-                    }
-                }
+        if isScoringSinging { pollsSinceScore += 1 } else { pollsSinceScore = 0 }
+        let refreshesScore = isScoringSinging && pollsSinceScore >= Self.scoreEveryNPolls
+        if refreshesScore { pollsSinceScore = 0 }
+        let reportedRate = pathQuality?.sampleRate ?? 0
+        let rate = reportedRate.isFinite && reportedRate > 0 ? reportedRate : 48_000
+        let score =
+            isScoringSinging
+            ? SingingScoreRequest(
+                through: songPosition, lyrics: lyrics, melody: melody,
+                referenceVersion: singingReferenceVersion, key: songKey,
+                refresh: refreshesScore)
+            : nil
+        workers.analysis.submit(
+            SingingAnalysisRequest(
+                generation: sourceTapTopologyGeneration,
+                resetToken: singingResetToken,
+                sampleRate: rate, anchorSeconds: songPosition,
+                advancesTimeline: !isScoringSinging || trackClock.isPlaying,
+                usesLearnedHead: usesLearnedPitch,
+                sources: plan.analysisSources(openedCount: applied.openedCount),
+                score: score))
+    }
+
+    private func finishSourceTapAnalysis(_ snapshot: SingingAnalysisSnapshot) {
+        guard
+            sourceTapRequestGate.accepts(
+                generation: snapshot.generation,
+                currentGeneration: sourceTapTopologyGeneration),
+            snapshot.resetToken == singingResetToken
+        else { return }
+        singingAnalysisSnapshot = snapshot
+
+        let old = Dictionary(uniqueKeysWithValues: singers.map { ($0.uid, $0) })
+        let next = snapshot.sources.compactMap { source -> Singer? in
+            guard source.role == .voice else { return nil }
+            return Singer(
+                uid: source.uid, name: source.name,
+                hertz: Self.singerDisplayHertz(
+                    measured: source.hertz, previous: old[source.uid],
+                    rescore: old[source.uid]?.score != source.score),
+                score: source.score)
+        }
+        if singers != next { singers = next }
+        let referenceMode: ScoringReferenceMode =
+            switch snapshot.scoringReferenceMode {
+            case .waiting: .waiting
+            case .exact: .midi
+            case .capturedBacking: .capturedPlayer
+            case .key: .key
             }
+        publish(referenceMode, to: \.scoringReferenceMode)
+        if isScoringSinging, snapshot.admittedVoiceCount == 0 {
+            singingError = loc("Could not listen to any source.")
+            setScoringActive(false, preservingWish: true)
         }
     }
 
@@ -10610,7 +13571,6 @@ final class RouterModel: ScriptTarget {
 
     private func releaseMusicRecognition() {
         musicRecognition?.reset(releasingBuffers: true)
-        musicRecognition = nil
     }
 
     /// Inserts one finished line into the attributed conversation.
@@ -10639,46 +13599,107 @@ final class RouterModel: ScriptTarget {
         return true
     }
 
-    private func receiveTranscript(_ line: Transcriber.Line, generation: Int) {
-        guard generation == transcriptSessionGeneration else { return }
-        Self.insertTranscriptLine(line, into: &transcript)
-    }
-
-    private func collectTranscript(
-        from transcribers: [Transcriber], generation: Int
-    ) async {
-        guard generation == transcriptSessionGeneration else { return }
-        for transcriber in transcribers {
-            for line in await transcriber.lines {
-                receiveTranscript(line, generation: generation)
-            }
+    private func finishTranscriptMailboxFlush(generation: UInt64) {
+        transcriptMailbox.flush(generation: generation) { [weak self] in
+            guard let self, generation == transcriptSessionGeneration else { return }
+            finishTranscriptStore(transcriptStoreWorker.snapshot)
+            isStoppingTranscription = false
         }
     }
 
-    /// The transcript as somebody would read it, attributed and timestamped.
-    var transcriptText: String {
-        transcript.map { line in
-            String(
-                format: "[%02d:%02d] %@: %@", Int(line.start) / 60, Int(line.start) % 60,
-                line.speaker, line.text)
-        }.joined(separator: "\n")
+    private func finishTranscriptStore(_ snapshot: TranscriptStoreWorker.Snapshot) {
+        guard snapshot.generation == transcriptSessionGeneration else { return }
+        transcriptLineCount = snapshot.statistics.lines
+        transcript = snapshot.visibleLines
+        guard snapshot.containsRefusal else { return }
+        transcriptionError = loc("The transcript exceeds the safe save limit.")
+        if isTranscribing { stopTranscribing() }
     }
 
-    /// Writes the transcript beside the recordings.
+    private func receiveTranscriptOverflow(generation: UInt64) {
+        guard generation == transcriptSessionGeneration else { return }
+        transcriptionError = loc("The transcript exceeds the safe save limit.")
+        if isTranscribing { stopTranscribing() }
+    }
+
+    /// The bounded visible transcript, formatted for diagnostics.
+    ///
+    /// Full-history formatting belongs to the explicit save worker; a computed
+    /// MainActor property must not traverse 100,000 retained lines.
+    var transcriptText: String {
+        var text = ""
+        var isFirst = true
+        for line in transcript {
+            if !isFirst { text.append("\n") }
+            text.append(
+                String(
+                    format: "[%02d:%02d] %@: %@", Int(line.start) / 60,
+                    Int(line.start) % 60, line.speaker, line.text))
+            isFirst = false
+        }
+        return text
+    }
+
+    /// Queues an atomic transcript write beside the recordings.
+    ///
+    /// Formatting and storage stay on one bounded utility owner. The immutable
+    /// Array snapshot is copy-on-write, so pressing Save does not make MainActor
+    /// build a potentially multi-megabyte string or wait on a volume.
     @discardableResult
-    func saveTranscript() -> URL? {
-        guard !transcript.isEmpty else { return nil }
-        let stamp = ISO8601DateFormatter()
-        stamp.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
-        let url = recordingDirectory.appendingPathComponent(
-            "YunAudio \(stamp.string(from: Date()).replacingOccurrences(of: ":", with: "-")).txt"
-        )
-        do {
-            try transcriptText.write(to: url, atomically: true, encoding: .utf8)
-            return url
-        } catch {
-            transcriptionError = String(describing: error)
-            return nil
+    func saveTranscript() -> Bool {
+        guard !isSavingTranscript, transcriptLineCount > 0 else { return false }
+        transcriptSaveGeneration &+= 1
+        let saveGeneration = transcriptSaveGeneration
+        lastSavedTranscriptURL = nil
+        transcriptSaveError = nil
+        isSavingTranscript = true
+        let accepted = transcriptStoreWorker.requestPages(
+            generation: transcriptSessionGeneration
+        ) { [weak self] pages in
+            self?.finishTranscriptPageSnapshot(pages, generation: saveGeneration)
+        }
+        if !accepted {
+            isSavingTranscript = false
+            transcriptSaveError = loc("The transcript could not be saved.")
+        }
+        return accepted
+    }
+
+    private func finishTranscriptPageSnapshot(
+        _ pages: [[Transcriber.Line]]?, generation: UInt64
+    ) {
+        guard generation == transcriptSaveGeneration else { return }
+        guard let pages else {
+            isSavingTranscript = false
+            transcriptSaveError = loc("The transcript could not be saved.")
+            return
+        }
+        let accepted = transcriptSaveWorker.submit(
+            TranscriptSaveRequest(generation: generation, pages: pages))
+        if !accepted {
+            isSavingTranscript = false
+            transcriptSaveError = loc("The transcript could not be saved.")
+        }
+    }
+
+    private func finishTranscriptSave(_ snapshot: TranscriptSaveSnapshot) {
+        guard snapshot.generation == transcriptSaveGeneration else { return }
+        isSavingTranscript = false
+        guard let failure = snapshot.failure else {
+            lastSavedTranscriptURL = snapshot.outputURL
+            transcriptSaveError = nil
+            return
+        }
+        lastSavedTranscriptURL = nil
+        switch failure {
+        case .empty:
+            transcriptSaveError = nil
+        case .tooManyLines, .inputTooLarge:
+            transcriptSaveError = loc("The transcript exceeds the safe save limit.")
+        case .timedOut:
+            transcriptSaveError = loc("Saving the transcript took too long.")
+        case .writeFailed:
+            transcriptSaveError = loc("The transcript could not be saved.")
         }
     }
 
@@ -10702,7 +13723,8 @@ final class RouterModel: ScriptTarget {
 
     /// Loudness and spectrum, computed off the routed signal.
     private(set) var analysis: SignalAnalyser.Reading = .silent
-    @ObservationIgnored private var analyser: SignalAnalyser?
+    @ObservationIgnored private var analysisSnapshot = SignalAnalysisWorker.Snapshot.silent
+    @ObservationIgnored private var analysisIsActive = false
 
     /// Set by the panel that draws the spectrum, so a closed panel costs nothing
     /// beyond the drain the meters need anyway.
@@ -10716,8 +13738,10 @@ final class RouterModel: ScriptTarget {
             // running replaced whatever was on screen with dashes — and wiped
             // the fixture the design captures depend on, so the analysis card
             // rendered empty in every one of them.
-            guard let analyser else { return }
-            analysis = analyser.reading()
+            guard analysisIsActive else { return }
+            let snapshot = analysisWorker.snapshot
+            analysisSnapshot = snapshot
+            analysis = snapshot.reading
         }
     }
 
@@ -10832,9 +13856,38 @@ final class RouterModel: ScriptTarget {
     var canCalibrate: Bool { isRunning && !isBusy && activeRoutes.count >= 1 }
 
     @ObservationIgnored private var calibrationTimer: Timer?
+    private enum CalibrationLevelPurpose: Sendable {
+        case live
+        case final
+    }
+
+    private struct CalibrationLevelRequest: Sendable {
+        let intentGeneration: UInt64
+        let sampleRate: Double
+        let purpose: CalibrationLevelPurpose
+    }
+
+    private struct CalibrationLevelReport: Sendable {
+        let request: CalibrationLevelRequest
+        let levels: [(decibels: Double, seconds: Double)]
+    }
+
+    @ObservationIgnored private var calibrationDesiredIntent: CalibrationIntent?
+    @ObservationIgnored private var calibrationActiveGeneration: UInt64?
+    @ObservationIgnored private var calibrationFinishContext:
+        (generation: UInt64, groups: [SourceGroup])?
+
+    var calibrationLifecycleStatisticsForDiagnostics: DiagnosticLifecycleStatistics {
+        calibrationLifecycleWorker.statistics
+    }
 
     func startCalibration() {
         guard canCalibrate, !isCalibrating else { return }
+        calibrationLifecycleWorker.invalidate()
+        calibrationLevelApplier.invalidate()
+        calibrationDesiredIntent = nil
+        calibrationActiveGeneration = nil
+        calibrationFinishContext = nil
         calibrationProposals = []
         calibrationGroups = []
         calibrationHeard = Array(repeating: 0, count: sourceGroups.count)
@@ -10846,11 +13899,30 @@ final class RouterModel: ScriptTarget {
     func cancelCalibration() {
         calibrationTimer?.invalidate()
         calibrationTimer = nil
-        engine.endCalibration()
+        calibrationLevelApplier.invalidate()
+        calibrationDesiredIntent = calibrationLifecycleWorker.cancel()
+        calibrationActiveGeneration = nil
+        calibrationFinishContext = nil
         calibrationPhase = .idle
         calibrationRemaining = 0
         calibrationProposals = []
         calibrationGroups = []
+    }
+
+    /// Revokes every calibration publication without joining the engine queue.
+    private func invalidateCalibrationForRouteLifecycle() {
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        calibrationLifecycleWorker.invalidate()
+        calibrationLevelApplier.invalidate()
+        calibrationDesiredIntent = nil
+        calibrationActiveGeneration = nil
+        calibrationFinishContext = nil
+        calibrationPhase = .idle
+        calibrationRemaining = 0
+        calibrationProposals = []
+        calibrationGroups = []
+        calibrationHeard = []
     }
 
     private func scheduleCalibrationTick() {
@@ -10869,17 +13941,22 @@ final class RouterModel: ScriptTarget {
         case .countdown:
             let left = Int(ceil(calibrationRemaining))
             if calibrationRemaining <= 0 {
-                calibrationPhase = .listening
-                calibrationRemaining = Self.calibrationSeconds
-                engine.beginCalibration()
+                // Desired state moves immediately, but `.listening` is active
+                // engine truth and is published only after `.applied` returns.
+                if calibrationDesiredIntent?.desiredState != .active {
+                    calibrationDesiredIntent = calibrationLifecycleWorker.begin()
+                }
             } else {
                 calibrationPhase = .countdown(max(1, left))
             }
         case .listening:
             let rate = pathQuality?.sampleRate ?? 48000
-            let seconds = engine.calibrationLevels(sampleRate: rate).map(\.seconds)
-            calibrationHeard = sourceGroups.map { group in
-                group.routes.compactMap { $0 < seconds.count ? seconds[$0] : nil }.max() ?? 0
+            if let generation = calibrationActiveGeneration {
+                calibrationLevelApplier.submit(
+                    CalibrationLevelRequest(
+                        intentGeneration: generation,
+                        sampleRate: rate,
+                        purpose: .live))
             }
             if calibrationRemaining <= 0 { finishCalibration() }
         default:
@@ -10891,10 +13968,82 @@ final class RouterModel: ScriptTarget {
     private func finishCalibration() {
         calibrationTimer?.invalidate()
         calibrationTimer = nil
-        engine.endCalibration()
+        calibrationLevelApplier.invalidate()
+        let groups = sourceGroups
+        guard let intent = calibrationLifecycleWorker.cancel() else {
+            calibrationPhase = .failed(
+                loc("Calibration could not be completed on this route."))
+            return
+        }
+        calibrationDesiredIntent = intent
+        calibrationFinishContext = (intent.generation, groups)
+    }
 
-        let rate = pathQuality?.sampleRate ?? 48000
-        let levels = engine.calibrationLevels(sampleRate: rate)
+    private func finishCalibrationMutation(
+        _ completion: CalibrationLifecycleCompletion<RoutingEngine.CalibrationMutationResult>
+    ) {
+        guard calibrationDesiredIntent == completion.intent else { return }
+        switch completion.intent.desiredState {
+        case .active:
+            switch completion.outcome {
+            case .applied:
+                guard case .countdown = calibrationPhase else { return }
+                calibrationActiveGeneration = completion.intent.generation
+                calibrationPhase = .listening
+                calibrationRemaining = Self.calibrationSeconds
+            case .revoked:
+                break
+            case .routeUnavailable:
+                calibrationPhase = .failed(
+                    loc("Calibration stopped because the audio route is no longer available."))
+                calibrationTimer?.invalidate()
+                calibrationTimer = nil
+            case .publicationFailed:
+                calibrationPhase = .failed(
+                    loc("Calibration could not start on this route."))
+                calibrationTimer?.invalidate()
+                calibrationTimer = nil
+            }
+        case .inactive:
+            calibrationActiveGeneration = nil
+            guard completion.outcome == .applied,
+                let context = calibrationFinishContext,
+                context.generation == completion.intent.generation
+            else { return }
+            let rate = pathQuality?.sampleRate ?? 48000
+            calibrationLevelApplier.submit(
+                CalibrationLevelRequest(
+                    intentGeneration: completion.intent.generation,
+                    sampleRate: rate,
+                    purpose: .final))
+        }
+    }
+
+    private func finishCalibrationLevelRead(_ report: CalibrationLevelReport) {
+        switch report.request.purpose {
+        case .live:
+            guard calibrationActiveGeneration == report.request.intentGeneration,
+                case .listening = calibrationPhase
+            else { return }
+            let seconds = report.levels.map(\.seconds)
+            calibrationHeard = sourceGroups.map { group in
+                group.routes.compactMap { $0 < seconds.count ? seconds[$0] : nil }.max() ?? 0
+            }
+        case .final:
+            guard let context = calibrationFinishContext,
+                context.generation == report.request.intentGeneration
+            else { return }
+            calibrationFinishContext = nil
+            completeCalibrationMeasurement(
+                levels: report.levels,
+                groups: context.groups)
+        }
+    }
+
+    private func completeCalibrationMeasurement(
+        levels: [(decibels: Double, seconds: Double)],
+        groups: [SourceGroup]
+    ) {
         // Measured per source, not per channel.
         //
         // A stereo source is two routes, and proposing a gain for each would
@@ -10902,7 +14051,6 @@ final class RouterModel: ScriptTarget {
         // for, and one that pulls the image apart. The group's level is its
         // loudest channel and its seconds are the longest, because a source was
         // heard if any of its channels heard something.
-        let groups = sourceGroups
         let measurements = groups.enumerated().compactMap {
             index, group -> LevelCalibration.Measurement? in
             guard let route = representative(of: group) else { return nil }
@@ -11016,7 +14164,9 @@ final class RouterModel: ScriptTarget {
         let enabled = isDucking
         let depth = Self.gain(fromDecibels: duckDecibels)
         duckingAllowedGate.reset()
-        applyLiveControl { $0.setDucking(enabled: enabled, depth: depth) }
+        applyLiveControl(key: .ducking) {
+            $0.setDucking(enabled: enabled, depth: depth)
+        }
         appliedToGraph.insert(.ducking)
     }
 
@@ -11044,10 +14194,10 @@ final class RouterModel: ScriptTarget {
 
     private func refreshDucking() {
         guard isDucking else { return }
-        if analyser?.classifier?.hearsSpeech == true { lastSpeechAt = Date() }
+        if analysisSnapshot.hearsSpeech { lastSpeechAt = Date() }
         let allowed = isSpeechRecent
         guard duckingAllowedGate.shouldSend(allowed) else { return }
-        applyLiveControl { $0.setDuckingAllowed(allowed) }
+        applyLiveControl(key: .duckingAllowed) { $0.setDuckingAllowed(allowed) }
     }
 
     // MARK: Automatic levelling
@@ -11130,7 +14280,7 @@ final class RouterModel: ScriptTarget {
         let offset = autoLevel.update(
             loudness: preMaster,
             target: loudnessTarget.lufs,
-            hearsSpeech: analyser?.classifier?.hearsSpeech ?? false,
+            hearsSpeech: analysisSnapshot.hearsSpeech,
             elapsed: elapsed,
             ceiling: ceiling)
         publish(offset, to: \.autoLevelOffset)
@@ -11144,7 +14294,8 @@ final class RouterModel: ScriptTarget {
 
     /// Starts the integrated measurement over.
     func resetLoudness() {
-        analyser?.reset()
+        analysisWorker.reset()
+        analysisSnapshot = analysisWorker.snapshot
         analysis = .silent
     }
 
@@ -11156,6 +14307,10 @@ final class RouterModel: ScriptTarget {
     /// on the IO thread — a router forwarding audio between two devices should
     /// not be holding a neural network open in case somebody looks.
     private func refreshAnalysisNeeds() {
+        guard startupPolicy.startsLiveServicesAfterLaunch else {
+            analysisNeeds = []
+            return
+        }
         let wanted = Self.analysisNeeds(
             isAnalysisVisible: isAnalysisVisible,
             identifiesSounds: isSoundIdentificationEnabled,
@@ -11165,9 +14320,11 @@ final class RouterModel: ScriptTarget {
 
         guard wanted != analysisNeeds else { return }
         analysisNeeds = wanted
-        analyser?.require(wanted)
+        analysisWorker.require(wanted)
         let analysisIsEnabled = !wanted.isEmpty
-        applyLiveControl { $0.setAnalysisEnabled(analysisIsEnabled) }
+        applyLiveControl(key: .analysisEnabled) {
+            $0.setAnalysisEnabled(analysisIsEnabled)
+        }
         if wanted.isEmpty { analysis = .silent }
     }
 
@@ -11192,10 +14349,17 @@ final class RouterModel: ScriptTarget {
     @ObservationIgnored private var analysisNeeds: SignalAnalyser.Needs = []
 
     /// True when no analysis is being computed at all.
-    var analysisIsIdle: Bool { analyser?.isIdle ?? true }
+    var analysisIsIdle: Bool { analysisNeeds.isEmpty }
+
+    /// Bounded-queue evidence for diagnostics and performance tests.
+    var analysisWorkerTelemetry: SignalAnalysisWorker.Telemetry {
+        analysisWorker.telemetry
+    }
 
     private func startAnalysis(sampleRate: Double) {
-        analyser = SignalAnalyser(sampleRate: sampleRate)
+        analysisWorker.activate(sampleRate: sampleRate)
+        analysisIsActive = true
+        analysisSnapshot = analysisWorker.snapshot
         analysis = .silent
         // Whatever was already switched on has to be re-declared against the
         // new analyser, or turning routing off and on again would silently stop
@@ -11205,7 +14369,9 @@ final class RouterModel: ScriptTarget {
     }
 
     private func stopAnalysis() {
-        analyser = nil
+        analysisWorker.deactivate()
+        analysisIsActive = false
+        analysisSnapshot = analysisWorker.snapshot
         analysis = .silent
         analysisNeeds = []
     }
@@ -11247,7 +14413,9 @@ final class RouterModel: ScriptTarget {
                 return
             }
             if watchesIOAllocations {
-                RoutingEngine.enableAllocationTripwire()
+                if !RoutingEngine.tryEnableAllocationTripwire() {
+                    watchesIOAllocations = false
+                }
             } else {
                 RoutingEngine.disableAllocationTripwire()
             }
@@ -11266,11 +14434,42 @@ final class RouterModel: ScriptTarget {
     /// What the last comparison found, or nil if none has run.
     private(set) var integrityResult: SelftestResult?
     private(set) var integrityError: String?
+    private struct IntegrityDiagnosticCapture: Sendable {
+        let runID: UInt64
+        let graphGeneration: UInt64
+        let lease: SelftestCaptureLease
+    }
+
+    private struct IntegrityDiagnosticResult: Sendable {
+        let runID: UInt64
+        let graphGeneration: UInt64
+        let result: SelftestResult
+    }
+
+    @ObservationIgnored private var integrityRunID: UInt64 = 0
+    @ObservationIgnored private var integrityExpectedGraphGeneration: UInt64?
+    @ObservationIgnored private var integrityPollTask: Task<Void, Never>?
+    @ObservationIgnored private lazy var integrityDiagnosticWorker =
+        DiagnosticLifecycleWorker<IntegrityDiagnosticCapture, IntegrityDiagnosticResult>(
+            evaluate: { snapshot in
+                IntegrityDiagnosticResult(
+                    runID: snapshot.capture.runID,
+                    graphGeneration: snapshot.capture.graphGeneration,
+                    result: snapshot.capture.lease.capture().evaluate())
+            },
+            publish: { [weak self] evaluation in
+                self?.finishIntegrityEvaluation(evaluation)
+            })
+
+    var integrityLifecycleStatisticsForDiagnostics: DiagnosticLifecycleStatistics {
+        integrityDiagnosticWorker.statistics
+    }
 
     /// Only a loopback destination can answer the question: the check writes a
     /// known sequence to the output and reads it back off the same device's
     /// input, so a destination with no input has nothing to read back.
     var canCheckIntegrity: Bool {
+        guard !teardownNeedsRetry else { return false }
         guard let destination = selectedDestination else { return false }
         return destination.inputChannels > 0 && !isCheckingIntegrity
     }
@@ -11284,6 +14483,10 @@ final class RouterModel: ScriptTarget {
     /// else in this category will tell them.
     func checkIntegrity() {
         guard canCheckIntegrity, !isBusy else { return }
+        invalidateIntegrityDiagnostic(publishingIdle: false)
+        integrityRunID &+= 1
+        if integrityRunID == 0 { integrityRunID = 1 }
+        let runID = integrityRunID
         integrityResult = nil
         integrityError = nil
         integrityProgress = 0
@@ -11293,46 +14496,135 @@ final class RouterModel: ScriptTarget {
         // buffer are installed when the graph is built, so they cannot be added
         // to a route that is already running.
         let wasRunning = isRunning
+        integrityRouteWasRunning = wasRunning
         let begin: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
             self.start(selftest: true)
-            Task { @MainActor in await self.pollIntegrity(restoreRunning: wasRunning) }
+            self.integrityPollTask = Task { @MainActor in
+                await self.pollIntegrity(runID: runID, restoreRunning: wasRunning)
+            }
         }
-        if wasRunning { stop(then: begin) } else { begin() }
+        if wasRunning {
+            stop(then: begin, preservingIntegrityDiagnostic: true)
+        } else {
+            begin()
+        }
     }
 
-    private func pollIntegrity(restoreRunning: Bool) async {
+    private func pollIntegrity(runID: UInt64, restoreRunning: Bool) async {
         // Long enough to fill the capture buffer at 48 kHz, with headroom for
         // the route to come up first.
         for _ in 0..<160 {
             try? await Task.sleep(for: .milliseconds(100))
-            integrityProgress = engine.selftestProgress
-            if integrityProgress >= 1 { break }
+            guard !Task.isCancelled, integrityRunID == runID,
+                isCheckingIntegrity
+            else { return }
+            if integrityExpectedGraphGeneration == nil,
+                isRunning, engineSnapshot.graphGeneration > 0
+            {
+                integrityExpectedGraphGeneration = engineSnapshot.graphGeneration
+            }
+            guard let graphGeneration = integrityExpectedGraphGeneration else {
+                if !isBusy, !isRunning {
+                    finishIntegrityFailure(
+                        runID: runID, restoreRunning: restoreRunning,
+                        message: loc("The check could not be set up on this path."))
+                    return
+                }
+                continue
+            }
+
+            switch engine.readSelftestProgress() {
+            case .busy:
+                // Retain the last complete fraction. Contention is not zero.
+                continue
+            case .unavailable:
+                continue
+            case let .available(_, incomingGraphGeneration, fraction):
+                guard incomingGraphGeneration == graphGeneration else { continue }
+                integrityProgress = max(integrityProgress, fraction)
+            }
+            guard integrityProgress >= 1 else { continue }
+
+            switch engine.captureSelftest() {
+            case .busy:
+                continue
+            case .unavailable:
+                break
+            case .available(let snapshot):
+                guard snapshot.graphGeneration == graphGeneration else { continue }
+                let capture = IntegrityDiagnosticCapture(
+                    runID: runID,
+                    graphGeneration: graphGeneration,
+                    lease: snapshot.lease)
+                if integrityDiagnosticWorker.submit(
+                    DiagnosticCaptureSnapshot(generation: runID, capture: capture))
+                {
+                    integrityPollTask = nil
+                    return
+                }
+            }
         }
-        integrityResult = engine.evaluateSelftest()
-        if integrityResult == nil {
-            // Two different failures, and telling them apart is the difference
-            // between a message somebody can act on and one they cannot. The
-            // check reads its sequence back off the destination's input; a
-            // destination with no input — speakers, a headset, a display — can
-            // never return anything, and saying "could not be set up" invites
-            // somebody to go looking for a fault that is not there.
-            integrityError =
-                integrityProgress <= 0
-                ? loc(
-                    "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check."
-                )
-                : loc("The check could not be set up on this path.")
-        }
+        let message =
+            integrityProgress <= 0
+            ? loc(
+                "This output has no input to read the sequence back from, so there is nothing to grade. Route to a loopback device to run the check."
+            )
+            : loc("The check could not be set up on this path.")
+        finishIntegrityFailure(
+            runID: runID, restoreRunning: restoreRunning,
+            message: message)
+    }
+
+    private func finishIntegrityEvaluation(
+        _ evaluation: DiagnosticEvaluation<IntegrityDiagnosticResult>
+    ) {
+        let answer = evaluation.result
+        guard evaluation.captureGeneration == integrityRunID,
+            answer.runID == integrityRunID,
+            answer.graphGeneration == integrityExpectedGraphGeneration,
+            isCheckingIntegrity
+        else { return }
+        integrityResult = answer.result
+        finishIntegrityRoute(restoreRunning: integrityRouteWasRunning)
+    }
+
+    @ObservationIgnored private var integrityRouteWasRunning = false
+
+    private func finishIntegrityFailure(
+        runID: UInt64,
+        restoreRunning: Bool,
+        message: String
+    ) {
+        guard integrityRunID == runID, isCheckingIntegrity else { return }
+        integrityError = message
+        finishIntegrityRoute(restoreRunning: restoreRunning)
+    }
+
+    private func finishIntegrityRoute(restoreRunning: Bool) {
+        integrityPollTask?.cancel()
+        integrityPollTask = nil
         isCheckingIntegrity = false
 
         // Put the route back the way it was found rather than leaving the
         // check's own graph running: it overwrites a destination channel with
         // the test sequence, which is not something to leave in a call.
-        stop(then: { [weak self] in
-            guard let self, restoreRunning else { return }
-            self.start()
-        })
+        stop(
+            then: { [weak self] in
+                guard let self, restoreRunning else { return }
+                self.start()
+            },
+            preservingIntegrityDiagnostic: true)
+    }
+
+    private func invalidateIntegrityDiagnostic(publishingIdle: Bool = true) {
+        integrityRunID &+= 1
+        if integrityRunID == 0 { integrityRunID = 1 }
+        integrityExpectedGraphGeneration = nil
+        integrityPollTask?.cancel()
+        integrityPollTask = nil
+        integrityDiagnosticWorker.invalidate()
+        if publishingIdle { isCheckingIntegrity = false }
     }
 
     /// Which of the two looks the whole application wears.

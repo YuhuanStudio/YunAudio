@@ -154,13 +154,15 @@ public struct Lyrics: Sendable, Hashable {
     /// difference is a factor of ten, so it is read as written rather than
     /// assumed.
     ///
+    /// - Parameters:
+    ///   - text: The LRC document to parse.
+    ///   - performers: Names from the track being played. A duet file marks who
+    ///     sings by putting a performer's name on a line of its own, and nothing
+    ///     but the track's own credits distinguishes that from a lyric that
+    ///     happens to be a name. Empty is safe: only the fixed markers and the
+    ///     credit vocabulary are then recognised.
     /// - Returns: Nil when nothing in the text carried a timestamp, which is
     ///   the honest answer for a plain text file of words with no timing.
-    /// - Parameter performers: Names from the track being played. A duet file
-    ///   marks who sings by putting a performer's name on a line of its own, and
-    ///   nothing but the track's own credits distinguishes that from a lyric
-    ///   that happens to be a name. Empty is safe: only the fixed markers and
-    ///   the credit vocabulary are then recognised.
     public static func parse(_ text: String, performers: [String] = []) -> Lyrics? {
         var title: String?
         var artist: String?

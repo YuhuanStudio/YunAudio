@@ -122,6 +122,7 @@ public final class PitchTracker {
     private var energyPrefix: [Float]
 
     /// - Parameters:
+    ///   - sampleRate: The rate of the samples that will be tracked.
     ///   - lowest: The bottom of the search, in hertz.
     ///   - highest: The top of it. Defaults to the speaking range, because that
     ///     is what the voice changer and the analysis panel want; the singing
@@ -131,18 +132,25 @@ public final class PitchTracker {
         lowest: Double = PitchTracker.lowestHertz,
         highest: Double = PitchTracker.highestHertz
     ) {
-        guard sampleRate.isFinite, sampleRate > 0, lowest > 0, highest > lowest else {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate),
+            lowest.isFinite, lowest > 0,
+            highest.isFinite, highest > lowest
+        else {
             return nil
         }
         // One candidate either side of the advertised limits gives the limit
         // itself two neighbours. Without it an exact 60 Hz period sat at the
         // end of the range and could never qualify as a local maximum.
+        let minimumCandidate = (sampleRate / highest).rounded(.down)
+        let maximumCandidate = (sampleRate / lowest).rounded(.up)
+        guard minimumCandidate.isFinite, maximumCandidate.isFinite
+        else { return nil }
         let minimumLag =
-            max(1, Int((sampleRate / highest).rounded(.down)) - 1)
+            max(1, Int(min(minimumCandidate, Double(Self.frameSize))) - 1)
         let maximumLag =
             min(
                 Self.frameSize - 2,
-                Int((sampleRate / lowest).rounded(.up)) + 1)
+                Int(min(maximumCandidate, Double(Self.frameSize - 2))) + 1)
         guard minimumLag + 1 < maximumLag else { return nil }
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
             return nil
@@ -169,7 +177,11 @@ public final class PitchTracker {
     ///   - count: How many frames are in the buffer.
     /// - Returns: One estimate per frame, zero where unvoiced.
     public func track(frames: [Float], count: Int) -> [Float] {
-        guard count > 0, frames.count >= count * Self.frameSize else { return [] }
+        guard count > 0,
+            let requiredFrames = AudioProcessingContract.checkedProduct(
+                count, Self.frameSize),
+            frames.count >= requiredFrames
+        else { return [] }
         var estimates = [Float](repeating: 0, count: count)
         frames.withUnsafeBufferPointer { framesBuffer in
             estimates.withUnsafeMutableBufferPointer { estimatesBuffer in

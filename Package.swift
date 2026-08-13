@@ -148,6 +148,7 @@ let package = Package(
                 // controller plugged in — those are pure functions living
                 // beside the CoreMIDI client that feeds them.
                 "YunAudioApp",
-            ]),
+            ],
+            resources: [.copy("Resources/SpeechFixture.wav")]),
     ]
 )

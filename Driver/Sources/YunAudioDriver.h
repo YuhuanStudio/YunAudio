@@ -17,6 +17,7 @@
 #ifndef YUN_AUDIO_DRIVER_H
 #define YUN_AUDIO_DRIVER_H
 
+#include <CoreAudio/AudioHardware.h>
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -46,11 +47,17 @@
 
 #define kDevice_DefaultSampleRate 48000.0
 
+/// The one buffer period this fixed-latency virtual device advertises.
+/// Explicitly publishing the size and its one-value range keeps the HAL from
+/// having to infer a callback contract from the safety offset.
+#define kDevice_BufferFrameSize 512
+
 /// Gives CoreAudio enough notice to finish a loopback write before an
-/// independent input client reads the same sample time. The installed device
-/// currently runs at 512 frames; keeping that whole period in hand costs
-/// 10.67 ms at 48 kHz and removes callback-order dependence under load.
-#define kDevice_SafetyOffsetFrames 512
+/// independent input client reads the same sample time. One whole advertised
+/// period costs 10.67 ms at 48 kHz and removes callback-order dependence under
+/// ordinary load. `DoIOOperation` still fails silent if an operation is larger:
+/// Apple explicitly permits some operation sizes to differ from the nominal.
+#define kDevice_SafetyOffsetFrames kDevice_BufferFrameSize
 
 #pragma mark - Object IDs
 
@@ -89,11 +96,14 @@ enum {
 /// the only channel that crosses coreaudiod's sandbox; shared memory does not.
 enum {
     kYunCustomProperty_ClockAnchor = 'yclk',
+    kYunCustomProperty_IOHealth = 'yioh',
 };
 
 #define kYunAnchorKey_SampleTime "sampleTime"
 #define kYunAnchorKey_HostTime "hostTime"
 #define kYunAnchorKey_SampleRate "sampleRate"
+#define kYunIOHealthKey_UnsafeReadOperations "unsafeReadOperations"
+#define kYunIOHealthKey_UnsafeWriteOperations "unsafeWriteOperations"
 
 /// An anchor is only trusted for this long. If the application stops publishing
 /// — it quit, or routing stopped — the device falls back to the host clock
@@ -126,10 +136,28 @@ typedef struct {
     _Atomic UInt64 seed;
 } YunPublishedClock;
 
+/// One independently published stereo frame in the shared loopback timeline.
+///
+/// CoreAudio identifies each callback's client but does not promise that
+/// callbacks for different clients share a thread or a serial executor. All
+/// three fields are therefore atomic: `owner` keeps a writer's whole callback
+/// span immutable until publication, `sampleFrame` prevents stale wraparound data,
+/// and `stereoBits` keeps left and right from ever belonging to different
+/// writes. A claimed frame is never observed as audio.
 typedef struct {
-    /// Guards everything below except the ring buffer, which is touched only
-    /// by the IO thread and by readers that tolerate a frame of skew.
+    _Atomic UInt64 owner;
+    _Atomic UInt64 sampleFrame;
+    _Atomic UInt64 stereoBits;
+} YunRingFrame;
+
+typedef struct {
+    /// Guards everything below except atomic fields and the ring buffer.
     pthread_mutex_t stateMutex;
+
+    /// Serialises the short admission and reconciliation stages around a
+    /// configuration request. It is deliberately released before calling the
+    /// host because the host may synchronously re-enter this driver.
+    pthread_mutex_t configurationRequestMutex;
 
     AudioServerPlugInHostRef host;
 
@@ -142,9 +170,23 @@ typedef struct {
     // Device
     Float64 sampleRate;
     UInt32 ioRunningCount;
+    /// Stream activity is host-visible state even though this loopback does
+    /// not need it to choose a different IO routine.
+    bool inputStreamIsActive;
+    bool outputStreamIsActive;
     /// Rate requested through SetPropertyData, applied when the host calls
     /// PerformDeviceConfigurationChange.
     Float64 pendingSampleRate;
+    /// The host may defer or reorder configuration callbacks. The opaque
+    /// action identifies the one request which is still allowed to commit.
+    UInt64 pendingConfigurationGeneration;
+    /// Non-zero only while the matching host request call has not returned.
+    /// A synchronous Perform callback may clear the pending action first; this
+    /// separate stage prevents a second host call from overlapping the first.
+    UInt64 configurationRequestInFlightGeneration;
+    UInt64 nextConfigurationGeneration;
+    /// Invalidates an action returned by a previous host initialisation.
+    UInt64 configurationLifetimeGeneration;
 
     // Output control state
     /// Scalar 0...1, as the controls report it.
@@ -155,6 +197,10 @@ typedef struct {
     /// independently changing control fields.
     _Atomic UInt32 inputGainBits;
     _Atomic UInt32 outputGainBits;
+    /// Fail-silent operation counts. Incremented relaxed on the IO thread and
+    /// exposed through the read-only `yioh` custom property.
+    _Atomic UInt64 unsafeReadOperations;
+    _Atomic UInt64 unsafeWriteOperations;
     bool inputMuted;
     bool outputMuted;
 
@@ -182,8 +228,9 @@ typedef struct {
     bool isClockFollowing;
 
     /// Loopback storage: whatever is written to the output stream reappears on
-    /// the input stream.
-    Float32 *ringBuffer;
+    /// the input stream. Each slot carries its absolute sample frame so a wrap
+    /// cannot replay stale audio and concurrent clients never race in C.
+    YunRingFrame *ringBuffer;
 } YunDriverState;
 
 extern YunDriverState gDriver;

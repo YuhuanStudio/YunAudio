@@ -1,0 +1,8 @@
+YunAudioTests.AudioApplicationGroupingTests/everyLiveRowMatches()
+YunAudioTests.AudioObjectStringTests/deviceUID()
+YunAudioTests.ProcessTapRestoreTests/absentApplication()
+YunAudioTests.ProcessTapRestoreTests/explicitFalse()
+YunAudioTests.ProcessTapRestoreTests/roundTrip()
+YunAudioTests.ProcessTapRestoreTests/theFlagWasNeverTheMissingPiece()
+YunAudioTests.SampleRateRestorationTests/noChangeNoRecord()
+YunAudioTests.SampleRateRestorationTests/reportsPreviousRates()

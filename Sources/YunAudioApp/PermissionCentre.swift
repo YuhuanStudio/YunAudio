@@ -17,13 +17,30 @@ import YunDesign
 @MainActor
 @Observable
 final class PermissionCentre {
+    /// Injectable process-service boundary for deterministic launch assertions.
+    struct SafeStatusService {
+        let submit: @MainActor (PermissionSafeStatusRequest) -> Bool
+        let invalidate: @MainActor () -> Void
+        let shutdown: @MainActor () -> Void
+
+        static func live(
+            receive: @escaping @MainActor @Sendable (PermissionSafeStatusSnapshot) -> Void
+        ) -> SafeStatusService {
+            let worker = PermissionSafeStatusWorker(publish: receive)
+            return SafeStatusService(
+                submit: { worker.submit($0) },
+                invalidate: { worker.invalidate() },
+                shutdown: { worker.shutdown() })
+        }
+    }
+
     enum RequestStep: Equatable {
         case microphone
         case systemAudio
         case automation(bundleID: String)
     }
 
-    enum State: Equatable {
+    enum State: Equatable, Sendable {
         case allowed
         case needsRequest
         case notDetermined
@@ -70,7 +87,9 @@ final class PermissionCentre {
         }
     }
 
-    static let shared = PermissionCentre()
+    static let shared = PermissionCentre(
+        startupPolicy: AppStartup.modelPolicy(
+            environment: ProcessInfo.processInfo.environment))
 
     private(set) var microphone: State = .notDetermined
     /// CoreAudio has no passive process-tap preflight API. This is deliberately
@@ -80,20 +99,43 @@ final class PermissionCentre {
     private(set) var automation: [String: State] = [:]
     private(set) var loginItem: State = .notDetermined
     private(set) var requestInFlight: Set<String> = []
+    private(set) var safeStatusSnapshotTimedOut = false
+    private var hasCompletedSafeStatusSnapshot = false
+    private var requestAllWaitsForSnapshot = false
+    private var deferredRequestAllCompletion: (@MainActor () -> Void)?
+    @ObservationIgnored private var safeStatusService: SafeStatusService?
+    private let startupPolicy: AppStartup.ModelPolicy
+    private(set) var safeStatusProbeSubmissions = 0
 
-    private init() {
+    init(
+        startupPolicy: AppStartup.ModelPolicy,
+        makeSafeStatusService:
+            @MainActor (
+                @escaping @MainActor @Sendable (PermissionSafeStatusSnapshot) -> Void
+            ) -> SafeStatusService = SafeStatusService.live
+    ) {
+        self.startupPolicy = startupPolicy
+        if startupPolicy.startsLiveServicesAfterLaunch {
+            safeStatusService = makeSafeStatusService { [weak self] snapshot in
+                self?.receiveSafeStatus(snapshot)
+            }
+        }
         refreshSafeStatuses()
     }
 
     /// Refreshes only APIs that cannot enumerate or open capture hardware.
     func refreshSafeStatuses() {
-        microphone = Self.microphoneState(
-            AVCaptureDevice.authorizationStatus(for: .audio))
-        loginItem = Self.loginItemState(LoginItem.state)
-        automationTargets = NowPlaying.installedAutomationTargets
-        for target in automationTargets {
-            automation[target.bundleID] = Self.automationState(
-                NowPlaying.automationPermissionStatus(for: target.bundleID))
+        guard startupPolicy.startsLiveServicesAfterLaunch,
+            let safeStatusService,
+            safeStatusService.submit(PermissionSafeStatusRequest())
+        else { return }
+        safeStatusProbeSubmissions &+= 1
+    }
+
+    /// Whether a Music or Spotify installation was found in the latest complete scan.
+    var hasInstalledPlayer: Bool {
+        automationTargets.contains {
+            $0.bundleID == "com.apple.Music" || $0.bundleID == "com.spotify.client"
         }
     }
 
@@ -144,6 +186,13 @@ final class PermissionCentre {
         requestInFlight.contains("all")
     }
 
+    /// Number of prompts or deferred prompt plans currently owned.
+    ///
+    /// Exposed only as a number so the synthetic launch test can prove that a
+    /// control cannot leave an invisible request behind after machine-service
+    /// authority was refused.
+    var requestInFlightCountForDiagnostics: Int { requestInFlight.count }
+
     static func executeRequestPlan(
         _ steps: [RequestStep], perform: (RequestStep) async -> Void
     ) async {
@@ -161,14 +210,35 @@ final class PermissionCentre {
     func requestAll(
         onComplete: @escaping @MainActor () -> Void = {}
     ) -> Bool {
-        guard requestInFlight.isEmpty else { return false }
-        let key = "all"
-        let steps = pendingRequestPlan
-        guard !steps.isEmpty else {
+        guard startupPolicy.startsLiveServicesAfterLaunch else {
             onComplete()
             return false
         }
+        guard requestInFlight.isEmpty else { return false }
+        if hasCompletedSafeStatusSnapshot, pendingRequestPlan.isEmpty {
+            onComplete()
+            return false
+        }
+        let key = "all"
         requestInFlight.insert(key)
+        guard hasCompletedSafeStatusSnapshot else {
+            requestAllWaitsForSnapshot = true
+            deferredRequestAllCompletion = onComplete
+            refreshSafeStatuses()
+            return true
+        }
+        beginRequestAll(onComplete: onComplete)
+        return true
+    }
+
+    private func beginRequestAll(onComplete: @escaping @MainActor () -> Void) {
+        let key = "all"
+        let steps = pendingRequestPlan
+        guard !steps.isEmpty else {
+            requestInFlight.remove(key)
+            onComplete()
+            return
+        }
         Task {
             await Self.executeRequestPlan(steps) { step in
                 switch step {
@@ -183,11 +253,11 @@ final class PermissionCentre {
             requestInFlight.remove(key)
             onComplete()
         }
-        return true
     }
 
     /// Requests one player's Automation grant after a direct button press.
     func requestAutomation(for bundleID: String) {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard requestInFlight.isEmpty else { return }
         requestInFlight.insert(bundleID)
         Task {
@@ -199,6 +269,7 @@ final class PermissionCentre {
     /// Requests microphone capture after a direct button press.
     func requestMicrophone() {
         let key = "microphone"
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard requestInFlight.isEmpty else { return }
         requestInFlight.insert(key)
         Task {
@@ -214,6 +285,7 @@ final class PermissionCentre {
     /// topology change explicit and auditable.
     func requestSystemAudio() {
         let key = "system-audio"
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard requestInFlight.isEmpty else { return }
         requestInFlight.insert(key)
         Task {
@@ -242,8 +314,39 @@ final class PermissionCentre {
     }
 
     func openSettings(_ destination: Destination) {
+        guard startupPolicy.startsLiveServicesAfterLaunch else { return }
         guard let url = destination.settingsURL else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// Revokes a stale snapshot for a Quit which AppKit may still refuse.
+    func invalidateSafeStatusRefresh() { safeStatusService?.invalidate() }
+
+    /// Permanently closes status discovery only after AppKit accepts termination.
+    func shutDownSafeStatusRefresh() { safeStatusService?.shutdown() }
+
+    private func receiveSafeStatus(_ snapshot: PermissionSafeStatusSnapshot) {
+        guard !snapshot.wasRevoked else { return }
+        safeStatusSnapshotTimedOut = snapshot.timedOut
+        guard !snapshot.timedOut else {
+            if requestAllWaitsForSnapshot {
+                requestAllWaitsForSnapshot = false
+                deferredRequestAllCompletion = nil
+                requestInFlight.remove("all")
+            }
+            return
+        }
+        microphone = snapshot.microphone
+        loginItem = snapshot.loginItem
+        automationTargets = snapshot.automationTargets
+        automation = snapshot.automation
+        hasCompletedSafeStatusSnapshot = true
+
+        guard requestAllWaitsForSnapshot else { return }
+        requestAllWaitsForSnapshot = false
+        let completion = deferredRequestAllCompletion ?? {}
+        deferredRequestAllCompletion = nil
+        beginRequestAll(onComplete: completion)
     }
 
     nonisolated static func microphoneState(

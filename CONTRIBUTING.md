@@ -26,18 +26,23 @@ do not run it for somebody.
 
 ```bash
 source ./App/toolchain.sh     # or the build fails with a confusing SDK error
-swift build && swift test
+./ci/no-hardware.sh build && ./ci/no-hardware.sh test
 ```
 
 `toolchain.sh` matters: the default Xcode may carry an older SDK, and the error
 that produces reads like a typo rather than a missing toolchain.
 
+The wrapper excludes eight reviewed live-HAL tests. Raw `swift test` is also
+safe by default: those cases remain visible but are disabled unless
+`YUNAUDIO_LIVE_HAL_TESTS=1` explicitly puts the machine's audio state in scope.
+
 ## Before opening a pull request
 
 ```bash
-./App/verify.sh                       # everything that needs no audio hardware
-./App/verify.sh --full                # and the flow check, which takes the devices
-"$(xcrun --find swift-format)" lint --recursive Sources Tests
+./ci/no-hardware.sh all               # deterministic checks, no live HAL
+./App/verify.sh                        # UI gate, no live HAL
+./App/verify.sh --full                 # adds eight live-HAL tests and real routing
+"$(xcrun --find swift-format)" lint --strict --recursive Sources Tests
 "$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
 ```
 
@@ -45,8 +50,11 @@ that produces reads like a typo rather than a missing toolchain.
 `xcrun`. A run that skips a step says so in its summary; read what it skipped
 before trusting a green line.
 
-There is no CI. `verify.sh` is what a hosted runner would have been, except it
-has the SDK and real audio devices, which a hosted runner does not.
+The [no-hardware CI](docs/ci.md) repeats the deterministic checks on explicitly
+labelled self-hosted macOS 26, macOS 27 and next-beta runners. It deliberately
+does not start routes or own audio devices. `verify.sh --full` and the lifecycle
+matrix still require a human-authorised isolated machine; a green CI run is not
+evidence that system audio recovered.
 
 ## House style
 

@@ -1,6 +1,73 @@
 import CoreAudio
 import Foundation
 
+/// Whether a watcher may change CoreAudio's detector-enable property.
+///
+/// Observing is the safe default. `enableIfNeeded` is deliberately spelt out at
+/// every call site because `vAd+` is device-global state: constructing an
+/// object must not silently change it on behalf of an unrelated route.
+public enum VoiceActivityActivationPolicy: Equatable, Sendable {
+    case observeOnly
+    case enableIfNeeded
+}
+
+/// The ownership state behind one detector activation.
+///
+/// CoreAudio itself is injected as two closures. Tests use a spy instead, so
+/// the zero-write default and the exact restore count are proved without
+/// touching the live HAL. Keeping the decision here also makes it impossible
+/// for listener teardown and property ownership to drift into separate rules.
+struct VoiceActivityEnableController {
+    private enum Phase: Equatable {
+        case idle
+        case borrowed
+        case owned
+        case stopped
+    }
+
+    private var phase: Phase = .idle
+
+    var isObserving: Bool {
+        phase == .borrowed || phase == .owned
+    }
+
+    mutating func start(
+        policy: VoiceActivityActivationPolicy,
+        readEnabled: () -> Bool?,
+        setEnabled: (Bool) -> Bool
+    ) -> Bool {
+        precondition(phase == .idle)
+        guard let wasEnabled = readEnabled() else {
+            phase = .stopped
+            return false
+        }
+        if wasEnabled {
+            // Somebody else owns the global switch. Observe it, but do not
+            // claim it and therefore never turn it off later.
+            phase = .borrowed
+            return true
+        }
+        guard policy == .enableIfNeeded, setEnabled(true) else {
+            phase = .stopped
+            return false
+        }
+        phase = .owned
+        return true
+    }
+
+    /// Claims the one restore write, if this activation owns it.
+    ///
+    /// The phase changes before the caller performs HAL work. A second stop —
+    /// including `deinit` after an explicit stop — therefore cannot write the
+    /// global property twice.
+    mutating func takeRestore() -> Bool {
+        guard phase != .stopped else { return false }
+        let restores = phase == .owned
+        phase = .stopped
+        return restores
+    }
+}
+
 /// Whether somebody is speaking, according to CoreAudio rather than to us.
 ///
 /// The system has carried this since macOS 14 and nothing here used it. It is
@@ -39,12 +106,10 @@ public final class VoiceActivityWatcher: @unchecked Sendable {
 
     private let device: AudioObjectID
     private let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.voice-activity")
+    private let lifecycleLock = NSLock()
     private var block: AudioObjectPropertyListenerBlock?
-    /// Whether this instance was the one that switched detection on, so that
-    /// tearing it down leaves the device as it was found. Another application
-    /// may be using the same detector on the same device, and turning it off
-    /// underneath them would be taking away a feature they are relying on.
-    private let didEnable: Bool
+    private var enableController = VoiceActivityEnableController()
+    private var stopped = false
 
     /// Fresh each time rather than a shared mutable static: every CoreAudio
     /// call wants an `inout` address, and a `var` at file scope is shared
@@ -79,14 +144,31 @@ public final class VoiceActivityWatcher: @unchecked Sendable {
 
     /// Whether detection is currently switched on for this device, by anybody.
     public static func isEnabled(on device: AudioObjectID) -> Bool {
+        enabledState(on: device) ?? false
+    }
+
+    /// The optional form used for ownership decisions.
+    ///
+    /// A failed read is not the same as off. Treating it as off and then
+    /// writing one would lose the baseline required to restore the property.
+    private static func enabledState(on device: AudioObjectID) -> Bool? {
         var address = address(enableSelector)
         var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
         guard
             AudioObjectGetPropertyData(
                 device, &address, 0, nil, &size, &value) == noErr
-        else { return false }
+        else { return nil }
         return value != 0
+    }
+
+    private static func setEnabled(_ enabled: Bool, on device: AudioObjectID) -> Bool {
+        var value: UInt32 = enabled ? 1 : 0
+        var address = address(enableSelector)
+        return
+            AudioObjectSetPropertyData(
+                device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
+            == noErr
     }
 
     /// The current answer, without a watcher.
@@ -136,58 +218,86 @@ public final class VoiceActivityWatcher: @unchecked Sendable {
     private static let suggestedReferenceDeviceSelector: AudioObjectPropertySelector =
         0x656f_7264  // 'eord'
 
-    /// Switches detection on and calls back whenever the answer changes.
+    /// Observes detection and, only when explicitly allowed, switches it on.
     ///
     /// The callback arrives on a private queue, not the main thread, and it
     /// fires on *changes* — the header recommends listening rather than
     /// polling, and the reason is that the state moves at the rate of speech.
     ///
     /// - Returns: Nil when the device does not publish the detector.
-    public init?(device: AudioObjectID, onChange: @escaping @Sendable (Bool) -> Void) {
+    public init?(
+        device: AudioObjectID,
+        activation: VoiceActivityActivationPolicy,
+        onCleanupFailure: @escaping @Sendable () -> Void = {},
+        onChange: @escaping @Sendable (Bool) -> Void
+    ) {
         guard Self.isAvailable(on: device) else { return nil }
         self.device = device
 
-        // Left alone if somebody else already has it on, so that tearing this
-        // down does not take it away from them.
-        let wasEnabled = Self.isEnabled(on: device)
-        if wasEnabled {
-            didEnable = false
-        } else {
-            var value: UInt32 = 1
-            var address = Self.address(Self.enableSelector)
-            didEnable =
-                AudioObjectSetPropertyData(
-                    device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
-                == noErr
-        }
+        guard
+            enableController.start(
+                policy: activation,
+                readEnabled: { Self.enabledState(on: device) },
+                setEnabled: { Self.setEnabled($0, on: device) })
+        else { return nil }
 
         let listener: AudioObjectPropertyListenerBlock = { _, _ in
             onChange(Self.state(of: device) ?? false)
         }
-        block = listener
         var address = Self.address(Self.stateSelector)
-        AudioObjectAddPropertyListenerBlock(device, &address, queue, listener)
+        guard AudioObjectAddPropertyListenerBlock(device, &address, queue, listener) == noErr
+        else {
+            if enableController.takeRestore() {
+                if !Self.setEnabled(false, on: device) { onCleanupFailure() }
+            }
+            return nil
+        }
+        block = listener
 
         // The first answer, since a listener only reports changes and the
         // device may already be hearing somebody.
         onChange(Self.state(of: device) ?? false)
     }
 
-    /// True while the detector is running on this device, which is what makes a
-    /// reading of "not speaking" mean anything.
-    public var isObserving: Bool { Self.isEnabled(on: device) }
+    /// True after activation and before explicit cleanup.
+    ///
+    /// Cached rather than read from HAL: this property is presented by SwiftUI,
+    /// and evaluating a view body must never synchronously query `coreaudiod`.
+    public var isObserving: Bool {
+        lifecycleLock.withLock { !stopped && enableController.isObserving }
+    }
+
+    /// Removes the listener and restores only the property this instance owns.
+    ///
+    /// Idempotent so normal route stop and application shutdown can both call
+    /// it. `deinit` remains a last defence, not the normal lifecycle mechanism.
+    ///
+    /// - Returns: True when every requested HAL cleanup operation succeeded.
+    @discardableResult
+    public func stop() -> Bool {
+        let cleanup: (AudioObjectPropertyListenerBlock?, Bool)? = lifecycleLock.withLock {
+            guard !stopped else { return nil }
+            stopped = true
+            let listener = block
+            block = nil
+            return (listener, enableController.takeRestore())
+        }
+        guard let cleanup else { return true }
+
+        var succeeded = true
+        if let listener = cleanup.0 {
+            var address = Self.address(Self.stateSelector)
+            succeeded =
+                AudioObjectRemovePropertyListenerBlock(device, &address, queue, listener)
+                == noErr
+        }
+        if cleanup.1 {
+            succeeded = Self.setEnabled(false, on: device) && succeeded
+        }
+        return succeeded
+    }
 
     deinit {
-        if let block {
-            var address = Self.address(Self.stateSelector)
-            AudioObjectRemovePropertyListenerBlock(device, &address, queue, block)
-        }
-        // Only if we were the ones who switched it on.
-        if didEnable {
-            var value: UInt32 = 0
-            var address = Self.address(Self.enableSelector)
-            AudioObjectSetPropertyData(
-                device, &address, 0, nil, UInt32(MemoryLayout<UInt32>.size), &value)
-        }
+        stop()
     }
 }

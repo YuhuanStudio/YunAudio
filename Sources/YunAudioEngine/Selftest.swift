@@ -1,5 +1,6 @@
 import CoreAudio
 import Foundation
+import YunAudioRT
 
 /// Deterministic test signal.
 ///
@@ -37,7 +38,9 @@ package struct RTSelftest {
     /// Captured samples from the return path.
     package var capture: UnsafeMutablePointer<Float>
     package var captureCapacity: Int32
-    package var captureCount: UnsafeMutablePointer<Int32>
+    /// Release-published count of immutable capture slots. Readers acquire this
+    /// once, then inspect only the prefix the callback has finished writing.
+    package var captureCount: OpaquePointer
     /// Value of `generatedFrames` when the first sample was captured, which
     /// anchors the captured run to the generated sequence.
     package var captureStartFrame: UnsafeMutablePointer<UInt64>
@@ -51,10 +54,17 @@ package struct RTSelftest {
         generated.initialize(to: 0)
         let capture = UnsafeMutablePointer<Float>.allocate(capacity: captureFrames)
         capture.initialize(repeating: 0, count: captureFrames)
-        let count = UnsafeMutablePointer<Int32>.allocate(capacity: 1)
-        count.initialize(to: 0)
         let start = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
         start.initialize(to: 0)
+        guard let count = yun_rt_counter_create(0) else {
+            generated.deinitialize(count: 1)
+            generated.deallocate()
+            capture.deinitialize(count: captureFrames)
+            capture.deallocate()
+            start.deinitialize(count: 1)
+            start.deallocate()
+            preconditionFailure("could not allocate the self-test capture counter")
+        }
 
         let selftest = UnsafeMutablePointer<RTSelftest>.allocate(capacity: 1)
         selftest.initialize(
@@ -75,8 +85,7 @@ package struct RTSelftest {
         selftest.pointee.generatedFrames.deallocate()
         selftest.pointee.capture.deinitialize(count: Int(selftest.pointee.captureCapacity))
         selftest.pointee.capture.deallocate()
-        selftest.pointee.captureCount.deinitialize(count: 1)
-        selftest.pointee.captureCount.deallocate()
+        yun_rt_counter_free(selftest.pointee.captureCount)
         selftest.pointee.captureStartFrame.deinitialize(count: 1)
         selftest.pointee.captureStartFrame.deallocate()
         selftest.deinitialize(count: 1)
@@ -144,7 +153,100 @@ public struct SelftestResult: Sendable {
     }
 }
 
+/// One fixed, owned prefix of a loopback capture.
+///
+/// The realtime writer release-publishes the capture count only after each
+/// prefix is complete. Copying exactly that prefix lets evaluation outlive the
+/// graph without dereferencing its raw storage after route teardown.
+public struct SelftestCapture: Sendable {
+    package let startFrame: UInt64
+    package let samples: [Float]
+
+    package init(startFrame: UInt64, samples: [Float]) {
+        self.startFrame = startFrame
+        self.samples = samples
+    }
+
+    public var capturedFrames: Int { samples.count }
+}
+
+/// ARC lifetime for raw capture storage shared with the realtime graph.
+///
+/// The callback never retains this object. The engine, any diagnostic lease and
+/// a failed-teardown quarantine do, so a route may drop its reference without
+/// freeing storage underneath an off-lock capture copy.
+package final class RTSelftestOwner: @unchecked Sendable {
+    package let block: UnsafeMutablePointer<RTSelftest>
+
+    package init(adopting block: UnsafeMutablePointer<RTSelftest>) {
+        self.block = block
+    }
+
+    package static func allocate(
+        outBuffer: Int32, outChannel: Int32,
+        inBuffer: Int32, inChannel: Int32,
+        captureFrames: Int
+    ) -> RTSelftestOwner {
+        RTSelftestOwner(
+            adopting: RTSelftest.allocate(
+                outBuffer: outBuffer, outChannel: outChannel,
+                inBuffer: inBuffer, inChannel: inChannel,
+                captureFrames: captureFrames))
+    }
+
+    deinit { RTSelftest.deallocate(block) }
+}
+
+/// One fixed prefix plus the owner which keeps its raw samples alive.
+public final class SelftestCaptureLease: @unchecked Sendable {
+    private let owner: RTSelftestOwner
+    private let startFrame: UInt64
+    public let capturedFrames: Int
+
+    package init(
+        owner: RTSelftestOwner, startFrame: UInt64, capturedFrames: Int
+    ) {
+        self.owner = owner
+        self.startFrame = startFrame
+        self.capturedFrames = capturedFrames
+    }
+
+    /// Copies the already-published immutable prefix on the caller's worker.
+    public func capture() -> SelftestCapture {
+        SelftestCapture(
+            startFrame: startFrame,
+            samples: Array(
+                UnsafeBufferPointer(
+                    start: owner.block.pointee.capture, count: capturedFrames)))
+    }
+}
+
 extension RTSelftest {
+    /// Copies only the immutable prefix published by the realtime callback.
+    package static func snapshot(
+        _ selftest: UnsafeMutablePointer<RTSelftest>
+    ) -> SelftestCapture {
+        let capacity = max(0, Int(selftest.pointee.captureCapacity))
+        let published = yun_rt_counter_load(selftest.pointee.captureCount)
+        let count = Int(min(published, UInt64(capacity)))
+        let samples = Array(
+            UnsafeBufferPointer(start: selftest.pointee.capture, count: count))
+        return SelftestCapture(
+            startFrame: count > 0 ? selftest.pointee.captureStartFrame.pointee : 0,
+            samples: samples)
+    }
+
+    package static func evaluate(
+        _ selftest: UnsafeMutablePointer<RTSelftest>,
+        maximumDelayFrames: Int = 16384
+    ) -> SelftestResult {
+        snapshot(selftest).evaluate(maximumDelayFrames: maximumDelayFrames)
+    }
+}
+
+extension SelftestCapture {
+    public static let maximumDelayFrames = 16_384
+
     /// Aligns the captured run against the generated sequence and grades it.
     ///
     /// The loopback delay is unknown up front — it depends on the driver's ring
@@ -152,13 +254,11 @@ extension RTSelftest {
     /// offset and keeping the one that matches best. An offset found this way
     /// is only convincing because an exact match against a 24-bit pseudorandom
     /// sequence cannot happen by chance.
-    package static func evaluate(
-        _ selftest: UnsafeMutablePointer<RTSelftest>,
-        maximumDelayFrames: Int = 16384
+    public func evaluate(
+        maximumDelayFrames: Int = SelftestCapture.maximumDelayFrames
     ) -> SelftestResult {
-        let count = Int(selftest.pointee.captureCount.pointee)
-        let startFrame = selftest.pointee.captureStartFrame.pointee
-        let capture = selftest.pointee.capture
+        let count = samples.count
+        let capture = samples
         guard count > 64 else {
             return SelftestResult(
                 delayFrames: 0, comparedFrames: 0, exactMatches: 0, maxAbsoluteError: 0,
@@ -182,8 +282,10 @@ extension RTSelftest {
         var bestDelay = 0
         var bestError = Double.infinity
         var errors: [Double] = []
-        errors.reserveCapacity(maximumDelayFrames + 1)
-        for delay in 0...maximumDelayFrames {
+        let maximumDelay = min(
+            SelftestCapture.maximumDelayFrames, max(0, maximumDelayFrames))
+        errors.reserveCapacity(maximumDelay + 1)
+        for delay in 0...maximumDelay {
             guard startFrame &+ UInt64(probeOffset) >= UInt64(delay) else { break }
             var error = 0.0
             var exact = 0

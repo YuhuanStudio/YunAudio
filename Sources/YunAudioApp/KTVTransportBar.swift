@@ -37,6 +37,8 @@ struct KTVTransportBar: View {
     var showsKaraokeControls = true
 
     var body: some View {
+        let _ = BodyCount.tick(
+            scale == .stage ? "KTVTransportStage" : "KTVTransportPanel")
         HStack(spacing: scale.spacing) {
             button(
                 "backward.fill", label: loc("Previous track"), size: scale.step,

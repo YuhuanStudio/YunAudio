@@ -248,15 +248,47 @@ extension RoutePreset {
     }
 }
 
+private let userPresetsStoreKey = "com.yuhuanstudio.yunaudio.presets"
+
 /// Presets somebody saved, on disk.
 @MainActor
 enum UserPresets {
-    private static let key = "com.yuhuanstudio.yunaudio.presets"
+    enum SaveResult: Equatable, Sendable {
+        case saved(RoutePreset)
+        case invalidName
+        case refused(CollectionPersistenceRefusal)
+    }
+
+    private static let persistence = BoundedCollectionPersistence<[RoutePreset]>(
+        encode: { try? JSONEncoder().encode($0) },
+        sink: { data in
+            UserDefaults.standard.set(data, forKey: userPresetsStoreKey)
+            return UserDefaults.standard.data(forKey: userPresetsStoreKey) == data
+        },
+        synchronise: { UserDefaults.standard.synchronize() })
+
+    static var statistics: CollectionPersistenceStatistics {
+        persistence.statistics
+    }
+
+    static func refusal(for presets: [RoutePreset]) -> CollectionPersistenceRefusal? {
+        persistence.preflightRefusal(
+            recordCount: presets.count,
+            estimatedEncodedBytes: encodedSizeUpperBoundForDiagnostics(presets))
+    }
 
     static func load() -> [RoutePreset] {
-        guard let data = UserDefaults.standard.data(forKey: key),
-            let decoded = try? JSONDecoder().decode([RoutePreset].self, from: data)
-        else { return [] }
+        let decoded: [RoutePreset]
+        switch persistence.load(
+            UserDefaults.standard.data(forKey: userPresetsStoreKey),
+            decode: { try? JSONDecoder().decode([RoutePreset].self, from: $0) },
+            recordCount: \.count)
+        {
+        case .loaded(let saved):
+            decoded = saved
+        case .absent, .refused:
+            return []
+        }
         // Whatever was stored, they are user-defined by definition of where
         // they came from — a file edited by hand cannot claim to be built in.
         return decoded.map {
@@ -266,9 +298,57 @@ enum UserPresets {
         }
     }
 
-    static func save(_ presets: [RoutePreset]) {
-        guard let data = try? JSONEncoder().encode(presets) else { return }
-        UserDefaults.standard.set(data, forKey: key)
+    @discardableResult
+    static func save(_ presets: [RoutePreset]) -> CollectionPersistenceSubmission {
+        persistence.submit(
+            presets,
+            recordCount: presets.count,
+            estimatedEncodedBytes: encodedSizeUpperBoundForDiagnostics(presets))
+    }
+
+    static func flush(
+        timeout: Duration = .seconds(1),
+        completion: @escaping @MainActor @Sendable (PreferenceFlushResult) -> Void
+    ) {
+        persistence.flush(timeout: timeout, completion: completion)
+    }
+
+    static func encodedSizeUpperBoundForDiagnostics(_ presets: [RoutePreset]) -> Int? {
+        var budget = JSONEncodedSizeBudget(
+            limit: CollectionPersistenceLimits.userCollection.maximumEncodedBytes)
+        budget.addSyntax()
+        for preset in presets {
+            budget.addSyntax()
+            budget.addField("name", string: preset.name)
+            budget.addField("sampleRate", number: preset.sampleRate)
+            budget.addIntegerField("bufferFrames")
+            budget.addBooleanField("voiceIsolationEnabled")
+            budget.addField("voiceIsolationMix", number: preset.voiceIsolationMix)
+            budget.addField("channelMode", string: preset.channelMode)
+            budget.addBooleanField("cancelsEcho")
+            budget.addField("recordingFormat", string: preset.recordingFormat)
+            budget.addField("note", string: preset.note)
+            budget.addBooleanField("isUserDefined")
+            budget.addStringArrayField("effects", values: preset.effects)
+            budget.addFloatDictionaryField("effectValues", values: preset.effectValues)
+            budget.addField("voicePreset", string: preset.voicePreset)
+            budget.addField("inputDecibels", number: preset.inputDecibels)
+            budget.addField("outputDecibels", number: preset.outputDecibels)
+            budget.addField("monitorDeviceUID", string: preset.monitorDeviceUID)
+            budget.addField("sourceDeviceUID", string: preset.sourceDeviceUID)
+            budget.addField(
+                "destinationDeviceUID", string: preset.destinationDeviceUID)
+            budget.addStringArrayField(
+                "capturedAppBundleIDs", values: preset.capturedAppBundleIDs)
+            budget.addField("isDucking", boolean: preset.isDucking)
+            budget.addField("duckDecibels", number: preset.duckDecibels)
+            budget.addField("isAutoLevelling", boolean: preset.isAutoLevelling)
+            budget.addField("loudnessTarget", string: preset.loudnessTarget)
+            budget.addSyntax(2)
+            if budget.hasExceededLimit || !budget.isValid { break }
+        }
+        budget.addSyntax()
+        return budget.upperBound
     }
 }
 
@@ -350,9 +430,10 @@ extension RouterModel {
     /// a preset has just spent time getting a setup right, and a snapshot that
     /// quietly left out the thing they were adjusting is worse than no snapshot
     /// at all.
-    func saveCurrentAsPreset(named name: String) {
+    @discardableResult
+    func saveCurrentAsPreset(named name: String) -> UserPresets.SaveResult {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else { return .invalidName }
         var preset = RoutePreset(
             name: trimmed,
             sampleRate: preferredSampleRate,
@@ -383,8 +464,12 @@ extension RouterModel {
         // "Podcast 3" and no way to tell which is current.
         var presets = userPresets.filter { $0.name != trimmed }
         presets.append(preset)
+        if let refusal = UserPresets.refusal(for: presets) {
+            return .refused(refusal)
+        }
         userPresets = presets
         activePresetName = trimmed
+        return .saved(preset)
     }
 
     func deletePreset(_ preset: RoutePreset) {

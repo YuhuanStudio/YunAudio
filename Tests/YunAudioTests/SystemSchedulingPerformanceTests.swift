@@ -108,6 +108,168 @@ struct SystemSchedulingPerformanceTests {
         #expect(watcher.ranges(of: "kAudioHardwarePropertyDefaultInputDevice").isEmpty)
     }
 
+    @Test("channel-label getters never trigger lazy profile filesystem work")
+    func profileSnapshotCrossesTheDiscoveryLane() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let getterStart = try #require(model.range(of: "var sourceChannelNames:"))
+        let getterEnd = try #require(
+            model.range(
+                of: "/// Label for one channel",
+                range: getterStart.upperBound..<model.endIndex))
+        let getters = model[getterStart.lowerBound..<getterEnd.lowerBound]
+
+        #expect(getters.contains("let deviceProfileLibrary"))
+        #expect(getters.contains("in: deviceProfileLibrary"))
+        #expect(getters.ranges(of: "DeviceChannelNames.shared").isEmpty)
+        #expect(getters.ranges(of: "DeviceProfileLibrary.standard").isEmpty)
+        #expect(getters.ranges(of: "FileManager").isEmpty)
+
+        let readerStart = try #require(
+            model.range(of: "nonisolated static func readDeviceRefreshSnapshot("))
+        let readerEnd = try #require(
+            model.range(
+                of: "private func applyDeviceInventory(",
+                range: readerStart.upperBound..<model.endIndex))
+        let reader = model[readerStart.lowerBound..<readerEnd.lowerBound]
+        #expect(reader.ranges(of: "DeviceChannelNames.shared").count == 1)
+
+        let applyStart = try #require(model.range(of: "private func applyDeviceInventory("))
+        let applyEnd = try #require(
+            model.range(
+                of: "private func applyDeviceControlSnapshot(",
+                range: applyStart.upperBound..<model.endIndex))
+        let apply = model[applyStart.lowerBound..<applyEnd.lowerBound]
+        #expect(apply.contains("deviceProfileLibrary = snapshot.deviceProfiles.library"))
+        #expect(apply.ranges(of: "DeviceChannelNames.shared").isEmpty)
+    }
+
+    @Test("selected words and transcript storage leave MainActor before filesystem work")
+    func localDocumentsUseBoundedOwners() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+
+        let wordsStart = try #require(model.range(of: "func openWords(at url: URL)"))
+        let wordsEnd = try #require(
+            model.range(
+                of: "private func adoptHandWordsResources(",
+                range: wordsStart.upperBound..<model.endIndex))
+        let words = model[wordsStart.lowerBound..<wordsEnd.lowerBound]
+        #expect(words.contains("if isVerificationProcess"))
+        #expect(words.ranges(of: "HandWordsResourceLoader.load(request)").count == 1)
+        #expect(words.ranges(of: "handWordsResourceWorker.submit(").count == 1)
+        #expect(words.ranges(of: "String(contentsOf").isEmpty)
+        #expect(words.ranges(of: "Data(contentsOf").isEmpty)
+        #expect(words.ranges(of: "FileManager").isEmpty)
+
+        let transcriptStart = try #require(model.range(of: "func saveTranscript() -> Bool"))
+        let transcriptEnd = try #require(
+            model.range(
+                of: "private func finishTranscriptSave(",
+                range: transcriptStart.upperBound..<model.endIndex))
+        let transcript = model[transcriptStart.lowerBound..<transcriptEnd.lowerBound]
+        #expect(transcript.ranges(of: "transcriptSaveWorker.submit(").count == 1)
+        #expect(transcript.ranges(of: ".write(").isEmpty)
+        #expect(transcript.ranges(of: "Data(").isEmpty)
+        #expect(transcript.ranges(of: "ISO8601DateFormatter").isEmpty)
+    }
+
+    @Test("optional HAL discovery cannot stand in front of route teardown")
+    func discoveryHasAnIndependentSerialLane() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        for (start, end, subsystem) in [
+            (
+                "private func runDeviceControlRefresh(",
+                "private func finishDeviceControlRefreshWithoutSnapshot(",
+                ".hardwareRead"
+            ),
+            (
+                "func refreshApps()",
+                "private func finishAppRefresh(",
+                ".applicationInventory"
+            ),
+            (
+                "private func runConfiguredDeviceHydration(",
+                "private func finishConfiguredDeviceHydration(",
+                ".deviceHydration"
+            ),
+            (
+                "private func runDeviceChangeRefresh(",
+                "private func finishDeviceChangeRefresh(",
+                ".deviceInventory"
+            ),
+            (
+                "private func refreshPathQualityAsynchronously()",
+                "private func poll()",
+                ".diagnostics"
+            ),
+        ] {
+            let lower = try #require(model.range(of: start))
+            let upper = try #require(
+                model.range(of: end, range: lower.upperBound..<model.endIndex))
+            let body = model[lower.lowerBound..<upper.lowerBound]
+            #expect(body.contains("systemQueryOwners.submit("), Comment(rawValue: start))
+            #expect(body.contains("to: \(subsystem)"), Comment(rawValue: start))
+            #expect(body.contains("deadline:"), Comment(rawValue: start))
+            #expect(!body.contains("systemDiscoveryQueue"), Comment(rawValue: start))
+            #expect(!body.contains("engineQueue"), Comment(rawValue: start))
+        }
+
+        #expect(model.contains("private final class RouterSystemQueryOwners"))
+        #expect(model.contains("BoundedSystemQueryLane<"))
+        #expect(!model.contains("systemDiscoveryQueue"))
+    }
+
+    @Test("application discovery cannot stand in front of route lifecycle")
+    func captureResolutionPrecedesLifecycleAdmission() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let model = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
+            encoding: .utf8)
+        let begin = try #require(model.range(of: "private func beginStartOnEngineQueue("))
+        let end = try #require(
+            model.range(
+                of: "/// Finishes a start made obsolete",
+                range: begin.upperBound..<model.endIndex))
+        let body = model[begin.lowerBound..<end.lowerBound]
+
+        let resolved = try #require(body.range(of: "let runResolvedStart:"))
+        let handover = try #require(
+            body.range(
+                of: "intent.admitEngineLifecycle()",
+                range: resolved.upperBound..<body.endIndex))
+        let lifecycle = try #require(
+            body.range(of: "lifecycleQueue.async", range: handover.upperBound..<body.endIndex))
+        let admission = try #require(
+            body.range(
+                of: "captureResolutionLane.submit(request)",
+                range: lifecycle.upperBound..<body.endIndex))
+
+        #expect(handover.lowerBound < lifecycle.lowerBound)
+        #expect(lifecycle.lowerBound < admission.lowerBound)
+        #expect(body.contains("if selectedApplications.isEmpty"))
+        #expect(body.contains("if !captureResolutionLane.submit(request)"))
+        #expect(!body.contains("systemDiscoveryQueue"))
+        #expect(!body.contains("AudioDevices.defaultOutputUID()"))
+
+        let cancel = try #require(model.range(of: "private func cancelCurrentStart()"))
+        let cancelEnd = try #require(
+            model.range(
+                of: "/// Finishes a start made obsolete",
+                range: cancel.upperBound..<model.endIndex))
+        let cancellation = model[cancel.lowerBound..<cancelEnd.lowerBound]
+        #expect(cancellation.contains("case .finishWithoutEngine:"))
+        #expect(cancellation.contains("invalidate(notifying: finish)"))
+        #expect(cancellation.contains("case .awaitEngineOwner, .alreadyCancelled:"))
+    }
+
     @Test("restore hydrates configured endpoints directly exactly once")
     func restoreHydrationDoesNotEnumerateTheMachine() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
@@ -159,7 +321,7 @@ struct SystemSchedulingPerformanceTests {
         let initialisation = model[initStart.lowerBound..<initEnd.lowerBound]
         #expect(
             initialisation.contains(
-                "if Self.isVerificationProcess, !Self.isUIBenchmarkProcess { refreshDevices() }"
+                "if startupPolicy.refreshesDevicesDuringConstruction { refreshDevices() }"
             ))
         #expect(initialisation.ranges(of: "DeviceChangeWatcher").isEmpty)
         #expect(initialisation.ranges(of: "runInitialDeviceRefresh").isEmpty)
@@ -175,6 +337,11 @@ struct SystemSchedulingPerformanceTests {
                 of: "var flowCheckModel:",
                 range: launchStart.upperBound..<app.endIndex))
         let launch = app[launchStart.lowerBound..<launchEnd.lowerBound]
+        let serviceGate = try #require(
+            launch.range(of: "AppStartup.startsLiveSystemServices"))
+        let deviceDiscovery = try #require(
+            launch.range(of: "beginInitialDeviceDiscovery()"))
+        #expect(serviceGate.lowerBound < deviceDiscovery.lowerBound)
         #expect(launch.ranges(of: "beginInitialDeviceDiscovery()").count == 1)
 
         let workerStart = try #require(
@@ -224,22 +391,20 @@ struct SystemSchedulingPerformanceTests {
         #expect(initialisation.ranges(of: "AudioUnitPlugins.installed()").isEmpty)
         #expect(initialisation.ranges(of: "refreshPluginsIfNeeded()").count == 1)
         #expect(initialisation.contains("if !enabledPlugins.isEmpty"))
-        #expect(initialisation.contains("if lighting.mode != .off"))
+        #expect(initialisation.contains("lighting.mode != .off"))
 
         let restore = try #require(initialisation.range(of: "restore()"))
         let deferred = try #require(
             initialisation.range(of: "refreshPluginsIfNeeded()"))
         #expect(restore.lowerBound < deferred.lowerBound)
 
-        let workerStart = try #require(
-            model.range(of: "private func runPluginRefresh("))
-        let workerEnd = try #require(
-            model.range(
-                of: "private func finishPluginRefresh(",
-                range: workerStart.upperBound..<model.endIndex))
-        let worker = model[workerStart.lowerBound..<workerEnd.lowerBound]
-        #expect(worker.ranges(of: "AudioUnitPlugins.installed()").count == 1)
-        #expect(worker.ranges(of: "systemDiscoveryQueue").count == 1)
+        let worker = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PluginRegistryWorker.swift",
+            encoding: .utf8)
+        #expect(worker.ranges(of: "AudioUnitPlugins.installed").count == 1)
+        #expect(worker.contains("LatestExternalWorkLane"))
+        #expect(worker.contains("maximumPlugins = 2_048"))
+        #expect(worker.contains("defaultTimeout: Duration = .seconds(2)"))
 
         let applyStart = try #require(
             model.range(of: "private func applyPluginRefresh("))
@@ -289,7 +454,8 @@ struct SystemSchedulingPerformanceTests {
             encoding: .utf8)
         #expect(
             router.contains(
-                "Self.isVerificationProcess && !Self.isUIBenchmarkProcess"))
+                "startsClientImmediately: startupPolicy.startsMIDIImmediatelyDuringConstruction"
+            ))
 
         let app = try String(
             contentsOfFile: root + "Sources/YunAudioApp/YunAudioApp.swift",
@@ -301,6 +467,10 @@ struct SystemSchedulingPerformanceTests {
                 of: "var flowCheckModel:",
                 range: launchStart.upperBound..<app.endIndex))
         let launch = app[launchStart.lowerBound..<launchEnd.lowerBound]
+        let serviceGate = try #require(
+            launch.range(of: "AppStartup.startsLiveSystemServices"))
+        let midiStart = try #require(launch.range(of: "beginMIDI()"))
+        #expect(serviceGate.lowerBound < midiStart.lowerBound)
         #expect(launch.ranges(of: "beginMIDI()").count == 1)
 
         let controllerStart = try #require(
@@ -493,15 +663,15 @@ struct SystemSchedulingPerformanceTests {
         #expect(initialisation.ranges(of: "refreshHeadphoneProfiles()").isEmpty)
         #expect(initialisation.contains("if !busHeadphoneProfiles.isEmpty"))
 
-        let readStart = try #require(
-            model.range(of: "nonisolated private static func readHeadphoneProfiles()"))
-        let readEnd = try #require(
-            model.range(
-                of: "private func runHeadphoneProfileRefresh(",
-                range: readStart.upperBound..<model.endIndex))
-        let read = model[readStart.lowerBound..<readEnd.lowerBound]
-        #expect(read.ranges(of: "contentsOfDirectory").count == 1)
-        #expect(read.ranges(of: "String(").count == 1)
+        let worker = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/HeadphoneProfileWorker.swift",
+            encoding: .utf8)
+        #expect(worker.ranges(of: "fileSystem.listDirectory(").count == 1)
+        #expect(worker.ranges(of: "fileSystem.readFile(").count == 1)
+        #expect(worker.contains("maximumDirectoryEntries = 2_048"))
+        #expect(worker.contains("maximumProfileFiles = 256"))
+        #expect(worker.contains("maximumProfileBytes = 1 * 1_024 * 1_024"))
+        #expect(worker.contains("maximumTotalBytes = 8 * 1_024 * 1_024"))
 
         let applyStart = try #require(
             model.range(of: "private func applyHeadphoneProfiles("))
@@ -512,6 +682,7 @@ struct SystemSchedulingPerformanceTests {
         let apply = model[applyStart.lowerBound..<applyEnd.lowerBound]
         #expect(apply.ranges(of: "FileManager").isEmpty)
         #expect(apply.ranges(of: "contentsOfDirectory").isEmpty)
+        #expect(apply.ranges(of: "String(contentsOf").isEmpty)
         #expect(apply.contains("if profilesChanged || !stale.isEmpty"))
     }
 

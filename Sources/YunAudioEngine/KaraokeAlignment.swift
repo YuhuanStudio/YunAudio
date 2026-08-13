@@ -39,6 +39,9 @@ import Foundation
 ///    talks about a performance — "that line was late" — rather than smearing
 ///    one late entry across a whole verse.
 public enum KaraokeAlignment {
+    static let maximumSamplesPerSide = 200_000
+    static let maximumCorridorSamples = 4_096
+    static let maximumAlignmentCells = 20_000_000
 
     /// What the alignment found.
     public struct Result: Sendable, Hashable {
@@ -114,17 +117,33 @@ public enum KaraokeAlignment {
         sung: [PitchSample], reference: [PitchSample],
         bandSeconds: Double = defaultBandSeconds
     ) -> Result? {
-        guard !reference.isEmpty, !sung.isEmpty else { return nil }
+        guard !reference.isEmpty, !sung.isEmpty,
+            reference.count <= maximumSamplesPerSide,
+            sung.count <= maximumSamplesPerSide,
+            bandSeconds.isFinite, bandSeconds > 0,
+            admits(reference), admits(sung)
+        else { return nil }
 
         let referenceStep = typicalStep(of: reference)
         let sungStep = typicalStep(of: sung)
-        guard referenceStep > 0, sungStep > 0 else { return nil }
+        guard referenceStep.isFinite, referenceStep > 0,
+            sungStep.isFinite, sungStep > 0
+        else { return nil }
 
         // The band in samples, from the band in seconds. At least one, or the
         // corridor has no width and the path cannot move.
-        let band = max(1, Int((bandSeconds / sungStep).rounded()))
+        let bandValue = (bandSeconds / sungStep).rounded()
+        guard bandValue.isFinite, let admittedBand = Int(exactly: bandValue) else {
+            return nil
+        }
+        let band = max(1, admittedBand)
+        guard band <= maximumCorridorSamples else { return nil }
         let n = reference.count
         let m = sung.count
+        let corridorWidth = min(m, band * 2 + 1)
+        guard let cells = AudioProcessingContract.checkedProduct(n, corridorWidth),
+            cells <= maximumAlignmentCells
+        else { return nil }
 
         // Two rows rather than the whole matrix. The path itself is not needed
         // — only what it costs and where it goes — and one row of a few hundred
@@ -154,8 +173,12 @@ public enum KaraokeAlignment {
             let referenceSample = reference[i - 1]
             // The corridor: only the sung samples near this reference moment in
             // time are candidates at all.
-            let centre = Int(
-                ((referenceSample.time - sung[0].time) / sungStep).rounded())
+            let centreValue =
+                ((referenceSample.time - sung[0].time) / sungStep).rounded()
+            guard centreValue.isFinite, let centre = Int(exactly: centreValue) else {
+                continue
+            }
+            guard centre >= -band, centre <= m + band else { continue }
             let lower = max(1, centre - band + 1)
             let upper = min(m, centre + band + 1)
             guard lower <= upper else { continue }
@@ -236,5 +259,18 @@ public enum KaraokeAlignment {
         guard !gaps.isEmpty else { return 0 }
         gaps.sort()
         return gaps[gaps.count / 2]
+    }
+
+    private static func admits(_ samples: [PitchSample]) -> Bool {
+        var previous = -Double.infinity
+        for sample in samples {
+            guard sample.time.isFinite, sample.time >= 0,
+                sample.time <= MidiMelody.maximumDurationSeconds,
+                sample.midi.isFinite, (0...127).contains(sample.midi),
+                sample.time >= previous
+            else { return false }
+            previous = sample.time
+        }
+        return true
     }
 }

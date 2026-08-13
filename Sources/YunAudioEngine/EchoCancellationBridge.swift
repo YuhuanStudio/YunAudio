@@ -3,6 +3,18 @@ import Foundation
 import YunAudioHAL
 import YunAudioRT
 
+/// Observable result for both halves of an echo-cancellation bridge.
+public enum EchoCancellationBridgeTeardownResult: Sendable, Equatable {
+    case complete
+    case capture(EchoCancellationTeardownResult)
+    case farEnd(FarEndCaptureTeardownResult)
+    /// The sole lifecycle worker is still inside an operation which public
+    /// Core Audio APIs do not make cancellable.
+    case lifecycleTimedOut(step: AudioUnitTeardownStep?)
+
+    public var isComplete: Bool { self == .complete }
+}
+
 /// What the router asks for when it wants the microphone echo-cancelled.
 public struct EchoCancellationSettings: Sendable {
     /// The speaker whose output should be removed from the microphone. It has
@@ -65,7 +77,8 @@ struct EchoCancellationRateContract: Sendable, Equatable {
     }
 
     static func ratesMatch(_ lhs: Double, _ rhs: Double) -> Bool {
-        lhs.isFinite && rhs.isFinite && lhs > 0 && rhs > 0
+        EchoCancellationCapacityPolicy.isValidSampleRate(lhs)
+            && EchoCancellationCapacityPolicy.isValidSampleRate(rhs)
             && abs(lhs - rhs) < tolerance
     }
 
@@ -78,8 +91,8 @@ struct EchoCancellationRateContract: Sendable, Equatable {
     )
         -> Double?
     {
-        guard producerRate.isFinite, producerRate > 0,
-            consumerRate.isFinite, consumerRate > 0
+        guard EchoCancellationCapacityPolicy.isValidSampleRate(producerRate),
+            EchoCancellationCapacityPolicy.isValidSampleRate(consumerRate)
         else { return nil }
         return producerRate - consumerRate
     }
@@ -93,11 +106,124 @@ struct EchoCancellationRateContract: Sendable, Equatable {
         capacityFrames: Int, producerRate: Double, consumerRate: Double
     ) -> Double? {
         guard capacityFrames > 0,
+            capacityFrames <= Int(EchoCancellationCapacityPolicy.maximumRingFrames),
             let drift = driftFramesPerSecond(
                 producerRate: producerRate, consumerRate: consumerRate),
             abs(drift) >= tolerance
         else { return nil }
         return Double(capacityFrames) / abs(drift)
+    }
+}
+
+/// Owns every completed inner object until bridge construction is published.
+///
+/// A construction timeout does not stop the vendor call already in flight. The
+/// lane therefore invokes this owner only after the constructor returns, while
+/// an ordinary thrown error invokes the same exact-once handoff from its defer.
+/// Keeping both paths here prevents a late successful capture from becoming a
+/// process-lifetime VoiceProcessingIO graph with no teardown transaction.
+final class EchoCancellationBridgePartialConstructionOwner: @unchecked Sendable,
+    AudioUnitTeardownOwner
+{
+    typealias CaptureCleanup =
+        (AudioUnitTeardownGate, HALTeardownDeadline) -> AudioUnitOwnerDisposalResult
+    typealias FarEndCleanup = (HALTeardownDeadline) -> Bool
+    typealias Submit = (any AudioUnitTeardownOwner) -> Void
+
+    private let lock = NSLock()
+    private let submit: Submit
+    private var captureCleanup: CaptureCleanup?
+    private var farEndCleanup: FarEndCleanup?
+    private var cleanupDeadline: HALTeardownDeadline?
+    private var cleanupWasSubmitted = false
+
+    init(
+        submit: @escaping Submit = {
+            BoundedAudioUnitDisposer.shared.disposeAfterFence($0)
+        }
+    ) {
+        self.submit = submit
+    }
+
+    func adopt(_ capture: EchoCancellingCapture) {
+        adoptCapture { gate, deadline in
+            capture.detachForTeardown(until: deadline)
+                .tearDownAudioUnits(using: gate)
+        }
+    }
+
+    func adopt(_ farEnd: FarEndCapture) {
+        adoptFarEnd { deadline in farEnd.stop(until: deadline).isComplete }
+    }
+
+    func relinquishFarEnd() {
+        lock.withLock {
+            precondition(!cleanupWasSubmitted)
+            farEndCleanup = nil
+        }
+    }
+
+    func adoptCapture(_ cleanup: @escaping CaptureCleanup) {
+        lock.withLock {
+            precondition(captureCleanup == nil && !cleanupWasSubmitted)
+            captureCleanup = cleanup
+        }
+    }
+
+    func adoptFarEnd(_ cleanup: @escaping FarEndCleanup) {
+        lock.withLock {
+            precondition(farEndCleanup == nil && !cleanupWasSubmitted)
+            farEndCleanup = cleanup
+        }
+    }
+
+    /// Atomically publishes this complete partial graph to the sole disposer.
+    func disposeAfterConstruction() {
+        let shouldSubmit = lock.withLock { () -> Bool in
+            guard !cleanupWasSubmitted,
+                captureCleanup != nil || farEndCleanup != nil
+            else { return false }
+            cleanupWasSubmitted = true
+            cleanupDeadline = HALTeardownDeadline(timeout: 2)
+            return true
+        }
+        if shouldSubmit { submit(self) }
+    }
+
+    var audioUnitCount: Int { lock.withLock { captureCleanup == nil ? 0 : 1 } }
+
+    var hasTeardownWork: Bool {
+        lock.withLock { captureCleanup != nil || farEndCleanup != nil }
+    }
+
+    func tearDownAudioUnits(
+        using gate: AudioUnitTeardownGate
+    ) -> AudioUnitOwnerDisposalResult {
+        guard let deadline = lock.withLock({ cleanupDeadline }) else {
+            return .blockedByRetainedTransaction(retainedUnits: audioUnitCount)
+        }
+
+        var disposedUnits = 0
+        if let cleanup = lock.withLock({ captureCleanup }) {
+            let result = cleanup(gate, deadline)
+            guard result.isComplete else { return result }
+            if case .complete(let count) = result { disposedUnits += count }
+            lock.withLock { captureCleanup = nil }
+        }
+
+        // A timeout can become visible immediately after the unit is disposed.
+        // Starting a HAL IOProc/aggregate teardown then would run beside the late
+        // Audio Unit call this transaction deliberately quarantined.
+        guard gate.admitsAnotherStep else {
+            return .timedOut(step: gate.stepInFlight, disposedUnits: disposedUnits)
+        }
+        if let cleanup = lock.withLock({ farEndCleanup }) {
+            guard cleanup(deadline) else {
+                return .ownerRetained(disposedUnits: disposedUnits)
+            }
+            lock.withLock { farEndCleanup = nil }
+        }
+        return .complete(disposedUnits: disposedUnits)
     }
 }
 
@@ -147,7 +273,11 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     /// because that callback runs on a realtime thread and cannot allocate.
     private let farEndScratch: UnsafeMutablePointer<Float>
     private let farEndScratchCapacity: Int
+    private let realtimeHandles: UnsafeMutablePointer<RealtimeHandles>
+    private let lifecycleLock = NSLock()
+    private var teardownOwner: EchoCancellationBridgeTeardownOwner?
     private var isRunning = false
+    public private(set) var lastTeardownResult: EchoCancellationBridgeTeardownResult?
 
     /// - Parameters:
     ///   - microphoneUID: The microphone to capture and cancel for.
@@ -157,12 +287,62 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     ///   - maximumFrames: Largest block the unit will be asked for.
     /// - Throws: `EchoCancellationSetupError`, which the route records so the
     ///   interface can name the refusal instead of the feature disappearing.
-    public init(
+    public convenience init(
         microphoneUID: String,
         settings: EchoCancellationSettings,
         routerSampleRate: Double,
         maximumFrames: Int = 512
     ) throws(EchoCancellationSetupError) {
+        try self.init(
+            microphoneUID: microphoneUID, settings: settings,
+            routerSampleRate: routerSampleRate, maximumFrames: maximumFrames,
+            constructionContext: nil)
+    }
+
+    /// Construction-lane entry point. The public standalone path has no
+    /// cancellation context, while a route timeout must prevent every later
+    /// HAL or Audio Unit stage from beginning.
+    init(
+        microphoneUID: String,
+        settings: EchoCancellationSettings,
+        routerSampleRate: Double,
+        maximumFrames: Int,
+        constructionContext: AudioUnitConstructionContext?,
+        graphAdmission: BoundedAudioUnitDisposer.GraphAdmission? = nil
+    ) throws(EchoCancellationSetupError) {
+        guard EchoCancellationCapacityPolicy.isValidSampleRate(routerSampleRate) else {
+            throw .unsafeCapacity(
+                field: "router sample rate",
+                value: String(describing: routerSampleRate))
+        }
+        guard
+            EchoCancellationCapacityPolicy.requestedSliceFrames(maximumFrames) != nil
+        else {
+            throw .unsafeCapacity(
+                field: "maximum slice", value: String(describing: maximumFrames))
+        }
+        guard constructionContext?.mayBeginOperation ?? true else {
+            throw .audioOwnershipQuarantined
+        }
+
+        let partialOwner = EchoCancellationBridgePartialConstructionOwner()
+        let cleanupRegistration: AudioUnitConstructionCleanupRegistration?
+        if let constructionContext {
+            guard
+                let registration = constructionContext.deferCleanupAfterCancellation({
+                    [partialOwner] in
+                    partialOwner.disposeAfterConstruction()
+                })
+            else { throw .audioOwnershipQuarantined }
+            cleanupRegistration = registration
+        } else {
+            cleanupRegistration = nil
+        }
+        var constructionCompleted = false
+        defer {
+            if !constructionCompleted { partialOwner.disposeAfterConstruction() }
+        }
+
         // Build the far end first so its actual rate is known before accepting
         // it as a reference. The router's rate decides the canceller clock; a
         // tap on another clock is left out rather than consumed at the wrong
@@ -172,12 +352,23 @@ public final class EchoCancellationBridge: @unchecked Sendable {
             ? nil
             : FarEndCapture(
                 processIDs: settings.farEndProcessIDs,
-                muteBehavior: settings.tapMuteBehavior)
+                muteBehavior: settings.tapMuteBehavior,
+                constructionContext: constructionContext)
+        if let candidateReference { partialOwner.adopt(candidateReference) }
+        guard constructionContext?.mayBeginOperation ?? true else {
+            throw .audioOwnershipQuarantined
+        }
 
         let capture = try EchoCancellingCapture(
             microphoneUID: microphoneUID, speakerUID: settings.speakerUID,
             requiredSampleRate: routerSampleRate,
-            maximumFrames: maximumFrames)
+            maximumFrames: maximumFrames,
+            constructionContext: constructionContext,
+            graphAdmission: graphAdmission)
+        partialOwner.adopt(capture)
+        guard constructionContext?.mayBeginOperation ?? true else {
+            throw EchoCancellationSetupError.audioOwnershipQuarantined
+        }
 
         let contract = EchoCancellationRateContract(
             farEndRate: candidateReference?.sampleRate,
@@ -187,12 +378,34 @@ public final class EchoCancellationBridge: @unchecked Sendable {
             throw .captureClockDiffersFromRouter(
                 captureRate: capture.sampleRate, routerRate: routerSampleRate)
         }
+        guard constructionContext?.mayBeginOperation ?? true else {
+            throw .audioOwnershipQuarantined
+        }
+        guard
+            let allocation = EchoCancellationCapacityPolicy.ringAllocation(
+                sampleRate: capture.sampleRate,
+                seconds: 0.25,
+                requestedSliceFrames: maximumFrames)
+        else {
+            throw .unsafeCapacity(
+                field: "cancelled ring",
+                value: "\(capture.sampleRate) Hz × 0.25 s")
+        }
 
         // A mismatched process tap is not a reference at this clock. Running
         // the canceller blind is less capable, but remains time-correct; feeding
         // the ring one for one would change speed and inevitably underflow or
         // overflow it.
-        farEnd = contract.canCarryFarEndReference ? candidateReference : nil
+        let selectedReference =
+            contract.canCarryFarEndReference ? candidateReference : nil
+        if selectedReference == nil {
+            guard constructionContext?.mayBeginOperation ?? true else {
+                throw .audioOwnershipQuarantined
+            }
+            partialOwner.relinquishFarEnd()
+            candidateReference?.disposeAfterFence()
+        }
+        farEnd = selectedReference
         self.capture = capture
         sampleRate = capture.sampleRate
 
@@ -200,91 +413,229 @@ public final class EchoCancellationBridge: @unchecked Sendable {
         // are realtime threads on the same nominal clock, so the standing fill
         // is a buffer or two; the rest is there so a stall costs latency rather
         // than a gap.
-        let ringFrames = Int(capture.sampleRate * 0.25)
-        guard let ring = yun_rt_ring_create(UInt32(ringFrames)) else {
-            throw .cancelledRingNotAllocated(frames: ringFrames)
+        guard let ring = yun_rt_ring_create(allocation.ringFrames) else {
+            throw .cancelledRingNotAllocated(frames: Int(allocation.ringFrames))
         }
         cancelledRing = ring
 
-        farEndScratchCapacity = max(maximumFrames, 4096)
+        farEndScratchCapacity = allocation.scratchFrames
         farEndScratch = .allocate(capacity: farEndScratchCapacity)
         farEndScratch.initialize(repeating: 0, count: farEndScratchCapacity)
+        realtimeHandles = .allocate(capacity: 1)
+        realtimeHandles.initialize(
+            to: RealtimeHandles(
+                cancelledRing: ring, farEndRing: farEnd?.realtimeRing))
+
+        // Do not cancel the registration here. Publication is the construction
+        // lane accepting this return, not the last line of this initializer. A
+        // deadline can win between those boundaries; in that case the context
+        // runs the registered cleanup before retaining the late result. A normal
+        // completed transaction releases the registration without invoking it.
+        constructionCompleted = true
+        withExtendedLifetime(cleanupRegistration) {}
     }
 
     deinit {
-        stop()
-        farEndScratch.deallocate()
-        yun_rt_ring_free(cancelledRing)
+        if lifecycleLock.withLock({ teardownOwner }) != nil { return }
+        // A timed-out Start or retry command already owns the capture on the
+        // sole worker. Submitting a replacement owner here would manufacture a
+        // second cleanup attempt. Raw bridge storage intentionally leaks in
+        // this terminal process state so a possible late callback stays valid.
+        if let captureTerminal = capture.terminalLifecycleResult,
+            !captureTerminal.isComplete
+        {
+            if let farEnd { _ = Unmanaged.passRetained(farEnd).toOpaque() }
+            return
+        }
+        let detached = detachForTeardown(until: HALTeardownDeadline(timeout: 2))
+        BoundedAudioUnitDisposer.shared.disposeAfterFence(detached)
     }
 
     /// - Returns: False when either unit refused to start, in which case
     ///   nothing is left running.
     public func start() -> Bool {
         guard !isRunning else { return true }
+        lastTeardownResult = nil
+        let lifecycleDeadline = HALTeardownDeadline(timeout: 2)
 
-        if let farEnd, !farEnd.start() {
-            // Not fatal. Without a reference the canceller still suppresses
-            // steady noise; saying so beats refusing to route.
+        if let farEnd,
+            startFarEnd(farEnd, until: lifecycleDeadline) != true
+        {
+            // An ordinary start refusal is not fatal. Without a reference the
+            // canceller still suppresses steady noise; saying so beats refusing
+            // to route. A failed cleanup is different: carrying a retained
+            // IOProc into a new route would compound the fault.
             farEndReferenceFailed = true
+            if lastTeardownResult?.isComplete == false { return false }
         }
-
-        // Captured by the callbacks instead of `self`: these run on a realtime
-        // thread, and touching a Swift object there would mean retain traffic.
-        //
-        // The pointers travel in a box because a raw pointer is not `Sendable`,
-        // which is the compiler asking the right question — who guarantees this
-        // stays alive? The answer is `stop()`, which runs before `deinit` frees
-        // either of them, and `stop()` returns only once the units have been
-        // stopped and no callback can still be in flight.
-        let handles = RealtimeHandles(
-            ring: cancelledRing, scratch: farEndScratch,
-            scratchCapacity: farEndScratchCapacity, farEnd: farEnd)
 
         // `AudioOutputUnitStart` can return success without ever driving a
         // callback. Observed in the full flow: the route advertised a live
         // canceller and its produced-frame count stayed at zero indefinitely.
         // Success is two callbacks, not the return code; retry the unchanged
         // unit once, as CoreAudio commonly recovers on the second start.
-        for _ in 0..<2 {
-            if let reference = handles.farEnd {
-                _ = reference.discardBufferedFrames(
-                    into: handles.scratch,
-                    capacity: handles.scratchCapacity)
+        for _ in 0..<2 where lifecycleDeadline.hasTimeRemaining {
+            if let farEnd {
+                _ = farEnd.discardBufferedFrames(
+                    into: farEndScratch,
+                    capacity: farEndScratchCapacity)
             }
             let writtenBefore = producedFrames
-            let started = capture.start(
-                capture: { samples, count, _ in
-                    _ = yun_rt_ring_write(handles.ring, samples, UInt32(count))
-                },
-                farEnd: { buffer, frames in
-                    guard let reference = handles.farEnd else { return 0 }
-                    let wanted = min(frames, handles.scratchCapacity)
-                    let taken = reference.read(into: handles.scratch, frames: wanted)
-                    EchoCancellationBridge.copySafeReference(
-                        from: handles.scratch, to: buffer, count: taken)
-                    return taken
-                })
+            let started = capture.startRaw(
+                captureContext: UnsafeMutableRawPointer(realtimeHandles),
+                captureHandler: Self.captureHandler,
+                farEndContext: UnsafeMutableRawPointer(realtimeHandles),
+                farEndProvider: farEnd == nil ? nil : Self.farEndProvider,
+                until: lifecycleDeadline)
+            if !started, capture.terminalLifecycleResult != nil { break }
             if started {
-                let deadline = Date().addingTimeInterval(0.75)
-                while Date() < deadline, producedFrames == writtenBefore {
+                let proofDeadline = DispatchTime.now() + .milliseconds(750)
+                while DispatchTime.now() < proofDeadline,
+                    lifecycleDeadline.hasTimeRemaining,
+                    producedFrames == writtenBefore
+                {
                     Thread.sleep(forTimeInterval: 0.01)
                 }
                 if producedFrames > writtenBefore {
                     isRunning = true
                     return true
                 }
-                capture.stop()
+                guard capture.pauseForRetry(until: lifecycleDeadline) == noErr else {
+                    break
+                }
             }
         }
-        farEnd?.stop()
+        _ = stop(until: lifecycleDeadline)
         return false
     }
 
-    public func stop() {
-        guard isRunning else { return }
-        capture.stop()
-        farEnd?.stop()
-        isRunning = false
+    /// Runs the far-end IOProc's complete start/proof/failure cleanup on the
+    /// same sole worker as VoiceProcessingIO. A hung `AudioDeviceStart` or its
+    /// failed-start Stop can therefore consume one worker, but cannot block the
+    /// route caller or be followed by a replacement cleanup thread.
+    private func startFarEnd(
+        _ farEnd: FarEndCapture,
+        until deadline: HALTeardownDeadline
+    ) -> Bool? {
+        final class StartResult: @unchecked Sendable {
+            var started = false
+        }
+
+        let startResult = StartResult()
+        let command = BoundedAudioUnitLifecycleCommand(
+            retaining: self, step: .start, quarantineOnError: true
+        ) {
+            startResult.started = farEnd.start()
+            // An ordinary unavailable reference is not unsafe and AEC can run
+            // blind. A failed cleanup means ownership is uncertain, so keep the
+            // command and this whole bridge quarantined.
+            return startResult.started || farEnd.lastTeardownResult?.isComplete != false
+                ? noErr : kAudioHardwareUnspecifiedError
+        }
+        let commandResult = BoundedAudioUnitDisposer.shared.dispose(
+            command, until: deadline)
+        switch commandResult {
+        case .complete:
+            return startResult.started
+        case .operationFailed:
+            let result =
+                farEnd.lastTeardownResult.map {
+                    EchoCancellationBridgeTeardownResult.farEnd($0)
+                } ?? .lifecycleTimedOut(step: .start)
+            lifecycleLock.withLock { lastTeardownResult = result }
+            return nil
+        case .timedOut(let step, _):
+            lifecycleLock.withLock {
+                lastTeardownResult = .lifecycleTimedOut(step: step)
+            }
+            return nil
+        case .ownerRetained, .blockedByRetainedTransaction:
+            command.cancelBeforeStart()
+            lifecycleLock.withLock {
+                lastTeardownResult = .lifecycleTimedOut(step: nil)
+            }
+            return nil
+        }
+    }
+
+    /// Tears the callback consumer down before its far-end producer.
+    ///
+    /// The capture render callback reads the far-end ring through a raw pointer,
+    /// so reversing this order would free that ring while a failed voice-unit
+    /// stop could still call it.
+    @discardableResult
+    public func stop(timeout: TimeInterval = 2) -> EchoCancellationBridgeTeardownResult {
+        stop(until: HALTeardownDeadline(timeout: timeout))
+    }
+
+    /// Uses one absolute budget for the callback consumer and producer.
+    @discardableResult
+    public func stop(
+        until deadline: HALTeardownDeadline
+    ) -> EchoCancellationBridgeTeardownResult {
+        if let terminal = lifecycleLock.withLock({ lastTeardownResult }) {
+            return terminal
+        }
+        if let captureTerminal = capture.terminalLifecycleResult,
+            !captureTerminal.isComplete
+        {
+            let result = EchoCancellationBridgeTeardownResult.capture(captureTerminal)
+            lifecycleLock.withLock { lastTeardownResult = result }
+            return result
+        }
+
+        let detached = detachForTeardown(until: deadline)
+        let disposal = BoundedAudioUnitDisposer.shared.dispose(detached, until: deadline)
+        let result: EchoCancellationBridgeTeardownResult
+        switch disposal {
+        case .complete:
+            result = detached.teardownResult ?? .complete
+        case .operationFailed(let step, let status, _):
+            result =
+                detached.teardownResult
+                ?? .capture(.audioUnit(step: step, status: status))
+        case .timedOut(let step, _):
+            result = .lifecycleTimedOut(step: step)
+        case .ownerRetained:
+            result = detached.teardownResult ?? .lifecycleTimedOut(step: nil)
+        case .blockedByRetainedTransaction:
+            result = .lifecycleTimedOut(step: nil)
+        }
+        lifecycleLock.withLock {
+            if lastTeardownResult == nil { lastTeardownResult = result }
+        }
+        let terminal = lifecycleLock.withLock { lastTeardownResult ?? result }
+        if terminal.isComplete { isRunning = false }
+        return terminal
+    }
+
+    /// Exactly-once transfer of both callback sides and all shared raw storage.
+    private func detachForTeardown(
+        until deadline: HALTeardownDeadline
+    ) -> EchoCancellationBridgeTeardownOwner {
+        lifecycleLock.lock()
+        defer { lifecycleLock.unlock() }
+        if let teardownOwner { return teardownOwner }
+
+        let captureOwner = capture.detachForTeardown(until: deadline)
+        let retainedFarEnd = farEnd
+        let retainedHandles = realtimeHandles
+        let retainedScratch = farEndScratch
+        let retainedRing = cancelledRing
+        let owner = EchoCancellationBridgeTeardownOwner(
+            capture: captureOwner,
+            deadline: deadline,
+            stopFarEnd: { transactionDeadline in
+                retainedFarEnd?.stop(until: transactionDeadline)
+            },
+            releaseStorage: {
+                retainedHandles.deinitialize(count: 1)
+                retainedHandles.deallocate()
+                retainedScratch.deallocate()
+                yun_rt_ring_free(retainedRing)
+            })
+        teardownOwner = owner
+        return owner
     }
 
     /// True when the far-end tap could not be started, so the canceller is
@@ -301,12 +652,54 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     public var truncatedBlocks: UInt64 { capture.truncatedBlockCount }
     public var inputCallbacks: UInt64 { capture.inputCallbackCount }
     public var farEndCallbacks: UInt64 { capture.farEndCallbackCount }
+    /// Callback entries refused because an earlier entry was still active.
+    public var callbackOverlaps: UInt64 { capture.callbackOverlapCount }
+    public var renderDiagnostics: EchoCancellationRenderDiagnostics? {
+        capture.renderDiagnosticsSnapshot
+    }
     public var renderFailures: UInt64 { capture.renderFailureCount }
     public var lastRenderStatus: OSStatus { capture.lastRenderStatus }
 
     /// Turns the cancellation off while leaving the same path in place, which
     /// is what makes its effect measurable rather than merely asserted.
-    public func setBypassed(_ bypassed: Bool) { capture.setBypassed(bypassed) }
+    @discardableResult
+    public func setBypassed(
+        _ bypassed: Bool, timeout: TimeInterval = 0.5
+    ) -> EchoCancellationControlResult {
+        capture.setBypassed(bypassed, timeout: timeout)
+    }
+
+    /// Raw handlers used by the production route. Both reach only POD and C
+    /// rings, so Release object code contains no ARC calls on either callback.
+    static let captureHandler:
+        @convention(c) (
+            UnsafeMutableRawPointer, UnsafePointer<Float>, UInt32,
+            UnsafePointer<AudioTimeStamp>
+        ) -> Void = { rawHandles, samples, frames, _ in
+            guard
+                frames
+                    <= UInt32(
+                        EchoCancellationCapacityPolicy.maximumCaptureBufferFrames)
+            else { return }
+            let handles = rawHandles.assumingMemoryBound(to: RealtimeHandles.self)
+            _ = yun_rt_ring_write(handles.pointee.cancelledRing, samples, frames)
+        }
+
+    static let farEndProvider:
+        @convention(c) (
+            UnsafeMutableRawPointer, UnsafeMutablePointer<Float>, UInt32
+        ) -> Int64 = { rawHandles, destination, frames in
+            guard AudioProcessingContract.supports(framesPerSlice: frames) else {
+                return 0
+            }
+            let handles = rawHandles.assumingMemoryBound(to: RealtimeHandles.self)
+            guard let ring = handles.pointee.farEndRing else { return 0 }
+            let taken = yun_rt_ring_read(ring, destination, frames)
+            for index in 0..<Int(taken) {
+                destination[index] = sanitisedAudioSample(destination[index])
+            }
+            return Int64(taken)
+        }
 
     /// Copies process audio into the stateful voice-processing unit.
     ///
@@ -320,24 +713,22 @@ public final class EchoCancellationBridge: @unchecked Sendable {
         to destination: UnsafeMutablePointer<Float>,
         count: Int
     ) {
-        guard count > 0 else { return }
+        guard AudioProcessingContract.supports(framesPerSlice: count)
+        else { return }
         for index in 0..<count {
             destination[index] = sanitisedAudioSample(source[index])
         }
     }
 }
 
-/// The pointers the realtime callbacks need, in one `Sendable` parcel.
+/// The pointers the realtime callbacks need, in one immutable allocation.
 ///
-/// `@unchecked` is the honest claim here rather than a shortcut: these are raw
-/// pointers, and what keeps them valid is lifetime, not synchronisation. The
-/// bridge stops both units before freeing either, and a stopped unit has no
-/// callback in flight.
-private struct RealtimeHandles: @unchecked Sendable {
-    let ring: OpaquePointer
-    let scratch: UnsafeMutablePointer<Float>
-    let scratchCapacity: Int
-    let farEnd: FarEndCapture?
+/// What keeps these valid is lifetime, not synchronisation. The bridge stops
+/// the consumer before the far-end producer and frees this only after both
+/// callback fences hold.
+struct RealtimeHandles: @unchecked Sendable {
+    let cancelledRing: OpaquePointer
+    let farEndRing: OpaquePointer?
 }
 
 /// What the canceller is doing, for the interface to report.
@@ -361,6 +752,10 @@ public struct EchoCancellationStatus: Sendable, Hashable {
     /// that is still being asked for and failing.
     public let inputCallbacks: UInt64
     public let farEndCallbacks: UInt64
+    /// Callback entries refused because an earlier entry was still active.
+    /// This must remain zero: a non-zero value is evidence that Core Audio
+    /// entered a nominally serial render path concurrently.
+    public let callbackOverlaps: UInt64
     public let renderFailures: UInt64
     public let lastRenderStatus: OSStatus
 }

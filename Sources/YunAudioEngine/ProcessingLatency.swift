@@ -38,6 +38,24 @@ public struct ProcessingLatency: Sendable, Hashable {
         max(limiterFrames, 0)
     }
 
+    /// Converts an untrusted Audio Unit latency report without trapping.
+    ///
+    /// Third-party units supply this value in-process. `Int(.nan)`, infinity
+    /// and an out-of-range product all trap in Swift, which would skip the
+    /// route's ordinary Audio Unit and aggregate teardown. A malformed report
+    /// is therefore a refused chain, never a process crash or a zero-latency
+    /// claim.
+    static func validatedFrames(seconds: Double, sampleRate: Double) -> Int? {
+        guard seconds.isFinite, seconds >= 0,
+            sampleRate.isFinite, sampleRate > 0
+        else { return nil }
+        let frames = seconds * sampleRate
+        guard frames.isFinite, frames >= 0, frames <= Double(Int.max) else {
+            return nil
+        }
+        return Int(frames)
+    }
+
     /// What paths that skipped source processing must be held back by.
     public var alignmentFrames: Int { sourceFrames }
 

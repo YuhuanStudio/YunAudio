@@ -10,7 +10,7 @@ cd "$(dirname "$0")"
 extract_function() {
 	local name="$1"
 	awk -v name="${name}" '
-		$0 ~ "static (OSStatus|UInt32|UInt64|Float32|YunClockSnapshot) " name "\\(" {
+		$0 ~ "static (bool|void|OSStatus|UInt32|UInt64|Float32|YunClockSnapshot) " name "\\(" {
 			inside = 1
 		}
 		inside {
@@ -28,11 +28,23 @@ extract_function() {
 
 for function in \
 	Float32FromBits \
+	PackStereoFrame \
+	UnpackStereoFrame \
 	TimestampPeriodAtHostTime \
 	RebasedAnchorHostTime \
 	ReadPublishedClock \
+	SampleTimeToFrame \
+	CycleSpansAreDisjoint \
+	RingSpanCanBeTagged \
+	ClaimRingWriteSpan \
+	PublishRingWrite \
+	ReadRingSpan \
+	FailSilentIO \
 	Yun_GetZeroTimeStamp \
-	Yun_DoIOOperation; do
+	Yun_WillDoIOOperation \
+	Yun_BeginIOOperation \
+	Yun_DoIOOperation \
+	Yun_EndIOOperation; do
 	body="$(extract_function "${function}")"
 	if [[ -z "${body}" ]]; then
 		echo "error: could not find ${function}" >&2

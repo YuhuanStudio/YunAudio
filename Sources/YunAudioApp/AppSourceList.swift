@@ -195,11 +195,9 @@ private struct AppSourceRow: View {
 private struct AppIconView: View {
     let url: URL?
 
-    @MainActor private static let cache = AppIconCache()
-
     var body: some View {
         Group {
-            if let image = Self.icon(for: url) {
+            if let image = AppIconStore.shared.image(for: url) {
                 Image(nsImage: image)
                     .resizable()
                     .interpolation(.high)
@@ -213,68 +211,17 @@ private struct AppIconView: View {
         }
         .frame(width: 16, height: 16)
     }
-
-    @MainActor
-    private static func icon(for url: URL?) -> NSImage? {
-        cache.image(for: url) { NSWorkspace.shared.icon(forFile: $0) }
-    }
 }
 
-/// Keeps only the pixels the sixteen-point application row can display.
-///
-/// `NSWorkspace` returns the complete icon, commonly with representations from
-/// 16 through 1024 pixels. The old static dictionary retained that whole image
-/// for every application ever seen by this process and had no eviction at all.
-/// A row needs neither property: 32 physical pixels cover a sixteen-point row
-/// on a Retina display, and sixty-four recent applications are more than both
-/// visible source lists can show.
-@MainActor
-final class AppIconCache {
-    static let maximumEntries = 64
-    static let pixelSize = 32
-    static let maximumPixelBytes = maximumEntries * pixelSize * pixelSize * 4
-
-    private struct Entry {
-        let image: NSImage
-        var recency: UInt64
-    }
-
-    private var entries: [String: Entry] = [:]
-    private var recency: UInt64 = 0
-
-    var count: Int { entries.count }
-    var pixelBytes: Int { entries.count * Self.pixelSize * Self.pixelSize * 4 }
-
-    func image(
-        for url: URL?,
-        loader: (String) -> NSImage
-    ) -> NSImage? {
-        guard let url else { return nil }
-        let path = url.path
-        recency &+= 1
-        if var hit = entries[path] {
-            hit.recency = recency
-            entries[path] = hit
-            return hit.image
-        }
-
-        guard let image = Self.thumbnail(of: loader(path)) else { return nil }
-        if entries.count >= Self.maximumEntries,
-            let oldest = entries.min(by: { $0.value.recency < $1.value.recency })?.key
-        {
-            entries.removeValue(forKey: oldest)
-        }
-        entries[path] = Entry(image: image, recency: recency)
-        return image
-    }
-
-    private static func thumbnail(of source: NSImage) -> NSImage? {
-        let size = NSSize(width: pixelSize, height: pixelSize)
+/// The sole icon worker calls this with a private bitmap graphics context.
+enum AppIconRasteriser {
+    static func thumbnail(of source: NSImage) -> NSImage? {
+        let size = NSSize(width: AppIconCache.pixelSize, height: AppIconCache.pixelSize)
         guard
             let representation = NSBitmapImageRep(
                 bitmapDataPlanes: nil,
-                pixelsWide: pixelSize,
-                pixelsHigh: pixelSize,
+                pixelsWide: AppIconCache.pixelSize,
+                pixelsHigh: AppIconCache.pixelSize,
                 bitsPerSample: 8,
                 samplesPerPixel: 4,
                 hasAlpha: true,
@@ -300,5 +247,62 @@ final class AppIconCache {
         let thumbnail = NSImage(size: size)
         thumbnail.addRepresentation(representation)
         return thumbnail
+    }
+}
+
+/// Keeps only the pixels the sixteen-point application row can display.
+///
+/// `NSWorkspace` returns the complete icon, commonly with representations from
+/// 16 through 1024 pixels. The old static dictionary retained that whole image
+/// for every application ever seen by this process and had no eviction at all.
+/// A row needs neither property: 32 physical pixels cover a sixteen-point row
+/// on a Retina display, and sixty-four recent applications are more than both
+/// visible source lists can show.
+@MainActor
+final class AppIconCache {
+    nonisolated static let maximumEntries = 64
+    nonisolated static let pixelSize = 32
+    nonisolated static let maximumPixelBytes = maximumEntries * pixelSize * pixelSize * 4
+
+    private struct Entry {
+        let image: NSImage
+        var recency: UInt64
+    }
+
+    private var entries: [String: Entry] = [:]
+    private var recency: UInt64 = 0
+
+    var count: Int { entries.count }
+    var pixelBytes: Int { entries.count * Self.pixelSize * Self.pixelSize * 4 }
+
+    func image(
+        for url: URL?,
+        loader: (String) -> NSImage
+    ) -> NSImage? {
+        guard let url else { return nil }
+        if let hit = cachedImage(for: url) { return hit }
+        let path = url.path
+        guard let image = AppIconRasteriser.thumbnail(of: loader(path)) else { return nil }
+        insert(image, forPath: path)
+        return image
+    }
+
+    func cachedImage(for url: URL) -> NSImage? {
+        let path = url.path
+        recency &+= 1
+        guard var hit = entries[path] else { return nil }
+        hit.recency = recency
+        entries[path] = hit
+        return hit.image
+    }
+
+    func insert(_ image: NSImage, forPath path: String) {
+        recency &+= 1
+        if entries.count >= Self.maximumEntries,
+            let oldest = entries.min(by: { $0.value.recency < $1.value.recency })?.key
+        {
+            entries.removeValue(forKey: oldest)
+        }
+        entries[path] = Entry(image: image, recency: recency)
     }
 }

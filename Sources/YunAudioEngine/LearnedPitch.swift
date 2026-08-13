@@ -53,6 +53,52 @@ import Foundation
 /// network small enough to train on synthetic data at all.
 public final class LearnedPitch: @unchecked Sendable {
 
+    /// Process-wide evidence that source compilation is not tied to tracker count.
+    struct CompilationStatistics: Sendable, Equatable {
+        let attempts: Int
+        let didCompile: Bool
+    }
+
+    /// `MLModel.compileModel` is package compilation, not instance setup. One
+    /// singing panel can own several source trackers, and compiling the same
+    /// package for every one was seconds of duplicate filesystem and Core ML
+    /// work whenever that set was rebuilt.
+    private final class CompiledModelCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var hasResolved = false
+        private var compiledURL: URL?
+        private var attempts = 0
+
+        func resolve(sourceURL: URL) -> URL? {
+            lock.lock()
+            defer { lock.unlock() }
+            if hasResolved { return compiledURL }
+            hasResolved = true
+            attempts += 1
+            compiledURL = try? MLModel.compileModel(at: sourceURL)
+            return compiledURL
+        }
+
+        var statistics: CompilationStatistics {
+            lock.lock()
+            defer { lock.unlock() }
+            return CompilationStatistics(
+                attempts: attempts, didCompile: compiledURL != nil)
+        }
+    }
+
+    private static let compiledModels = CompiledModelCache()
+
+    static var compilationStatistics: CompilationStatistics {
+        compiledModels.statistics
+    }
+
+    /// Per-instance proof that the steady-state call reuses its input objects.
+    struct PredictionStatistics: Sendable, Equatable {
+        let featureProviders: Int
+        let predictions: UInt64
+    }
+
     /// Where the curve's first lag sits, so a bin can become a frequency.
     public let minimumLag: Int
     public let sampleRate: Double
@@ -60,12 +106,19 @@ public final class LearnedPitch: @unchecked Sendable {
 
     private let model: MLModel
     private let input: MLMultiArray
+    private let features: MLDictionaryFeatureProvider
+    /// Core ML does not mark `MLModel` Sendable, and `input` is deliberately
+    /// mutated in place. Serialising the pair is what makes this class's
+    /// `@unchecked Sendable` conformance true rather than aspirational.
+    private let predictionLock = NSLock()
+    private var predictionCount: UInt64 = 0
 
     /// Loads the head from the package's own bundle.
     ///
     /// - Returns: Nil when the model is absent or will not compile, which is a
     ///   perfectly good state — the caller keeps the rule.
     public init?(sampleRate: Double) {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate) else { return nil }
         guard
             let url = Bundle.module.url(
                 forResource: "PitchHead", withExtension: "mlpackage")
@@ -77,7 +130,7 @@ public final class LearnedPitch: @unchecked Sendable {
         // ever runs on.
         configuration.computeUnits = .all
         guard
-            let compiled = try? MLModel.compileModel(at: url),
+            let compiled = Self.compiledModels.resolve(sourceURL: url),
             let model = try? MLModel(contentsOf: compiled, configuration: configuration)
         else { return nil }
         self.model = model
@@ -94,9 +147,17 @@ public final class LearnedPitch: @unchecked Sendable {
         width = shape[1].intValue
         guard
             let input = try? MLMultiArray(
-                shape: [1, NSNumber(value: width), 1, 1], dataType: .float32)
+                shape: [1, NSNumber(value: width), 1, 1], dataType: .float32),
+            let features = try? MLDictionaryFeatureProvider(dictionary: ["curve": input])
         else { return nil }
         self.input = input
+        self.features = features
+    }
+
+    var predictionStatistics: PredictionStatistics {
+        predictionLock.lock()
+        defer { predictionLock.unlock() }
+        return PredictionStatistics(featureProviders: 1, predictions: predictionCount)
     }
 
     /// The rule's answer where the rule is reliable, the head's where it is not,
@@ -123,6 +184,8 @@ public final class LearnedPitch: @unchecked Sendable {
     /// - Parameters:
     ///   - curve: From `PitchTracker.correlationCurve`.
     ///   - ruled: What `PitchTracker.track` said about the same frame.
+    /// - Returns: The rule's precise pitch unless the head identifies another
+    ///   periodicity, or zero when the rule says the frame is unvoiced.
     public func hertz(from curve: [Float], agreeingWith ruled: Float) -> Float {
         let chosen = hertz(from: curve)
         guard chosen > 0 else { return ruled }
@@ -183,14 +246,18 @@ public final class LearnedPitch: @unchecked Sendable {
     ///
     /// - Parameter curve: Exactly `width` values from
     ///   `PitchTracker.correlationCurve`.
+    /// - Returns: The pitch selected by the learned head, in hertz, or zero
+    ///   when the curve has the wrong shape or no periodicity was selected.
     public func hertz(from curve: [Float]) -> Float {
         guard curve.count == width else { return 0 }
+        predictionLock.lock()
+        defer { predictionLock.unlock() }
+        predictionCount &+= 1
         let destination = input.dataPointer.bindMemory(to: Float.self, capacity: width)
         curve.withUnsafeBufferPointer { source in
             destination.update(from: source.baseAddress!, count: width)
         }
         guard
-            let features = try? MLDictionaryFeatureProvider(dictionary: ["curve": input]),
             let output = try? model.prediction(from: features),
             let probabilities = output.featureValue(for: "lagProbabilities")?
                 .multiArrayValue

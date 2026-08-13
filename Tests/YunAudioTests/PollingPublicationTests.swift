@@ -290,10 +290,10 @@ struct PollingPublicationTests {
             "publish(key, to: \\.songKey)",
             "to: \\.suggestedShift)",
             "to: \\.scoringReferenceMode)",
-            "publish(engine.recordingDuration, to: \\.recordingSeconds)",
+            "publish(snapshot.duration, to: \\.recordingSeconds)",
             "publish(held, at: index, to: \\.peakHolds)",
             "to: \\.gainReduction)",
-            "publish(analyser.reading(), to: \\.analysis)",
+            "publish(snapshot.reading, to: \\.analysis)",
             "publish(offset, to: \\.autoLevelOffset)",
             "to: \\.outputVerdict)",
         ] {

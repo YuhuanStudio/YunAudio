@@ -218,7 +218,21 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     public var hasOutput: Bool { pickerRole.contains(.output) }
 
     public init(id: AudioObjectID) throws {
-        try self.init(id: id, loadingBluetoothCapabilitiesFor: nil)
+        try self.init(
+            id: id, loadingBluetoothCapabilitiesFor: nil,
+            operationAdmission: { true })
+    }
+
+    /// Package construction path which stops a multi-property snapshot after
+    /// the route's absolute deadline. A property call already in flight cannot
+    /// be cancelled; every later one asks this closure again.
+    package init(
+        id: AudioObjectID,
+        operationAdmission: @escaping @Sendable () -> Bool
+    ) throws {
+        try self.init(
+            id: id, loadingBluetoothCapabilitiesFor: nil,
+            operationAdmission: operationAdmission)
     }
 
     /// Builds an enumeration snapshot without waking an unrelated Bluetooth
@@ -237,14 +251,21 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// the caller genuinely needs.
     init(
         id: AudioObjectID,
-        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String>?
+        loadingBluetoothCapabilitiesFor selectedUIDs: Set<String>?,
+        operationAdmission: @escaping @Sendable () -> Bool = { true }
     ) throws {
         self.id = id
+        guard operationAdmission() else { throw CancellationError() }
         uid = try id.string(of: .deviceUID)
+        guard operationAdmission() else { throw CancellationError() }
         name = id.optionalString(of: .deviceName) ?? uid
+        guard operationAdmission() else { throw CancellationError() }
         manufacturer = id.optionalString(of: .manufacturer)
+        guard operationAdmission() else { throw CancellationError() }
         modelUID = id.optionalString(of: .modelUID)
+        guard operationAdmission() else { throw CancellationError() }
         transport = AudioTransport(rawValue: id.optionalValue(of: .transportType))
+        guard operationAdmission() else { throw CancellationError() }
         let loadsDetails: Bool
         if let selectedUIDs {
             loadsDetails = AudioDevices.shouldLoadDetailedCapabilities(
@@ -254,20 +275,32 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         }
         let topology = Self.topologySnapshot(
             loadsDetails: loadsDetails,
-            readsChannelCount: { scope in Self.channelCount(of: id, scope: scope) })
+            readsChannelCount: { scope in
+                Self.channelCount(
+                    of: id, scope: scope,
+                    operationAdmission: operationAdmission)
+            })
+        guard operationAdmission() else { throw CancellationError() }
         inputChannels = topology.inputChannels
         outputChannels = topology.outputChannels
         pickerRole = topology.pickerRole
         pickerRoleIsCertain = topology.pickerRoleIsCertain
         hasCompleteTopology = topology.isComplete
         if loadsDetails {
+            guard operationAdmission() else { throw CancellationError() }
             nominalSampleRate = id.optionalValue(of: .nominalSampleRate) ?? 0
-            let ranges = (try? id.array(of: .availableNominalSampleRates)) ?? []
+            guard operationAdmission() else { throw CancellationError() }
+            let ranges =
+                (try? id.array(
+                    of: .availableNominalSampleRates,
+                    maximumCount: HALSemanticArrayPolicy.maximumFormatsPerObject)) ?? []
+            guard operationAdmission() else { throw CancellationError() }
             availableSampleRates = Self.expand(ranges)
 
             // A published domain of 0 means the device did not join a domain, so it
             // is preserved as nil rather than being compared as a real value.
             let domain = id.optionalValue(of: .clockDomain)
+            guard operationAdmission() else { throw CancellationError() }
             clockDomain = (domain == 0) ? nil : domain
         } else {
             nominalSampleRate = 0
@@ -316,23 +349,77 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// Sums the channels across every buffer in the stream configuration for a
     /// scope. Multi-stream devices (the Seiren V3 Pro exposes several) report
     /// one buffer per stream, so reading only the first undercounts.
-    static func channelCount(of id: AudioObjectID, scope: AudioObjectPropertyScope) -> Int {
-        let property = AudioProperty<AudioBufferList>.streamConfiguration.scoped(to: scope)
-        guard let byteCount = try? id.dataSize(of: property), byteCount > 0 else { return 0 }
+    ///
+    /// Sixty-four is also the routing topology ceiling. A corrupt or hostile
+    /// HAL object which reports billions of channels must be rejected here,
+    /// before the application builds dictionaries and scratch storage from a
+    /// value which was only ever metadata.
+    static let maximumSupportedChannelsPerScope = 64
 
-        let raw = UnsafeMutableRawPointer.allocate(
-            byteCount: byteCount, alignment: MemoryLayout<AudioBufferList>.alignment)
-        defer { raw.deallocate() }
-
-        var address = property.address
-        var size = UInt32(byteCount)
-        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, raw) == noErr else {
-            return 0
+    static func admittedChannelTotal(_ reported: [UInt32]) -> Int? {
+        var total = 0
+        for count in reported {
+            guard count <= UInt32(maximumSupportedChannelsPerScope) else { return nil }
+            let (next, overflowed) = total.addingReportingOverflow(Int(count))
+            guard !overflowed, next <= maximumSupportedChannelsPerScope else { return nil }
+            total = next
         }
+        return total
+    }
 
-        let list = UnsafeMutableAudioBufferListPointer(
-            raw.assumingMemoryBound(to: AudioBufferList.self))
-        return list.reduce(0) { $0 + Int($1.mNumberChannels) }
+    static func channelCount(of id: AudioObjectID, scope: AudioObjectPropertyScope) -> Int {
+        channelCount(of: id, scope: scope, operationAdmission: { true })
+    }
+
+    private static func channelCount(
+        of id: AudioObjectID, scope: AudioObjectPropertyScope,
+        operationAdmission: () -> Bool
+    ) -> Int {
+        let property = AudioProperty<AudioBufferList>.streamConfiguration.scoped(to: scope)
+        for attempt in 0..<HALArrayReadPolicy.maximumAttempts {
+            guard operationAdmission() else { return 0 }
+            guard let byteCount = try? id.dataSize(of: property), byteCount > 0,
+                (try? HALArrayReadPolicy.elementCount(
+                    byteCount: byteCount, for: UInt8.self, selector: property.selector)) != nil
+            else { return 0 }
+
+            let raw = UnsafeMutableRawPointer.allocate(
+                byteCount: byteCount, alignment: MemoryLayout<AudioBufferList>.alignment)
+            defer { raw.deallocate() }
+
+            var address = property.address
+            var size = UInt32(byteCount)
+            guard operationAdmission() else { return 0 }
+            let status = AudioObjectGetPropertyData(id, &address, 0, nil, &size, raw)
+            guard operationAdmission() else { return 0 }
+            if status == kAudioHardwareBadPropertySizeError,
+                attempt + 1 < HALArrayReadPolicy.maximumAttempts
+            {
+                continue
+            }
+            guard status == noErr, Int(size) <= byteCount,
+                Int(size) >= MemoryLayout<UInt32>.size
+            else { return 0 }
+
+            let declaredCount = raw.load(as: UInt32.self)
+            guard
+                let count = try? HALAudioBufferListPolicy.bufferCount(
+                    byteCount: Int(size), declaredCount: declaredCount,
+                    selector: property.selector)
+            else { return 0 }
+            let buffers = raw.advanced(by: HALAudioBufferListPolicy.headerBytes)
+                .assumingMemoryBound(to: AudioBuffer.self)
+            var channels = 0
+            for index in 0..<count {
+                let reported = buffers[index].mNumberChannels
+                guard reported <= UInt32(maximumSupportedChannelsPerScope) else { return 0 }
+                let (next, overflowed) = channels.addingReportingOverflow(Int(reported))
+                guard !overflowed, next <= maximumSupportedChannelsPerScope else { return 0 }
+                channels = next
+            }
+            return channels
+        }
+        return 0
     }
 
     /// Flattens `AudioValueRange`s into concrete rates. Continuous ranges (some
@@ -346,7 +433,12 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         ]
         var rates: Set<Double> = []
         for range in ranges {
-            if range.mMinimum == range.mMaximum {
+            guard range.mMinimum.isFinite, range.mMaximum.isFinite,
+                range.mMinimum <= range.mMaximum
+            else { continue }
+            if range.mMinimum == range.mMaximum,
+                AudioHardwareValuePolicy.supports(sampleRate: range.mMinimum)
+            {
                 rates.insert(range.mMinimum)
             } else {
                 rates.formUnion(
@@ -500,24 +592,28 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 
     public func controls() -> [Control] {
         let owned = AudioProperty<AudioObjectID>(kAudioObjectPropertyOwnedObjects)
-        return (try? id.array(of: owned))?.compactMap { object -> Control? in
-            guard
-                let classID: UInt32 = object.optionalValue(of: .init(kAudioObjectPropertyClass))
-            else { return nil }
-            // Streams own no controls and are already reported elsewhere.
-            guard classID != kAudioStreamClassID else { return nil }
-            let scope: UInt32 =
-                object.optionalValue(of: .init(kAudioControlPropertyScope)) ?? 0
-            let element: UInt32 =
-                object.optionalValue(of: .init(kAudioControlPropertyElement)) ?? 0
-            let level = AudioProperty<Float32>(kAudioLevelControlPropertyScalarValue)
-            return Control(
-                objectID: object, classID: classID, scope: scope, element: element,
-                isSettable: object.isSettable(level),
-                scalar: object.optionalValue(of: level),
-                decibels: object.optionalValue(
-                    of: AudioProperty<Float32>(kAudioLevelControlPropertyDecibelValue)))
-        } ?? []
+        return
+            (try? id.array(
+                of: owned, maximumCount: HALSemanticArrayPolicy.maximumOwnedObjects
+            ))?.compactMap { object -> Control? in
+                guard
+                    let classID: UInt32 = object.optionalValue(
+                        of: .init(kAudioObjectPropertyClass))
+                else { return nil }
+                // Streams own no controls and are already reported elsewhere.
+                guard classID != kAudioStreamClassID else { return nil }
+                let scope: UInt32 =
+                    object.optionalValue(of: .init(kAudioControlPropertyScope)) ?? 0
+                let element: UInt32 =
+                    object.optionalValue(of: .init(kAudioControlPropertyElement)) ?? 0
+                let level = AudioProperty<Float32>(kAudioLevelControlPropertyScalarValue)
+                return Control(
+                    objectID: object, classID: classID, scope: scope, element: element,
+                    isSettable: object.isSettable(level),
+                    scalar: object.optionalValue(of: level),
+                    decibels: object.optionalValue(
+                        of: AudioProperty<Float32>(kAudioLevelControlPropertyDecibelValue)))
+            } ?? []
     }
 
     public func isMuted(scope: AudioObjectPropertyScope) -> Bool {
@@ -553,6 +649,26 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
         /// channel, and is worth knowing because a device that publishes only
         /// per-channel controls looks like a device with none.
         public let element: AudioObjectPropertyElement
+        /// Every element already proven settable during the low-rate control
+        /// snapshot. Slider writes reuse this list instead of rediscovering up
+        /// to five properties for every pointer event.
+        public let settableElements: [AudioObjectPropertyElement]
+
+        public init(
+            scalar: Float,
+            decibels: Float?,
+            decibelRange: ClosedRange<Float>?,
+            isSettable: Bool,
+            element: AudioObjectPropertyElement,
+            settableElements: [AudioObjectPropertyElement] = []
+        ) {
+            self.scalar = scalar
+            self.decibels = decibels
+            self.decibelRange = decibelRange
+            self.isSettable = isSettable
+            self.element = element
+            self.settableElements = settableElements
+        }
     }
 
     /// The device's own gain, and which element it turned out to live on.
@@ -569,37 +685,79 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     /// transfer would reach it. It does expose it. Nobody had asked the right
     /// element.
     public func hardwareGain(scope: AudioObjectPropertyScope) -> HardwareGain? {
+        var first: HardwareGain?
+        var settableElements: [AudioObjectPropertyElement] = []
         for element in gainElements(scope: scope) {
             let volume = AudioProperty<Float32>(
                 kAudioDevicePropertyVolumeScalar, scope: scope, element: element)
             guard let scalar = id.optionalValue(of: volume) else { continue }
-            let range = id.optionalValue(
-                of: AudioProperty<AudioValueRange>(
-                    kAudioDevicePropertyVolumeRangeDecibels, scope: scope,
-                    element: element))
-            return HardwareGain(
-                scalar: scalar,
-                decibels: id.optionalValue(
-                    of: AudioProperty<Float32>(
-                        kAudioDevicePropertyVolumeDecibels, scope: scope, element: element)),
-                decibelRange: range.map { Float($0.mMinimum)...Float($0.mMaximum) },
-                isSettable: id.isSettable(volume),
-                element: element)
+            let isSettable = id.isSettable(volume)
+            if isSettable { settableElements.append(element) }
+            if first == nil {
+                let range = id.optionalValue(
+                    of: AudioProperty<AudioValueRange>(
+                        kAudioDevicePropertyVolumeRangeDecibels, scope: scope,
+                        element: element))
+                first = HardwareGain(
+                    scalar: scalar,
+                    decibels: id.optionalValue(
+                        of: AudioProperty<Float32>(
+                            kAudioDevicePropertyVolumeDecibels, scope: scope,
+                            element: element)),
+                    decibelRange: range.map { Float($0.mMinimum)...Float($0.mMaximum) },
+                    isSettable: isSettable,
+                    element: element)
+            }
+            // A settable master governs every channel. Scanning the remaining
+            // elements would add property round trips without changing either
+            // the reading or what the writer should touch.
+            if element == kAudioObjectPropertyElementMain, isSettable {
+                break
+            }
         }
-        return nil
+        guard let first else { return nil }
+        return HardwareGain(
+            scalar: first.scalar,
+            decibels: first.decibels,
+            decibelRange: first.decibelRange,
+            isSettable: !settableElements.isEmpty,
+            element: first.element,
+            settableElements: settableElements)
     }
 
     /// Every channel that carries the gain gets it, not only the one that was
     /// found. A three-capsule microphone with one channel turned up and two
     /// left alone is a device somebody will spend an evening on.
     public func setHardwareGain(scalar: Float, scope: AudioObjectPropertyScope) throws {
-        let value = Float32(max(0, min(1, scalar)))
+        // Keep the public convenience boundary fail-fast too: element
+        // discovery itself is HAL work and malformed input earns none of it.
+        _ = try AudioHardwareValuePolicy.clampedControlScalar(scalar)
+        let elements = hardwareGain(scope: scope)?.settableElements ?? []
+        try setHardwareGain(scalar: scalar, scope: scope, elements: elements)
+    }
+
+    /// Writes a control through elements discovered by a prior low-rate read.
+    ///
+    /// Validation happens before the first HAL call. The cached list turns a
+    /// three-channel slider tick from property discovery plus three writes into
+    /// exactly three writes, while a stale element simply returns its HAL error.
+    public func setHardwareGain(
+        scalar: Float,
+        scope: AudioObjectPropertyScope,
+        elements: [AudioObjectPropertyElement]
+    ) throws {
+        // A NaN written to a device control is not merely bad local state: the
+        // audio service is shared with the system Sound menu and every other
+        // application.
+        let value = try AudioHardwareValuePolicy.clampedControlScalar(scalar)
+        guard AudioHardwareValuePolicy.supports(hardwareControlElements: elements) else {
+            throw AudioHardwareValueError.unsupportedHardwareControlElements(elements)
+        }
         var wrote = false
         var lastError: Error?
-        for element in gainElements(scope: scope) {
+        for element in elements {
             let volume = AudioProperty<Float32>(
                 kAudioDevicePropertyVolumeScalar, scope: scope, element: element)
-            guard id.optionalValue(of: volume) != nil, id.isSettable(volume) else { continue }
             do {
                 try id.setValue(value, for: volume)
                 wrote = true
@@ -674,6 +832,12 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     ) throws
         -> Bool
     {
+        guard AudioHardwareValuePolicy.supports(sampleRate: rate) else {
+            throw AudioHardwareValueError.unsupportedSampleRate(rate)
+        }
+        guard AudioHardwareValuePolicy.supports(controlWait: timeout) else {
+            throw AudioHardwareValueError.unsupportedControlWait(timeout)
+        }
         try id.setValue(rate, for: .nominalSampleRate)
         // Poll rather than register a listener: this is a control-thread
         // operation that happens a handful of times per route, and a listener
@@ -688,6 +852,9 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
     }
 
     public func setBufferFrameSize(_ frames: UInt32) throws {
+        guard AudioHardwareValuePolicy.supports(framesPerSlice: frames) else {
+            throw AudioHardwareValueError.unsupportedFramesPerSlice(frames)
+        }
         try id.setValue(frames, for: .bufferFrameSize)
     }
 }
@@ -701,7 +868,9 @@ public enum AudioDevices {
     /// with an exact non-zero channel count. Only the application's picker
     /// inventory uses the deliberately partial API below.
     public static func all() throws -> [AudioDevice] {
-        try AudioObjectID.system.array(of: .devices).compactMap {
+        try AudioObjectID.system.array(
+            of: .devices, maximumCount: HALSemanticArrayPolicy.maximumDevices
+        ).compactMap {
             try? AudioDevice(id: $0)
         }
     }
@@ -710,7 +879,9 @@ public enum AudioDevices {
     public static func inventory(
         loadingBluetoothCapabilitiesFor selectedUIDs: Set<String>
     ) throws -> [AudioDevice] {
-        try AudioObjectID.system.array(of: .devices).compactMap {
+        try AudioObjectID.system.array(
+            of: .devices, maximumCount: HALSemanticArrayPolicy.maximumDevices
+        ).compactMap {
             try? AudioDevice(
                 id: $0, loadingBluetoothCapabilitiesFor: selectedUIDs)
         }
@@ -729,6 +900,29 @@ public enum AudioDevices {
     }
 
     public static func device(uid: String) throws -> AudioDevice? {
+        guard let deviceID = try objectID(forUID: uid) else { return nil }
+        return try AudioDevice(id: deviceID)
+    }
+
+    /// Package construction lookup sharing one admission boundary with the
+    /// caller's remaining HAL property reads.
+    package static func device(
+        uid: String,
+        operationAdmission: @escaping @Sendable () -> Bool
+    ) throws -> AudioDevice? {
+        guard operationAdmission() else { throw CancellationError() }
+        guard let deviceID = try objectID(forUID: uid) else { return nil }
+        guard operationAdmission() else { throw CancellationError() }
+        return try AudioDevice(
+            id: deviceID, operationAdmission: operationAdmission)
+    }
+
+    /// Resolves one UID without constructing a complete device snapshot.
+    ///
+    /// Lifecycle waits need only know whether an aggregate still exists.
+    /// Constructing `AudioDevice` for every poll would also query its streams,
+    /// rates and clock domain while the HAL was in the middle of removing it.
+    public static func objectID(forUID uid: String) throws -> AudioObjectID? {
         // A UID already identifies one endpoint. Enumerating every endpoint to
         // resolve it asks every plug-in for its stream topology, live nominal
         // rate, available rates and clock domain. Besides making one lookup
@@ -761,7 +955,7 @@ public enum AudioDevices {
                 expected: MemoryLayout<AudioObjectID>.size, actual: Int(outputSize),
                 selector: kAudioHardwarePropertyTranslateUIDToDevice)
         }
-        return deviceID == kAudioObjectUnknown ? nil : try AudioDevice(id: deviceID)
+        return deviceID == kAudioObjectUnknown ? nil : deviceID
     }
 
     public static func defaultInput() throws -> AudioDevice? {
@@ -796,6 +990,15 @@ public enum AudioDevices {
         return id == kAudioObjectUnknown ? nil : try AudioDevice(id: id)
     }
 
+    /// The system output's identity without asking it for topology or timing.
+    public static func defaultOutputUID() throws -> String? {
+        try readDefaultDeviceUID(
+            readsDefaultID: {
+                try AudioObjectID.system.value(of: .defaultOutputDevice)
+            },
+            readsUID: { try $0.string(of: .deviceUID) })
+    }
+
     /// Points the whole system at a device, the way the Sound pane does.
     ///
     /// By UID and not by ID: the numeric ID is reassigned when a device is
@@ -804,12 +1007,13 @@ public enum AudioDevices {
     /// it is the ordinary case of restoring a setup somewhere the interface is
     /// not plugged in — so it is reported rather than thrown.
     ///
-    /// - Returns: True when the system moved.
+    /// - Returns: True when CoreAudio accepted the property write. A caller
+    ///   requiring completion must read the default back to observe it.
     @discardableResult
     public static func setDefault(_ uid: String, forInput: Bool) throws -> Bool {
-        guard let device = try device(uid: uid) else { return false }
+        guard let deviceID = try objectID(forUID: uid) else { return false }
         try AudioObjectID.system.setValue(
-            device.id, for: forInput ? .defaultInputDevice : .defaultOutputDevice)
+            deviceID, for: forInput ? .defaultInputDevice : .defaultOutputDevice)
         return true
     }
 }

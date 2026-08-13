@@ -12,6 +12,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -19,8 +20,12 @@
 
 YunDriverState gDriver = {
     .stateMutex = PTHREAD_MUTEX_INITIALIZER,
+    .configurationRequestMutex = PTHREAD_MUTEX_INITIALIZER,
     .sampleRate = kDevice_DefaultSampleRate,
     .pendingSampleRate = 0.0,
+    .configurationLifetimeGeneration = 1,
+    .inputStreamIsActive = true,
+    .outputStreamIsActive = true,
     .inputVolume = 1.0f,
     .outputVolume = 1.0f,
     .inputGainBits = 0x3F800000,
@@ -31,6 +36,26 @@ YunDriverState gDriver = {
 
 static AudioServerPlugInDriverInterface gInterface;
 static AudioServerPlugInDriverInterface *gInterfacePtr = &gInterface;
+
+#if defined(YUNAUDIO_DRIVER_TESTING)
+typedef void (*YunDriverIOTestHook)(bool entering,
+                                    UInt32 clientID,
+                                    UInt32 operationID);
+static YunDriverIOTestHook gYunDriverIOTestHook;
+#define YUN_DRIVER_IO_TEST_HOOK(entering, clientID, operationID) \
+    do {                                                        \
+        if (gYunDriverIOTestHook != NULL) {                      \
+            gYunDriverIOTestHook((entering), (clientID), (operationID)); \
+        }                                                       \
+    } while (0)
+#else
+#define YUN_DRIVER_IO_TEST_HOOK(entering, clientID, operationID) \
+    do {                                                        \
+        (void)(entering);                                       \
+        (void)(clientID);                                       \
+        (void)(operationID);                                    \
+    } while (0)
+#endif
 
 /// The host is handed `&gInterfacePtr` by the factory, and an
 /// AudioServerPlugInDriverRef is a *pointer to* the interface pointer.
@@ -46,7 +71,11 @@ static const UInt32 kSupportedSampleRateCount =
 
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "UInt32 atomics must be lock-free on the IO thread");
 _Static_assert(ATOMIC_LLONG_LOCK_FREE == 2,
-               "UInt64 atomics must be lock-free in GetZeroTimeStamp");
+               "UInt64 atomics must be lock-free on realtime threads");
+_Static_assert(2 * sizeof(Float32) == sizeof(UInt64),
+               "A stereo frame must fit in one lock-free atomic word");
+_Static_assert((kRingBufferFrames & kRingBufferMask) == 0,
+               "The ring size must remain a power of two");
 
 #define YUN_GUARD(condition, error, label) \
     if (!(condition)) {                    \
@@ -66,6 +95,44 @@ static Float32 Float32FromBits(UInt32 bits) {
     Float32 value;
     memcpy(&value, &bits, sizeof(value));
     return value;
+}
+
+static UInt64 PackStereoFrame(const Float32 *samples) {
+    UInt64 bits;
+    memcpy(&bits, samples, sizeof(bits));
+    return bits;
+}
+
+static void UnpackStereoFrame(UInt64 bits, Float32 *samples) {
+    memcpy(samples, &bits, sizeof(bits));
+}
+
+/// UINT64_MAX cannot be an exact accepted Float64 sample time, so it is an
+/// unambiguous unpublished state even at the edge of the accepted timeline.
+static const UInt64 kRingFrameUnpublished = UINT64_MAX;
+
+static YunRingFrame *CreateRingBuffer(void) {
+    YunRingFrame *ring = calloc(kRingBufferFrames, sizeof(*ring));
+    if (ring == NULL) return NULL;
+    for (UInt32 frame = 0; frame < kRingBufferFrames; ++frame) {
+        atomic_init(&ring[frame].owner, 0);
+        atomic_init(&ring[frame].sampleFrame, kRingFrameUnpublished);
+        atomic_init(&ring[frame].stereoBits, 0);
+    }
+    return ring;
+}
+
+/// Called only across a host lifecycle boundary, never from DoIOOperation.
+static void ResetRingBuffer(YunRingFrame *ring) {
+    if (ring == NULL) return;
+    for (UInt32 frame = 0; frame < kRingBufferFrames; ++frame) {
+        atomic_store_explicit(&ring[frame].owner, 0, memory_order_seq_cst);
+        atomic_store_explicit(
+            &ring[frame].sampleFrame, kRingFrameUnpublished,
+            memory_order_seq_cst);
+        atomic_store_explicit(
+            &ring[frame].stereoBits, 0, memory_order_seq_cst);
+    }
 }
 
 static UInt64 Float64Bits(Float64 value) {
@@ -88,7 +155,9 @@ static Float64 Float64FromBits(UInt64 bits) {
 static UInt64 TimestampPeriodAtHostTime(UInt64 anchorHostTime,
                                         UInt64 hostTime,
                                         Float64 ticksPerPeriod) {
-    if (hostTime <= anchorHostTime || ticksPerPeriod <= 0.0) return 0;
+    if (hostTime <= anchorHostTime || !isfinite(ticksPerPeriod) || ticksPerPeriod <= 0.0) {
+        return 0;
+    }
     return (UInt64)((Float64)(hostTime - anchorHostTime) / ticksPerPeriod);
 }
 
@@ -97,6 +166,10 @@ static UInt64 RebasedAnchorHostTime(UInt64 anchorHostTime,
                                     Float64 oldTicksPerPeriod,
                                     Float64 newTicksPerPeriod,
                                     UInt64 rebaseHostTime) {
+    if (!isfinite(oldTicksPerPeriod) || oldTicksPerPeriod <= 0.0
+        || !isfinite(newTicksPerPeriod) || newTicksPerPeriod <= 0.0) {
+        return anchorHostTime;
+    }
     UInt64 period =
         TimestampPeriodAtHostTime(anchorHostTime, rebaseHostTime, oldTicksPerPeriod);
     Float64 currentHostTime =
@@ -177,9 +250,9 @@ static YunClockSnapshot ReadPublishedClock(void) {
 static void FillStreamDescription(AudioStreamBasicDescription *description, Float64 sampleRate) {
     description->mSampleRate = sampleRate;
     description->mFormatID = kAudioFormatLinearPCM;
-    // Float, packed, non-interleaved is what the HAL prefers for virtual
-    // devices and keeps the IO path free of any conversion.
-    description->mFormatFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+    // The IO callback indexes one stereo frame at a time, so the advertised
+    // format has to be exactly native-endian, packed and interleaved.
+    description->mFormatFlags = kAudioFormatFlagsNativeFloatPacked;
     description->mBytesPerPacket = kDevice_ChannelCount * sizeof(Float32);
     description->mFramesPerPacket = 1;
     description->mBytesPerFrame = kDevice_ChannelCount * sizeof(Float32);
@@ -189,10 +262,137 @@ static void FillStreamDescription(AudioStreamBasicDescription *description, Floa
 }
 
 static bool IsSupportedSampleRate(Float64 rate) {
+    if (!isfinite(rate)) return false;
     for (UInt32 index = 0; index < kSupportedSampleRateCount; ++index) {
         if (kSupportedSampleRates[index] == rate) return true;
     }
     return false;
+}
+
+static bool IsCanonicalStreamDescription(const AudioStreamBasicDescription *description) {
+    if (description == NULL || !IsSupportedSampleRate(description->mSampleRate)) return false;
+
+    AudioStreamBasicDescription expected;
+    FillStreamDescription(&expected, description->mSampleRate);
+    return description->mFormatID == expected.mFormatID
+        && description->mFormatFlags == expected.mFormatFlags
+        && description->mBytesPerPacket == expected.mBytesPerPacket
+        && description->mFramesPerPacket == expected.mFramesPerPacket
+        && description->mBytesPerFrame == expected.mBytesPerFrame
+        && description->mChannelsPerFrame == expected.mChannelsPerFrame
+        && description->mBitsPerChannel == expected.mBitsPerChannel
+        && description->mReserved == expected.mReserved;
+}
+
+static UInt64 NextConfigurationGeneration_Locked(void) {
+    if (++gDriver.nextConfigurationGeneration == 0) {
+        ++gDriver.nextConfigurationGeneration;
+    }
+    return gDriver.nextConfigurationGeneration;
+}
+
+/// Asks the host to stop IO before a rate changes and records exactly which
+/// deferred callback may commit it.
+static OSStatus RequestSampleRateChange(Float64 requested) {
+    bool publishDesiredRate = true;
+    OSStatus callerStatus = 0;
+
+    for (;;) {
+        pthread_mutex_lock(&gDriver.configurationRequestMutex);
+        pthread_mutex_lock(&gDriver.stateMutex);
+
+        if (publishDesiredRate) {
+            if (gDriver.sampleRate == requested
+                && gDriver.pendingConfigurationGeneration == 0
+                && gDriver.configurationRequestInFlightGeneration == 0) {
+                pthread_mutex_unlock(&gDriver.stateMutex);
+                pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+                return 0;
+            }
+            // One action means "stop IO and apply the latest desired format",
+            // not "commit the value captured when the request began".
+            gDriver.pendingSampleRate = requested;
+            publishDesiredRate = false;
+        }
+
+        if (gDriver.pendingConfigurationGeneration != 0
+            || gDriver.configurationRequestInFlightGeneration != 0) {
+            pthread_mutex_unlock(&gDriver.stateMutex);
+            pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+            return callerStatus;
+        }
+        if (!IsSupportedSampleRate(gDriver.pendingSampleRate)) {
+            gDriver.pendingSampleRate = 0.0;
+            pthread_mutex_unlock(&gDriver.stateMutex);
+            pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+            return callerStatus != 0 ? callerStatus : kAudioHardwareIllegalOperationError;
+        }
+        if (gDriver.sampleRate == gDriver.pendingSampleRate) {
+            gDriver.pendingSampleRate = 0.0;
+            pthread_mutex_unlock(&gDriver.stateMutex);
+            pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+            return callerStatus;
+        }
+
+        AudioServerPlugInHostRef host = gDriver.host;
+        if (host == NULL || host->RequestDeviceConfigurationChange == NULL) {
+            gDriver.pendingSampleRate = 0.0;
+            pthread_mutex_unlock(&gDriver.stateMutex);
+            pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+            return kAudioHardwareNotReadyError;
+        }
+
+        UInt64 generation = NextConfigurationGeneration_Locked();
+        UInt64 lifetime = gDriver.configurationLifetimeGeneration;
+        Float64 actionRate = gDriver.pendingSampleRate;
+        gDriver.pendingConfigurationGeneration = generation;
+        gDriver.configurationRequestInFlightGeneration = generation;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+
+        // No driver lock may cross this boundary. AudioServerPlugIn hosts are
+        // allowed to perform, abort or set another format synchronously.
+        OSStatus status = host->RequestDeviceConfigurationChange(
+            host, kObjectID_Device, generation, NULL);
+
+        pthread_mutex_lock(&gDriver.configurationRequestMutex);
+        pthread_mutex_lock(&gDriver.stateMutex);
+        if (gDriver.configurationRequestInFlightGeneration == generation) {
+            gDriver.configurationRequestInFlightGeneration = 0;
+        }
+        if (gDriver.configurationLifetimeGeneration != lifetime) {
+            // The action belongs to the preceding host lifetime. Even if that
+            // host accepted it, its eventual callback is deliberately a no-op.
+            status = kAudioHardwareNotReadyError;
+        } else if (status != 0) {
+            if (gDriver.pendingConfigurationGeneration == generation) {
+                gDriver.pendingConfigurationGeneration = 0;
+                if (gDriver.pendingSampleRate == actionRate) {
+                    gDriver.pendingSampleRate = 0.0;
+                }
+            } else if (gDriver.sampleRate == actionRate) {
+                // A synchronous commit cannot be rolled back by a contradictory
+                // status returned afterwards.
+                status = 0;
+            }
+        }
+        if (callerStatus == 0 && status != 0) callerStatus = status;
+
+        if (gDriver.pendingConfigurationGeneration == 0
+            && gDriver.configurationRequestInFlightGeneration == 0
+            && gDriver.sampleRate == gDriver.pendingSampleRate) {
+            gDriver.pendingSampleRate = 0.0;
+        }
+        bool needsFollowUp =
+            gDriver.pendingConfigurationGeneration == 0
+            && gDriver.configurationRequestInFlightGeneration == 0
+            && IsSupportedSampleRate(gDriver.pendingSampleRate)
+            && gDriver.sampleRate != gDriver.pendingSampleRate;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        pthread_mutex_unlock(&gDriver.configurationRequestMutex);
+
+        if (!needsFollowUp) return callerStatus;
+    }
 }
 
 /// Recomputes the host-ticks-per-frame ratio. Called whenever the rate changes.
@@ -227,7 +427,8 @@ static void ApplyClockAnchor_Locked(Float64 sampleTime, UInt64 hostTime, Float64
 
     if (gDriver.hasLastAnchor) {
         Float64 frameDelta = sampleTime - gDriver.lastAnchorSampleTime;
-        Float64 tickDelta = (Float64)(hostTime - gDriver.lastAnchorHostTime);
+        Float64 tickDelta = hostTime > gDriver.lastAnchorHostTime
+            ? (Float64)(hostTime - gDriver.lastAnchorHostTime) : 0.0;
 
         if (frameDelta > 0.0 && tickDelta > 0.0 && sampleRate > 0.0) {
             // Ticks per master frame, rescaled to this device's frame rate in
@@ -291,33 +492,65 @@ static bool ReadAnchorDictionary(CFDictionaryRef dictionary,
                                  Float64 *outSampleTime,
                                  UInt64 *outHostTime,
                                  Float64 *outSampleRate) {
-    if (dictionary == NULL || CFGetTypeID(dictionary) != CFDictionaryGetTypeID()) return false;
-
-    Float64 values[3] = { 0.0, 0.0, 0.0 };
-    const char *keys[3] = {
-        kYunAnchorKey_SampleTime, kYunAnchorKey_HostTime, kYunAnchorKey_SampleRate
-    };
-    for (int index = 0; index < 3; ++index) {
-        CFStringRef key = CFStringCreateWithCString(NULL, keys[index], kCFStringEncodingUTF8);
-        if (key == NULL) return false;
-        CFNumberRef number = (CFNumberRef)CFDictionaryGetValue(dictionary, key);
-        CFRelease(key);
-        if (number == NULL || CFGetTypeID(number) != CFNumberGetTypeID()) return false;
-        if (!CFNumberGetValue(number, kCFNumberDoubleType, &values[index])) return false;
+    if (dictionary == NULL || CFGetTypeID(dictionary) != CFDictionaryGetTypeID()
+        || outSampleTime == NULL || outHostTime == NULL || outSampleRate == NULL) {
+        return false;
     }
 
-    *outSampleTime = values[0];
-    // Host times exceed 2^53 only after ~285 years of uptime, so a double
-    // carries them exactly for any real machine.
-    *outHostTime = (UInt64)values[1];
-    *outSampleRate = values[2];
+    CFNumberRef sampleNumber = (CFNumberRef)CFDictionaryGetValue(
+        dictionary, CFSTR(kYunAnchorKey_SampleTime));
+    CFNumberRef hostNumber = (CFNumberRef)CFDictionaryGetValue(
+        dictionary, CFSTR(kYunAnchorKey_HostTime));
+    CFNumberRef rateNumber = (CFNumberRef)CFDictionaryGetValue(
+        dictionary, CFSTR(kYunAnchorKey_SampleRate));
+    if (sampleNumber == NULL || CFGetTypeID(sampleNumber) != CFNumberGetTypeID()
+        || hostNumber == NULL || CFGetTypeID(hostNumber) != CFNumberGetTypeID()
+        || rateNumber == NULL || CFGetTypeID(rateNumber) != CFNumberGetTypeID()) {
+        return false;
+    }
+
+    Float64 sampleTime = 0.0;
+    Float64 sampleRate = 0.0;
+    if (!CFNumberGetValue(sampleNumber, kCFNumberDoubleType, &sampleTime)
+        || !isfinite(sampleTime) || sampleTime < 0.0
+        || !CFNumberGetValue(rateNumber, kCFNumberDoubleType, &sampleRate)
+        || !isfinite(sampleRate) || sampleRate <= 0.0 || sampleRate > 768000.0) {
+        return false;
+    }
+
+    SInt64 signedHostTime = 0;
+    if (CFNumberIsFloatType(hostNumber)) {
+        // Compatibility with publishers from before the SInt64 schema. A
+        // floating payload is accepted only when round-tripping through SInt64
+        // leaves it byte-for-byte at the same integer value.
+        Float64 legacyHostTime = 0.0;
+        if (!CFNumberGetValue(hostNumber, kCFNumberDoubleType, &legacyHostTime)
+            || !isfinite(legacyHostTime) || legacyHostTime < 0.0
+            || legacyHostTime >= 0x1p63 || trunc(legacyHostTime) != legacyHostTime) {
+            return false;
+        }
+        signedHostTime = (SInt64)legacyHostTime;
+        if ((Float64)signedHostTime != legacyHostTime) return false;
+    } else if (!CFNumberGetValue(hostNumber, kCFNumberSInt64Type, &signedHostTime)
+               || signedHostTime < 0) {
+        return false;
+    }
+
+    *outSampleTime = sampleTime;
+    *outHostTime = (UInt64)signedHostTime;
+    *outSampleRate = sampleRate;
     return true;
 }
 
 #pragma mark - IUnknown
 
 static HRESULT Yun_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInterface) {
-    if (!IsOurDriver(inDriver) || outInterface == NULL) return kAudioHardwareBadObjectError;
+    if (outInterface == NULL) return kAudioHardwareBadObjectError;
+    // COM requires a failed query to leave no usable interface behind. A host
+    // is allowed to reuse its storage, so merely avoiding a write on failure
+    // can hand it a stale pointer into this plug-in.
+    *outInterface = NULL;
+    if (!IsOurDriver(inDriver)) return kAudioHardwareBadObjectError;
 
     CFUUIDRef requested = CFUUIDCreateFromUUIDBytes(NULL, inUUID);
     if (requested == NULL) return kAudioHardwareIllegalOperationError;
@@ -332,7 +565,7 @@ static HRESULT Yun_QueryInterface(void *inDriver, REFIID inUUID, LPVOID *outInte
     HRESULT result = E_NOINTERFACE;
     if (CFEqual(requested, plugInInterface) || CFEqual(requested, unknownInterface)) {
         pthread_mutex_lock(&gDriver.stateMutex);
-        ++gDriver.refCount;
+        if (gDriver.refCount < UINT32_MAX) ++gDriver.refCount;
         pthread_mutex_unlock(&gDriver.stateMutex);
         *outInterface = &gInterfacePtr;
         result = S_OK;
@@ -367,9 +600,17 @@ static OSStatus Yun_Initialize(AudioServerPlugInDriverRef inDriver,
 
     pthread_mutex_lock(&gDriver.stateMutex);
     gDriver.host = inHost;
+    // An initialization boundary invalidates every deferred callback from the
+    // preceding host lifetime. Keep the generation counter monotonic so none
+    // of those callbacks can alias a future request.
+    if (++gDriver.configurationLifetimeGeneration == 0) {
+        ++gDriver.configurationLifetimeGeneration;
+    }
+    gDriver.pendingSampleRate = 0.0;
+    gDriver.pendingConfigurationGeneration = 0;
+    gDriver.configurationRequestInFlightGeneration = 0;
     if (gDriver.ringBuffer == NULL) {
-        gDriver.ringBuffer = (Float32 *)calloc(
-            (size_t)kRingBufferFrames * kDevice_ChannelCount, sizeof(Float32));
+        gDriver.ringBuffer = CreateRingBuffer();
     }
     RefreshTimebase_Locked();
     gDriver.anchorHostTime = mach_absolute_time();
@@ -421,23 +662,36 @@ static OSStatus Yun_PerformDeviceConfigurationChange(AudioServerPlugInDriverRef 
     if (!IsOurDriver(inDriver)) return kAudioHardwareBadObjectError;
     if (inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
 
-    // The change action carries the new rate, agreed when SetPropertyData asked
-    // the host for a configuration change.
-    Float64 newRate = (Float64)inChangeAction;
-    if (!IsSupportedSampleRate(newRate)) return kAudioHardwareIllegalOperationError;
-
     pthread_mutex_lock(&gDriver.stateMutex);
-    gDriver.sampleRate = newRate;
+    if (inChangeAction == 0) {
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        return kAudioHardwareIllegalOperationError;
+    }
+    if (inChangeAction != gDriver.pendingConfigurationGeneration) {
+        // A deferred callback can legitimately arrive after a newer host
+        // lifetime or after the action was synchronously completed. It owns no
+        // state now; acknowledging it avoids turning harmless reordering into
+        // a stream of errors inside the audio server.
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        return 0;
+    }
+    if (!IsSupportedSampleRate(gDriver.pendingSampleRate)) {
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        return kAudioHardwareIllegalOperationError;
+    }
+
+    Float64 newRate = gDriver.pendingSampleRate;
     gDriver.pendingSampleRate = 0.0;
-    RefreshTimebase_Locked();
-    // Restart the timestamp series: sample time is meaningless across a rate
-    // change, and leaving stale anchors is how virtual devices start crackling.
-    gDriver.anchorHostTime = mach_absolute_time();
-    if (++gDriver.clockSeed == 0) gDriver.clockSeed = 1;
-    PublishClockState_Locked();
-    if (gDriver.ringBuffer != NULL) {
-        memset(gDriver.ringBuffer, 0,
-               (size_t)kRingBufferFrames * kDevice_ChannelCount * sizeof(Float32));
+    gDriver.pendingConfigurationGeneration = 0;
+    if (gDriver.sampleRate != newRate) {
+        gDriver.sampleRate = newRate;
+        RefreshTimebase_Locked();
+        // Restart the timestamp series: sample time is meaningless across a
+        // rate change, and stale anchors make virtual devices crackle.
+        gDriver.anchorHostTime = mach_absolute_time();
+        if (++gDriver.clockSeed == 0) gDriver.clockSeed = 1;
+        PublishClockState_Locked();
+        ResetRingBuffer(gDriver.ringBuffer);
     }
     pthread_mutex_unlock(&gDriver.stateMutex);
     return 0;
@@ -447,11 +701,20 @@ static OSStatus Yun_AbortDeviceConfigurationChange(AudioServerPlugInDriverRef in
                                                    AudioObjectID inDeviceObjectID,
                                                    UInt64 inChangeAction,
                                                    void *inChangeInfo) {
-    (void)inChangeAction; (void)inChangeInfo;
+    (void)inChangeInfo;
     if (!IsOurDriver(inDriver)) return kAudioHardwareBadObjectError;
     if (inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
     pthread_mutex_lock(&gDriver.stateMutex);
+    if (inChangeAction == 0) {
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        return kAudioHardwareIllegalOperationError;
+    }
+    if (inChangeAction != gDriver.pendingConfigurationGeneration) {
+        pthread_mutex_unlock(&gDriver.stateMutex);
+        return 0;
+    }
     gDriver.pendingSampleRate = 0.0;
+    gDriver.pendingConfigurationGeneration = 0;
     pthread_mutex_unlock(&gDriver.stateMutex);
     return 0;
 }
@@ -487,6 +750,124 @@ static bool StreamIsInput(AudioObjectID objectID) {
     return objectID == kObjectID_Stream_Input;
 }
 
+static bool IsInputOrOutputScope(AudioObjectPropertyScope scope) {
+    return scope == kAudioObjectPropertyScopeInput
+        || scope == kAudioObjectPropertyScopeOutput;
+}
+
+/// Matches the inheritance rules used by the class qualifier on
+/// kAudioObjectPropertyOwnedObjects. Returning an unfiltered object list makes
+/// the HAL discover streams as controls (and controls as streams), which can
+/// poison its object cache even though each object's own class is correct.
+static bool ObjectIsClassOrSubclassOf(AudioObjectID objectID,
+                                      AudioClassID requestedClass) {
+    if (requestedClass == kAudioObjectClassIDWildcard
+        || requestedClass == kAudioObjectClassID) {
+        return true;
+    }
+    if (objectID == kObjectID_PlugIn) {
+        return requestedClass == kAudioPlugInClassID;
+    }
+    if (objectID == kObjectID_Device) {
+        return requestedClass == kAudioDeviceClassID;
+    }
+    if (objectID == kObjectID_Stream_Input || objectID == kObjectID_Stream_Output) {
+        return requestedClass == kAudioStreamClassID;
+    }
+    if (IsVolumeControl(objectID)) {
+        return requestedClass == kAudioVolumeControlClassID
+            || requestedClass == kAudioLevelControlClassID
+            || requestedClass == kAudioControlClassID;
+    }
+    if (IsMuteControl(objectID)) {
+        return requestedClass == kAudioMuteControlClassID
+            || requestedClass == kAudioBooleanControlClassID
+            || requestedClass == kAudioControlClassID;
+    }
+    return false;
+}
+
+static OSStatus ValidateClassQualifier(UInt32 qualifierDataSize,
+                                       const void *qualifierData) {
+    if (qualifierDataSize == 0) return 0;
+    if (qualifierDataSize % sizeof(AudioClassID) != 0) {
+        return kAudioHardwareBadPropertySizeError;
+    }
+    if (qualifierData == NULL) return kAudioHardwareIllegalOperationError;
+    return 0;
+}
+
+static bool OwnedObjectPassesClassQualifier(AudioObjectID objectID,
+                                            UInt32 qualifierDataSize,
+                                            const void *qualifierData) {
+    if (qualifierDataSize == 0) return true;
+
+    const UInt8 *bytes = (const UInt8 *)qualifierData;
+    UInt32 count = qualifierDataSize / sizeof(AudioClassID);
+    for (UInt32 index = 0; index < count; ++index) {
+        // A qualifier is an opaque byte buffer and need not be naturally
+        // aligned. memcpy avoids turning a valid unaligned query into UB.
+        AudioClassID requestedClass;
+        memcpy(&requestedClass, bytes + index * sizeof(AudioClassID),
+               sizeof(requestedClass));
+        if (ObjectIsClassOrSubclassOf(objectID, requestedClass)) return true;
+    }
+    return false;
+}
+
+static UInt32 UnfilteredOwnedObjects(AudioObjectID objectID,
+                                     AudioObjectPropertyScope scope,
+                                     AudioObjectID *outObjectIDs) {
+    if (objectID == kObjectID_PlugIn) {
+        if (outObjectIDs != NULL) outObjectIDs[0] = kObjectID_Device;
+        return 1;
+    }
+    if (objectID != kObjectID_Device) return 0;
+
+    if (scope == kAudioObjectPropertyScopeInput) {
+        if (outObjectIDs != NULL) {
+            outObjectIDs[0] = kObjectID_Stream_Input;
+            outObjectIDs[1] = kObjectID_Volume_Input_Master;
+            outObjectIDs[2] = kObjectID_Mute_Input_Master;
+        }
+        return 3;
+    }
+    if (scope == kAudioObjectPropertyScopeOutput) {
+        if (outObjectIDs != NULL) {
+            outObjectIDs[0] = kObjectID_Stream_Output;
+            outObjectIDs[1] = kObjectID_Volume_Output_Master;
+            outObjectIDs[2] = kObjectID_Mute_Output_Master;
+        }
+        return 3;
+    }
+
+    if (outObjectIDs != NULL) {
+        outObjectIDs[0] = kObjectID_Stream_Input;
+        outObjectIDs[1] = kObjectID_Stream_Output;
+        outObjectIDs[2] = kObjectID_Volume_Input_Master;
+        outObjectIDs[3] = kObjectID_Mute_Input_Master;
+        outObjectIDs[4] = kObjectID_Volume_Output_Master;
+        outObjectIDs[5] = kObjectID_Mute_Output_Master;
+    }
+    return 6;
+}
+
+static UInt32 FilteredOwnedObjectCount(AudioObjectID objectID,
+                                       AudioObjectPropertyScope scope,
+                                       UInt32 qualifierDataSize,
+                                       const void *qualifierData) {
+    AudioObjectID candidates[6];
+    UInt32 candidateCount = UnfilteredOwnedObjects(objectID, scope, candidates);
+    UInt32 result = 0;
+    for (UInt32 index = 0; index < candidateCount; ++index) {
+        if (OwnedObjectPassesClassQualifier(
+                candidates[index], qualifierDataSize, qualifierData)) {
+            ++result;
+        }
+    }
+    return result;
+}
+
 /// Scalar 0...1 to decibels, with a taper rather than a straight line.
 ///
 /// A linear scalar spends most of its travel in the top few decibels, so the
@@ -514,6 +895,44 @@ static Float32 ScalarToGain(Float32 scalar) {
     return powf(10.0f, ScalarToDecibels(scalar) / 20.0f);
 }
 
+typedef CFNumberRef (*YunNumberCreateFunction)(
+    CFAllocatorRef, CFNumberType, const void *);
+
+/// Builds the small property-list dictionaries returned by the driver without
+/// ever inserting or releasing a null Core Foundation object. Allocation
+/// failure is rare, but this code runs inside coreaudiod where a null passed to
+/// CFDictionarySetValue would crash system audio rather than only this app.
+static CFMutableDictionaryRef CreateTwoNumberDictionary(
+    CFStringRef firstKey,
+    CFNumberType firstType,
+    const void *firstValue,
+    CFStringRef secondKey,
+    CFNumberType secondType,
+    const void *secondValue,
+    YunNumberCreateFunction createNumber
+) {
+    CFMutableDictionaryRef result = CFDictionaryCreateMutable(
+        NULL, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    if (result == NULL) return NULL;
+
+    CFNumberRef first = createNumber(NULL, firstType, firstValue);
+    if (first == NULL) {
+        CFRelease(result);
+        return NULL;
+    }
+    CFNumberRef second = createNumber(NULL, secondType, secondValue);
+    if (second == NULL) {
+        CFRelease(first);
+        CFRelease(result);
+        return NULL;
+    }
+    CFDictionarySetValue(result, firstKey, first);
+    CFDictionarySetValue(result, secondKey, second);
+    CFRelease(first);
+    CFRelease(second);
+    return result;
+}
+
 static Boolean Yun_HasProperty(AudioServerPlugInDriverRef inDriver,
                                AudioObjectID inObjectID,
                                pid_t inClientProcessID,
@@ -539,6 +958,9 @@ static OSStatus Yun_IsPropertySettable(AudioServerPlugInDriverRef inDriver,
         return kAudioHardwareBadObjectError;
     }
     if (!ObjectExists(inObjectID)) return kAudioHardwareBadObjectError;
+    if (!Yun_HasProperty(inDriver, inObjectID, inClientProcessID, inAddress)) {
+        return kAudioHardwareUnknownPropertyError;
+    }
 
     switch (inAddress->mSelector) {
     case kAudioDevicePropertyNominalSampleRate:
@@ -574,7 +996,7 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
                                         UInt32 inQualifierDataSize,
                                         const void *inQualifierData,
                                         UInt32 *outDataSize) {
-    (void)inClientProcessID; (void)inQualifierDataSize; (void)inQualifierData;
+    (void)inClientProcessID;
     if (!IsOurDriver(inDriver) || inAddress == NULL || outDataSize == NULL) {
         return kAudioHardwareBadObjectError;
     }
@@ -595,24 +1017,16 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
         *outDataSize = sizeof(CFStringRef);
         return 0;
 
-    case kAudioObjectPropertyOwnedObjects:
-        if (inObjectID == kObjectID_PlugIn) {
-            *outDataSize = sizeof(AudioObjectID);
-        } else if (inObjectID == kObjectID_Device) {
-            switch (inAddress->mScope) {
-            // Each side owns its stream plus a level and a mute.
-            case kAudioObjectPropertyScopeInput:
-            case kAudioObjectPropertyScopeOutput:
-                *outDataSize = 3 * sizeof(AudioObjectID);
-                break;
-            default:
-                *outDataSize = 2 * sizeof(AudioObjectID);
-                break;
-            }
-        } else {
-            *outDataSize = 0;
-        }
+    case kAudioObjectPropertyOwnedObjects: {
+        OSStatus status = ValidateClassQualifier(
+            inQualifierDataSize, inQualifierData);
+        if (status != 0) return status;
+        UInt32 count = FilteredOwnedObjectCount(
+            inObjectID, inAddress->mScope,
+            inQualifierDataSize, inQualifierData);
+        *outDataSize = count * sizeof(AudioObjectID);
         return 0;
+    }
 
     // PlugIn
     case kAudioPlugInPropertyDeviceList:
@@ -642,13 +1056,25 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
     case kAudioDevicePropertyClockDomain:
     case kAudioDevicePropertyDeviceIsAlive:
     case kAudioDevicePropertyDeviceIsRunning:
-    case kAudioDevicePropertyDeviceCanBeDefaultDevice:
-    case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
-    case kAudioDevicePropertySafetyOffset:
+    case kAudioDevicePropertyBufferFrameSize:
+    case kAudioDevicePropertyUsesVariableBufferFrameSizes:
     case kAudioDevicePropertyZeroTimeStampPeriod:
     case kAudioDevicePropertyIsHidden:
         if (inObjectID != kObjectID_Device) break;
         *outDataSize = sizeof(UInt32);
+        return 0;
+    case kAudioDevicePropertyDeviceCanBeDefaultDevice:
+    case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
+    case kAudioDevicePropertySafetyOffset:
+        if (inObjectID != kObjectID_Device
+            || !IsInputOrOutputScope(inAddress->mScope)) {
+            break;
+        }
+        *outDataSize = sizeof(UInt32);
+        return 0;
+    case kAudioDevicePropertyBufferFrameSizeRange:
+        if (inObjectID != kObjectID_Device) break;
+        *outDataSize = sizeof(AudioValueRange);
         return 0;
     case kAudioDevicePropertyNominalSampleRate:
         if (inObjectID != kObjectID_Device) break;
@@ -659,11 +1085,17 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
         *outDataSize = kSupportedSampleRateCount * sizeof(AudioValueRange);
         return 0;
     case kAudioDevicePropertyPreferredChannelsForStereo:
-        if (inObjectID != kObjectID_Device) break;
+        if (inObjectID != kObjectID_Device
+            || !IsInputOrOutputScope(inAddress->mScope)) {
+            break;
+        }
         *outDataSize = 2 * sizeof(UInt32);
         return 0;
     case kAudioDevicePropertyPreferredChannelLayout:
-        if (inObjectID != kObjectID_Device) break;
+        if (inObjectID != kObjectID_Device
+            || !IsInputOrOutputScope(inAddress->mScope)) {
+            break;
+        }
         *outDataSize = offsetof(AudioChannelLayout, mChannelDescriptions)
             + (kDevice_ChannelCount * sizeof(AudioChannelDescription));
         return 0;
@@ -675,7 +1107,7 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
             *outDataSize = sizeof(AudioObjectID);
             break;
         default:
-            *outDataSize = 6 * sizeof(AudioObjectID);
+            *outDataSize = 2 * sizeof(AudioObjectID);
             break;
         }
         return 0;
@@ -713,9 +1145,10 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
         return 0;
     case kAudioObjectPropertyCustomPropertyInfoList:
         if (inObjectID != kObjectID_Device) break;
-        *outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+        *outDataSize = 2 * sizeof(AudioServerPlugInCustomPropertyInfo);
         return 0;
     case kYunCustomProperty_ClockAnchor:
+    case kYunCustomProperty_IOHealth:
         if (inObjectID != kObjectID_Device) break;
         *outDataSize = sizeof(CFPropertyListRef);
         return 0;
@@ -736,6 +1169,15 @@ static OSStatus Yun_GetPropertyDataSize(AudioServerPlugInDriverRef inDriver,
     // kAudioDevicePropertyLatency and kAudioStreamPropertyLatency are the same
     // selector ('ltnc'), so one case serves both the device and its streams.
     case kAudioDevicePropertyLatency:
+        if (inObjectID != kObjectID_Device
+            && inObjectID != kObjectID_Stream_Input
+            && inObjectID != kObjectID_Stream_Output) {
+            break;
+        }
+        if (inObjectID == kObjectID_Device
+            && !IsInputOrOutputScope(inAddress->mScope)) {
+            break;
+        }
         *outDataSize = sizeof(UInt32);
         return 0;
     case kAudioStreamPropertyVirtualFormat:
@@ -771,6 +1213,11 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
     if (!ObjectExists(inObjectID)) return kAudioHardwareBadObjectError;
 
     OSStatus status = 0;
+    UInt32 advertisedSize = 0;
+    status = Yun_GetPropertyDataSize(
+        inDriver, inObjectID, inClientProcessID, inAddress,
+        inQualifierDataSize, inQualifierData, &advertisedSize);
+    if (status != 0) return status;
 
     switch (inAddress->mSelector) {
     case kAudioObjectPropertyBaseClass:
@@ -849,24 +1296,13 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         AudioObjectID *ids = (AudioObjectID *)outData;
         UInt32 capacity = inDataSize / sizeof(AudioObjectID);
         UInt32 written = 0;
-        if (inObjectID == kObjectID_PlugIn) {
-            if (capacity > written) ids[written++] = kObjectID_Device;
-        } else if (inObjectID == kObjectID_Device) {
-            if (inAddress->mScope == kAudioObjectPropertyScopeInput) {
-                if (capacity > written) ids[written++] = kObjectID_Stream_Input;
-                if (capacity > written) ids[written++] = kObjectID_Volume_Input_Master;
-                if (capacity > written) ids[written++] = kObjectID_Mute_Input_Master;
-            } else if (inAddress->mScope == kAudioObjectPropertyScopeOutput) {
-                if (capacity > written) ids[written++] = kObjectID_Stream_Output;
-                if (capacity > written) ids[written++] = kObjectID_Volume_Output_Master;
-                if (capacity > written) ids[written++] = kObjectID_Mute_Output_Master;
-            } else {
-                if (capacity > written) ids[written++] = kObjectID_Stream_Input;
-                if (capacity > written) ids[written++] = kObjectID_Stream_Output;
-                if (capacity > written) ids[written++] = kObjectID_Volume_Input_Master;
-                if (capacity > written) ids[written++] = kObjectID_Mute_Input_Master;
-                if (capacity > written) ids[written++] = kObjectID_Volume_Output_Master;
-                if (capacity > written) ids[written++] = kObjectID_Mute_Output_Master;
+        AudioObjectID candidates[6];
+        UInt32 candidateCount = UnfilteredOwnedObjects(
+            inObjectID, inAddress->mScope, candidates);
+        for (UInt32 index = 0; index < candidateCount && written < capacity; ++index) {
+            if (OwnedObjectPassesClassQualifier(
+                    candidates[index], inQualifierDataSize, inQualifierData)) {
+                ids[written++] = candidates[index];
             }
         }
         *outDataSize = written * sizeof(AudioObjectID);
@@ -934,12 +1370,16 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
 
     case kAudioLevelControlPropertyConvertScalarToDecibels:
         YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        YUN_GUARD(isfinite(*(Float32 *)outData),
+                  kAudioHardwareIllegalOperationError, done);
         *(Float32 *)outData = ScalarToDecibels(*(Float32 *)outData);
         *outDataSize = sizeof(Float32);
         break;
 
     case kAudioLevelControlPropertyConvertDecibelsToScalar:
         YUN_GUARD(inDataSize >= sizeof(Float32), kAudioHardwareBadPropertySizeError, done);
+        YUN_GUARD(isfinite(*(Float32 *)outData),
+                  kAudioHardwareIllegalOperationError, done);
         *(Float32 *)outData = DecibelsToScalar(*(Float32 *)outData);
         *outDataSize = sizeof(Float32);
         break;
@@ -954,14 +1394,17 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         break;
 
     case kAudioObjectPropertyCustomPropertyInfoList: {
-        YUN_GUARD(inDataSize >= sizeof(AudioServerPlugInCustomPropertyInfo),
+        YUN_GUARD(inDataSize >= 2 * sizeof(AudioServerPlugInCustomPropertyInfo),
                   kAudioHardwareBadPropertySizeError, done);
         AudioServerPlugInCustomPropertyInfo *info =
             (AudioServerPlugInCustomPropertyInfo *)outData;
         info[0].mSelector = kYunCustomProperty_ClockAnchor;
         info[0].mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList;
         info[0].mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
-        *outDataSize = sizeof(AudioServerPlugInCustomPropertyInfo);
+        info[1].mSelector = kYunCustomProperty_IOHealth;
+        info[1].mPropertyDataType = kAudioServerPlugInCustomPropertyDataTypeCFPropertyList;
+        info[1].mQualifierDataType = kAudioServerPlugInCustomPropertyDataTypeNone;
+        *outDataSize = 2 * sizeof(AudioServerPlugInCustomPropertyInfo);
         break;
     }
 
@@ -983,19 +1426,37 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         // stated rate, 1.00002 means twenty parts per million fast.
         Float64 ratio = (nominalTicks > 0.0) ? (ticksPerFrame / nominalTicks) : 1.0;
 
-        CFMutableDictionaryRef result = CFDictionaryCreateMutable(
-            NULL, 2, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFMutableDictionaryRef result = CreateTwoNumberDictionary(
+            CFSTR("following"), kCFNumberDoubleType, &following,
+            CFSTR("rateRatio"), kCFNumberDoubleType, &ratio,
+            CFNumberCreate);
         if (result == NULL) {
             status = kAudioHardwareUnspecifiedError;
             goto done;
         }
-        CFNumberRef followingNumber = CFNumberCreate(NULL, kCFNumberDoubleType, &following);
-        CFNumberRef ratioNumber = CFNumberCreate(NULL, kCFNumberDoubleType, &ratio);
-        CFDictionarySetValue(result, CFSTR("following"), followingNumber);
-        CFDictionarySetValue(result, CFSTR("rateRatio"), ratioNumber);
-        CFRelease(followingNumber);
-        CFRelease(ratioNumber);
 
+        *(CFPropertyListRef *)outData = result;
+        *outDataSize = sizeof(CFPropertyListRef);
+        break;
+    }
+
+    case kYunCustomProperty_IOHealth: {
+        YUN_GUARD(inDataSize >= sizeof(CFPropertyListRef),
+                  kAudioHardwareBadPropertySizeError, done);
+        SInt64 unsafeReads = (SInt64)atomic_load_explicit(
+            &gDriver.unsafeReadOperations, memory_order_relaxed);
+        SInt64 unsafeWrites = (SInt64)atomic_load_explicit(
+            &gDriver.unsafeWriteOperations, memory_order_relaxed);
+        CFMutableDictionaryRef result = CreateTwoNumberDictionary(
+            CFSTR(kYunIOHealthKey_UnsafeReadOperations),
+            kCFNumberSInt64Type, &unsafeReads,
+            CFSTR(kYunIOHealthKey_UnsafeWriteOperations),
+            kCFNumberSInt64Type, &unsafeWrites,
+            CFNumberCreate);
+        if (result == NULL) {
+            status = kAudioHardwareUnspecifiedError;
+            goto done;
+        }
         *(CFPropertyListRef *)outData = result;
         *outDataSize = sizeof(CFPropertyListRef);
         break;
@@ -1015,8 +1476,11 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
     case kAudioPlugInPropertyTranslateUIDToDevice: {
         YUN_GUARD(inQualifierDataSize == sizeof(CFStringRef),
                   kAudioHardwareBadPropertySizeError, done);
+        YUN_GUARD(inQualifierData != NULL, kAudioHardwareIllegalOperationError, done);
         YUN_GUARD(inDataSize >= sizeof(AudioObjectID), kAudioHardwareBadPropertySizeError, done);
         CFStringRef uid = *(const CFStringRef *)inQualifierData;
+        YUN_GUARD(uid == NULL || CFGetTypeID(uid) == CFStringGetTypeID(),
+                  kAudioHardwareIllegalOperationError, done);
         *(AudioObjectID *)outData =
             (uid != NULL && CFStringCompare(uid, CFSTR(kDevice_UID), 0) == kCFCompareEqualTo)
                 ? kObjectID_Device : kAudioObjectUnknown;
@@ -1084,6 +1548,28 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
         // Keeping alerts and system sounds out of a routing endpoint by
         // default: nobody wants a notification chime in their stream mix.
+        *(UInt32 *)outData = 0;
+        *outDataSize = sizeof(UInt32);
+        break;
+
+    case kAudioDevicePropertyBufferFrameSize:
+        YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
+        *(UInt32 *)outData = kDevice_BufferFrameSize;
+        *outDataSize = sizeof(UInt32);
+        break;
+
+    case kAudioDevicePropertyBufferFrameSizeRange: {
+        YUN_GUARD(inDataSize >= sizeof(AudioValueRange),
+                  kAudioHardwareBadPropertySizeError, done);
+        AudioValueRange *range = (AudioValueRange *)outData;
+        range->mMinimum = kDevice_BufferFrameSize;
+        range->mMaximum = kDevice_BufferFrameSize;
+        *outDataSize = sizeof(AudioValueRange);
+        break;
+    }
+
+    case kAudioDevicePropertyUsesVariableBufferFrameSizes:
+        YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
         *(UInt32 *)outData = 0;
         *outDataSize = sizeof(UInt32);
         break;
@@ -1174,7 +1660,10 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
 
     case kAudioStreamPropertyIsActive:
         YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
-        *(UInt32 *)outData = 1;
+        pthread_mutex_lock(&gDriver.stateMutex);
+        *(UInt32 *)outData = StreamIsInput(inObjectID)
+            ? gDriver.inputStreamIsActive : gDriver.outputStreamIsActive;
+        pthread_mutex_unlock(&gDriver.stateMutex);
         *outDataSize = sizeof(UInt32);
         break;
 
@@ -1253,10 +1742,11 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
     case kAudioLevelControlPropertyDecibelValue: {
         if (!IsVolumeControl(inObjectID)) return kAudioHardwareUnknownPropertyError;
         if (inDataSize != sizeof(Float32)) return kAudioHardwareBadPropertySizeError;
+        Float32 value = *(const Float32 *)inData;
+        if (!isfinite(value)) return kAudioHardwareIllegalOperationError;
         Float32 scalar =
             (inAddress->mSelector == kAudioLevelControlPropertyScalarValue)
-                ? *(const Float32 *)inData
-                : DecibelsToScalar(*(const Float32 *)inData);
+                ? value : DecibelsToScalar(value);
         if (scalar < 0.0f) scalar = 0.0f;
         if (scalar > 1.0f) scalar = 1.0f;
 
@@ -1281,7 +1771,7 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
 
         // Both representations move together, so both have to be announced or
         // whichever one the observer watches goes stale.
-        if (changed && host != NULL) {
+        if (changed && host != NULL && host->PropertiesChanged != NULL) {
             AudioObjectPropertyAddress changes[2] = {
                 { kAudioLevelControlPropertyScalarValue,
                   kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain },
@@ -1315,7 +1805,7 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         AudioServerPlugInHostRef host = gDriver.host;
         pthread_mutex_unlock(&gDriver.stateMutex);
 
-        if (changed && host != NULL) {
+        if (changed && host != NULL && host->PropertiesChanged != NULL) {
             AudioObjectPropertyAddress change = {
                 kAudioBooleanControlPropertyValue,
                 kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain
@@ -1330,20 +1820,7 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
         if (inDataSize != sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
         Float64 requested = *(const Float64 *)inData;
         if (!IsSupportedSampleRate(requested)) return kAudioHardwareIllegalOperationError;
-
-        pthread_mutex_lock(&gDriver.stateMutex);
-        bool changed = (requested != gDriver.sampleRate);
-        if (changed) gDriver.pendingSampleRate = requested;
-        AudioServerPlugInHostRef host = gDriver.host;
-        pthread_mutex_unlock(&gDriver.stateMutex);
-
-        // A rate change alters the IO structure, so it has to go through the
-        // host: it stops outstanding IO, calls us back, then restarts.
-        if (changed && host != NULL) {
-            host->RequestDeviceConfigurationChange(host, kObjectID_Device,
-                                                   (UInt64)requested, NULL);
-        }
-        return 0;
+        return RequestSampleRateChange(requested);
     }
 
     case kAudioStreamPropertyVirtualFormat:
@@ -1355,30 +1832,39 @@ static OSStatus Yun_SetPropertyData(AudioServerPlugInDriverRef inDriver,
             return kAudioHardwareBadPropertySizeError;
         }
         const AudioStreamBasicDescription *format = (const AudioStreamBasicDescription *)inData;
-        if (format->mFormatID != kAudioFormatLinearPCM
-            || format->mChannelsPerFrame != kDevice_ChannelCount
-            || format->mBitsPerChannel != 32
-            || !(format->mFormatFlags & kAudioFormatFlagIsFloat)
-            || !IsSupportedSampleRate(format->mSampleRate)) {
+        if (!IsCanonicalStreamDescription(format)) {
             return kAudioDeviceUnsupportedFormatError;
         }
-
-        pthread_mutex_lock(&gDriver.stateMutex);
-        bool changed = (format->mSampleRate != gDriver.sampleRate);
-        if (changed) gDriver.pendingSampleRate = format->mSampleRate;
-        AudioServerPlugInHostRef host = gDriver.host;
-        pthread_mutex_unlock(&gDriver.stateMutex);
-
-        if (changed && host != NULL) {
-            host->RequestDeviceConfigurationChange(host, kObjectID_Device,
-                                                   (UInt64)format->mSampleRate, NULL);
-        }
-        return 0;
+        return RequestSampleRateChange(format->mSampleRate);
     }
 
     case kAudioStreamPropertyIsActive:
-        // Both streams are always active; accept the write so clients that set
-        // it unconditionally do not see an error.
+        if (inObjectID != kObjectID_Stream_Input
+            && inObjectID != kObjectID_Stream_Output) {
+            return kAudioHardwareUnknownPropertyError;
+        }
+        if (inDataSize != sizeof(UInt32)) return kAudioHardwareBadPropertySizeError;
+        bool isInput = StreamIsInput(inObjectID);
+        bool active = *(const UInt32 *)inData != 0;
+        pthread_mutex_lock(&gDriver.stateMutex);
+        bool changed = active != (isInput
+            ? gDriver.inputStreamIsActive : gDriver.outputStreamIsActive);
+        if (isInput) {
+            gDriver.inputStreamIsActive = active;
+        } else {
+            gDriver.outputStreamIsActive = active;
+        }
+        AudioServerPlugInHostRef host = gDriver.host;
+        pthread_mutex_unlock(&gDriver.stateMutex);
+
+        if (changed && host != NULL && host->PropertiesChanged != NULL) {
+            AudioObjectPropertyAddress change = {
+                kAudioStreamPropertyIsActive,
+                kAudioObjectPropertyScopeGlobal,
+                kAudioObjectPropertyElementMain,
+            };
+            host->PropertiesChanged(host, inObjectID, 1, &change);
+        }
         return 0;
 
     case kYunCustomProperty_ClockAnchor: {
@@ -1421,10 +1907,7 @@ static OSStatus Yun_StartIO(AudioServerPlugInDriverRef inDriver,
         RefreshTimebase_Locked();
         if (++gDriver.clockSeed == 0) gDriver.clockSeed = 1;
         PublishClockState_Locked();
-        if (gDriver.ringBuffer != NULL) {
-            memset(gDriver.ringBuffer, 0,
-                   (size_t)kRingBufferFrames * kDevice_ChannelCount * sizeof(Float32));
-        }
+        ResetRingBuffer(gDriver.ringBuffer);
     }
     ++gDriver.ioRunningCount;
     pthread_mutex_unlock(&gDriver.stateMutex);
@@ -1529,6 +2012,166 @@ static OSStatus Yun_BeginIOOperation(AudioServerPlugInDriverRef inDriver,
     return 0;
 }
 
+static bool SampleTimeToFrame(Float64 sampleTime, UInt64 *outFrame) {
+    if (outFrame == NULL || !isfinite(sampleTime)
+        || sampleTime < 0.0 || sampleTime >= 0x1p64) {
+        return false;
+    }
+    UInt64 frame = (UInt64)sampleTime;
+    if ((Float64)frame != sampleTime) return false;
+    *outFrame = frame;
+    return true;
+}
+
+/// The HAL can vary an operation above its nominal frame count for drift
+/// compensation. Size alone therefore cannot decide whether a cycle is safe:
+/// the two timestamped spans must occupy disjoint parts of the circular ring.
+static bool CycleSpansAreDisjoint(UInt64 inputStart,
+                                  UInt64 outputStart,
+                                  UInt32 frames) {
+    if (frames == 0) return true;
+    if (frames > kRingBufferFrames / 2) return false;
+
+    UInt64 separation = (outputStart - inputStart) & kRingBufferMask;
+    return separation >= frames && separation <= kRingBufferFrames - frames;
+}
+
+static bool RingSpanCanBeTagged(UInt64 startFrame, UInt32 frames) {
+    if (frames == 0) return true;
+    if (startFrame == kRingFrameUnpublished) return false;
+    return (UInt64)(frames - 1) < kRingFrameUnpublished - startFrame;
+}
+
+/// Claims every slot before changing a sample. This makes one callback the
+/// owner of the whole block: overlapping or duplicate writers lose without
+/// publishing a partial mix. No retry is deliberate; an IO deadline is a poor
+/// place for a spin loop.
+static bool ClaimRingWriteSpan(YunRingFrame *ring,
+                               UInt64 startFrame,
+                               UInt32 frames) {
+    UInt32 claimed = 0;
+    for (; claimed < frames; ++claimed) {
+        UInt64 absoluteFrame = startFrame + claimed;
+        UInt64 slot = absoluteFrame & kRingBufferMask;
+        UInt64 unowned = 0;
+        if (!atomic_compare_exchange_strong_explicit(
+                &ring[slot].owner, &unowned, 1,
+                memory_order_seq_cst, memory_order_seq_cst)) {
+            break;
+        }
+        UInt64 published = atomic_load_explicit(
+            &ring[slot].sampleFrame, memory_order_seq_cst);
+        if (published == absoluteFrame) {
+            atomic_store_explicit(
+                &ring[slot].owner, 0, memory_order_seq_cst);
+            break;
+        }
+    }
+    if (claimed == frames) return true;
+
+    // A loser releases only the prefix it claimed and publishes no samples.
+    // Readers then get one bounded silent block, never a mix assembled from
+    // competing clients.
+    for (UInt32 frame = 0; frame < claimed; ++frame) {
+        UInt64 slot = (startFrame + frame) & kRingBufferMask;
+        atomic_store_explicit(
+            &ring[slot].owner, 0, memory_order_seq_cst);
+    }
+    return false;
+}
+
+static void PublishRingWrite(YunRingFrame *ring,
+                             UInt64 startFrame,
+                             UInt32 frames,
+                             const Float32 *buffer,
+                             Float32 gain) {
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        Float32 samples[kDevice_ChannelCount] = {
+            buffer[frame * kDevice_ChannelCount],
+            buffer[frame * kDevice_ChannelCount + 1],
+        };
+        if (gain != 1.0f) {
+            samples[0] *= gain;
+            samples[1] *= gain;
+        }
+        UInt64 absoluteFrame = startFrame + frame;
+        UInt64 slot = absoluteFrame & kRingBufferMask;
+        atomic_store_explicit(
+            &ring[slot].stereoBits, PackStereoFrame(samples),
+            memory_order_seq_cst);
+        atomic_store_explicit(
+            &ring[slot].sampleFrame, absoluteFrame, memory_order_seq_cst);
+    }
+    // Keep every slot owned until the complete callback block is immutable.
+    // Releasing frame-by-frame is safe: a competing writer which sees only a
+    // prefix released cannot claim the still-owned suffix and publishes none.
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        UInt64 slot = (startFrame + frame) & kRingBufferMask;
+        atomic_store_explicit(&ring[slot].owner, 0, memory_order_seq_cst);
+    }
+}
+
+/// The two tag loads bracket the packed stereo load. All ring operations are
+/// sequentially consistent so a slot reuse which overwrites the sample must
+/// also be visible to the second tag load. Release/acquire publication alone
+/// cannot give that guarantee when a reader straddles a later writer's claim.
+static bool ReadRingSpan(YunRingFrame *ring,
+                         UInt64 startFrame,
+                         UInt32 frames,
+                         Float32 *buffer,
+                         Float32 gain) {
+    for (UInt32 frame = 0; frame < frames; ++frame) {
+        UInt64 absoluteFrame = startFrame + frame;
+        UInt64 slot = absoluteFrame & kRingBufferMask;
+        UInt64 ownerBefore = atomic_load_explicit(
+            &ring[slot].owner, memory_order_seq_cst);
+        if (ownerBefore != 0) return false;
+        UInt64 tagBefore = atomic_load_explicit(
+            &ring[slot].sampleFrame, memory_order_seq_cst);
+        if (tagBefore != absoluteFrame) return false;
+        UInt64 bits = atomic_load_explicit(
+            &ring[slot].stereoBits, memory_order_seq_cst);
+        UInt64 tagAfter = atomic_load_explicit(
+            &ring[slot].sampleFrame, memory_order_seq_cst);
+        UInt64 ownerAfter = atomic_load_explicit(
+            &ring[slot].owner, memory_order_seq_cst);
+        if (tagAfter != absoluteFrame || ownerAfter != 0) return false;
+
+        Float32 samples[kDevice_ChannelCount];
+        UnpackStereoFrame(bits, samples);
+        if (gain == 1.0f) {
+            // Unity is the ordinary case and has to stay exactly untouched:
+            // multiplying by 1.0f is arithmetic, and this device's claim is
+            // that it does none.
+            buffer[frame * kDevice_ChannelCount] = samples[0];
+            buffer[frame * kDevice_ChannelCount + 1] = samples[1];
+        } else {
+            buffer[frame * kDevice_ChannelCount] = samples[0] * gain;
+            buffer[frame * kDevice_ChannelCount + 1] = samples[1] * gain;
+        }
+    }
+    return true;
+}
+
+/// Converts a timing-contract violation into a deterministic silent cycle.
+/// Returning an error for every drift-adjusted operation can make the audio
+/// server retry continuously; one bounded dropout is safer for the entire
+/// machine. Absolute tags make old ring epochs unreadable, so a rejected write
+/// changes no storage and cannot disturb a valid concurrent owner.
+static void FailSilentIO(bool isRead,
+                         Float32 *buffer,
+                         UInt32 frames) {
+    if (isRead) {
+        memset(buffer, 0,
+               (size_t)frames * kDevice_ChannelCount * sizeof(Float32));
+        atomic_fetch_add_explicit(
+            &gDriver.unsafeReadOperations, 1, memory_order_relaxed);
+    } else {
+        atomic_fetch_add_explicit(
+            &gDriver.unsafeWriteOperations, 1, memory_order_relaxed);
+    }
+}
+
 /// The loopback itself. Runs on a realtime thread with a deadline: no locks, no
 /// allocation, no logging.
 static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
@@ -1540,65 +2183,63 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
                                   const AudioServerPlugInIOCycleInfo *inIOCycleInfo,
                                   void *ioMainBuffer,
                                   void *ioSecondaryBuffer) {
-    (void)inStreamObjectID; (void)inClientID; (void)ioSecondaryBuffer;
+    (void)ioSecondaryBuffer;
     if (!IsOurDriver(inDriver)) return kAudioHardwareBadObjectError;
     if (inDeviceObjectID != kObjectID_Device) return kAudioHardwareBadObjectError;
 
-    Float32 *ring = gDriver.ringBuffer;
-    if (ring == NULL || ioMainBuffer == NULL) return 0;
+    bool isRead = inOperationID == kAudioServerPlugInIOOperationReadInput;
+    bool isWrite = inOperationID == kAudioServerPlugInIOOperationWriteMix;
+    if (!isRead && !isWrite) return 0;
+    if ((isRead && inStreamObjectID != kObjectID_Stream_Input)
+        || (isWrite && inStreamObjectID != kObjectID_Stream_Output)) {
+        return kAudioHardwareBadStreamError;
+    }
+    if (inIOCycleInfo == NULL || ioMainBuffer == NULL) {
+        return kAudioHardwareIllegalOperationError;
+    }
 
+    YunRingFrame *ring = gDriver.ringBuffer;
     Float32 *buffer = (Float32 *)ioMainBuffer;
+    if (inIOBufferFrameSize == 0) return 0;
 
-    if (inOperationID == kAudioServerPlugInIOOperationReadInput) {
-        Float32 gain = Float32FromBits(
-            atomic_load_explicit(&gDriver.inputGainBits, memory_order_acquire));
-
-        UInt64 startFrame = (UInt64)inIOCycleInfo->mInputTime.mSampleTime;
-        if (gain == 1.0f) {
-            // Unity is the ordinary case and has to stay exactly untouched:
-            // multiplying by 1.0f is arithmetic, and this device's claim is
-            // that it does none.
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
-                UInt64 slot = (startFrame + frame) & kRingBufferMask;
-                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
-                    buffer[frame * kDevice_ChannelCount + channel] =
-                        ring[slot * kDevice_ChannelCount + channel];
-                }
-            }
-        } else {
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
-                UInt64 slot = (startFrame + frame) & kRingBufferMask;
-                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
-                    buffer[frame * kDevice_ChannelCount + channel] =
-                        ring[slot * kDevice_ChannelCount + channel] * gain;
-                }
-            }
-        }
+    UInt64 inputStart = 0;
+    UInt64 outputStart = 0;
+    bool inputTimeIsValid = SampleTimeToFrame(
+        inIOCycleInfo->mInputTime.mSampleTime, &inputStart);
+    bool outputTimeIsValid = SampleTimeToFrame(
+        inIOCycleInfo->mOutputTime.mSampleTime, &outputStart);
+    if (ring == NULL || !inputTimeIsValid || !outputTimeIsValid
+        || !RingSpanCanBeTagged(inputStart, inIOBufferFrameSize)
+        || !RingSpanCanBeTagged(outputStart, inIOBufferFrameSize)
+        || !CycleSpansAreDisjoint(
+            inputStart, outputStart, inIOBufferFrameSize)) {
+        FailSilentIO(isRead, buffer, inIOBufferFrameSize);
         return 0;
     }
 
-    if (inOperationID == kAudioServerPlugInIOOperationWriteMix) {
+    YUN_DRIVER_IO_TEST_HOOK(true, inClientID, inOperationID);
+
+    if (isRead) {
+        Float32 gain = Float32FromBits(
+            atomic_load_explicit(&gDriver.inputGainBits, memory_order_acquire));
+        if (!ReadRingSpan(
+                ring, inputStart, inIOBufferFrameSize, buffer, gain)) {
+            FailSilentIO(true, buffer, inIOBufferFrameSize);
+        }
+        YUN_DRIVER_IO_TEST_HOOK(false, inClientID, inOperationID);
+        return 0;
+    }
+
+    if (isWrite) {
         Float32 gain = Float32FromBits(
             atomic_load_explicit(&gDriver.outputGainBits, memory_order_acquire));
-
-        UInt64 startFrame = (UInt64)inIOCycleInfo->mOutputTime.mSampleTime;
-        if (gain == 1.0f) {
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
-                UInt64 slot = (startFrame + frame) & kRingBufferMask;
-                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
-                    ring[slot * kDevice_ChannelCount + channel] =
-                        buffer[frame * kDevice_ChannelCount + channel];
-                }
-            }
+        if (ClaimRingWriteSpan(ring, outputStart, inIOBufferFrameSize)) {
+            PublishRingWrite(
+                ring, outputStart, inIOBufferFrameSize, buffer, gain);
         } else {
-            for (UInt32 frame = 0; frame < inIOBufferFrameSize; ++frame) {
-                UInt64 slot = (startFrame + frame) & kRingBufferMask;
-                for (UInt32 channel = 0; channel < kDevice_ChannelCount; ++channel) {
-                    ring[slot * kDevice_ChannelCount + channel] =
-                        buffer[frame * kDevice_ChannelCount + channel] * gain;
-                }
-            }
+            FailSilentIO(false, buffer, inIOBufferFrameSize);
         }
+        YUN_DRIVER_IO_TEST_HOOK(false, inClientID, inOperationID);
         return 0;
     }
 

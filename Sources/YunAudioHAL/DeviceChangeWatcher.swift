@@ -7,20 +7,52 @@ import Foundation
 /// `AudioObjectID`, because the numeric ID is reassigned on replug. This is the
 /// signal that tells the app to go and re-resolve those UIDs.
 public final class DeviceChangeWatcher: @unchecked Sendable {
-    private var block: AudioObjectPropertyListenerBlock?
     private let queue: DispatchQueue
     private let coalescer: DeviceChangeCoalescer
     private let inventory: DeviceInventoryProbe
+    private let lifecycle: DeviceChangeWatcherLifecycle
+    private let onChange: @Sendable () -> Void
 
     private static let deviceListAddress = AudioObjectPropertyAddress(
         mSelector: kAudioHardwarePropertyDevices,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain)
 
-    public init(onChange: @escaping @Sendable () -> Void) {
+    public convenience init(onChange: @escaping @Sendable () -> Void) {
         let queue = DispatchQueue(label: "com.yuhuanstudio.yunaudio.device-watch")
+        self.init(
+            queue: queue,
+            initialInventory: nil,
+            inventoryRead: Self.inventorySignature,
+            installListener: { registration in
+                var deviceList = Self.deviceListAddress
+                return AudioObjectAddPropertyListenerBlock(
+                    AudioObjectID.system, &deviceList, queue, registration.block) == noErr
+            },
+            removeListener: { registration in
+                var deviceList = Self.deviceListAddress
+                _ = AudioObjectRemovePropertyListenerBlock(
+                    AudioObjectID.system, &deviceList, queue, registration.block)
+            },
+            diagnostics: DeviceChangeDiagnostics.fromEnvironment(),
+            onChange: onChange)
+    }
+
+    init(
+        queue: DispatchQueue,
+        schedule: DeviceChangeSchedule = DeviceChangeSchedule(),
+        initialInventory: Set<AudioObjectID>?,
+        inventoryRead: @escaping @Sendable () -> Set<AudioObjectID>?,
+        installListener: @escaping @Sendable (DeviceChangeListenerRegistration) -> Bool,
+        removeListener: @escaping @Sendable (DeviceChangeListenerRegistration) -> Void,
+        diagnostics: DeviceChangeDiagnostics? = nil,
+        onChange: @escaping @Sendable () -> Void
+    ) {
         self.queue = queue
-        let diagnostics = DeviceChangeDiagnostics.fromEnvironment()
+        self.onChange = onChange
+        let lifecycle = DeviceChangeWatcherLifecycle(
+            queue: queue, removeListener: removeListener)
+        self.lifecycle = lifecycle
         let inventory = DeviceInventoryProbe(
             // Construction happens before the application's first frame. A
             // baseline read here blocked MainActor on coreaudiod even though
@@ -28,42 +60,38 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
             // Starting unknown keeps construction read-free: the probe reads
             // only when a notification has already said something changed, and
             // it does that on this watcher's own queue.
-            initial: nil,
-            read: Self.inventorySignature,
+            initial: initialInventory,
+            read: inventoryRead,
             diagnostics: diagnostics)
         self.inventory = inventory
-        coalescer = DeviceChangeCoalescer(queue: queue, diagnostics: diagnostics) {
+        let coalescer = DeviceChangeCoalescer(
+            queue: queue, schedule: schedule, diagnostics: diagnostics
+        ) {
             // Some audio plug-ins announce the device-list property after a
             // harmless property read. Re-enumerating complete devices in
             // response asks the same plug-in again and can create a permanent
             // notification loop. An unchanged answer increases the probe
             // interval, while an actual inventory change restores the 50 ms
             // response for the next physical device event.
-            let changed = inventory.readChanged()
-            if changed { onChange() }
-            return changed
+            inventory.readChanged()
         }
+        self.coalescer = coalescer
 
-        let listener: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            // Every notification is scheduled, with no precondition of any
-            // kind. It used to be gated on RouterModel having published its
-            // launch snapshot, and that gate was silent when it never opened:
-            // `establishBaseline` is reached from one code path, and the
-            // verification process reads its inventory synchronously and takes
-            // the other one — so the watcher swallowed every notification for
-            // the lifetime of the process and no device appearing or
-            // disappearing was ever noticed. A missing baseline is now a fact
-            // about the *first read*, handled in `DeviceInventoryProbe`, where
-            // it costs one silent adoption rather than everything.
-            self.coalescer.signal()
+        let listener: AudioObjectPropertyListenerBlock = {
+            [weak lifecycle, weak coalescer] _, _ in
+            guard let lifecycle, let token = lifecycle.admitNotification() else { return }
+            // The generation is checked once before a queued probe enters HAL
+            // and again before a changed inventory is published. Suspension is
+            // therefore O(1): callbacks which were already queued do no HAL
+            // work, while an entered system-object read may finish only on this
+            // same serial owner and its late answer is discarded.
+            coalescer?.signal(
+                isCurrent: { [weak lifecycle] in
+                    lifecycle?.accepts(token) == true
+                },
+                publish: onChange)
         }
-        block = listener
-
-        var deviceList = Self.deviceListAddress
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID.system, &deviceList, queue, listener)
-
+        lifecycle.install(DeviceChangeListenerRegistration(listener), using: installListener)
     }
 
     /// Supplies the ID set already read by RouterModel's launch inventory.
@@ -74,20 +102,194 @@ public final class DeviceChangeWatcher: @unchecked Sendable {
     /// still worth doing on every path that constructs a watcher — a probe
     /// that baselines itself absorbs whichever change was being announced.
     public func establishBaseline(_ ids: Set<AudioObjectID>) {
+        guard let token = lifecycle.admitOperation() else { return }
         queue.async { [weak self] in
-            self?.inventory.establishBaseline(ids)
+            guard let self, lifecycle.accepts(token) else { return }
+            inventory.establishBaseline(ids)
         }
     }
 
+    /// Revokes queued probes and publications without removing the listener.
+    ///
+    /// AppKit can refuse Quit after an audio owner times out. Keeping this
+    /// listener installed lets that same live process resume observation
+    /// without constructing a peer beside a possibly blocked Core Audio call.
+    @discardableResult
+    public func suspend() -> Bool {
+        guard lifecycle.suspend() else { return false }
+        coalescer.invalidate()
+        return true
+    }
+
+    /// Reopens the same listener owner after AppKit refuses termination.
+    ///
+    /// Any read which entered before suspension remains ahead of the resumed
+    /// generation on the sole serial queue. This method never installs another
+    /// listener and never joins that queue.
+    @discardableResult
+    public func resume() -> Bool {
+        guard let token = lifecycle.beginResume() else { return false }
+        queue.async { [weak self] in
+            guard let self, self.lifecycle.activateResume(token) else { return }
+            // Notifications received while suspended were deliberately ignored.
+            // Reconcile once after the old generation has left this sole queue.
+            // This direct probe must not pass back through `coalescer.signal`:
+            // invalidation's queued schedule reset could otherwise erase the
+            // new generation's pending deadline before it enters HAL.
+            _ = inventory.readChanged()
+            if lifecycle.accepts(token) { onChange() }
+        }
+        return true
+    }
+
+    /// Permanently closes admission and removes the listener on its owner queue.
+    ///
+    /// Removal is scheduled exactly once and this call never waits for a HAL
+    /// read which already entered. Use only after process termination has been
+    /// accepted; a refused attempt must call `resume()` instead.
+    @discardableResult
+    public func shutdown() -> Bool {
+        guard lifecycle.shutdown() else { return false }
+        coalescer.invalidate()
+        return true
+    }
+
     deinit {
-        guard let block else { return }
-        var deviceList = Self.deviceListAddress
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID.system, &deviceList, queue, block)
+        shutdown()
     }
 
     private static func inventorySignature() -> Set<AudioObjectID>? {
-        try? Set(AudioObjectID.system.array(of: .devices))
+        try? Set(
+            AudioObjectID.system.array(
+                of: .devices, maximumCount: HALSemanticArrayPolicy.maximumDevices))
+    }
+}
+
+/// Gives injected installation operations an owned block rather than a
+/// nonescaping closure parameter. Core Audio retains the block until removal;
+/// representing that lifetime explicitly avoids lying to Swift's closure model.
+final class DeviceChangeListenerRegistration: @unchecked Sendable {
+    let block: AudioObjectPropertyListenerBlock
+
+    init(_ block: @escaping AudioObjectPropertyListenerBlock) {
+        self.block = block
+    }
+}
+
+/// Generation admission and exact-once ownership of the HAL listener block.
+///
+/// The lock protects only scalar state and a block reference. No Core Audio
+/// operation runs under it: listener removal belongs to the watcher's serial
+/// queue, so releasing a watcher on MainActor cannot inherit a coreaudiod stall.
+private final class DeviceChangeWatcherLifecycle: @unchecked Sendable {
+    fileprivate struct Token: Sendable {
+        let generation: UInt64
+    }
+
+    private enum Phase: Equatable {
+        case active
+        case suspended
+        case resuming
+        case shutDown
+    }
+
+    private let lock = NSLock()
+    private let queue: DispatchQueue
+    private let removeListener: @Sendable (DeviceChangeListenerRegistration) -> Void
+    private var phase = Phase.active
+    private var generation: UInt64 = 1
+    private var listener: DeviceChangeListenerRegistration?
+    private var removalWasScheduled = false
+
+    init(
+        queue: DispatchQueue,
+        removeListener: @escaping @Sendable (DeviceChangeListenerRegistration) -> Void
+    ) {
+        self.queue = queue
+        self.removeListener = removeListener
+    }
+
+    func install(
+        _ listener: DeviceChangeListenerRegistration,
+        using installListener: @Sendable (DeviceChangeListenerRegistration) -> Bool
+    ) {
+        guard installListener(listener) else { return }
+        lock.withLock { self.listener = listener }
+    }
+
+    func admitNotification() -> Token? {
+        admitOperation()
+    }
+
+    func admitOperation() -> Token? {
+        lock.withLock {
+            guard phase == .active else { return nil }
+            return Token(generation: generation)
+        }
+    }
+
+    func accepts(_ token: Token) -> Bool {
+        lock.withLock {
+            phase == .active && generation == token.generation
+        }
+    }
+
+    func suspend() -> Bool {
+        lock.withLock {
+            guard phase == .active || phase == .resuming else { return false }
+            phase = .suspended
+            advanceGeneration()
+            return true
+        }
+    }
+
+    func beginResume() -> Token? {
+        lock.withLock {
+            guard phase == .suspended else { return nil }
+            // Stay closed until the serial queue reaches the activation edge.
+            // Core Audio callbacks submitted while suspended can themselves be
+            // waiting on this queue; opening here would misclassify them as new.
+            phase = .resuming
+            advanceGeneration()
+            return Token(generation: generation)
+        }
+    }
+
+    func activateResume(_ token: Token) -> Bool {
+        lock.withLock {
+            guard phase == .resuming, generation == token.generation else { return false }
+            phase = .active
+            return true
+        }
+    }
+
+    func shutdown() -> Bool {
+        let result: (changed: Bool, schedulesRemoval: Bool) = lock.withLock {
+            guard phase != .shutDown else { return (false, false) }
+            phase = .shutDown
+            advanceGeneration()
+            guard listener != nil, !removalWasScheduled else { return (true, false) }
+            removalWasScheduled = true
+            return (true, true)
+        }
+        if result.schedulesRemoval {
+            queue.async { [self] in removeInstalledListener() }
+        }
+        return result.changed
+    }
+
+    private func removeInstalledListener() {
+        let installed = lock.withLock {
+            let installed = listener
+            listener = nil
+            return installed
+        }
+        if let installed { removeListener(installed) }
+    }
+
+    private func advanceGeneration() {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
     }
 }
 
@@ -124,8 +326,17 @@ final class DeviceChangeCoalescer: @unchecked Sendable {
     }
 
     func signal(recordsNotification: Bool = true) {
+        signal(recordsNotification: recordsNotification, isCurrent: { true }, publish: {})
+    }
+
+    func signal(
+        recordsNotification: Bool = true,
+        isCurrent: @escaping @Sendable () -> Bool,
+        publish: @escaping @Sendable () -> Void
+    ) {
         queue.async { [weak self] in
             guard let self else { return }
+            guard isCurrent() else { return }
             let now = clock()
             guard
                 let probe = schedule.signal(
@@ -140,8 +351,19 @@ final class DeviceChangeCoalescer: @unchecked Sendable {
                 // token is what keeps it from reading HAL or completing the new
                 // generation when it eventually arrives.
                 guard schedule.beginProbe(probe) else { return }
-                schedule.complete(inventoryChanged: handler(), at: clock())
+                guard isCurrent() else { return }
+                let changed = handler()
+                let mayPublish = isCurrent()
+                schedule.complete(inventoryChanged: changed && mayPublish, at: clock())
+                if changed, mayPublish { publish() }
             }
+        }
+    }
+
+    /// Invalidates an already-submitted deadline without joining the queue.
+    func invalidate() {
+        queue.async { [weak self] in
+            self?.schedule.invalidate()
         }
     }
 }
@@ -256,6 +478,16 @@ struct DeviceChangeSchedule: Sendable {
         } else {
             delay = min(delay.multipliedReportingOverflow(by: 2).partialValue, maximumDelay)
         }
+    }
+
+    /// Makes every submitted `asyncAfter` token stale and resets its backoff.
+    mutating func invalidate() {
+        generation &+= 1
+        if generation == 0 { generation = 1 }
+        pendingGeneration = nil
+        delay = initialDelay
+        lastCompletion = nil
+        lastSignal = nil
     }
 
     private mutating func makeProbe(at now: UInt64) -> DeviceChangeProbe {

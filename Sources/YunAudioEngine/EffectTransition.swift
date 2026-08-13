@@ -1,4 +1,5 @@
 import Foundation
+import YunAudioRT
 
 /// A preallocated handover between two effect paths.
 ///
@@ -12,15 +13,28 @@ import Foundation
 ///
 /// Gain curves and storage are prepared at construction. `process` allocates
 /// nothing and is therefore suitable for the IO thread.
-final class EffectTransition {
+///
+/// `@unchecked Sendable` has one narrow boundary: the IO callback owns every
+/// mutable timeline field, while control code may read only `isComplete`, whose
+/// storage is C11 atomic. The graph retirement fence outlives both uses.
+final class EffectTransition: @unchecked Sendable {
     static let fadeSeconds = 0.020
 
     let oldLatencyFrames: Int
     let newLatencyFrames: Int
     let warmupFrames: Int
     let fadeFrames: Int
+    /// Wall-clock duration of the longest sample timeline this handover can
+    /// consume. Control code uses it only to schedule cleanup; completion is
+    /// still decided by the callback's atomic publication, never by a timer.
+    let expectedCompletionSeconds: Double
 
     private let progress: UnsafeMutablePointer<Float>
+    /// Completion crosses from the IO thread to control code. Keeping that
+    /// publication in C11 atomic storage avoids turning a twenty-millisecond
+    /// handover into a plain-memory race when the next edit asks whether it is
+    /// safe to retire the old path.
+    private let completion: OpaquePointer
     private let changesLatency: Bool
     private let searchFrames: Int
     private let fallbackFrames: Int
@@ -37,14 +51,27 @@ final class EffectTransition {
 
     private(set) var spliceFrame: Int?
     var isComplete: Bool {
-        changesLatency ? mismatchComplete : fadePosition == fadeFrames
+        yun_rt_counter_load(completion) != 0
     }
     private(set) var processedFrames = 0
+
+    /// A successor may use this handover's new side as its old path only once
+    /// that side is the complete audible answer.
+    static func admitsSuccessor(after current: EffectTransition?) -> Bool {
+        current?.isComplete != false
+    }
 
     init(
         sampleRate: Double, oldLatencyFrames: Int,
         newLatencyFrames: Int
     ) {
+        precondition(
+            sampleRate.isFinite && sampleRate > 0
+                && sampleRate <= Double(Int.max) / Self.fadeSeconds)
+        guard let completion = yun_rt_counter_create(0) else {
+            preconditionFailure("Effect-transition completion storage is unavailable")
+        }
+        self.completion = completion
         self.oldLatencyFrames = max(0, oldLatencyFrames)
         self.newLatencyFrames = max(0, newLatencyFrames)
         // A newly-created stage starts with empty history regardless of how
@@ -52,6 +79,10 @@ final class EffectTransition {
         // the newcomer can produce a real sample.
         warmupFrames = self.newLatencyFrames
         fadeFrames = max(1, Int((sampleRate * Self.fadeSeconds).rounded()))
+        let (completionFrames, durationOverflowed) =
+            warmupFrames.addingReportingOverflow(fadeFrames)
+        precondition(!durationOverflowed)
+        expectedCompletionSeconds = Double(completionFrames) / sampleRate
         changesLatency = self.oldLatencyFrames != self.newLatencyFrames
         fallbackFrames = min(
             fadeFrames,
@@ -72,6 +103,7 @@ final class EffectTransition {
     }
 
     deinit {
+        yun_rt_counter_free(completion)
         progress.deinitialize(count: fadeFrames)
         progress.deallocate()
     }
@@ -85,7 +117,11 @@ final class EffectTransition {
         output: UnsafeMutablePointer<Float>, frames: Int
     ) {
         guard frames > 0 else { return }
-        defer { processedFrames += frames }
+        defer {
+            processedFrames += frames
+            let complete = changesLatency ? mismatchComplete : fadePosition == fadeFrames
+            if complete { yun_rt_counter_store(completion, 1) }
+        }
         var offset = 0
 
         if warmupPosition < warmupFrames {

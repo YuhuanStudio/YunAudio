@@ -6,6 +6,277 @@ import YunDesign
 
 @Suite("UI resource benchmark boundary")
 struct UIResourceBenchmarkTests {
+    @Test("section 69 is an explicit deterministic scenario")
+    func section69ScenarioIsExplicit() {
+        #expect(UIResourceBenchmarkScenario.resolve(environment: [:]) == .standard)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "app-open"
+            ]) == .appOpen)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "panel-closed"
+            ]) == .panelClosed)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "section-69"
+            ]) == .section69)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "unknown"
+            ]) == nil)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "ktv-stage"
+            ]) == .ktvStage)
+        #expect(UIResourceBenchmarkScenario.allCases.count == 5)
+    }
+
+    @Test("section 69 rejects the measured storm but admits a healthy layout")
+    func section69HasNumericBudget() {
+        #expect(
+            UIResourceBenchmarkBudget.admitsSection69(
+                staticProcessorSeconds: 0.08,
+                staticWallSeconds: 10,
+                plannedStaticSeconds: 10,
+                movingProcessorSeconds: 0.28,
+                movingWallSeconds: 10,
+                plannedMovingSeconds: 10,
+                mainRunLoopDeliveryLatency: 0.02))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsSection69(
+                staticProcessorSeconds: 1.4,
+                staticWallSeconds: 10,
+                plannedStaticSeconds: 10,
+                movingProcessorSeconds: 0.28,
+                movingWallSeconds: 10,
+                plannedMovingSeconds: 10,
+                mainRunLoopDeliveryLatency: 0.02))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsSection69(
+                staticProcessorSeconds: 0.08,
+                staticWallSeconds: 12.1,
+                plannedStaticSeconds: 10,
+                movingProcessorSeconds: 0.28,
+                movingWallSeconds: 10,
+                plannedMovingSeconds: 10,
+                mainRunLoopDeliveryLatency: 0.02))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsSection69(
+                staticProcessorSeconds: 0.08,
+                staticWallSeconds: 10,
+                plannedStaticSeconds: 10,
+                movingProcessorSeconds: 0.28,
+                movingWallSeconds: 10,
+                plannedMovingSeconds: 10,
+                mainRunLoopDeliveryLatency: 0.101))
+    }
+
+    @Test("the MainActor distribution rejects an injected nine millisecond stall")
+    func mainActorDistributionGate() {
+        let healthy = MainActorLatencyDistribution(
+            nanoseconds: [UInt64](repeating: 200_000, count: 1_000))
+        #expect(healthy.samples == 1_000)
+        #expect(healthy.p50Seconds == 0.0002)
+        #expect(healthy.p99Seconds == 0.0002)
+        #expect(healthy.maximumSeconds == 0.0002)
+        #expect(UIResourceBenchmarkBudget.admitsMainActor(healthy))
+
+        var stalled = [UInt64](repeating: 200_000, count: 999)
+        stalled.append(9_000_000)
+        let injected = MainActorLatencyDistribution(nanoseconds: stalled)
+        #expect(injected.p50Seconds == 0.0002)
+        #expect(injected.p99Seconds == 0.0002)
+        #expect(injected.maximumSeconds == 0.009)
+        #expect(!UIResourceBenchmarkBudget.admitsMainActor(injected))
+
+        let p99Regression = MainActorLatencyDistribution(
+            nanoseconds: [UInt64](repeating: 200_000, count: 989)
+                + [UInt64](repeating: 2_100_000, count: 11))
+        #expect(p99Regression.p99Seconds == 0.0021)
+        #expect(!UIResourceBenchmarkBudget.admitsMainActor(p99Regression))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                MainActorLatencyDistribution(nanoseconds: [])))
+    }
+
+    @Test("the hard distribution boundaries are exact")
+    func mainActorDistributionBoundariesAreExact() {
+        #expect(
+            UIResourceBenchmarkBudget.admitsMainActor(
+                MainActorLatencyDistribution(
+                    samples: 1, p50Seconds: 0.0005, p99Seconds: 0.002,
+                    maximumSeconds: 0.008)))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                MainActorLatencyDistribution(
+                    samples: 1, p50Seconds: 0.000_501, p99Seconds: 0.002,
+                    maximumSeconds: 0.008)))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                MainActorLatencyDistribution(
+                    samples: 1, p50Seconds: 0.0005, p99Seconds: 0.002_001,
+                    maximumSeconds: 0.008)))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                MainActorLatencyDistribution(
+                    samples: 1, p50Seconds: 0.0005, p99Seconds: 0.002,
+                    maximumSeconds: 0.008_001)))
+    }
+
+    @Test("sample coverage is numeric and producer misses cannot be hidden")
+    func sampleCoverageIsFailClosed() {
+        let distribution = MainActorLatencyDistribution(
+            nanoseconds: [UInt64](repeating: 200_000, count: 990))
+        let accepted = MainActorScenarioEvidence(
+            passCount: 1,
+            expectedSamples: 1_000,
+            deliveredSamples: 990,
+            producerMisses: 10,
+            minimumSampleCoverage: 0.99,
+            producer: distribution,
+            delivery: distribution)
+        #expect(UIResourceBenchmarkBudget.admitsMainActor(accepted))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                evidence(accepted, delivered: 989, misses: 11, coverage: 0.989)))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                evidence(accepted, delivered: 990, misses: 9, coverage: 0.99)))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsMainActor(
+                evidence(accepted, delivered: 989, misses: 11, coverage: 1)))
+    }
+
+    @MainActor
+    @Test("a queued delivery observes a deterministic nine millisecond MainActor barrier")
+    func queuedDeliveryObservesNineMillisecondBarrier() async {
+        let recorder = MainActorDeliveryRecorder(
+            origin: DispatchTime.now().uptimeNanoseconds)
+        enqueueDeliveryAndBlockMainActor(recorder)
+        await withCheckedContinuation { continuation in
+            MainRunLoopDelivery.perform { continuation.resume() }
+        }
+
+        let observed = recorder.result.distribution
+        #expect(observed.samples == 1)
+        #expect(observed.maximumSeconds >= 0.009)
+        #expect(!UIResourceBenchmarkBudget.admitsMainActor(observed))
+    }
+
+    @MainActor
+    private func enqueueDeliveryAndBlockMainActor(_ recorder: MainActorDeliveryRecorder) {
+        #expect(Thread.isMainThread)
+        let enqueued = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let sentAt = DispatchTime.now().uptimeNanoseconds
+            MainRunLoopDelivery.perform {
+                recorder.record(sentAt: sentAt)
+            }
+            enqueued.signal()
+        }
+        #expect(enqueued.wait(timeout: .now() + 1) == .success)
+
+        Thread.sleep(forTimeInterval: 0.009)
+    }
+
+    @Test("canonical evidence requires four revisions and four fresh processes")
+    func canonicalManifestRequiresExactRunGroup() throws {
+        let identity = revisionIdentity()
+        let manifests = zip(
+            UIBenchmarkContract.requiredScenarios,
+            [Int32(101), 102, 103, 104]
+        ).map { scenarioManifest(identity: identity, scenario: $0.0, pid: $0.1) }
+
+        let aggregate = try UIBenchmarkManifestAggregator.validate(manifests).get()
+        #expect(aggregate.identity == identity)
+        #expect(aggregate.scenarios.map(\.scenario) == UIBenchmarkContract.requiredScenarios)
+        #expect(aggregate.scenarios.map(\.processIdentifier) == [101, 102, 103, 104])
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(Array(manifests.dropLast()))))
+
+        var duplicatePID = manifests
+        duplicatePID[3] = scenarioManifest(
+            identity: identity, scenario: .ktvStage, pid: 103)
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(duplicatePID)))
+
+        var duplicateScenario = manifests
+        duplicateScenario[3] = scenarioManifest(
+            identity: identity, scenario: .section69, pid: 104)
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(duplicateScenario)))
+
+        var mixedRevision = manifests
+        mixedRevision[3] = scenarioManifest(
+            identity: revisionIdentity(binary: String(repeating: "b", count: 64)),
+            scenario: .ktvStage,
+            pid: 104)
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(mixedRevision)))
+
+        var failed = manifests
+        failed[3] = scenarioManifest(
+            identity: identity, scenario: .ktvStage, pid: 104, passed: false)
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(failed)))
+
+        var numericallyFailed = manifests
+        numericallyFailed[3] = scenarioManifest(
+            identity: identity,
+            scenario: .ktvStage,
+            pid: 104,
+            maximumDeliveryNanoseconds: 9_000_000)
+        #expect(isFailure(UIBenchmarkManifestAggregator.validate(numericallyFailed)))
+
+        let longest = zip(
+            UIBenchmarkContract.requiredScenarios,
+            [Int32(301), 302, 303, 304]
+        ).map {
+            scenarioManifest(
+                identity: identity, scenario: $0.0, pid: $0.1, requestedSeconds: 60)
+        }
+        #expect(try UIBenchmarkManifestAggregator.validate(longest).get().scenarios.count == 4)
+    }
+
+    @Test("revision identity refuses an omitted or malformed binding")
+    func revisionIdentityIsFailClosed() {
+        var environment = revisionEnvironment()
+        #expect(UIBenchmarkRevisionIdentity.resolve(environment: environment) != nil)
+        environment.removeValue(forKey: "YUNAUDIO_UI_BENCHMARK_OS_BUILD")
+        #expect(UIBenchmarkRevisionIdentity.resolve(environment: environment) == nil)
+        environment = revisionEnvironment()
+        environment["YUNAUDIO_UI_BENCHMARK_BINARY_SHA256"] = "not-a-sha"
+        #expect(UIBenchmarkRevisionIdentity.resolve(environment: environment) == nil)
+        environment = revisionEnvironment()
+        environment["YUNAUDIO_UI_BENCHMARK_THRESHOLD_REVISION"] = "old-threshold"
+        #expect(UIBenchmarkRevisionIdentity.resolve(environment: environment) == nil)
+    }
+
+    @Test("the fourth fresh process atomically produces one canonical aggregate")
+    func manifestStoreAggregatesOnceComplete() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "YunAudio-ui-manifest-test-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let identity = revisionIdentity()
+        let manifests = zip(
+            UIBenchmarkContract.requiredScenarios,
+            [Int32(201), 202, 203, 204]
+        ).map { scenarioManifest(identity: identity, scenario: $0.0, pid: $0.1) }
+
+        for manifest in manifests.dropLast() {
+            #expect(try UIBenchmarkManifestStore.write(manifest, to: directory) == .recorded)
+        }
+        let outcome = try UIBenchmarkManifestStore.write(manifests[3], to: directory)
+        guard case .aggregated(let aggregateURL) = outcome else {
+            Issue.record("the fourth scenario did not aggregate")
+            return
+        }
+        let data = try Data(contentsOf: aggregateURL)
+        let aggregate = try JSONDecoder().decode(UIBenchmarkAggregateManifest.self, from: data)
+        #expect(aggregate.scenarios.count == 4)
+        #expect(Set(aggregate.scenarios.map(\.processIdentifier)).count == 4)
+        #expect(data.count <= UIBenchmarkContract.maximumManifestBytes)
+        #expect(throws: UIBenchmarkManifestValidationError.self) {
+            try UIBenchmarkManifestStore.write(manifests[3], to: directory)
+        }
+    }
+
     @Test("drawing variants require both no-audio benchmark guards")
     func drawingVariantsAreGuarded() {
         let unguarded = YunUIBenchmarkConfiguration.resolve(environment: [
@@ -65,28 +336,77 @@ struct UIResourceBenchmarkTests {
             contentsOf: repository.appendingPathComponent(
                 "Sources/YunAudioApp/UIResourceBenchmark.swift"),
             encoding: .utf8)
+        let manifest = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/YunAudioApp/UIBenchmarkManifest.swift"),
+            encoding: .utf8)
         let model = try String(
             contentsOf: repository.appendingPathComponent(
                 "Sources/YunAudioApp/RouterModel.swift"),
+            encoding: .utf8)
+        let transport = try String(
+            contentsOf: repository.appendingPathComponent(
+                "Sources/YunAudioApp/KTVTransportBar.swift"),
             encoding: .utf8)
 
         #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK=1"))
         #expect(launcher.contains("YUNAUDIO_SCREENSHOT_NO_AUDIO=1"))
         #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_VARIANT=\"$VARIANT_TO_MEASURE\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_SCENARIO=\"$scenario\""))
+        #expect(launcher.contains("SCENARIOS=(app-open panel-closed section-69 ktv-stage)"))
+        #expect(launcher.contains("kill -0 \"$benchmark_pid\""))
+        #expect(launcher.contains("deadline_seconds="))
+        #expect(launcher.contains("-newer \"$APP\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_GIT_HEAD=\"$GIT_HEAD\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_DIRTY_DIGEST=\"$DIRTY_DIGEST\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_SOURCE_SHA256=\"$SOURCE_TREE_SHA\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_BINARY_SHA256=\"$BINARY_SHA\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_TOOLCHAIN_SHA256=\"$TOOLCHAIN_SHA\""))
+        #expect(launcher.contains("YUNAUDIO_UI_BENCHMARK_OS_BUILD=\"$OS_BUILD\""))
+        #expect(launcher.contains("aggregate.json"))
+        #expect(launcher.contains("UI benchmark binary SHA-256"))
+        #expect(launcher.contains("UI benchmark MainActor distribution"))
         #expect(app.contains("UIResourceBenchmark.run(model: model)"))
         #expect(
+            app.contains("UIResourceBenchmark.beginColdLaunchProbe(environment: environment)"))
+        let coldBegin = try #require(app.range(of: "UIResourceBenchmark.beginColdLaunchProbe"))
+        let modelPolicy = try #require(app.range(of: "AppStartup.modelPolicy"))
+        #expect(coldBegin.lowerBound < modelPolicy.lowerBound)
+        #expect(
             model.contains(
-                "if Self.isVerificationProcess, !Self.isUIBenchmarkProcess { refreshDevices() }"
+                "if startupPolicy.refreshesDevicesDuringConstruction { refreshDevices() }"
             ))
         #expect(
             model.contains(
-                "Self.isVerificationProcess && !Self.isUIBenchmarkProcess"))
+                "startsClientImmediately: startupPolicy.startsMIDIImmediatelyDuringConstruction"
+            ))
         #expect(
             benchmark.contains(
                 "model.prepareForRendering(refreshesApplications: false)"))
-        #expect(benchmark.contains("guard fixtureIsIsolated(model) else { return false }"))
+        #expect(benchmark.contains("guard fixtureIsIsolated(model) else"))
+        let coldBranch = try #require(benchmark.range(of: "if scenario == .appOpen"))
+        let renderFixture = try #require(benchmark.range(of: "model.prepareForRendering"))
+        #expect(coldBranch.lowerBound < renderFixture.lowerBound)
         #expect(benchmark.contains("UI benchmark fresh process"))
         #expect(benchmark.contains("UI benchmark composition cards"))
+        #expect(benchmark.contains("UI benchmark section-69 boundary"))
+        #expect(benchmark.contains("section69LyricFixture"))
+        #expect(benchmark.contains("!model.canCancelLeadVocal"))
+        #expect(benchmark.contains("!KTVWindow.isVisible"))
+        #expect(
+            benchmark.contains(
+                "[\"MainWindow\", \"SingingPanel\", \"KTVTransportPanel\", \"KTVStage\"]"))
+        #expect(benchmark.contains("moving immediate"))
+        #expect(benchmark.contains("MainRunLoopDelivery.perform"))
+        #expect(benchmark.contains("cadenceNanoseconds"))
+        #expect(benchmark.contains("producerMisses"))
+        #expect(benchmark.contains("window.orderOut(nil)"))
+        #expect(benchmark.contains("task scheduling lateness"))
+        #expect(manifest.contains("expected exactly four scenario manifests"))
+        #expect(manifest.contains("every scenario must run in a fresh process"))
+        #expect(manifest.contains("scenario manifests belong to different revisions"))
+        #expect(manifest.contains("maximumManifestBytes = 64 * 1024"))
+        #expect(transport.contains("\"KTVTransportStage\" : \"KTVTransportPanel\""))
     }
 
     @Test("the fixture cannot enumerate or display the person's applications")
@@ -160,5 +480,119 @@ struct UIResourceBenchmarkTests {
         #expect(
             compositor.contains(
                 "swiftUISurface(progress: model.lyricProgress, animates: true)"))
+    }
+
+    private func evidence(
+        _ basis: MainActorScenarioEvidence,
+        delivered: Int,
+        misses: Int,
+        coverage: Double
+    ) -> MainActorScenarioEvidence {
+        let distribution = MainActorLatencyDistribution(
+            nanoseconds: [UInt64](repeating: 200_000, count: delivered))
+        return MainActorScenarioEvidence(
+            passCount: basis.passCount,
+            expectedSamples: basis.expectedSamples,
+            deliveredSamples: delivered,
+            producerMisses: misses,
+            minimumSampleCoverage: coverage,
+            producer: distribution,
+            delivery: distribution)
+    }
+
+    private func revisionIdentity(
+        binary: String = String(repeating: "a", count: 64)
+    ) -> UIBenchmarkRevisionIdentity {
+        UIBenchmarkRevisionIdentity(
+            schemaVersion: UIBenchmarkContract.schemaVersion,
+            runGroupID: "test-run-group",
+            gitHEAD: String(repeating: "a", count: 40),
+            dirtyDigest: String(repeating: "a", count: 64),
+            sourceTreeSHA256: String(repeating: "a", count: 64),
+            binarySHA256: binary,
+            toolchainSHA256: String(repeating: "a", count: 64),
+            operatingSystemBuild: "26A123",
+            fixtureRevision: UIBenchmarkContract.fixtureRevision,
+            thresholdRevision: UIBenchmarkContract.thresholdRevision)
+    }
+
+    private func revisionEnvironment() -> [String: String] {
+        [
+            "YUNAUDIO_UI_BENCHMARK_RUN_GROUP": "test-run-group",
+            "YUNAUDIO_UI_BENCHMARK_GIT_HEAD": String(repeating: "a", count: 40),
+            "YUNAUDIO_UI_BENCHMARK_DIRTY_DIGEST": String(repeating: "a", count: 64),
+            "YUNAUDIO_UI_BENCHMARK_SOURCE_SHA256": String(repeating: "a", count: 64),
+            "YUNAUDIO_UI_BENCHMARK_BINARY_SHA256": String(repeating: "a", count: 64),
+            "YUNAUDIO_UI_BENCHMARK_TOOLCHAIN_SHA256": String(repeating: "a", count: 64),
+            "YUNAUDIO_UI_BENCHMARK_OS_BUILD": "26A123",
+            "YUNAUDIO_UI_BENCHMARK_FIXTURE_REVISION":
+                UIBenchmarkContract.fixtureRevision,
+            "YUNAUDIO_UI_BENCHMARK_THRESHOLD_REVISION":
+                UIBenchmarkContract.thresholdRevision,
+        ]
+    }
+
+    private func scenarioManifest(
+        identity: UIBenchmarkRevisionIdentity,
+        scenario: UIResourceBenchmarkScenario,
+        pid: Int32,
+        passed: Bool = true,
+        requestedSeconds: Double = 4,
+        maximumDeliveryNanoseconds: UInt64 = 200_000
+    ) -> UIBenchmarkScenarioManifest {
+        let passCount = scenario == .appOpen || scenario == .panelClosed ? 1 : 5
+        let plannedSeconds: Double
+        switch scenario {
+        case .appOpen, .panelClosed:
+            plannedSeconds = requestedSeconds
+        case .section69:
+            plannedSeconds = max(10, requestedSeconds) + requestedSeconds * 4
+        case .ktvStage:
+            plannedSeconds = 4 + requestedSeconds * 4
+        case .standard:
+            plannedSeconds = requestedSeconds
+        }
+        let sampleCount = Int(plannedSeconds * 1_000)
+        let producer = MainActorLatencyDistribution(
+            samples: sampleCount,
+            p50Seconds: 0.0002,
+            p99Seconds: 0.0002,
+            maximumSeconds: 0.0002)
+        let delivery = MainActorLatencyDistribution(
+            samples: sampleCount,
+            p50Seconds: 0.0002,
+            p99Seconds: 0.0002,
+            maximumSeconds: Double(maximumDeliveryNanoseconds) / 1e9)
+        return UIBenchmarkScenarioManifest(
+            identity: identity,
+            scenario: scenario,
+            processIdentifier: pid,
+            style: "flat",
+            variant: "full",
+            requestedSeconds: requestedSeconds,
+            mainActor: MainActorScenarioEvidence(
+                passCount: passCount,
+                expectedSamples: sampleCount,
+                deliveredSamples: sampleCount,
+                producerMisses: 0,
+                minimumSampleCoverage: 1,
+                producer: producer,
+                delivery: delivery),
+            resources: [
+                UIBenchmarkResourcePhase(
+                    name: scenario.rawValue,
+                    processorSeconds: 0.01,
+                    wallSeconds: 4,
+                    footprintBytes: 1,
+                    bodyEvaluations: [:])
+            ],
+            passed: passed)
+    }
+
+    private func isFailure<Success, Failure: Error>(
+        _ result: Result<Success, Failure>
+    ) -> Bool {
+        if case .failure = result { return true }
+        return false
     }
 }

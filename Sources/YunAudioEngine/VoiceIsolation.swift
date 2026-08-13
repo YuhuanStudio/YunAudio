@@ -1,6 +1,7 @@
 import AudioToolbox
 import AVFoundation
 import Foundation
+import YunAudioHAL
 
 /// Hosts `AUSoundIsolation` on the audio path.
 ///
@@ -21,7 +22,7 @@ import Foundation
 /// isolation also gives up the no-allocation guarantee. It has not produced a
 /// dropout in testing, but it is a broken realtime contract and is recorded
 /// here rather than smoothed over.
-final class VoiceIsolationUnit {
+final class VoiceIsolationUnit: AudioUnitTeardownOwner, @unchecked Sendable {
     let unit: AudioComponentInstance
     let maximumFrames: Int
 
@@ -29,13 +30,32 @@ final class VoiceIsolationUnit {
     /// copies out of it.
     let inputBuffer: UnsafeMutablePointer<Float>
     let outputBuffer: UnsafeMutablePointer<Float>
+    private let inputPullContext: UnsafeMutablePointer<AudioUnitPullSourceContext>
     private let bufferList: UnsafeMutableAudioBufferListPointer
     private var timestamp = AudioTimeStamp()
+    private var teardownState = AudioUnitTeardownState()
+    private var storageWasDetached = false
+    private let controlGate = AudioUnitOwnerControlGate()
 
     /// Latency the unit reports, in frames at the configured rate.
     let latencyFrames: Int
 
-    init?(sampleRate: Double, maximumFrames: Int) {
+    init?(
+        sampleRate: Double, maximumFrames: Int,
+        teardownDeadline: HALTeardownDeadline = HALTeardownDeadline(timeout: 2),
+        constructionContext: AudioUnitConstructionContext? = nil,
+        suppliedGraphAdmission: AudioUnitGraphAdmissionBox? = nil
+    ) {
+        let ownsGraphAdmission = suppliedGraphAdmission == nil
+        guard
+            let graphAdmission = suppliedGraphAdmission
+                ?? AudioUnitGraphAdmissionBox(
+                    waitingUpTo: teardownDeadline.remainingTimeInterval)
+        else { return nil }
+        defer { if ownsGraphAdmission { graphAdmission.release() } }
+        guard
+            let maximumByteCount = AudioUnitPullSourceContext.byteCount(for: maximumFrames)
+        else { return nil }
         self.maximumFrames = maximumFrames
 
         var description = AudioComponentDescription(
@@ -43,23 +63,52 @@ final class VoiceIsolationUnit {
             componentSubType: SoundIsolation.componentSubType,
             componentManufacturer: kAudioUnitManufacturer_Apple,
             componentFlags: 0, componentFlagsMask: 0)
+        guard teardownDeadline.hasTimeRemaining else { return nil }
         guard let component = AudioComponentFindNext(nil, &description) else { return nil }
+        guard teardownDeadline.hasTimeRemaining else { return nil }
+        guard !AudioUnitPlugins.requiresAsyncInstantiation(component) else { return nil }
 
         var instance: AudioComponentInstance?
-        guard AudioComponentInstanceNew(component, &instance) == noErr,
-            let created = instance
+        guard
+            let status = performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                {
+                    AudioComponentInstanceNew(component, &instance)
+                })
         else { return nil }
+        let ownership = AudioComponentCreationOwnership(
+            status: status, instance: instance)
+        guard let created = ownership.createdInstance else {
+            if let orphaned = ownership.orphanedInstance {
+                let rejected = AudioUnitResourceCapsule(
+                    units: [.init(instance: orphaned, initialised: false)])
+                _ = graphAdmission.handOffRejectedOwner(
+                    rejected, until: teardownDeadline)
+            }
+            return nil
+        }
         unit = created
 
         inputBuffer = .allocate(capacity: maximumFrames)
         inputBuffer.initialize(repeating: 0, count: maximumFrames)
         outputBuffer = .allocate(capacity: maximumFrames)
         outputBuffer.initialize(repeating: 0, count: maximumFrames)
+        guard
+            let pullContext = AudioUnitPullSourceContext.allocate(
+                source: inputBuffer, capacityFrames: maximumFrames)
+        else {
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer))
+            return nil
+        }
+        inputPullContext = pullContext
 
         bufferList = AudioBufferList.allocate(maximumBuffers: 1)
         bufferList[0] = AudioBuffer(
             mNumberChannels: 1,
-            mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
+            mDataByteSize: maximumByteCount,
             mData: UnsafeMutableRawPointer(outputBuffer))
 
         var format = AudioStreamBasicDescription(
@@ -70,65 +119,177 @@ final class VoiceIsolationUnit {
             mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
             mChannelsPerFrame: 1, mBitsPerChannel: 32, mReserved: 0)
         let formatSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-            &format, formatSize)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
-            &format, formatSize)
-
-        var frames = UInt32(maximumFrames)
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
-            &frames, UInt32(MemoryLayout<UInt32>.size))
-
-        // The input callback reads from `inputBuffer`, which the IOProc fills
-        // just before calling render. Passing the buffer pointer rather than
-        // self keeps the callback free of any object reference.
-        var callback = AURenderCallbackStruct(
-            inputProc: { refCon, _, _, _, frameCount, ioData in
-                guard let ioData else { return noErr }
-                let source = refCon.assumingMemoryBound(to: Float.self)
-                let buffers = UnsafeMutableAudioBufferListPointer(ioData)
-                for index in 0..<buffers.count {
-                    guard let data = buffers[index].mData else { continue }
-                    data.assumingMemoryBound(to: Float.self)
-                        .update(from: source, count: Int(frameCount))
-                }
-                return noErr
-            },
-            inputProcRefCon: UnsafeMutableRawPointer(inputBuffer))
-        AudioUnitSetProperty(
-            unit, kAudioUnitProperty_SetRenderCallback, kAudioUnitScope_Input, 0,
-            &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
-
-        guard AudioUnitInitialize(unit) == noErr else {
-            AudioComponentInstanceDispose(unit)
-            inputBuffer.deallocate()
-            outputBuffer.deallocate()
+        guard
+            performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                {
+                    AudioUnitSetProperty(
+                        created, kAudioUnitProperty_StreamFormat,
+                        kAudioUnitScope_Input, 0, &format, formatSize)
+                }) == noErr,
+            performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                {
+                    AudioUnitSetProperty(
+                        created, kAudioUnitProperty_StreamFormat,
+                        kAudioUnitScope_Output, 0, &format, formatSize)
+                }) == noErr
+        else {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
             return nil
         }
 
+        var frames = UInt32(maximumFrames)
+        guard
+            performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                {
+                    AudioUnitSetProperty(
+                        created, kAudioUnitProperty_MaximumFramesPerSlice,
+                        kAudioUnitScope_Global, 0,
+                        &frames, UInt32(MemoryLayout<UInt32>.size))
+                }) == noErr
+        else {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
+            return nil
+        }
+
+        // The context contains no object reference, so the callback remains
+        // retain-free while carrying the capacity that bounds its source.
+        var callback = AURenderCallbackStruct(
+            inputProc: audioUnitPullInput,
+            inputProcRefCon: UnsafeMutableRawPointer(inputPullContext))
+        guard
+            performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                {
+                    AudioUnitSetProperty(
+                        created, kAudioUnitProperty_SetRenderCallback,
+                        kAudioUnitScope_Input, 0,
+                        &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                }) == noErr
+        else {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
+            return nil
+        }
+
+        guard
+            performAudioUnitConstruction(
+                until: teardownDeadline, context: constructionContext,
+                { AudioUnitInitialize(created) }) == noErr
+        else {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
+            return nil
+        }
+        teardownState.didInitialise()
+
         var latency: Float64 = 0
         var latencySize = UInt32(MemoryLayout<Float64>.size)
-        AudioUnitGetProperty(
-            unit, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
-            &latency, &latencySize)
-        latencyFrames = Int(latency * sampleRate)
+        let latencyStatus = performAudioUnitConstruction(
+            until: teardownDeadline, context: constructionContext
+        ) {
+            AudioUnitGetProperty(
+                created, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
+                &latency, &latencySize)
+        }
+        guard latencyStatus == noErr,
+            latencySize == UInt32(MemoryLayout<Float64>.size),
+            let measuredLatencyFrames = ProcessingLatency.validatedFrames(
+                seconds: latency, sampleRate: sampleRate)
+        else {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
+            return nil
+        }
+        latencyFrames = measuredLatencyFrames
 
         timestamp.mFlags = .sampleTimeValid
     }
 
     deinit {
-        AudioUnitUninitialize(unit)
-        AudioComponentInstanceDispose(unit)
+        if storageWasDetached { return }
+        if teardownState.phase != .disposed {
+            storageWasDetached = true
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(
+                Self.resourceCapsule(
+                    unit: unit, state: teardownState,
+                    inputBuffer: inputBuffer, outputBuffer: outputBuffer,
+                    inputPullContext: inputPullContext, bufferList: bufferList))
+            return
+        }
+        releaseStorage()
+    }
+
+    var audioUnitCount: Int { teardownState.phase == .disposed ? 0 : 1 }
+
+    func acquireControlLease() -> AudioUnitOwnerControlLease? {
+        controlGate.acquire()
+    }
+
+    func tearDownAudioUnits(
+        using gate: AudioUnitTeardownGate
+    ) -> AudioUnitOwnerDisposalResult {
+        guard controlGate.closeForTeardown() else {
+            return .ownerRetained(disposedUnits: 0)
+        }
+        return AudioUnitOwnerTeardownSequence.tearDown(
+            unit, state: &teardownState, using: gate)
+    }
+
+    private func releaseStorage() {
         free(bufferList.unsafeMutablePointer)
+        AudioUnitPullSourceContext.deallocate(inputPullContext)
         inputBuffer.deallocate()
         outputBuffer.deallocate()
     }
 
+    private static func resourceCapsule(
+        unit: AudioComponentInstance,
+        state: AudioUnitTeardownState,
+        inputBuffer: UnsafeMutablePointer<Float>,
+        outputBuffer: UnsafeMutablePointer<Float>,
+        inputPullContext: UnsafeMutablePointer<AudioUnitPullSourceContext>? = nil,
+        bufferList: UnsafeMutableAudioBufferListPointer? = nil
+    ) -> AudioUnitResourceCapsule {
+        AudioUnitResourceCapsule(
+            units: [.init(instance: unit, state: state)]
+        ) {
+            if let bufferList { free(bufferList.unsafeMutablePointer) }
+            if let inputPullContext {
+                AudioUnitPullSourceContext.deallocate(inputPullContext)
+            }
+            inputBuffer.deallocate()
+            outputBuffer.deallocate()
+        }
+    }
+
     /// Sets the wet/dry mix, 0…100.
-    func setMix(_ percent: Float) {
+    @discardableResult
+    func setMix(_ percent: Float) -> OSStatus {
         AudioUnitSetParameter(
             unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
             kAudioUnitScope_Global, 0, percent, 0)
@@ -150,7 +311,8 @@ final class VoiceIsolationUnit {
     }
 
     /// Chooses the model. High quality is macOS 15+.
-    func setHighQuality(_ isHighQuality: Bool) {
+    @discardableResult
+    func setHighQuality(_ isHighQuality: Bool) -> OSStatus {
         AudioUnitSetParameter(
             unit, AudioUnitParameterID(kAUSoundIsolationParam_SoundToIsolate),
             kAudioUnitScope_Global, 0,
@@ -167,8 +329,14 @@ final class VoiceIsolationUnit {
     /// "allocates nothing" claim to this comment.
     @inline(__always)
     func render(frames: Int, sampleTime: Float64) -> Bool {
+        guard let byteCount = AudioUnitPullSourceContext.byteCount(for: frames),
+            frames <= maximumFrames
+        else {
+            for index in 0..<maximumFrames { outputBuffer[index] = 0 }
+            return false
+        }
         timestamp.mSampleTime = sampleTime
-        bufferList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
+        bufferList[0].mDataByteSize = byteCount
         var flags = AudioUnitRenderActionFlags()
         return AudioUnitRender(
             unit, &flags, &timestamp, 0, UInt32(frames),
@@ -198,7 +366,7 @@ struct RTVoiceIsolation {
     var maximumFrames: Int32
     /// Set by the IOProc when a render fails, so the control thread can report
     /// it instead of the stage silently passing audio through unprocessed.
-    var renderFailures: UnsafeMutablePointer<UInt64>
+    var renderFailures: OpaquePointer
 }
 
 /// Realtime-visible state for handing one processing path to another.

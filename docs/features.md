@@ -274,11 +274,13 @@ you back then would be overriding a decision rather than undoing an accident.
 `AudioHardwareCreateProcessTap`, optionally silencing its normal output. Loopback
 and its peers need their own plug-in for this; here it is a documented API.
 
-**It costs almost nothing to run.** 0.40% of one core for a stereo route at 128
-frames, 4.7 MB resident, measured over a six-minute run rather than estimated.
+**The bare engine is cheap; the complete application is not yet.** The latest
+recorded six-minute stereo-route baseline is 0.42% of one core and 7.1 MB
+resident at 128 frames. With the window open the complete application was about
+18% and 180 MB. Both figures belong in the comparison: quoting only the engine
+would hide the UI performance work which remains.
 
 **The realtime path allocates nothing.** Verified rather than asserted: a hook on
 the allocator counts anything allocated on the IO thread. Zero over thousands of
 cycles in an optimised build. (Measure release builds — a debug build's own
 bounds and exclusivity checking allocates, and says nothing about shipping code.)
-

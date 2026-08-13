@@ -71,10 +71,15 @@ enum NowPlaying {
         }
     }
 
-    struct AutomationTarget: Identifiable, Equatable {
+    struct AutomationTarget: Identifiable, Equatable, Sendable {
         let name: String
         let bundleID: String
         var id: String { bundleID }
+
+        nonisolated init(name: String, bundleID: String) {
+            self.name = name
+            self.bundleID = bundleID
+        }
     }
 
     /// Players, in the order they are asked.
@@ -86,12 +91,14 @@ enum NowPlaying {
         ("Spotify", "com.spotify.client"),
     ]
 
-    static var installedAutomationTargets: [AutomationTarget] {
+    /// The finite registry input. Installation and TCC state are read together
+    /// by `PermissionSafeStatusWorker`, never by a SwiftUI body.
+    nonisolated static let automationTargetCandidates: [AutomationTarget] =
         (players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) })
-            .compactMap { name, bundleID in
-                NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) == nil
-                    ? nil : AutomationTarget(name: name, bundleID: bundleID)
-            }
+        .map { AutomationTarget(name: $0.0, bundleID: $0.1) }
+
+    static var installedAutomationTargets: [AutomationTarget] {
+        PermissionCentre.shared.automationTargets
     }
 
     /// What is loaded in a player, preferring one that is actually playing.
@@ -265,13 +272,13 @@ enum NowPlaying {
     nonisolated static func readBrowser(_ name: String) -> Track? {
         knownTabsLock.lock()
         let cached = lastBrowserTracks[name]
+        let quiet = browserFoundNothing.contains(name)
         knownTabsLock.unlock()
         // The HAL first, because it is free and it settles the question.
         let bundleID = BrowserNowPlaying.browsers.first { $0.name == name }?.bundleID
         if let bundleID, !isMakingSound(bundleID), cached?.track == nil {
             return nil
         }
-        let quiet = browserFoundNothing.contains(name)
         let interval = quiet ? browserQuietInterval : browserSweepInterval
         if let cached, monotonicNow - cached.asked < interval {
             return cached.track
@@ -630,6 +637,59 @@ enum NowPlaying {
         return run(source, application: application).text == "ok"
     }
 
+    /// Applies one bounded control only to the exact player and song observed.
+    ///
+    /// This is the blocking boundary owned by `NowPlayingControlWorker`. The
+    /// identity check deliberately remains inside the AppleScript or browser
+    /// JavaScript which performs the mutation, so a request stalled in another
+    /// process cannot arrive after that player has moved on to a different song.
+    nonisolated static func apply(_ application: NowPlayingControlApplication) -> Bool {
+        let target = application.context.target
+        guard !target.trackIdentity.isEmpty,
+            let registered = automationTargetCandidates.first(where: {
+                $0.name == target.application
+            }),
+            target.bundleIdentifier == nil || target.bundleIdentifier == registered.bundleID
+        else { return false }
+
+        switch application.command {
+        case let .seek(seconds):
+            return seek(to: seconds, target: target)
+        case let .edge(edge):
+            let transport: Transport
+            switch edge {
+            case .playPause: transport = .playPause
+            case .next: transport = .next
+            case .previous: transport = .previous
+            }
+            return send(transport, target: target)
+        }
+    }
+
+    nonisolated private static func send(
+        _ transport: Transport, target: NowPlayingControlTarget
+    ) -> Bool {
+        if isBrowser(target.application) {
+            guard
+                let javaScript = BrowserNowPlaying.script(
+                    for: transport, expectedIdentity: target.trackIdentity)
+            else { return false }
+            return run(
+                BrowserNowPlaying.script(
+                    forBrowser: target.application,
+                    javaScript: javaScript,
+                    onlyTabAt: target.trackIdentity),
+                application: target.application
+            ).text == "ok"
+        }
+        return run(
+            exactTransportScript(
+                transport, application: target.application,
+                expectedIdentity: target.trackIdentity),
+            application: target.application
+        ).text == "ok"
+    }
+
     /// Moves the playhead, in seconds from the start of the track.
     ///
     /// Both players spell this the same way and both take seconds, including
@@ -648,16 +708,82 @@ enum NowPlaying {
                 application: application
             ).text == "ok"
         }
+        let position = String(
+            format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), seconds)
         let source = """
             tell application "\(application)"
                 if it is running then
-                    set player position to \(String(format: "%.3f", seconds))
+                    set player position to \(position)
                     return "ok"
                 end if
             end tell
             return ""
             """
         return run(source, application: application).text == "ok"
+    }
+
+    nonisolated private static func seek(
+        to seconds: Double, target: NowPlayingControlTarget
+    ) -> Bool {
+        guard seconds.isFinite, seconds >= 0 else { return false }
+        if isBrowser(target.application) {
+            guard
+                let javaScript = BrowserNowPlaying.seekScript(
+                    toSeconds: seconds, expectedIdentity: target.trackIdentity)
+            else { return false }
+            return run(
+                BrowserNowPlaying.script(
+                    forBrowser: target.application,
+                    javaScript: javaScript,
+                    onlyTabAt: target.trackIdentity),
+                application: target.application
+            ).text == "ok"
+        }
+        return run(
+            exactSeekScript(
+                seconds: seconds, application: target.application,
+                expectedIdentity: target.trackIdentity),
+            application: target.application
+        ).text == "ok"
+    }
+
+    /// Pure source builders keep the identity boundary executable in tests
+    /// without launching a player or displaying an Automation prompt.
+    nonisolated static func exactTransportScript(
+        _ transport: Transport, application: String, expectedIdentity: String
+    ) -> String {
+        let identity = BrowserNowPlaying.escapedForAppleScript(expectedIdentity)
+        return """
+            set expectedTrackIdentity to "\(identity)"
+            tell application "\(application)"
+                if it is running then
+                    if ((id of current track) as text) is not expectedTrackIdentity then return ""
+                    \(transport.command)
+                    return "ok"
+                end if
+            end tell
+            return ""
+            """
+    }
+
+    nonisolated static func exactSeekScript(
+        seconds: Double, application: String, expectedIdentity: String
+    ) -> String {
+        let bounded = max(0, seconds.isFinite ? seconds : 0)
+        let position = String(
+            format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), bounded)
+        let identity = BrowserNowPlaying.escapedForAppleScript(expectedIdentity)
+        return """
+            set expectedTrackIdentity to "\(identity)"
+            tell application "\(application)"
+                if it is running then
+                    if ((id of current track) as text) is not expectedTrackIdentity then return ""
+                    set player position to \(position)
+                    return "ok"
+                end if
+            end tell
+            return ""
+            """
     }
 
     nonisolated private static func run(
@@ -802,9 +928,7 @@ enum NowPlaying {
     /// True when either player is installed at all, so the interface can say
     /// something better than an empty panel.
     static var hasAPlayer: Bool {
-        players.contains { _, bundleID in
-            NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
-        }
+        PermissionCentre.shared.hasInstalledPlayer
     }
 
     static var installedPlayerBundleIDs: [String] {

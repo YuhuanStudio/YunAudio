@@ -603,9 +603,9 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "send-app" {
         print("need an input to act as clock master and an output to send to")
         exit(1)
     }
-    let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? []).filter {
-        AudioApplications.matches(appMatch, process: $0)
-    }
+    let processes = AudioApplications.matching(
+        appMatch,
+        in: (try? AudioProcesses.all(includingSilent: true)) ?? [])
     guard !processes.isEmpty else {
         print("no process matching \"\(appMatch)\"")
         exit(1)
@@ -681,8 +681,12 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "capture" {
     // Read before stopping: stopRecording releases the recorder, and the
     // duration lives on it.
     let recorded = engine.recordingDuration
-    engine.stopRecording()
+    let recordingFinalisation = engine.stopRecording()
     engine.stop()
+    guard recordingFinalisation.wait(timeout: 1) == .complete else {
+        print("recording file writer did not finish before the deadline")
+        exit(1)
+    }
 
     let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int ?? 0
     let expected = Int(recorded * 48000 * 2 * 4)
@@ -954,7 +958,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap" {
     let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Discord"
     do {
         let processes = try AudioProcesses.all(includingSilent: true)
-        let matches = processes.filter { AudioApplications.matches(match, process: $0) }
+        let matches = AudioApplications.matching(match, in: processes)
         guard !matches.isEmpty else {
             print("no process matching \"\(match)\"")
             exit(1)
@@ -1033,7 +1037,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap-restore" {
     let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Music"
     do {
         let processes = try AudioProcesses.all(includingSilent: true)
-        let matches = processes.filter { AudioApplications.matches(match, process: $0) }
+        let matches = AudioApplications.matching(match, in: processes)
         let bundleIDs = Set(matches.compactMap(\.bundleID)).sorted()
         print("matched \(matches.count) process(es) for \"\(match)\"")
         for process in matches {
@@ -1874,8 +1878,9 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "far-end" {
     }) {
         target = (application.name, application.processIDs, application.processCount)
     } else {
-        let processes = ((try? AudioProcesses.all(includingSilent: true)) ?? [])
-            .filter { AudioApplications.matches(match, process: $0) }
+        let processes = AudioApplications.matching(
+            match,
+            in: (try? AudioProcesses.all(includingSilent: true)) ?? [])
         guard !processes.isEmpty else {
             print("nothing matching \"\(match)\" is producing audio")
             exit(1)
@@ -2034,8 +2039,17 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
             return frames
         })
 
-    func measure(bypassed: Bool, label: String) -> Double {
-        capture.setBypassed(bypassed)
+    func measure(bypassed: Bool, label: String) -> Double? {
+        switch capture.setBypassed(bypassed) {
+        case .applied:
+            break
+        case .failed(let status):
+            print("  bypass property failed: \(fourCharDescription(status))")
+            return nil
+        case .lifecycleTimedOut(let step):
+            print("  bypass property timed out at \(step?.rawValue ?? "unknown")")
+            return nil
+        }
         Thread.sleep(forTimeInterval: 0.8)  // let the canceller settle
         state.beginMeasuring()
         Thread.sleep(forTimeInterval: 2.0)
@@ -2049,8 +2063,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-measure" {
 
     print("playing a quiet 440 Hz tone through \(speaker.name)")
     print("measuring \(mic.name)\n")
-    let bypassed = measure(bypassed: true, label: "processing bypassed")
-    let processed = measure(bypassed: false, label: "processing active   ")
+    guard
+        let bypassed = measure(bypassed: true, label: "processing bypassed"),
+        let processed = measure(bypassed: false, label: "processing active   ")
+    else {
+        _ = capture.stop()
+        exit(1)
+    }
     capture.stop()
 
     let reduction = bypassed - processed
@@ -2168,6 +2187,10 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec" {
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
     let cycles =
         CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2]) ?? 50_000 : 50_000
+    guard (1...1_000_000).contains(cycles) else {
+        print("bench cycles must be between 1 and 1000000")
+        exit(2)
+    }
 
     RoutingEngine.enableAllocationTripwire()
 
@@ -2208,12 +2231,19 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "bench" {
         var best = Double.infinity
         var allocations: UInt64 = 0
         var checksum = 0.0
+        var wasAdmitted = true
         for _ in 0..<5 {
-            let result = RTBenchmark.run(options, cycles: cycles)
+            guard let result = RTBenchmark.run(options, cycles: cycles) else {
+                print("invalid built-in benchmark configuration: \(name)")
+                broke = true
+                wasAdmitted = false
+                break
+            }
             best = min(best, result.nanosecondsPerCycle)
             allocations += result.allocations
             checksum = result.checksum
         }
+        guard wasAdmitted else { continue }
         print(
             String(
                 format: "  %-28s %8.1f %10.2f %7llu   %+.6e",
@@ -2340,11 +2370,16 @@ private func proveVoiceActivity(deviceMatch: String) -> Bool {
     AudioDeviceStart(device.id, procID)
     defer { AudioDeviceStop(device.id, procID) }
 
-    guard let watcher = VoiceActivityWatcher(device: device.id, onChange: { seen.record($0) })
+    guard
+        let watcher = VoiceActivityWatcher(
+            device: device.id,
+            activation: .enableIfNeeded,
+            onChange: { seen.record($0) })
     else {
         print("this device does not publish the detector")
         return false
     }
+    defer { watcher.stop() }
     print("  detection enabled: \(watcher.isObserving)")
 
     // Speech rather than noise, because the detector is a voice detector: a
@@ -2498,6 +2533,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "vad" {
         guard
             let watcher = VoiceActivityWatcher(
                 device: device.id,
+                activation: .enableIfNeeded,
                 onChange: { speaking in
                     changes.bump()
                     print("  \(speaking ? "voice" : "silence")")
@@ -2512,6 +2548,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "vad" {
         print("  (input has to be running somewhere, or this stays silent)")
         RunLoop.current.run(until: Date().addingTimeInterval(20))
         print("\n\(changes.count) change(s), still observing: \(watcher.isObserving)")
+        watcher.stop()
     }
     exit(0)
 }

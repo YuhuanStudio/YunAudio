@@ -17,6 +17,14 @@ BUNDLE_NAME="YunAudioDriver.driver"
 BUILD_DIR="build"
 BUNDLE="${BUILD_DIR}/${BUNDLE_NAME}"
 INSTALL_DIR="/Library/Audio/Plug-Ins/HAL"
+STRICT_WARNINGS=(
+	-Wall
+	-Wextra
+	-Wpedantic
+	-Werror
+	-Wno-gnu-zero-variadic-macro-arguments
+	-Wno-gnu-statement-expression-from-macro-expansion
+)
 
 rm -rf "${BUNDLE}"
 mkdir -p "${BUNDLE}/Contents/MacOS"
@@ -35,8 +43,7 @@ clang \
 	-bundle \
 	-O2 \
 	-fvisibility=hidden \
-	-Wall -Wextra \
-	-Werror=implicit-function-declaration \
+	"${STRICT_WARNINGS[@]}" \
 	-mmacosx-version-min=13.0 \
 	-framework CoreFoundation \
 	-framework CoreAudio \
@@ -46,14 +53,55 @@ clang \
 echo "testing…"
 clang \
 	-O2 \
-	-Wall -Wextra \
-	-Werror=implicit-function-declaration \
+	-DYUNAUDIO_DRIVER_PERFORMANCE_TESTS=1 \
+	"${STRICT_WARNINGS[@]}" \
 	-mmacosx-version-min=13.0 \
 	-framework CoreFoundation \
 	-framework CoreAudio \
 	-o "${BUILD_DIR}/DriverCoreTests" \
 	Tests/DriverCoreTests.c
 "${BUILD_DIR}/DriverCoreTests"
+
+echo "testing with ASan and UBSan…"
+clang \
+	-O1 -g \
+	-fsanitize=address,undefined \
+	-fno-omit-frame-pointer \
+	"${STRICT_WARNINGS[@]}" \
+	-mmacosx-version-min=13.0 \
+	-framework CoreFoundation \
+	-framework CoreAudio \
+	-o "${BUILD_DIR}/DriverCoreTests-asan-ubsan" \
+	Tests/DriverCoreTests.c
+ASAN_OPTIONS=abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+	"${BUILD_DIR}/DriverCoreTests-asan-ubsan"
+
+echo "testing with TSan…"
+clang \
+	-O1 -g \
+	-fsanitize=thread \
+	-fno-omit-frame-pointer \
+	"${STRICT_WARNINGS[@]}" \
+	-mmacosx-version-min=13.0 \
+	-framework CoreFoundation \
+	-framework CoreAudio \
+	-o "${BUILD_DIR}/DriverCoreTests-tsan" \
+	Tests/DriverCoreTests.c
+TSAN_OPTIONS=halt_on_error=1 "${BUILD_DIR}/DriverCoreTests-tsan"
+
+echo "analysing…"
+clang \
+	--analyze \
+	"${STRICT_WARNINGS[@]}" \
+	-mmacosx-version-min=13.0 \
+	-o /dev/null \
+	Sources/YunAudioDriver.c
+clang \
+	--analyze \
+	"${STRICT_WARNINGS[@]}" \
+	-mmacosx-version-min=13.0 \
+	-o /dev/null \
+	Tests/DriverCoreTests.c
 ./check-realtime.sh
 
 # The factory is looked up by name through CFPlugIn, so it has to stay visible

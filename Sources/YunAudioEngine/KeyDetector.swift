@@ -23,6 +23,7 @@ import Foundation
 /// is reported for exactly that reason — a weak match means "this is a guess"
 /// and the interface should say so rather than printing a letter.
 public struct KeyDetector: Sendable {
+    static let maximumChromaBins = 1_048_576
 
     public struct Key: Sendable, Hashable {
         /// 0 = C, 1 = C♯, … 11 = B.
@@ -67,8 +68,10 @@ public struct KeyDetector: Sendable {
         magnitudes: [Float], sampleRate: Double, binCount: Int
     ) -> [Double] {
         var bins = [Double](repeating: 0, count: 12)
-        guard binCount > 1, sampleRate > 0 else { return bins }
-        let hertzPerBin = sampleRate / Double(binCount * 2)
+        guard binCount > 1, binCount <= maximumChromaBins,
+            AudioProcessingContract.supports(sampleRate: sampleRate)
+        else { return bins }
+        let hertzPerBin = sampleRate / Double(binCount) / 2
         for index in 1..<min(magnitudes.count, binCount) {
             let hertz = Double(index) * hertzPerBin
             // Below the bottom of a bass guitar and above where pitch stops
@@ -90,7 +93,9 @@ public struct KeyDetector: Sendable {
     ///   with no variation at all, which is what a sine wave or a noise floor
     ///   produces and neither is in a key.
     public static func key(from chroma: [Double]) -> Key? {
-        guard chroma.count == 12 else { return nil }
+        guard chroma.count == 12,
+            chroma.allSatisfy({ $0.isFinite && $0 >= 0 })
+        else { return nil }
         let total = chroma.reduce(0, +)
         guard total > 0 else { return nil }
 
@@ -186,6 +191,7 @@ public struct KeyDetector: Sendable {
     /// - Returns: Semitones, always within an octave: moving a song more than
     ///   six semitones makes it a different song rather than an easier one.
     public static func suggestedShift(songKey: Key, comfortableMidi: Double) -> Int {
+        guard comfortableMidi.isFinite else { return 0 }
         // Fold the difference, rather than pick an octave and then add the
         // tonic to it. Picking the octave from the voice alone — round the
         // voice to the nearest twelve, add the pitch class — puts the tonic

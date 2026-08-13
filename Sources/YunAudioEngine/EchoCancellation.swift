@@ -91,6 +91,12 @@ public enum EchoCancellation {
                 supportsAGC: false, supportsDucking: false, failureReason: reason)
         }
 
+        var graphAdmission = BoundedAudioUnitDisposer.shared.acquireGraphAdmission()
+        guard graphAdmission != nil else {
+            return failure("Audio Unit teardown residue is still retained")
+        }
+        defer { graphAdmission?.release() }
+
         var description = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: componentSubType,
@@ -101,9 +107,33 @@ public enum EchoCancellation {
         }
 
         var instance: AudioComponentInstance?
-        guard AudioComponentInstanceNew(component, &instance) == noErr, let unit = instance
-        else { return failure("could not instantiate") }
-        defer { AudioComponentInstanceDispose(unit) }
+        let status = AudioComponentInstanceNew(component, &instance)
+        let ownership = AudioComponentCreationOwnership(
+            status: status, instance: instance)
+        guard let unit = ownership.createdInstance else {
+            if let orphaned = ownership.orphanedInstance,
+                let admission = graphAdmission
+            {
+                let capsule = AudioUnitResourceCapsule(
+                    units: [.init(instance: orphaned, initialised: false)])
+                _ = admission.handOffForDisposal(
+                    capsule, until: HALTeardownDeadline(timeout: 2))
+                graphAdmission = nil
+            }
+            return failure("could not instantiate")
+        }
+        var teardownState = AudioUnitTeardownState()
+        defer {
+            let capsule = AudioUnitResourceCapsule(
+                units: [.init(instance: unit, state: teardownState)])
+            if let admission = graphAdmission {
+                _ = admission.handOffForDisposal(
+                    capsule, until: HALTeardownDeadline(timeout: 2))
+                graphAdmission = nil
+            } else {
+                BoundedAudioUnitDisposer.shared.disposeAfterFence(capsule)
+            }
+        }
 
         // Element 1 is the microphone side, element 0 the speaker side. Both
         // have to be enabled for the unit to do echo cancellation at all: it
@@ -132,7 +162,7 @@ public enum EchoCancellation {
                 "initialise failed with \(fourCharDescription(initStatus))"
                     + " — a single IO unit cannot open output on an input-only device")
         }
-        defer { AudioUnitUninitialize(unit) }
+        teardownState.didInitialise()
 
         func latency(scope: AudioUnitScope, element: AudioUnitElement) -> Double {
             var value: Float64 = 0

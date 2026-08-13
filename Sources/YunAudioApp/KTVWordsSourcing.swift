@@ -117,14 +117,27 @@ struct KTVWordsSourcing: View {
                 }
                 Button(loc("Open the folder")) {
                     guard let directory = RouterModel.lyricsDirectory else { return }
-                    try? FileManager.default.createDirectory(
-                        at: directory, withIntermediateDirectories: true)
-                    NSWorkspace.shared.open(directory)
+                    FolderRevealWorker.shared.submit(directory)
                 }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
 
             if isExpanded { search }
+            if model.isLoadingLocalWords {
+                HStack(spacing: Yun.Space.sm) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(loc("Reading local words…"))
+                        .font(scale.caption)
+                        .foregroundStyle(scale.quiet)
+                }
+            }
+            if let problem = model.localWordsError {
+                Text(problem)
+                    .font(scale.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

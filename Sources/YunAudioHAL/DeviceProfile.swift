@@ -78,20 +78,53 @@ public struct DeviceProfile: Codable, Sendable, Equatable {
 
 /// Every profile the application knows about.
 public struct DeviceProfileLibrary: Sendable {
+    static let maximumDirectoryEntries = 1_024
+    static let maximumProfiles = 256
+    static let maximumProfileBytes = 64 * 1_024
+    static let maximumChannelsPerProfile = 64
+    static let maximumIdentityCharacters = 256
+    static let maximumDetailCharacters = 2_048
 
     public private(set) var profiles: [DeviceProfile]
 
-    public init(profiles: [DeviceProfile]) { self.profiles = profiles }
+    public init(profiles: [DeviceProfile]) {
+        // Keep the later entries because user profiles intentionally follow
+        // bundled ones and win an equal-specificity match.
+        self.profiles = Array(
+            profiles.lazy.filter(Self.admits).suffix(Self.maximumProfiles))
+    }
+
+    private static func admits(_ profile: DeviceProfile) -> Bool {
+        !profile.match.isEmpty
+            && profile.match.count <= maximumIdentityCharacters
+            && (profile.displayName?.count ?? 0) <= maximumIdentityCharacters
+            && (profile.note?.count ?? 0) <= maximumDetailCharacters
+            && profile.inputChannels.count <= maximumChannelsPerProfile
+            && profile.inputChannels.allSatisfy {
+                !$0.name.isEmpty
+                    && $0.name.count <= maximumIdentityCharacters
+                    && $0.detail.count <= maximumDetailCharacters
+            }
+    }
 
     /// The best match for a device, or nil when nothing is known about it.
     ///
     /// Longest match wins. A profile for "seiren v3 pro" has to beat one for
     /// "seiren", or adding a general entry would silently take over from every
-    /// specific one already in the folder.
+    /// specific one already in the folder. At equal specificity, later wins:
+    /// `standard` appends user profiles after bundled ones so a local correction
+    /// can replace a shipped profile without inventing a longer false match.
     public func profile(modelUID: String?, name: String) -> DeviceProfile? {
         profiles
-            .filter { $0.matches(modelUID: modelUID, name: name) }
-            .max { $0.match.count < $1.match.count }
+            .enumerated()
+            .filter { $0.element.matches(modelUID: modelUID, name: name) }
+            .max { lhs, rhs in
+                if lhs.element.match.count != rhs.element.match.count {
+                    return lhs.element.match.count < rhs.element.match.count
+                }
+                return lhs.offset < rhs.offset
+            }?
+            .element
     }
 
     /// Loads every `.json` in a folder, skipping anything that will not parse.
@@ -101,21 +134,51 @@ public struct DeviceProfileLibrary: Sendable {
     /// the rest — nor stop it starting at all.
     public static func load(from directory: URL) -> ([DeviceProfile], [String]) {
         guard
-            let entries = try? FileManager.default.contentsOfDirectory(
-                at: directory, includingPropertiesForKeys: nil)
+            let enumerator = FileManager.default.enumerator(
+                at: directory,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles, .skipsSubdirectoryDescendants])
         else { return ([], []) }
+
+        var entries: [URL] = []
+        var inspected = 0
+        while let entry = enumerator.nextObject() as? URL,
+            inspected < maximumDirectoryEntries
+        {
+            inspected += 1
+            guard entry.pathExtension.lowercased() == "json" else { continue }
+            entries.append(entry)
+            if entries.count == maximumProfiles { break }
+        }
 
         var loaded: [DeviceProfile] = []
         var problems: [String] = []
         let decoder = JSONDecoder()
-        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent })
-        where entry.pathExtension.lowercased() == "json" {
-            guard let data = try? Data(contentsOf: entry) else {
+        for entry in entries.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard let values = try? entry.resourceValues(forKeys: [.isRegularFileKey]),
+                values.isRegularFile == true,
+                let handle = try? FileHandle(forReadingFrom: entry)
+            else {
                 problems.append("\(entry.lastPathComponent): could not be read")
                 continue
             }
+            let data = try? handle.read(upToCount: maximumProfileBytes + 1)
+            try? handle.close()
+            guard let data else {
+                problems.append("\(entry.lastPathComponent): could not be read")
+                continue
+            }
+            guard data.count <= maximumProfileBytes else {
+                problems.append("\(entry.lastPathComponent): profile is too large")
+                continue
+            }
             do {
-                loaded.append(try decoder.decode(DeviceProfile.self, from: data))
+                let profile = try decoder.decode(DeviceProfile.self, from: data)
+                guard admits(profile) else {
+                    problems.append("\(entry.lastPathComponent): profile exceeds safe limits")
+                    continue
+                }
+                loaded.append(profile)
             } catch {
                 problems.append("\(entry.lastPathComponent): \(error.localizedDescription)")
             }

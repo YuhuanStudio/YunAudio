@@ -1,6 +1,7 @@
 import AudioToolbox
 import AVFoundation
 import Foundation
+import YunAudioHAL
 
 /// A knob on a stage.
 ///
@@ -442,12 +443,138 @@ public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     ]
 }
 
+/// The immutable source address and capacity handed to an Audio Unit callback.
+struct AudioUnitPullSourceContext {
+    let source: UnsafePointer<Float>
+    let capacityFrames: UInt32
+
+    /// An `AudioBuffer` carries its capacity in `mDataByteSize`, so any frame
+    /// count whose byte representation does not fit there cannot be rendered.
+    static let maximumRepresentableFrames = UInt32.max / UInt32(MemoryLayout<Float>.stride)
+
+    static func allocate(
+        source: UnsafeMutablePointer<Float>, capacityFrames: Int
+    ) -> UnsafeMutablePointer<AudioUnitPullSourceContext>? {
+        guard AudioProcessingContract.supports(framesPerSlice: capacityFrames),
+            let capacity = UInt32(exactly: capacityFrames),
+            capacity <= maximumRepresentableFrames
+        else { return nil }
+        let context = UnsafeMutablePointer<AudioUnitPullSourceContext>.allocate(capacity: 1)
+        context.initialize(
+            to: AudioUnitPullSourceContext(
+                source: UnsafePointer(source), capacityFrames: capacity))
+        return context
+    }
+
+    static func deallocate(_ context: UnsafeMutablePointer<AudioUnitPullSourceContext>) {
+        context.deinitialize(count: 1)
+        context.deallocate()
+    }
+
+    static func byteCount(for frames: Int) -> UInt32? {
+        guard AudioProcessingContract.supports(framesPerSlice: frames),
+            let count = UInt32(exactly: frames), count <= maximumRepresentableFrames
+        else {
+            return nil
+        }
+        return count * UInt32(MemoryLayout<Float>.stride)
+    }
+}
+
+/// Supplies one preallocated mono block to a hosted Audio Unit.
+///
+/// `MaximumFramesPerSlice` is a request to somebody else's unit, not a memory
+/// bound it is obliged to honour. The callback therefore checks both sides of
+/// the copy itself. On refusal it marks the output as silence and clears only
+/// the prefix bounded by the request, destination and host allocation; it
+/// never tries a partial copy.
+@inline(__always)
+func audioUnitPullInput(
+    _ refCon: UnsafeMutableRawPointer,
+    _ actionFlags: UnsafeMutablePointer<AudioUnitRenderActionFlags>,
+    _ timestamp: UnsafePointer<AudioTimeStamp>,
+    _ bus: UInt32,
+    _ frameCount: UInt32,
+    _ ioData: UnsafeMutablePointer<AudioBufferList>?
+) -> OSStatus {
+    _ = timestamp
+    _ = bus
+    let context = refCon.assumingMemoryBound(to: AudioUnitPullSourceContext.self).pointee
+    let requestedBytes = UInt64(frameCount) * UInt64(MemoryLayout<Float>.stride)
+    let sourceCapacityBytes =
+        UInt64(context.capacityFrames) * UInt64(MemoryLayout<Float>.stride)
+    actionFlags.pointee.remove(.unitRenderAction_OutputIsSilence)
+    guard let ioData else {
+        actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+        return kAudioUnitErr_InvalidParameter
+    }
+
+    // The allocation behind a variable-length AudioBufferList is unknowable
+    // here. Inspect only its fixed header until it proves it contains the one
+    // mono buffer this callback was configured to supply.
+    guard ioData.pointee.mNumberBuffers == 1 else {
+        actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+        if ioData.pointee.mNumberBuffers > 0, let data = ioData.pointee.mBuffers.mData {
+            let clearBytes = Int(
+                min(
+                    min(UInt64(ioData.pointee.mBuffers.mDataByteSize), requestedBytes),
+                    sourceCapacityBytes))
+            memset(data, 0, clearBytes)
+        }
+        return kAudioUnitErr_InvalidParameter
+    }
+    let buffer = ioData.pointee.mBuffers
+    guard buffer.mNumberChannels == 1 else {
+        actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+        if let data = buffer.mData {
+            let clearBytes = Int(
+                min(min(UInt64(buffer.mDataByteSize), requestedBytes), sourceCapacityBytes))
+            memset(data, 0, clearBytes)
+        }
+        return kAudioUnitErr_InvalidParameter
+    }
+
+    let status: OSStatus
+    if frameCount > context.capacityFrames
+        || frameCount > AudioUnitPullSourceContext.maximumRepresentableFrames
+    {
+        status = kAudioUnitErr_TooManyFramesToProcess
+    } else if frameCount > 0
+        && (buffer.mData == nil || UInt64(buffer.mDataByteSize) < requestedBytes)
+    {
+        status = kAudioUnitErr_InvalidParameter
+    } else {
+        status = noErr
+    }
+
+    if status != noErr {
+        actionFlags.pointee.insert(.unitRenderAction_OutputIsSilence)
+        if let data = buffer.mData {
+            let clearBytes = Int(
+                min(min(UInt64(buffer.mDataByteSize), requestedBytes), sourceCapacityBytes))
+            memset(data, 0, clearBytes)
+        }
+        return status
+    }
+
+    if frameCount > 0 {
+        buffer.mData!.assumingMemoryBound(to: Float.self)
+            .update(from: context.source, count: Int(frameCount))
+    }
+    return noErr
+}
+
 /// A series of Audio Units rendered on the IO thread.
 ///
 /// Each stage pulls from the previous one through a render callback, which is
 /// how Audio Units are meant to be chained — the alternative, rendering each
 /// into a scratch buffer by hand, means one more copy per stage and no benefit.
-final class EffectChain {
+final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
+    /// Stable across the owner's lifetime and never recycled after teardown.
+    /// `ObjectIdentifier` can be reused for a later allocation, which would
+    /// make a UI publication from an old graph look current.
+    let controlIdentity = UUID()
+
     /// What owns one hosted unit.
     ///
     /// Kept beside the instance rather than in a parallel list: inserting a
@@ -461,6 +588,7 @@ final class EffectChain {
     private struct HostedUnit {
         let owner: UnitOwner
         let instance: AudioComponentInstance
+        var teardownState = AudioUnitTeardownState()
     }
 
     /// Buffer the first stage pulls from. The IOProc fills it before rendering.
@@ -481,9 +609,15 @@ final class EffectChain {
     /// copying through this buffer there spent one whole block for no consumer.
     private var nativeBuffer: UnsafeMutablePointer<Float>?
     private var nativeList: UnsafeMutableAudioBufferListPointer?
+    private let inputPullContext: UnsafeMutablePointer<AudioUnitPullSourceContext>
+    private var nativePullContext: UnsafeMutablePointer<AudioUnitPullSourceContext>?
     private var nativeTimestamp = AudioTimeStamp()
     private let bufferList: UnsafeMutableAudioBufferListPointer
     private var timestamp = AudioTimeStamp()
+    /// True after raw callback storage moved into a detached teardown capsule.
+    private var storageWasDetached = false
+    /// Covers every vendor getter and parameter call from snapshot to return.
+    private let controlGate = AudioUnitOwnerControlGate()
 
     /// Total latency the chain adds, in frames.
     private(set) var latencyFrames = 0
@@ -522,6 +656,21 @@ final class EffectChain {
         return units[index].instance
     }
 
+    /// Atomically replaces construction admission with disposal of an instance
+    /// the graph cannot own, then reacquires admission before another component
+    /// call can begin. The same absolute deadline bounds both operations.
+    private static func disposeRejectedInstance(
+        _ unit: AudioComponentInstance,
+        graphAdmission: AudioUnitGraphAdmissionBox,
+        until deadline: HALTeardownDeadline
+    ) -> Bool {
+        let rejected = AudioUnitResourceCapsule(
+            units: [.init(instance: unit, initialised: false)])
+        let result = graphAdmission.handOffRejectedOwner(rejected, until: deadline)
+        guard result.isComplete, deadline.hasTimeRemaining else { return false }
+        return graphAdmission.reacquire(waitingUpTo: deadline.remainingTimeInterval)
+    }
+
     convenience init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
         self.init(
             kinds: kinds, plugins: [], sampleRate: sampleRate,
@@ -530,9 +679,22 @@ final class EffectChain {
 
     init?(
         kinds: [EffectKind], plugins requested: [AudioUnitPlugin], sampleRate: Double,
-        maximumFrames: Int
+        maximumFrames: Int,
+        teardownDeadline: HALTeardownDeadline = HALTeardownDeadline(timeout: 2),
+        constructionContext: AudioUnitConstructionContext? = nil,
+        suppliedGraphAdmission: AudioUnitGraphAdmissionBox? = nil
     ) {
         guard !kinds.isEmpty || !requested.isEmpty else { return nil }
+        let ownsGraphAdmission = suppliedGraphAdmission == nil
+        guard
+            let graphAdmission = suppliedGraphAdmission
+                ?? AudioUnitGraphAdmissionBox(
+                    waitingUpTo: teardownDeadline.remainingTimeInterval)
+        else { return nil }
+        defer { if ownsGraphAdmission { graphAdmission.release() } }
+        guard
+            let maximumByteCount = AudioUnitPullSourceContext.byteCount(for: maximumFrames)
+        else { return nil }
         self.maximumFrames = maximumFrames
         let requestedStages = kinds.sorted { $0.chainOrder < $1.chainOrder }
         plugins = requested
@@ -541,10 +703,19 @@ final class EffectChain {
         inputBuffer.initialize(repeating: 0, count: maximumFrames)
         outputBuffer = .allocate(capacity: maximumFrames)
         outputBuffer.initialize(repeating: 0, count: maximumFrames)
+        guard
+            let pullContext = AudioUnitPullSourceContext.allocate(
+                source: inputBuffer, capacityFrames: maximumFrames)
+        else {
+            inputBuffer.deallocate()
+            outputBuffer.deallocate()
+            return nil
+        }
+        inputPullContext = pullContext
         bufferList = AudioBufferList.allocate(maximumBuffers: 1)
         bufferList[0] = AudioBuffer(
             mNumberChannels: 1,
-            mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
+            mDataByteSize: maximumByteCount,
             mData: UnsafeMutableRawPointer(outputBuffer))
 
         var format = AudioStreamBasicDescription(
@@ -564,7 +735,10 @@ final class EffectChain {
             if kind.isNative {
                 nativeIndex = units.count
                 native = FormantShifter(sampleRate: sampleRate)
-                guard native != nil else { return nil }
+                guard native != nil else {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
                 stages.append(kind)
                 continue
             }
@@ -573,23 +747,74 @@ final class EffectChain {
                 componentSubType: kind.subType,
                 componentManufacturer: kAudioUnitManufacturer_Apple,
                 componentFlags: 0, componentFlagsMask: 0)
+            guard teardownDeadline.hasTimeRemaining else {
+                scheduleDetachedTeardown()
+                return nil
+            }
             guard let component = AudioComponentFindNext(nil, &description) else { continue }
+            guard teardownDeadline.hasTimeRemaining else {
+                scheduleDetachedTeardown()
+                return nil
+            }
+            // Apple requires `AudioComponentInstantiate` for this flag. This
+            // route has no buffered IPC boundary, so it refuses rather than
+            // silently sending an async-only component through the sync API.
+            guard !AudioUnitPlugins.requiresAsyncInstantiation(component) else {
+                continue
+            }
             var instance: AudioComponentInstance?
-            guard AudioComponentInstanceNew(component, &instance) == noErr,
-                let unit = instance
-            else { continue }
-
-            AudioUnitSetProperty(
-                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-                &format, formatSize)
-            AudioUnitSetProperty(
-                unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
-                &format, formatSize)
-            var frames = UInt32(maximumFrames)
-            AudioUnitSetProperty(
-                unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0,
-                &frames, UInt32(MemoryLayout<UInt32>.size))
+            guard
+                let status = teardownDeadline.perform({
+                    AudioComponentInstanceNew(component, &instance)
+                })
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
+            let ownership = AudioComponentCreationOwnership(
+                status: status, instance: instance)
+            guard let unit = ownership.createdInstance else {
+                if let orphaned = ownership.orphanedInstance,
+                    !Self.disposeRejectedInstance(
+                        orphaned, graphAdmission: graphAdmission,
+                        until: teardownDeadline)
+                {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
+                continue
+            }
+            // Ownership moves before the first vendor property call. If that
+            // call overruns its deadline the construction transaction retains
+            // the unit and the detached teardown can still name it.
             units.append(HostedUnit(owner: .stage(kind), instance: unit))
+            guard
+                teardownDeadline.perform({
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_StreamFormat,
+                        kAudioUnitScope_Input, 0, &format, formatSize)
+                }) == noErr,
+                teardownDeadline.perform({
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_StreamFormat,
+                        kAudioUnitScope_Output, 0, &format, formatSize)
+                }) == noErr
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
+            var frames = UInt32(maximumFrames)
+            guard
+                teardownDeadline.perform({
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_MaximumFramesPerSlice,
+                        kAudioUnitScope_Global, 0, &frames,
+                        UInt32(MemoryLayout<UInt32>.size))
+                }) == noErr
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
             stages.append(kind)
         }
 
@@ -601,21 +826,52 @@ final class EffectChain {
         // user drags around. Everywhere else in the chain is a matter of taste
         // and this is not.
         if !plugins.isEmpty {
-            let insertAt = Self.pluginInsertionIndex(in: units.map(\.owner))
-            var built: [HostedUnit] = []
+            var insertAt = Self.pluginInsertionIndex(in: units.map(\.owner))
             for plugin in plugins {
+                guard teardownDeadline.hasTimeRemaining else {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
                 var description = plugin.componentDescription
                 guard let component = AudioComponentFindNext(nil, &description) else {
                     pluginFailures.append(
                         .init(name: plugin.name, reason: .notInstalled, status: noErr))
                     continue
                 }
+                guard teardownDeadline.hasTimeRemaining else {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
+                guard !AudioUnitPlugins.requiresAsyncInstantiation(component) else {
+                    pluginFailures.append(
+                        .init(
+                            name: plugin.name, reason: .couldNotInstantiate,
+                            status: kAudio_ParamError))
+                    continue
+                }
                 var instance: AudioComponentInstance?
-                let created = AudioComponentInstanceNew(component, &instance)
-                guard created == noErr, let unit = instance else {
+                guard
+                    let created = teardownDeadline.perform({
+                        AudioComponentInstanceNew(component, &instance)
+                    })
+                else {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
+                let ownership = AudioComponentCreationOwnership(
+                    status: created, instance: instance)
+                guard let unit = ownership.createdInstance else {
                     pluginFailures.append(
                         .init(
                             name: plugin.name, reason: .couldNotInstantiate, status: created))
+                    if let orphaned = ownership.orphanedInstance,
+                        !Self.disposeRejectedInstance(
+                            orphaned, graphAdmission: graphAdmission,
+                            until: teardownDeadline)
+                    {
+                        scheduleDetachedTeardown()
+                        return nil
+                    }
                     continue
                 }
 
@@ -628,65 +884,79 @@ final class EffectChain {
                 // equaliser, the compressor and the limiter with it, and named
                 // none of them. AUAudioMix is the measurable case: -10868 to
                 // each format, -10875 to initialise.
-                let inputFormat = AudioUnitSetProperty(
-                    unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
-                    &format, formatSize)
-                let outputFormat = AudioUnitSetProperty(
-                    unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
-                    &format, formatSize)
+                let inputFormat = teardownDeadline.perform {
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 0,
+                        &format, formatSize)
+                }
+                let outputFormat = teardownDeadline.perform {
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 0,
+                        &format, formatSize)
+                }
                 guard inputFormat == noErr, outputFormat == noErr else {
                     pluginFailures.append(
                         .init(
                             name: plugin.name, reason: .formatRejected,
-                            status: inputFormat == noErr ? outputFormat : inputFormat))
-                    AudioComponentInstanceDispose(unit)
+                            status: inputFormat == noErr
+                                ? (outputFormat ?? kAudio_ParamError)
+                                : (inputFormat ?? kAudio_ParamError)))
+                    guard
+                        Self.disposeRejectedInstance(
+                            unit, graphAdmission: graphAdmission,
+                            until: teardownDeadline)
+                    else {
+                        scheduleDetachedTeardown()
+                        return nil
+                    }
                     continue
                 }
                 // Before initialising, never after: a unit reads this when it
                 // sizes its internal buffers, and setting it afterwards is
                 // either refused or ignored depending on whose unit it is.
                 var frames = UInt32(maximumFrames)
-                AudioUnitSetProperty(
-                    unit, kAudioUnitProperty_MaximumFramesPerSlice,
-                    kAudioUnitScope_Global, 0, &frames,
-                    UInt32(MemoryLayout<UInt32>.size))
-
-                // A dry run, undone immediately. Initialising here proves the
-                // unit can start on its own terms; the common loop below then
-                // starts it for real once it is connected, which is the state
-                // it will render in.
-                let started = AudioUnitInitialize(unit)
-                guard started == noErr else {
+                let frameStatus = teardownDeadline.perform {
+                    AudioUnitSetProperty(
+                        unit, kAudioUnitProperty_MaximumFramesPerSlice,
+                        kAudioUnitScope_Global, 0, &frames,
+                        UInt32(MemoryLayout<UInt32>.size))
+                }
+                guard frameStatus == noErr else {
                     pluginFailures.append(
                         .init(
-                            name: plugin.name, reason: .wouldNotInitialise, status: started))
-                    AudioComponentInstanceDispose(unit)
+                            name: plugin.name, reason: .formatRejected,
+                            status: frameStatus ?? kAudio_ParamError))
+                    guard
+                        Self.disposeRejectedInstance(
+                            unit, graphAdmission: graphAdmission,
+                            until: teardownDeadline)
+                    else {
+                        scheduleDetachedTeardown()
+                        return nil
+                    }
                     continue
                 }
-                AudioUnitUninitialize(unit)
 
-                built.append(HostedUnit(owner: .plugin(plugin.id), instance: unit))
-            }
-            if !built.isEmpty {
-                units.insert(contentsOf: built, at: insertAt)
+                // Commit each instance before advancing the loop. A later
+                // rejection can time out, so keeping earlier owners in a local
+                // array would let failable-init destroy the array without ever
+                // handing those instances to the bounded disposer.
+                units.insert(
+                    HostedUnit(owner: .plugin(plugin.id), instance: unit), at: insertAt)
                 // The native stage's position is an index into `units`, so
                 // inserting ahead of it moves it.
                 if let native = nativeIndex, native >= insertAt {
-                    nativeIndex = native + built.count
+                    nativeIndex = native + 1
                 }
+                insertAt += 1
             }
         }
 
         // A chain of nothing but the native stage is legitimate: somebody who
         // wants only a formant shift should get one.
         //
-        // Nothing is freed on the way out of a failed init, here or below.
-        // Swift runs `deinit` on a class whose failable init returns nil once
-        // every stored property has a value, so cleaning up here as well freed
-        // the same three allocations twice and libmalloc aborted the process:
-        // POINTER_BEING_FREED_WAS_NOT_ALLOCATED, inside EffectChain.deinit,
-        // reached from EffectChain.init. It was not a plugin failing to load —
-        // it was the application dying on the spot.
+        // With no hosted unit there is no callback-transitive owner to detach;
+        // failable-init deinitialisation releases the raw staging storage once.
         guard !units.isEmpty || native != nil else { return nil }
 
         if native != nil {
@@ -699,91 +969,229 @@ final class EffectChain {
             let list = AudioBufferList.allocate(maximumBuffers: 1)
             list[0] = AudioBuffer(
                 mNumberChannels: 1,
-                mDataByteSize: UInt32(maximumFrames * MemoryLayout<Float>.size),
+                mDataByteSize: maximumByteCount,
                 mData: UnsafeMutableRawPointer(buffer))
             nativeList = list
+            nativePullContext = AudioUnitPullSourceContext.allocate(
+                source: buffer, capacityFrames: maximumFrames)
+            guard nativePullContext != nil else {
+                scheduleDetachedTeardown()
+                return nil
+            }
         }
 
         // The head pulls from our staging buffer; every later stage pulls from
         // the one before it.
         let headCallback = AURenderCallbackStruct(
-            inputProc: { refCon, _, _, _, frameCount, ioData in
-                guard let ioData else { return noErr }
-                let source = refCon.assumingMemoryBound(to: Float.self)
-                let buffers = UnsafeMutableAudioBufferListPointer(ioData)
-                for index in 0..<buffers.count {
-                    guard let data = buffers[index].mData else { continue }
-                    data.assumingMemoryBound(to: Float.self)
-                        .update(from: source, count: Int(frameCount))
-                }
-                return noErr
-            },
-            inputProcRefCon: UnsafeMutableRawPointer(inputBuffer))
+            inputProc: audioUnitPullInput,
+            inputProcRefCon: UnsafeMutableRawPointer(inputPullContext))
         if !units.isEmpty {
             // When the native stage is first, unit zero is already after the
             // split. Pointing it at `inputBuffer` bypassed the formant output:
             // a formant followed by only the limiter rendered both stages but
             // the listener heard the limiter over the unshifted input.
             var firstCallback = headCallback
-            if nativeIndex == 0, let nativeBuffer {
-                firstCallback.inputProcRefCon = UnsafeMutableRawPointer(nativeBuffer)
+            if nativeIndex == 0, let nativePullContext {
+                firstCallback.inputProcRefCon = UnsafeMutableRawPointer(nativePullContext)
             }
-            AudioUnitSetProperty(
-                units[0].instance, kAudioUnitProperty_SetRenderCallback,
-                kAudioUnitScope_Input, 0,
-                &firstCallback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+            guard
+                teardownDeadline.perform({
+                    AudioUnitSetProperty(
+                        units[0].instance, kAudioUnitProperty_SetRenderCallback,
+                        kAudioUnitScope_Input, 0,
+                        &firstCallback,
+                        UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                }) == noErr
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
         }
 
         for index in 1..<max(units.count, 1) where index < units.count {
             // The unit immediately after the native stage is fed from the
             // native stage's buffer rather than connected to the unit before
             // it — that connection is where the split goes.
-            if index == nativeIndex, let buffer = nativeBuffer {
+            if index == nativeIndex, let nativePullContext {
                 var callback = AURenderCallbackStruct(
                     inputProc: headCallback.inputProc,
-                    inputProcRefCon: UnsafeMutableRawPointer(buffer))
-                AudioUnitSetProperty(
-                    units[index].instance, kAudioUnitProperty_SetRenderCallback,
-                    kAudioUnitScope_Input, 0,
-                    &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                    inputProcRefCon: UnsafeMutableRawPointer(nativePullContext))
+                guard
+                    teardownDeadline.perform({
+                        AudioUnitSetProperty(
+                            units[index].instance,
+                            kAudioUnitProperty_SetRenderCallback,
+                            kAudioUnitScope_Input, 0,
+                            &callback,
+                            UInt32(MemoryLayout<AURenderCallbackStruct>.size))
+                    }) == noErr
+                else {
+                    scheduleDetachedTeardown()
+                    return nil
+                }
                 continue
             }
             var connection = AudioUnitConnection(
                 sourceAudioUnit: units[index - 1].instance,
                 sourceOutputNumber: 0,
                 destInputNumber: 0)
-            AudioUnitSetProperty(
-                units[index].instance, kAudioUnitProperty_MakeConnection,
-                kAudioUnitScope_Input, 0,
-                &connection, UInt32(MemoryLayout<AudioUnitConnection>.size))
+            guard
+                teardownDeadline.perform({
+                    AudioUnitSetProperty(
+                        units[index].instance, kAudioUnitProperty_MakeConnection,
+                        kAudioUnitScope_Input, 0,
+                        &connection, UInt32(MemoryLayout<AudioUnitConnection>.size))
+                }) == noErr
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
         }
 
-        for unit in units where AudioUnitInitialize(unit.instance) != noErr {
-            // A stage that will not initialise is worse than no chain: the
-            // signal would silently skip it while the UI claimed it was on.
-            // Only this application's own stages can reach here now — a
-            // third-party unit that cannot start was rejected and named above,
-            // rather than taking every other stage down with it.
-            teardown()
-            return nil
+        for index in units.indices {
+            let status = teardownDeadline.perform {
+                AudioUnitInitialize(units[index].instance)
+            }
+            guard status == noErr else {
+                // A stage that will not initialise is worse than no chain: the
+                // signal would silently skip it while the UI claimed it was on.
+                if case .plugin(let id) = units[index].owner,
+                    let plugin = plugins.first(where: { $0.id == id })
+                {
+                    pluginFailures.append(
+                        .init(
+                            name: plugin.name, reason: .wouldNotInitialise,
+                            status: status ?? kAudio_ParamError))
+                }
+                scheduleDetachedTeardown()
+                return nil
+            }
+            units[index].teardownState.didInitialise()
         }
 
-        latencyFrames = (native?.latencyFrames ?? 0)
-        latencyFrames += units.reduce(into: 0) { total, unit in
+        var measuredLatencyFrames = native?.latencyFrames ?? 0
+        for unit in units {
             var latency: Float64 = 0
             var size = UInt32(MemoryLayout<Float64>.size)
-            AudioUnitGetProperty(
-                unit.instance, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
-                &latency, &size)
-            total += Int(latency * sampleRate)
+            let status = teardownDeadline.perform {
+                AudioUnitGetProperty(
+                    unit.instance, kAudioUnitProperty_Latency, kAudioUnitScope_Global, 0,
+                    &latency, &size)
+            }
+            guard status == noErr,
+                size == UInt32(MemoryLayout<Float64>.size),
+                let frames = ProcessingLatency.validatedFrames(
+                    seconds: latency, sampleRate: sampleRate)
+            else {
+                scheduleDetachedTeardown()
+                return nil
+            }
+            let (total, overflowed) =
+                measuredLatencyFrames.addingReportingOverflow(frames)
+            guard !overflowed else {
+                scheduleDetachedTeardown()
+                return nil
+            }
+            measuredLatencyFrames = total
         }
+        latencyFrames = measuredLatencyFrames
 
-        applyDefaults(sampleRate: sampleRate)
+        guard
+            applyDefaults(
+                sampleRate: sampleRate, until: teardownDeadline,
+                context: constructionContext)
+        else {
+            scheduleDetachedTeardown()
+            return nil
+        }
         timestamp.mFlags = .sampleTimeValid
     }
 
     deinit {
-        teardown()
+        if storageWasDetached { return }
+        if let detached = detachResourcesForTeardown() {
+            BoundedAudioUnitDisposer.shared.disposeAfterFence(detached)
+            return
+        }
+        releaseStorage()
+    }
+
+    var audioUnitCount: Int { units.count }
+
+    func acquireControlLease() -> AudioUnitOwnerControlLease? {
+        controlGate.acquire()
+    }
+
+    func tearDownAudioUnits(
+        using gate: AudioUnitTeardownGate
+    ) -> AudioUnitOwnerDisposalResult {
+        guard controlGate.closeForTeardown() else {
+            return .ownerRetained(disposedUnits: 0)
+        }
+        var disposed = 0
+        for index in units.indices {
+            let result = AudioUnitOwnerTeardownSequence.tearDown(
+                units[index].instance, state: &units[index].teardownState,
+                using: gate)
+            switch result {
+            case .complete(let count):
+                disposed += count
+            case .operationFailed(let step, let status, let count):
+                return .operationFailed(
+                    step: step, status: status, disposedUnits: disposed + count)
+            case .timedOut(let step, let count):
+                return .timedOut(step: step, disposedUnits: disposed + count)
+            case .ownerRetained(let count):
+                return .ownerRetained(disposedUnits: disposed + count)
+            case .blockedByRetainedTransaction:
+                preconditionFailure("an EffectChain cannot submit nested teardown")
+            }
+        }
+        units.removeAll()
+        return .complete(disposedUnits: disposed)
+    }
+
+    private func scheduleDetachedTeardown() {
+        guard let detached = detachResourcesForTeardown() else { return }
+        BoundedAudioUnitDisposer.shared.disposeAfterFence(detached)
+    }
+
+    private func detachResourcesForTeardown() -> AudioUnitResourceCapsule? {
+        guard !units.isEmpty else { return nil }
+        let detachedUnits = units.map {
+            AudioUnitResourceCapsule.Unit(
+                instance: $0.instance, state: $0.teardownState)
+        }
+        units.removeAll()
+        storageWasDetached = true
+
+        let inputPullContext = self.inputPullContext
+        let nativePullContext = self.nativePullContext
+        let inputBuffer = self.inputBuffer
+        let outputBuffer = self.outputBuffer
+        let nativeBuffer = self.nativeBuffer
+        let nativeList = self.nativeList
+        let bufferList = self.bufferList
+        let retainedNative = native
+        return AudioUnitResourceCapsule(units: detachedUnits) {
+            AudioUnitPullSourceContext.deallocate(inputPullContext)
+            if let nativePullContext {
+                AudioUnitPullSourceContext.deallocate(nativePullContext)
+            }
+            inputBuffer.deallocate()
+            outputBuffer.deallocate()
+            nativeBuffer?.deallocate()
+            if let nativeList { free(nativeList.unsafeMutablePointer) }
+            free(bufferList.unsafeMutablePointer)
+            withExtendedLifetime(retainedNative) {}
+        }
+    }
+
+    private func releaseStorage() {
+        AudioUnitPullSourceContext.deallocate(inputPullContext)
+        if let nativePullContext {
+            AudioUnitPullSourceContext.deallocate(nativePullContext)
+        }
         inputBuffer.deallocate()
         outputBuffer.deallocate()
         nativeBuffer?.deallocate()
@@ -791,79 +1199,86 @@ final class EffectChain {
         free(bufferList.unsafeMutablePointer)
     }
 
-    private func teardown() {
-        for unit in units {
-            AudioUnitUninitialize(unit.instance)
-            AudioComponentInstanceDispose(unit.instance)
-        }
-        units.removeAll()
-    }
-
     /// Starting points chosen for a voice signal rather than the units' own
     /// defaults, which are tuned for music.
-    private func applyDefaults(sampleRate: Double) {
+    private func applyDefaults(
+        sampleRate: Double, until deadline: HALTeardownDeadline,
+        context: AudioUnitConstructionContext? = nil
+    ) -> Bool {
+        _ = sampleRate
+        var accepted = true
+        func setParameter(
+            _ unit: AudioComponentInstance, _ parameter: AudioUnitParameterID, _ value: Float
+        ) {
+            guard accepted,
+                let status = performAudioUnitConstruction(
+                    until: deadline, context: context,
+                    {
+                        AudioUnitSetParameter(
+                            unit, parameter, kAudioUnitScope_Global, 0, value, 0)
+                    }), status == noErr
+            else {
+                accepted = false
+                return
+            }
+        }
+        func setUInt32Property(
+            _ unit: AudioComponentInstance, _ property: AudioUnitPropertyID,
+            _ value: inout UInt32
+        ) {
+            guard accepted,
+                let status = performAudioUnitConstruction(
+                    until: deadline, context: context,
+                    {
+                        AudioUnitSetProperty(
+                            unit, property, kAudioUnitScope_Global, 0, &value,
+                            UInt32(MemoryLayout<UInt32>.size))
+                    }), status == noErr
+            else {
+                accepted = false
+                return
+            }
+        }
         for hosted in units {
             guard case .stage(let kind) = hosted.owner else { continue }
+            guard deadline.hasTimeRemaining else { return false }
             let unit = hosted.instance
             switch kind {
             case .voiceIsolation:
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent),
-                    kAudioUnitScope_Global, 0, 100, 0)
+                setParameter(
+                    unit, AudioUnitParameterID(kAUSoundIsolationParam_WetDryMixPercent), 100)
             case .gate:
                 // The dynamics processor does both jobs; a gate is its expander
                 // with the compressor half left alone. The compression side is
                 // pushed out of the way rather than merely unset — its own
                 // defaults are tuned for music and would squash speech.
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_ExpansionThreshold,
-                    kAudioUnitScope_Global, 0, -45, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_ExpansionRatio,
-                    kAudioUnitScope_Global, 0, 20, 0)
+                setParameter(unit, kDynamicsProcessorParam_ExpansionThreshold, -45)
+                setParameter(unit, kDynamicsProcessorParam_ExpansionRatio, 20)
                 // Fast enough not to clip the start of a word, slow enough not
                 // to chatter on breath between them.
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_AttackTime,
-                    kAudioUnitScope_Global, 0, 0.002, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_ReleaseTime,
-                    kAudioUnitScope_Global, 0, 0.2, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_Threshold,
-                    kAudioUnitScope_Global, 0, 0, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_OverallGain,
-                    kAudioUnitScope_Global, 0, 0, 0)
+                setParameter(unit, kDynamicsProcessorParam_AttackTime, 0.002)
+                setParameter(unit, kDynamicsProcessorParam_ReleaseTime, 0.2)
+                setParameter(unit, kDynamicsProcessorParam_Threshold, 0)
+                setParameter(unit, kDynamicsProcessorParam_OverallGain, 0)
             case .equaliser:
                 // A high-pass at 80 Hz: everything below is rumble, handling
                 // noise and plosive energy, none of it voice.
                 var bands: UInt32 = 1
-                AudioUnitSetProperty(
-                    unit, kAUNBandEQProperty_NumberOfBands, kAudioUnitScope_Global, 0,
-                    &bands, UInt32(MemoryLayout<UInt32>.size))
-                AudioUnitSetParameter(
+                setUInt32Property(unit, kAUNBandEQProperty_NumberOfBands, &bands)
+                setParameter(
                     unit, AudioUnitParameterID(kAUNBandEQParam_FilterType),
-                    kAudioUnitScope_Global, 0,
                     // Butterworth rather than resonant: a resonant high-pass
                     // adds a peak right where the plosive energy is.
-                    Float(kAUNBandEQFilterType_2ndOrderButterworthHighPass), 0)
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kAUNBandEQParam_Frequency),
-                    kAudioUnitScope_Global, 0, 80, 0)
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kAUNBandEQParam_BypassBand),
-                    kAudioUnitScope_Global, 0, 0, 0)
+                    Float(kAUNBandEQFilterType_2ndOrderButterworthHighPass))
+                setParameter(unit, AudioUnitParameterID(kAUNBandEQParam_Frequency), 80)
+                setParameter(unit, AudioUnitParameterID(kAUNBandEQParam_BypassBand), 0)
             case .tone:
                 var bands = UInt32(EffectKind.toneBands.count)
-                AudioUnitSetProperty(
-                    unit, kAUNBandEQProperty_NumberOfBands, kAudioUnitScope_Global, 0,
-                    &bands, UInt32(MemoryLayout<UInt32>.size))
+                setUInt32Property(unit, kAUNBandEQProperty_NumberOfBands, &bands)
                 for band in EffectKind.toneBands {
                     let offset = AudioUnitParameterID(band.index)
-                    AudioUnitSetParameter(
+                    setParameter(
                         unit, AudioUnitParameterID(kAUNBandEQParam_FilterType) + offset,
-                        kAudioUnitScope_Global, 0,
                         // Shelves at the ends and bells in between, which is
                         // what every voice equaliser has ever been: the top and
                         // bottom bands are asked to move everything past them,
@@ -873,52 +1288,42 @@ final class EffectChain {
                                 ? (band.index == 0
                                     ? kAUNBandEQFilterType_LowShelf
                                     : kAUNBandEQFilterType_HighShelf)
-                                : kAUNBandEQFilterType_Parametric), 0)
-                    AudioUnitSetParameter(
+                                : kAUNBandEQFilterType_Parametric))
+                    setParameter(
                         unit, AudioUnitParameterID(kAUNBandEQParam_Frequency) + offset,
-                        kAudioUnitScope_Global, 0, band.hertz, 0)
-                    AudioUnitSetParameter(
+                        band.hertz)
+                    setParameter(
                         unit, AudioUnitParameterID(kAUNBandEQParam_Gain) + offset,
-                        kAudioUnitScope_Global, 0, 0, 0)
+                        0)
                     // Two thirds of an octave: wide enough not to sound like a
                     // notch, narrow enough that two neighbouring bands do not
                     // simply add up.
-                    AudioUnitSetParameter(
+                    setParameter(
                         unit, AudioUnitParameterID(kAUNBandEQParam_Bandwidth) + offset,
-                        kAudioUnitScope_Global, 0, 0.66, 0)
-                    AudioUnitSetParameter(
+                        0.66)
+                    setParameter(
                         unit, AudioUnitParameterID(kAUNBandEQParam_BypassBand) + offset,
-                        kAudioUnitScope_Global, 0, 0, 0)
+                        0)
                 }
             case .compressor:
                 // Gentle: 3:1 above -20 dBFS. A router should even out a voice,
                 // not squash it — the conferencing application will apply its
                 // own dynamics after this.
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_Threshold, kAudioUnitScope_Global, 0, -20, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_HeadRoom, kAudioUnitScope_Global, 0, 5, 0)
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_AttackTime, kAudioUnitScope_Global, 0, 0.01, 0
-                )
-                AudioUnitSetParameter(
-                    unit, kDynamicsProcessorParam_ReleaseTime, kAudioUnitScope_Global, 0, 0.15,
-                    0)
+                setParameter(unit, kDynamicsProcessorParam_Threshold, -20)
+                setParameter(unit, kDynamicsProcessorParam_HeadRoom, 5)
+                setParameter(unit, kDynamicsProcessorParam_AttackTime, 0.01)
+                setParameter(unit, kDynamicsProcessorParam_ReleaseTime, 0.15)
             case .pitch:
                 // Unshifted by default. Switching the stage on has to be
                 // inaudible until somebody moves the control — a voice changer
                 // that changes the voice the moment it is enabled gives no way
                 // to hear what it cost in latency alone.
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kNewTimePitchParam_Pitch),
-                    kAudioUnitScope_Global, 0, 0, 0)
+                setParameter(unit, AudioUnitParameterID(kNewTimePitchParam_Pitch), 0)
                 // Rate is left at one throughout: this is a pitch shifter, not
                 // a speed control, and anything other than one would put the
                 // output out of step with the clock the whole router is locked
                 // to.
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kNewTimePitchParam_Rate),
-                    kAudioUnitScope_Global, 0, 1, 0)
+                setParameter(unit, AudioUnitParameterID(kNewTimePitchParam_Rate), 1)
             case .formant:
                 // Never reached: the native stage produces no unit and is not
                 // a `HostedUnit`. Stated rather than left to `default`, so that
@@ -926,52 +1331,39 @@ final class EffectChain {
                 // of silently configuring the wrong unit.
                 break
             case .character:
-                applyFlavour(.robot, amount: 60, to: unit)
+                applyFlavour(.robot, amount: 60, to: unit) { parameter, value in
+                    setParameter(unit, parameter, value)
+                }
             case .reverb:
                 // Small and short. The unit's own default is a concert hall,
                 // which on a voice call sounds like a fault rather than an
                 // effect.
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kReverb2Param_DryWetMix),
-                    kAudioUnitScope_Global, 0, 18, 0)
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kReverb2Param_DecayTimeAt0Hz),
-                    kAudioUnitScope_Global, 0, 1.2, 0)
+                setParameter(unit, AudioUnitParameterID(kReverb2Param_DryWetMix), 18)
+                setParameter(unit, AudioUnitParameterID(kReverb2Param_DecayTimeAt0Hz), 1.2)
                 // The top decays faster than the bottom in every real room, and
                 // a tail that stays bright is the single thing that makes a
                 // reverb sound artificial.
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kReverb2Param_DecayTimeAtNyquist),
-                    kAudioUnitScope_Global, 0, 0.6, 0)
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kReverb2Param_MinDelayTime),
-                    kAudioUnitScope_Global, 0, 0.008, 0)
-                AudioUnitSetParameter(
-                    unit, AudioUnitParameterID(kReverb2Param_MaxDelayTime),
-                    kAudioUnitScope_Global, 0, 0.05, 0)
+                setParameter(
+                    unit, AudioUnitParameterID(kReverb2Param_DecayTimeAtNyquist), 0.6)
+                setParameter(unit, AudioUnitParameterID(kReverb2Param_MinDelayTime), 0.008)
+                setParameter(unit, AudioUnitParameterID(kReverb2Param_MaxDelayTime), 0.05)
             case .echo:
-                AudioUnitSetParameter(
-                    unit, kDelayParam_WetDryMix, kAudioUnitScope_Global, 0, 20, 0)
-                AudioUnitSetParameter(
-                    unit, kDelayParam_DelayTime, kAudioUnitScope_Global, 0, 0.18, 0)
-                AudioUnitSetParameter(
-                    unit, kDelayParam_Feedback, kAudioUnitScope_Global, 0, 25, 0)
+                setParameter(unit, kDelayParam_WetDryMix, 20)
+                setParameter(unit, kDelayParam_DelayTime, 0.18)
+                setParameter(unit, kDelayParam_Feedback, 25)
                 // Repeats get duller each time, as they do off a real wall.
                 // Without this the tail stays as bright as the source and reads
                 // as a fault.
-                AudioUnitSetParameter(
-                    unit, kDelayParam_LopassCutoff, kAudioUnitScope_Global, 0, 6000, 0)
+                setParameter(unit, kDelayParam_LopassCutoff, 6000)
             case .limiter:
                 // Just below full scale, so nothing downstream ever sees a
                 // sample it has to clip.
-                AudioUnitSetParameter(
-                    unit, kLimiterParam_PreGain, kAudioUnitScope_Global, 0, 0, 0)
-                AudioUnitSetParameter(
-                    unit, kLimiterParam_AttackTime, kAudioUnitScope_Global, 0, 0.001, 0)
-                AudioUnitSetParameter(
-                    unit, kLimiterParam_DecayTime, kAudioUnitScope_Global, 0, 0.05, 0)
+                setParameter(unit, kLimiterParam_PreGain, 0)
+                setParameter(unit, kLimiterParam_AttackTime, 0.001)
+                setParameter(unit, kLimiterParam_DecayTime, 0.05)
             }
         }
+        return accepted && deadline.hasTimeRemaining
     }
 
     /// Puts one voice on the distortion unit.
@@ -983,10 +1375,16 @@ final class EffectChain {
     /// alone, because the unit keeps whatever the last flavour set and the
     /// leftovers are what make a robot and a radio sound like the same mess.
     private func applyFlavour(
-        _ flavour: EffectKind.Flavour, amount: Float, to unit: AudioComponentInstance
+        _ flavour: EffectKind.Flavour, amount: Float, to unit: AudioComponentInstance,
+        using boundedSet: ((AudioUnitParameterID, Float) -> Void)? = nil
     ) {
         func set(_ parameter: AudioUnitParameterID, _ value: Float) {
-            AudioUnitSetParameter(unit, parameter, kAudioUnitScope_Global, 0, value, 0)
+            if let boundedSet {
+                boundedSet(parameter, value)
+            } else {
+                AudioUnitSetParameter(
+                    unit, parameter, kAudioUnitScope_Global, 0, value, 0)
+            }
         }
 
         // Everything off first.
@@ -1327,6 +1725,12 @@ final class EffectChain {
     /// `outputBuffer`. Called on the IO thread.
     @inline(__always)
     func render(frames: Int, sampleTime: Float64) -> Bool {
+        guard let byteCount = AudioUnitPullSourceContext.byteCount(for: frames),
+            frames <= maximumFrames
+        else {
+            for index in 0..<maximumFrames { outputBuffer[index] = 0 }
+            return false
+        }
         // The native stage splits the run in two. Everything before it renders
         // into its own buffer, it rewrites that in place, and everything after
         // pulls from the result.
@@ -1341,8 +1745,7 @@ final class EffectChain {
                 // there is no hosted head at all.
                 if split > 0 {
                     nativeTimestamp.mSampleTime = sampleTime
-                    bufferList[0].mDataByteSize =
-                        UInt32(frames * MemoryLayout<Float>.size)
+                    bufferList[0].mDataByteSize = byteCount
                     var flags = AudioUnitRenderActionFlags()
                     guard
                         AudioUnitRender(
@@ -1359,7 +1762,7 @@ final class EffectChain {
             guard let nativeBuffer, let nativeList else { return false }
             if split > 0 {
                 nativeTimestamp.mSampleTime = sampleTime
-                nativeList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
+                nativeList[0].mDataByteSize = byteCount
                 var flags = AudioUnitRenderActionFlags()
                 guard
                     AudioUnitRender(
@@ -1375,7 +1778,7 @@ final class EffectChain {
 
         guard let tail = units.last?.instance else { return false }
         timestamp.mSampleTime = sampleTime
-        bufferList[0].mDataByteSize = UInt32(frames * MemoryLayout<Float>.size)
+        bufferList[0].mDataByteSize = byteCount
         var flags = AudioUnitRenderActionFlags()
         return AudioUnitRender(
             tail, &flags, &timestamp, 0, UInt32(frames),

@@ -180,6 +180,9 @@ enum WindowCapture {
         // Long enough for the meters to have something in them.
         try? await Task.sleep(for: .seconds(2))
         model.toggleRecording()
+        for _ in 0..<50 where !model.isRecording {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         try? await Task.sleep(for: .seconds(2))
 
         wroteEverything =
@@ -188,6 +191,9 @@ enum WindowCapture {
                 into: directory) && wroteEverything
 
         model.toggleRecording()
+        for _ in 0..<50 where model.isRecording {
+            try? await Task.sleep(for: .milliseconds(100))
+        }
         if let url = model.recordingURL { try? FileManager.default.removeItem(at: url) }
         model.stop()
         return wroteEverything
@@ -502,7 +508,9 @@ enum WindowCapture {
                     wroteEverything = false
                     continue
                 }
-                if name == "live-min-light.png", !spectrumHasVisibleShape(png) {
+                if ProcessInfo.processInfo.environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil,
+                    name == "live-min-light.png", !spectrumHasVisibleShape(png)
+                {
                     FileHandle.standardError.write(
                         Data(
                             "live-min-light.png has a finite output reading but no visible spectrum"
@@ -524,7 +532,8 @@ enum WindowCapture {
     /// The synthetic non-hardware fixture has a voice-shaped spectrum. Assert
     /// that the real window actually drew it, closing the exact hole where a
     /// finite −52.6 dBFS reading sat above twenty-four one-point bars and the
-    /// screenshot gate still passed.
+    /// screenshot gate still passed. A live room can be genuinely silent, so
+    /// this is evidence only for the deterministic fixture.
     private static func spectrumHasVisibleShape(_ png: Data) -> Bool {
         guard
             let coloured = PixelProbe.count(

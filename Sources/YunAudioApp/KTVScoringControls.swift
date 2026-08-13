@@ -50,9 +50,14 @@ struct KTVScoringControls: View {
                 // the platform one because the stage is dark and the system
                 // one was not, which is a reason to extend the system rather
                 // than to leave it.
-                YunSwitch(isOn: $model.isScoringSinging, onDark: scale == .stage)
-                    .accessibilityLabel(loc("Score the singing"))
-                    .accessibilityIdentifier(identifier("ScoreSwitch"))
+                YunSwitch(
+                    isOn: Binding(
+                        get: { model.isScoringRequested },
+                        set: { model.setScoringRequested($0) }),
+                    onDark: scale == .stage
+                )
+                .accessibilityLabel(loc("Score the singing"))
+                .accessibilityIdentifier(identifier("ScoreSwitch"))
                 Text(loc("Score the singing"))
                     .font(scale.title)
                     .foregroundStyle(scale.tint)

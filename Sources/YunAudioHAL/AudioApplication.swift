@@ -304,14 +304,65 @@ extension AudioApplications {
         matches(wanted, bundleID: process.bundleID, pid: process.pid, halName: process.name)
     }
 
+    /// Resolves all processes named by one user-facing application query.
+    ///
+    /// A process does not necessarily publish the name shown by Finder or the
+    /// Dock. OrbStack is one measured example: the workspace calls the
+    /// application "OrbStack", while none of its HAL processes contains that
+    /// word. Looking at the process alone therefore made a row offered by the
+    /// interface impossible to select from the command line.
+    ///
+    /// The workspace is read once for the whole enumeration. Folding that read
+    /// into `matches(_:process:)` would turn one already expensive HAL census
+    /// into an application-census read for every process.
+    ///
+    /// - Parameters:
+    ///   - wanted: The application name, bundle identifier or process id.
+    ///   - processes: The process census to search.
+    ///   - workspace: One matching AppKit snapshot. Passing the same snapshot
+    ///     used for grouping makes the command and interface deterministic.
+    /// - Returns: Every process belonging to the requested application.
+    public static func matching(
+        _ wanted: String,
+        in processes: [AudioProcess],
+        workspace: WorkspaceSnapshot? = nil
+    ) -> [AudioProcess] {
+        let named = (workspace ?? workspaceSnapshot()).named
+        return processes.filter {
+            matches(
+                wanted, bundleID: $0.bundleID, pid: $0.pid, halName: $0.name,
+                named: named)
+        }
+    }
+
     /// The pieces rather than the process, for the reason above.
     static func matches(
         _ wanted: String, bundleID: String?, pid: pid_t, halName: String
     ) -> Bool {
+        matches(wanted, bundleID: bundleID, pid: pid, halName: halName, named: [:])
+    }
+
+    /// The complete matching rule, split into values so it can be exercised
+    /// without asking the live HAL or workspace to contain a particular app.
+    static func matches(
+        _ wanted: String,
+        bundleID: String?,
+        pid: pid_t,
+        halName: String,
+        named: [String: ApplicationInfo]
+    ) -> Bool {
         if let wantedPID = pid_t(wanted) { return pid == wantedPID }
         let name = displayName(bundleID: bundleID, pid: pid, halName: halName)
         if name.localizedCaseInsensitiveContains(wanted) { return true }
-        return bundleID?.localizedCaseInsensitiveContains(wanted) ?? false
+        guard let bundleID else { return false }
+        if bundleID.localizedCaseInsensitiveContains(wanted) { return true }
+
+        return named.contains { identifier, application in
+            guard bundleID == identifier || bundleID.hasPrefix(identifier + ".") else {
+                return false
+            }
+            return application.name.localizedCaseInsensitiveContains(wanted)
+        }
     }
 
     /// Kept out of `group(processes:foreground:named:)` so that stays a

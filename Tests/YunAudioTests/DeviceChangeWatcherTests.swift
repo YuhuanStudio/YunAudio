@@ -8,6 +8,96 @@ import Testing
 struct DeviceChangeWatcherTests {
     private let millisecond: UInt64 = 1_000_000
 
+    private final class ListenerHarness: @unchecked Sendable {
+        private let lock = NSLock()
+        private var listener: DeviceChangeListenerRegistration?
+        private var installationCount = 0
+        private var removalCount = 0
+        private var removalThreads: [Bool] = []
+        let removed = DispatchSemaphore(value: 0)
+
+        func install(_ listener: DeviceChangeListenerRegistration) -> Bool {
+            lock.withLock {
+                installationCount += 1
+                self.listener = listener
+            }
+            return true
+        }
+
+        func remove(_: DeviceChangeListenerRegistration) {
+            lock.withLock {
+                removalCount += 1
+                removalThreads.append(Thread.isMainThread)
+                self.listener = nil
+            }
+            removed.signal()
+        }
+
+        func notify() {
+            let listener = lock.withLock { listener }
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain)
+            withUnsafePointer(to: &address) { pointer in
+                listener?.block(1, pointer)
+            }
+        }
+
+        var removals: Int {
+            lock.withLock { removalCount }
+        }
+
+        var installations: Int {
+            lock.withLock { installationCount }
+        }
+
+        var removedOnMainThread: [Bool] {
+            lock.withLock { removalThreads }
+        }
+    }
+
+    private final class BlockingInventory: @unchecked Sendable {
+        private let lock = NSLock()
+        private let releaseFirst = DispatchSemaphore(value: 0)
+        let firstEntered = DispatchSemaphore(value: 0)
+        private(set) var readCount = 0
+        private(set) var maximumConcurrentReads = 0
+        private var concurrentReads = 0
+
+        func read() -> Set<AudioObjectID>? {
+            let ordinal = lock.withLock {
+                readCount += 1
+                concurrentReads += 1
+                maximumConcurrentReads = max(maximumConcurrentReads, concurrentReads)
+                return readCount
+            }
+            if ordinal == 1 {
+                firstEntered.signal()
+                _ = releaseFirst.wait(timeout: .now() + 2)
+            }
+            lock.withLock { concurrentReads -= 1 }
+            return ordinal == 1 ? [1, 2] : [1, 3]
+        }
+
+        func releaseEnteredRead() {
+            releaseFirst.signal()
+        }
+
+        var snapshot: (reads: Int, maximumConcurrentReads: Int) {
+            lock.withLock { (readCount, maximumConcurrentReads) }
+        }
+    }
+
+    private func fastSchedule() -> DeviceChangeSchedule {
+        DeviceChangeSchedule(
+            initialDelay: millisecond,
+            burstMaximumDelay: 2 * millisecond,
+            stormInitialDelay: 3 * millisecond,
+            maximumDelay: 4 * millisecond,
+            quietReset: 5 * millisecond)
+    }
+
     private final class Inventory: @unchecked Sendable {
         private let lock = NSLock()
         private var value: Set<AudioObjectID>?
@@ -51,6 +141,124 @@ struct DeviceChangeWatcherTests {
         inventory.set([12, 34, 56])
         #expect(probe.readChanged())
         #expect(inventory.reads == 2)
+    }
+
+    @Test("suspension revokes a queued probe and ten thousand later notifications")
+    func suspensionRevokesQueuedAndLaterNotifications() {
+        let queue = DispatchQueue(label: "device-watch-tests.suspension")
+        let queueEntered = DispatchSemaphore(value: 0)
+        let releaseQueue = DispatchSemaphore(value: 0)
+        queue.async {
+            queueEntered.signal()
+            _ = releaseQueue.wait(timeout: .now() + 2)
+        }
+        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+
+        let listener = ListenerHarness()
+        let inventory = Inventory([1, 2])
+        let delivered = DispatchSemaphore(value: 0)
+        let watcher = DeviceChangeWatcher(
+            queue: queue,
+            schedule: fastSchedule(),
+            initialInventory: [1],
+            inventoryRead: inventory.read,
+            installListener: listener.install,
+            removeListener: listener.remove
+        ) {
+            delivered.signal()
+        }
+
+        // This callback is admitted but remains queued behind the artificial
+        // owner stall. Suspension must make its token stale before it enters HAL.
+        listener.notify()
+        let began = DispatchTime.now().uptimeNanoseconds
+        #expect(watcher.suspend())
+        let suspensionNanoseconds = DispatchTime.now().uptimeNanoseconds - began
+        // Core Audio delivers the block on this same queue. Submit the storm
+        // before resume so the test proves delayed callbacks do not become a
+        // new-generation notification merely because they execute later.
+        for _ in 0..<10_000 {
+            queue.async { listener.notify() }
+        }
+        #expect(inventory.reads == 0)
+        #expect(watcher.resume())
+        #expect(inventory.reads == 0)
+        releaseQueue.signal()
+
+        #expect(suspensionNanoseconds < 8_000_000)
+
+        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + .milliseconds(20)) == .timedOut)
+        #expect(inventory.reads == 1)
+        #expect(inventory.observations == [[1, 2]])
+        #expect(listener.installations == 1)
+
+        #expect(watcher.shutdown())
+        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removals == 1)
+    }
+
+    @MainActor
+    @Test("accepted shutdown removes one listener off MainActor exactly once")
+    func acceptedShutdownRemovesListenerExactlyOnce() {
+        let queue = DispatchQueue(label: "device-watch-tests.shutdown")
+        let listener = ListenerHarness()
+        let watcher = DeviceChangeWatcher(
+            queue: queue,
+            schedule: fastSchedule(),
+            initialInventory: [1],
+            inventoryRead: { [1] },
+            installListener: listener.install,
+            removeListener: listener.remove,
+            onChange: {})
+
+        let began = DispatchTime.now().uptimeNanoseconds
+        #expect(watcher.shutdown())
+        let admissionNanoseconds = DispatchTime.now().uptimeNanoseconds - began
+        for _ in 0..<10_000 { #expect(!watcher.shutdown()) }
+
+        #expect(admissionNanoseconds < 8_000_000)
+        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removals == 1)
+        #expect(listener.installations == 1)
+        #expect(listener.removedOnMainThread == [false])
+    }
+
+    @Test("an entered read publishes zero late results and resume stays single owner")
+    func enteredReadIsQuarantinedAcrossResume() {
+        let queue = DispatchQueue(label: "device-watch-tests.entered-read")
+        let listener = ListenerHarness()
+        let inventory = BlockingInventory()
+        let delivered = DispatchSemaphore(value: 0)
+        let watcher = DeviceChangeWatcher(
+            queue: queue,
+            schedule: fastSchedule(),
+            initialInventory: [1],
+            inventoryRead: inventory.read,
+            installListener: listener.install,
+            removeListener: listener.remove
+        ) {
+            delivered.signal()
+        }
+
+        listener.notify()
+        #expect(inventory.firstEntered.wait(timeout: .now() + 1) == .success)
+        let began = DispatchTime.now().uptimeNanoseconds
+        #expect(watcher.suspend())
+        let suspensionNanoseconds = DispatchTime.now().uptimeNanoseconds - began
+        #expect(watcher.resume())
+        inventory.releaseEnteredRead()
+
+        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + .milliseconds(20)) == .timedOut)
+        #expect(inventory.snapshot.reads == 2)
+        #expect(inventory.snapshot.maximumConcurrentReads == 1)
+        #expect(listener.installations == 1)
+        #expect(suspensionNanoseconds < 8_000_000)
+
+        #expect(watcher.shutdown())
+        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removals == 1)
     }
 
     /// A watcher whose baseline never arrives has to start working anyway.

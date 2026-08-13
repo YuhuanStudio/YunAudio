@@ -50,9 +50,10 @@ for argument in "$@"; do
 verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
-  tests                          687 of them                          ~7 s
+  strict formatting             swift-format lint --strict           ~2 s
+  tests                          2016 of them                         ~80 s
   strings                        both tables, and every loc()          ~1 s
-  app bundle                     build-app.sh                        ~50 s
+  app bundle                     build and isolated resource smoke   ~50 s
   settings entry                 opens a real settings window          ~2 s
   offscreen render               every panel, no window server       ~20 s
   photograph the real window     what the window server drew         ~70 s
@@ -84,6 +85,14 @@ wanted() {
 		[[ "${step}" == *"${piece}"* ]] && return 0
 	done
 	return 1
+}
+
+# Checked before any `--full` unit test is allowed to inspect or alter the live
+# HAL. The flow runner repeats the check immediately before its longer lease.
+nobody_else_has_the_devices() {
+	local others
+	others=$(pgrep -x YunAudioApp | wc -l | tr -d ' ')
+	[[ "${others}" == "0" ]]
 }
 
 WORK="$(mktemp -d)"
@@ -150,6 +159,11 @@ step() {
 echo "verifying YunAudio"
 echo
 
+if [[ "${FULL}" == "1" ]] && ! nobody_else_has_the_devices; then
+	echo "stopping: --full was asked for while another YunAudioApp owns the devices"
+	exit 2
+fi
+
 # ---------------------------------------------------------------- it compiles
 # The build first and alone: everything after it is a check against a binary,
 # and running the tests against one that did not compile reports the previous
@@ -159,6 +173,15 @@ if ! step "build" swift build; then
 	echo "stopping: it does not compile, so nothing below would be measuring this change"
 	exit 1
 fi
+
+strict_formatting() {
+	local formatter
+	formatter="$(xcrun --find swift-format)" || return 1
+	"${formatter}" lint --strict --recursive Sources Tests
+}
+
+step "strict formatting" strict_formatting
+
 # The count as well as the result, because **a deleted test cannot fail.**
 #
 # A merge resolution took the wrong side of a hunk and removed a whole suite —
@@ -167,9 +190,16 @@ fi
 # The run stayed green and the number went down, and nothing was looking at the
 # number. A floor is crude, and crude is the point: it cannot be satisfied by
 # a test that quietly stopped existing.
-tests_ran_and_did_not_shrink() {
+tests_ran_and_match_baseline() {
 	local output count floor
-	output=$(swift test 2>&1) || {
+	# Several suites deliberately fault the same process-wide allocator, Audio Unit
+	# registry and device-lock seams. Serial execution keeps those measurements
+	# independent instead of turning the acceptance gate into a scheduler lottery.
+	local command=(env YUNAUDIO_LIVE_HAL_TESTS=0 swift test --no-parallel)
+	if [[ "${FULL}" == "1" ]]; then
+		command=(env YUNAUDIO_LIVE_HAL_TESTS=1 swift test --no-parallel)
+	fi
+	output=$("${command[@]}" 2>&1) || {
 		echo "${output}"
 		return 1
 	}
@@ -191,34 +221,25 @@ tests_ran_and_did_not_shrink() {
 		echo "error: if that was deliberate, lower App/test-floor.txt in the same commit."
 		return 1
 	fi
-	# Raised on the way past, so the floor follows the high-water mark without
-	# anybody having to remember.
-	#
-	# The three READMEs carry the same number, in a badge and in a sentence, and
-	# they went stale the way every hand-maintained number does: 688 in two of
-	# them and 1364 in the third, against a suite that had 1379. A count that is
-	# only true on the day somebody types it is worse than no count, because a
-	# reader has no way to tell which day that was.
+	# Verification is read-only. Updating this on the way past made a check
+	# silently edit four tracked files, so the evidence depended on whether the
+	# caller noticed and kept those edits. A larger suite is good, but the new
+	# number and the three public claims are a deliberate part of that change.
 	if [[ "${count}" -gt "${floor}" ]]; then
-		echo "${count}" >App/test-floor.txt
-		for readme in README.md README.zh-Hant.md README.zh-Hans.md; do
-			[[ -f "${readme}" ]] || continue
-			LC_ALL=C sed -i '' \
-				-e "s/tests-[0-9][0-9]*-brightgreen/tests-${count}-brightgreen/" \
-				-e "s/!\[[0-9][0-9]* tests\]/![${count} tests]/" \
-				-e "s/[0-9][0-9]* unit tests/${count} unit tests/" \
-				-e "s/[0-9][0-9]* 個單元測試/${count} 個單元測試/" \
-				-e "s/[0-9][0-9]* 个单元测试/${count} 个单元测试/" \
-				"${readme}"
-		done
+		echo "error: ${count} tests ran, but App/test-floor.txt still says ${floor}."
+		echo "error: update the floor and all three README counts explicitly in this change."
+		return 1
 	fi
 	return 0
 }
 
-step "tests" tests_ran_and_did_not_shrink
+step "tests" tests_ran_and_match_baseline
+if [[ "${FULL}" != "1" ]] && wanted "tests"; then
+	SKIPPED+=("8 live-HAL unit tests — not authorised; run with --full on an isolated machine")
+fi
 step "strings" ./App/check-strings.sh
 APP_BUNDLE_FAILED=0
-step "app bundle" ./App/build-app.sh || APP_BUNDLE_FAILED=1
+step "app bundle" ./App/build-app.sh --verify || APP_BUNDLE_FAILED=1
 
 # An unbuilt bundle makes every check below meaningless rather than failing, so
 # stop here rather than reporting a stale binary as verified.
@@ -303,43 +324,65 @@ no_new_crash_report() {
 
 photographed_the_real_window() {
 	rm -rf "${WORK}/shot"
+	rm -f "${WORK}/capture-complete"
 	touch "${WORK}/crash-marker"
-	# Bounded, and judged by what it produced rather than by how it ended. The
-	# capture asks the router to start so it can photograph a window with meters
-	# in it, and on a machine where CoreAudio cannot start IO that call blocks
-	# in `AudioDeviceCreateIOProcID` on a `mach_msg` to a `coreaudiod` that is
-	# not answering — measured at four minutes, all of it after every photograph
-	# had already been written. Waiting for a clean exit would make the gate
-	# hostage to a broken audio server; the photographs are what this step is
-	# for, and they are all there.
+	# Bounded, but a complete set of files is not enough. A capture once wrote
+	# every photograph and then wedged while releasing CoreAudio; killing it and
+	# accepting the files certified the exact shutdown failure that leaves the
+	# system's Sound menu spinning. The process has to terminate cleanly too.
 	if [[ "${FULL}" == "1" ]]; then
 		YUNAUDIO_SCREENSHOT="${WORK}/shot" \
+			YUNAUDIO_CAPTURE_COMPLETION="${WORK}/capture-complete" \
 			./build/YunAudio.app/Contents/MacOS/YunAudioApp &
 	else
 		YUNAUDIO_SCREENSHOT="${WORK}/shot" YUNAUDIO_SCREENSHOT_NO_AUDIO=1 \
+			YUNAUDIO_CAPTURE_COMPLETION="${WORK}/capture-complete" \
 			./build/YunAudio.app/Contents/MacOS/YunAudioApp &
 	fi
 	local capture=$!
 	local waited=0
+	local completed_at=-1
 	local capture_status=0
 	while kill -0 "${capture}" 2>/dev/null && [[ ${waited} -lt 90 ]]; do
 		sleep 1
 		waited=$((waited + 1))
+		if [[ "${completed_at}" -lt 0 && -f "${WORK}/capture-complete" ]]; then
+			completed_at=${waited}
+		fi
+		if [[ "${completed_at}" -ge 0 && $((waited - completed_at)) -ge 5 ]]; then
+			break
+		fi
 	done
 	if kill -0 "${capture}" 2>/dev/null; then
 		kill "${capture}" 2>/dev/null
-		wait "${capture}" 2>/dev/null
-		echo "  (the capture had to be stopped after ${waited}s — checking what it wrote)"
+		local stopping=0
+		while kill -0 "${capture}" 2>/dev/null && [[ "${stopping}" -lt 5 ]]; do
+			sleep 1
+			stopping=$((stopping + 1))
+		done
+		if kill -0 "${capture}" 2>/dev/null; then
+			kill -KILL "${capture}" 2>/dev/null || true
+		fi
+		wait "${capture}" 2>/dev/null || true
+		if [[ "${completed_at}" -ge 0 ]]; then
+			echo "the window capture did not exit within 5s of finishing its photographs"
+		else
+			echo "the window capture did not finish within ${waited}s"
+		fi
+		return 1
 	else
 		wait "${capture}" 2>/dev/null || capture_status=$?
 	fi
-	# The ordinary capture never touches CoreAudio and therefore has no reason
-	# to be killed or ignored. Its exit status includes appearance, missing-file
-	# and visible-spectrum assertions from the app itself.
-	if [[ "${FULL}" != "1" && "${capture_status}" -ne 0 ]]; then
-		echo "the non-hardware window capture rejected its own output (${capture_status})"
+	# Its exit status includes appearance, missing-file and visible-spectrum
+	# assertions, and now also proves teardown reached the end of the process.
+	if [[ "${capture_status}" -ne 0 ]]; then
+		echo "the window capture rejected its own output (${capture_status})"
 		return 1
 	fi
+	[[ -f "${WORK}/capture-complete" ]] || {
+		echo "the window capture exited without marking its photographs complete"
+		return 1
+	}
 	local count
 	count=$(find "${WORK}/shot" -name '*.png' | wc -l | tr -d ' ')
 	# Both appearances at both sizes and every tab. A full run also adds the
@@ -412,18 +455,6 @@ bit_exact_release() {
 # same self-test gave "261738/261738 identical" and, a minute later with two
 # other copies running, "217/261738 (0.08%)". A bit-exactness failure is the
 # most alarming thing this gate can print and it was somebody else's flow check.
-nobody_else_has_the_devices() {
-	# Matched on the executable name, not on a command line. `pgrep -f` matches
-	# any process whose *arguments* mention the path — including a diagnostic
-	# command that merely names it — so running one alongside the gate made it
-	# skip every audio check and report that it had. It said so under "not
-	# checked" rather than lying, which is the only reason this was noticed
-	# rather than believed.
-	local others
-	others=$(pgrep -x YunAudioApp | wc -l | tr -d ' ')
-	[[ "${others}" == "0" ]]
-}
-
 audio_can_start() {
 	local output="${WORK}/audio-start.txt"
 	.build/debug/yunaudio-cli audio-start >"${output}" 2>&1 &
@@ -484,7 +515,7 @@ builds_from_a_fresh_clone() {
 	where="${WORK}/fresh"
 	rm -rf "${where}"
 	git clone --quiet . "${where}" || return 1
-	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && ./App/build-app.sh ) ||
+	( cd "${where}" && source ./App/toolchain.sh >/dev/null 2>&1 && ./App/build-app.sh --verify ) ||
 		return 1
 	[[ -x "${where}/build/YunAudio.app/Contents/MacOS/YunAudioApp" ]] || {
 		echo "the clone built without producing a binary"

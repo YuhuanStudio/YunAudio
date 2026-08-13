@@ -8,7 +8,7 @@ can be proved bit-exact.**
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![1400 tests](https://img.shields.io/badge/tests-1400-brightgreen)](#verification)
+[![2016 tests](https://img.shields.io/badge/tests-2016-brightgreen)](#verification)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
@@ -280,7 +280,7 @@ input, over a bit-exact path.
 ./App/verify.sh --flow="more than one input"  # one flow-check section, 44 s
 ```
 
-The steps are independent by design: 1400 unit tests, a string-table comparison
+The steps are independent by design: 2016 unit tests, a string-table comparison
 across three languages, an offscreen render of every panel, a photograph of the
 window as the window server drew it, an assertion that no other instance holds
 the audio devices, a release-build bit-exactness measurement, and a flow check
@@ -318,6 +318,12 @@ App/                bundle assembly, the icon, and verify.sh
 
 ## Limitations
 
+- **Issue #9 remains open.** A previous session left
+  `coreaudiod` and the system Sound menu degraded after YunAudio had exited.
+  Version 0.1.2 removes measured driver, teardown and ownership defects which
+  made that class of failure more likely, but the isolated system-audio recovery
+  validation in [issue #9](https://github.com/YuhuanStudio/YunAudio/issues/9)
+  is still incomplete. Keep the removal command available when using the optional driver.
 - The driver is ad-hoc signed. Distribution without a first-launch dialog
   requires a Developer ID identity and notarisation.
 - Voice isolation causes `AudioUnitRender` to allocate on the IO thread, at

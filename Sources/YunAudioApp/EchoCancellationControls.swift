@@ -72,6 +72,11 @@ struct EchoCancellationControls: View {
                             loc("Truncated"), value: "\(status.truncatedBlocks)",
                             tone: .warning)
                     }
+                    if status.callbackOverlaps > 0 {
+                        YunDetailRow(
+                            loc("Callback overlaps"), value: "\(status.callbackOverlaps)",
+                            tone: .danger)
+                    }
                 }
             }
         }

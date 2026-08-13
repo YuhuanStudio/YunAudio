@@ -133,6 +133,89 @@ struct RTGainIntegrationTests {
         #expect(muted.pointee.inputGainSlew.current == 0)
     }
 
+    @Test("a final microphone mute survives a full legacy command queue")
+    func finalMuteCannotBeDropped() throws {
+        let graph = graph()
+        defer { RTGraph.deallocate(graph) }
+        let queue = try #require(graph.pointee.commands)
+        while yun_rt_queue_push(
+            queue,
+            YunRTCommand(
+                kind: Int32(kYunRTCommandSetInputMute.rawValue), index: 0, value: 0))
+        {}
+
+        let mailbox = try #require(graph.pointee.controlMailbox)
+        #expect(
+            yun_rt_control_mailbox_publish(
+                mailbox,
+                YunRTCommand(
+                    kind: Int32(kYunRTCommandSetInputMute.rawValue), index: 0, value: 1)))
+        let output = cycle(graph, frames: 128)[0]
+
+        #expect(graph.pointee.inputMuted == 1)
+        #expect(output.allSatisfy { $0 == 0 })
+        #expect(
+            yun_rt_control_mailbox_desired_generation(mailbox)
+                == yun_rt_control_mailbox_applied_generation(mailbox))
+    }
+
+    @Test("every global mailbox control applies on one callback boundary")
+    func globalMailboxControlsAreCompleteAndCoalesced() throws {
+        let graph = graph()
+        let recording = try #require(yun_rt_ring_create(4_096))
+        defer {
+            RTGraph.deallocate(graph)
+            yun_rt_ring_free(recording)
+        }
+        graph.pointee.recordRing = recording
+        graph.pointee.recordChannels = 1
+        graph.pointee.outputClipped = 17
+        let mailbox = try #require(graph.pointee.controlMailbox)
+
+        func publish(_ kind: YunRTCommandKind, _ value: Float) {
+            #expect(
+                yun_rt_control_mailbox_publish(
+                    mailbox,
+                    YunRTCommand(
+                        kind: Int32(kind.rawValue), index: 0, value: value)))
+        }
+        publish(kYunRTCommandSetDuckingEnabled, 1)
+        publish(kYunRTCommandSetDuckingDepth, 0.8)
+        publish(kYunRTCommandSetDuckingDepth, 0.25)
+        publish(kYunRTCommandSetDuckingAllowed, 1)
+        publish(kYunRTCommandSetAnalysisEnabled, 1)
+        publish(kYunRTCommandSetRecordingPaused, 1)
+        publish(kYunRTCommandSetCalibrating, Float(bitPattern: 7))
+        publish(kYunRTCommandClearOutputClipping, Float(bitPattern: 9))
+
+        _ = cycle(graph, frames: 128, inputValues: [0])
+
+        #expect(graph.pointee.duckEnabled == 1)
+        #expect(graph.pointee.duckDepth == 0.25)
+        #expect(graph.pointee.duckAllowed == 1)
+        #expect(graph.pointee.analysisEnabled == 1)
+        #expect(graph.pointee.recordPaused == 1)
+        #expect(graph.pointee.calibrating == 1)
+        #expect(graph.pointee.calibrationEpoch == 7)
+        #expect(graph.pointee.calibrationEnergy[0] == 0)
+        #expect(graph.pointee.calibrationFrames[0] == 0)
+        #expect(graph.pointee.outputClipped == 0)
+        #expect(graph.pointee.outputClippingEpoch == 9)
+        #expect(yun_rt_ring_written(recording) == 0)
+        let analysis = try #require(graph.pointee.analysisRing)
+        #expect(yun_rt_ring_written(analysis) == 128)
+        #expect(
+            yun_rt_control_mailbox_desired_generation(mailbox)
+                == yun_rt_control_mailbox_applied_generation(mailbox))
+
+        publish(kYunRTCommandSetRecordingPaused, 0)
+        publish(kYunRTCommandSetCalibrating, 0)
+        _ = cycle(graph, frames: 64, inputValues: [0.5])
+        #expect(graph.pointee.recordPaused == 0)
+        #expect(graph.pointee.calibrating == 0)
+        #expect(yun_rt_ring_written(recording) == 64)
+    }
+
     @Test("persisted mix state synchronises its first audible sample")
     func persistedMixStateSynchronisesSlews() {
         let graph = graph()

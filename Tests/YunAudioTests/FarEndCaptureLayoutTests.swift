@@ -7,6 +7,16 @@ import YunAudioRT
 
 @Suite("Far-end buffer layout", .serialized)
 struct FarEndCaptureLayoutTests {
+    @Test("two callback entries are required before a far-end start is trusted")
+    func callbackStartProof() {
+        #expect(!FarEndCapture.startWasProven(callbacksBefore: 40, callbacksAfter: 40))
+        #expect(!FarEndCapture.startWasProven(callbacksBefore: 40, callbacksAfter: 41))
+        #expect(FarEndCapture.startWasProven(callbacksBefore: 40, callbacksAfter: 42))
+        #expect(
+            FarEndCapture.startWasProven(
+                callbacksBefore: UInt64.max, callbacksAfter: 1))
+    }
+
     @Test(
         "packed float32 is accepted in interleaved and non-interleaved layouts",
         arguments: [false, true]
@@ -132,6 +142,50 @@ struct FarEndCaptureLayoutTests {
 
         #expect(frames == 1)
         #expect(output == [1])
+    }
+
+    @Test("malformed channel, byte and capacity bounds fail without a write")
+    func malformedBufferBoundsFailClosed() {
+        let oversizedChannel = BufferListFixture([
+            .init(channels: Int(UInt32.max), samples: [1])
+        ])
+        let tooManyChannels = BufferListFixture([
+            .init(channels: 64, samples: [Float](repeating: 1, count: 64)),
+            .init(channels: 1, samples: [1]),
+        ])
+        let partialFrame = BufferListFixture([
+            .init(channels: 2, samples: [1, 2, 3])
+        ])
+        var output = [Float](repeating: 99, count: 1)
+
+        output.withUnsafeMutableBufferPointer { destination in
+            #expect(
+                FarEndCapture.downmix(
+                    oversizedChannel.list,
+                    into: destination.baseAddress!,
+                    capacity: 1) == 0)
+            #expect(
+                FarEndCapture.downmix(
+                    tooManyChannels.list,
+                    into: destination.baseAddress!,
+                    capacity: 1) == 0)
+            #expect(
+                FarEndCapture.downmix(
+                    partialFrame.list,
+                    into: destination.baseAddress!,
+                    capacity: 1) == 0)
+            #expect(
+                FarEndCapture.downmix(
+                    partialFrame.list,
+                    into: destination.baseAddress!,
+                    capacity: 4_097) == 0)
+            #expect(
+                FarEndCapture.downmix(
+                    partialFrame.list,
+                    into: destination.baseAddress!,
+                    capacity: Int.max) == 0)
+        }
+        #expect(output == [99])
     }
 
     #if DEBUG

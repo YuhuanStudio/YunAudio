@@ -34,6 +34,8 @@ struct PitchAccuracyTests {
     /// voice makes one.
     ///
     /// - Parameters:
+    ///   - hertz: The fundamental frequency before vibrato is applied.
+    ///   - seconds: The duration of the generated fixture.
     ///   - harmonics: How many partials. A voice on a vowel has a dozen; a
     ///     whistle has one.
     ///   - fundamentalGain: Zero removes the fundamental entirely, which is the
@@ -42,6 +44,9 @@ struct PitchAccuracyTests {
     ///   - inharmonicity: How far the partials drift from exact multiples, as a
     ///     fraction. Real voices are slightly inharmonic.
     ///   - noise: Broadband, as a fraction of the total amplitude.
+    ///   - vibratoCents: The peak excursion of a five-hertz vibrato.
+    ///   - seed: The deterministic noise sequence to use.
+    /// - Returns: A bounded mono fixture at the suite's sample rate.
     private func voice(
         hertz: Double, seconds: Double = 0.2, harmonics: Int = 8,
         fundamentalGain: Double = 1, inharmonicity: Double = 0, noise: Double = 0,

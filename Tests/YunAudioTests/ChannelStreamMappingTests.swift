@@ -6,13 +6,14 @@ import Testing
 struct ChannelStreamMappingTests {
     @Test("one member may span several stream buffers")
     func mapsSplitStreams() throws {
-        let map = RoutingEngine.map(
-            streamLayouts: [
-                .init(buffer: 0, startingChannel: 1, channelCount: 2),
-                .init(buffer: 1, startingChannel: 3, channelCount: 2),
-            ],
-            orderedUIDs: ["interface"],
-            channelCount: { _ in 4 })
+        let map = try #require(
+            RoutingEngine.map(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 1, channelCount: 2),
+                    .init(buffer: 1, startingChannel: 3, channelCount: 2),
+                ],
+                orderedUIDs: ["interface"],
+                channelCount: { _ in 4 }))
 
         try expect(map, uid: "interface", channel: 0, buffer: 0, offset: 0)
         try expect(map, uid: "interface", channel: 1, buffer: 0, offset: 1)
@@ -22,13 +23,14 @@ struct ChannelStreamMappingTests {
 
     @Test("a gap in aggregate channel numbers does not consume a logical channel")
     func skipsStartingChannelGaps() throws {
-        let map = RoutingEngine.map(
-            streamLayouts: [
-                .init(buffer: 0, startingChannel: 1, channelCount: 2),
-                .init(buffer: 1, startingChannel: 5, channelCount: 2),
-            ],
-            orderedUIDs: ["microphone", "application"],
-            channelCount: { _ in 2 })
+        let map = try #require(
+            RoutingEngine.map(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 1, channelCount: 2),
+                    .init(buffer: 1, startingChannel: 5, channelCount: 2),
+                ],
+                orderedUIDs: ["microphone", "application"],
+                channelCount: { _ in 2 }))
 
         try expect(map, uid: "microphone", channel: 0, buffer: 0, offset: 0)
         try expect(map, uid: "microphone", channel: 1, buffer: 0, offset: 1)
@@ -38,13 +40,14 @@ struct ChannelStreamMappingTests {
 
     @Test("stream array order cannot swap channels")
     func honoursStartingChannelWhenStreamsAreOutOfOrder() throws {
-        let map = RoutingEngine.map(
-            streamLayouts: [
-                .init(buffer: 0, startingChannel: 5, channelCount: 2),
-                .init(buffer: 1, startingChannel: 1, channelCount: 2),
-            ],
-            orderedUIDs: ["first", "second"],
-            channelCount: { _ in 2 })
+        let map = try #require(
+            RoutingEngine.map(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 5, channelCount: 2),
+                    .init(buffer: 1, startingChannel: 1, channelCount: 2),
+                ],
+                orderedUIDs: ["first", "second"],
+                channelCount: { _ in 2 }))
 
         try expect(map, uid: "first", channel: 0, buffer: 1, offset: 0)
         try expect(map, uid: "first", channel: 1, buffer: 1, offset: 1)
@@ -54,18 +57,67 @@ struct ChannelStreamMappingTests {
 
     @Test("invalid and empty streams never create phantom channels")
     func ignoresInvalidLayouts() throws {
-        let map = RoutingEngine.map(
-            streamLayouts: [
-                .init(buffer: 0, startingChannel: 0, channelCount: 2),
-                .init(buffer: 1, startingChannel: 1, channelCount: 0),
-                .init(buffer: 2, startingChannel: 3, channelCount: 1),
-            ],
-            orderedUIDs: ["source"],
-            channelCount: { _ in 3 })
+        let map = try #require(
+            RoutingEngine.map(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 0, channelCount: 2),
+                    .init(buffer: 1, startingChannel: 1, channelCount: 0),
+                    .init(buffer: 2, startingChannel: 3, channelCount: 1),
+                ],
+                orderedUIDs: ["source"],
+                channelCount: { _ in 3 }))
 
         try expect(map, uid: "source", channel: 0, buffer: 2, offset: 0)
         #expect(map[ChannelRef(deviceUID: "source", channel: 1)] == nil)
         #expect(map[ChannelRef(deviceUID: "source", channel: 2)] == nil)
+    }
+
+    @Test("channel dimensions are bounded before mapping")
+    func rejectsUnsupportedDimensions() {
+        #expect(AudioProcessingContract.admittedChannelCount(64) == 64)
+        #expect(AudioProcessingContract.admittedChannelCount(65) == nil)
+        #expect(AudioProcessingContract.admittedChannelCount(UInt32.max) == nil)
+        #expect(AudioProcessingContract.admittedChannelTotal([32, 32]) == 64)
+        #expect(AudioProcessingContract.admittedChannelTotal([64, 1]) == nil)
+
+        #expect(
+            !RoutingEngine.supportsChannelMap(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 1, channelCount: 65)
+                ],
+                orderedChannelCounts: [1]))
+        #expect(
+            !RoutingEngine.supportsChannelMap(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 1, channelCount: 32),
+                    .init(buffer: 1, startingChannel: 33, channelCount: 33),
+                ],
+                orderedChannelCounts: [64]))
+        #expect(
+            !RoutingEngine.supportsChannelMap(
+                streamLayouts: [
+                    .init(buffer: 0, startingChannel: 1, channelCount: 64)
+                ],
+                orderedChannelCounts: [64, 1]))
+    }
+
+    @Test("an unsupported topology produces no partial map")
+    func oversizedTopologyFailsClosed() {
+        let physicalOverflow = RoutingEngine.map(
+            streamLayouts: [
+                .init(buffer: 0, startingChannel: 1, channelCount: 65)
+            ],
+            orderedUIDs: ["source"],
+            channelCount: { _ in 1 })
+        let logicalOverflow = RoutingEngine.map(
+            streamLayouts: [
+                .init(buffer: 0, startingChannel: 1, channelCount: 64)
+            ],
+            orderedUIDs: ["first", "second"],
+            channelCount: { $0 == "first" ? 64 : 1 })
+
+        #expect(physicalOverflow == nil)
+        #expect(logicalOverflow == nil)
     }
 
     private func expect(

@@ -10,7 +10,6 @@ import Foundation
 /// is handed to `osascript` with administrator rights: the user sees the
 /// standard authentication dialog, grants it once, and nothing persists
 /// afterwards.
-@MainActor
 enum DriverInstaller {
     static let installPath = "/Library/Audio/Plug-Ins/HAL/YunAudioDriver.driver"
 
@@ -26,15 +25,18 @@ enum DriverInstaller {
     /// Looked for inside the app bundle first, then next to it — the disk image
     /// ships them side by side so the driver can be copied out by an installer
     /// script without unpacking the app.
-    static var bundledDriverURL: URL? {
-        let candidates = [
+    static var bundledDriverCandidates: [URL] {
+        [
             Bundle.main.bundleURL
                 .appendingPathComponent("Contents/Resources/YunAudioDriver.driver"),
             Bundle.main.bundleURL
                 .deletingLastPathComponent()
                 .appendingPathComponent("YunAudioDriver.driver"),
         ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    static var bundledDriverURL: URL? {
+        bundledDriverCandidates.first { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     static var isInstalled: Bool {

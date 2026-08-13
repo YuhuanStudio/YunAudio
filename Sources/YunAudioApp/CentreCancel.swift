@@ -30,6 +30,7 @@ enum CentreCancel {
     /// - Parameters:
     ///   - left: Left channel samples, modified.
     ///   - right: Right channel, modified.
+    ///   - frames: The number of samples available in each channel.
     ///   - amount: 0 leaves the mix alone; 1 removes everything both channels
     ///     agree on.
     static func apply(

@@ -7,6 +7,12 @@ public enum AudioHALError: Error, CustomStringConvertible, Sendable {
     case status(OSStatus, selector: AudioObjectPropertySelector, object: AudioObjectID)
     case missingProperty(selector: AudioObjectPropertySelector, object: AudioObjectID)
     case unexpectedSize(expected: Int, actual: Int, selector: AudioObjectPropertySelector)
+    case misalignedArraySize(
+        actual: Int, elementStride: Int, selector: AudioObjectPropertySelector)
+    case propertyTooLarge(
+        limit: Int, actual: Int, selector: AudioObjectPropertySelector)
+    case tooManyElements(
+        limit: Int, actual: Int, selector: AudioObjectPropertySelector)
 
     public var description: String {
         switch self {
@@ -16,7 +22,103 @@ public enum AudioHALError: Error, CustomStringConvertible, Sendable {
             "object \(object) has no property \(fourCharDescription(selector))"
         case let .unexpectedSize(expected, actual, selector):
             "property \(fourCharDescription(selector)) returned \(actual) bytes, expected \(expected)"
+        case let .misalignedArraySize(actual, stride, selector):
+            "property \(fourCharDescription(selector)) returned \(actual) bytes for \(stride)-byte elements"
+        case let .propertyTooLarge(limit, actual, selector):
+            "property \(fourCharDescription(selector)) requested \(actual) bytes, above the \(limit)-byte limit"
+        case let .tooManyElements(limit, actual, selector):
+            "property \(fourCharDescription(selector)) returned \(actual) elements, above the \(limit)-element limit"
         }
+    }
+}
+
+/// Bounds and validates the two variable-size answers around a HAL array read.
+///
+/// Device and process lists are untrusted cross-process data. A corrupt size
+/// must not become an arbitrary allocation, and a shortened byte count must
+/// not be rounded down into a persuasive partial list.
+enum HALArrayReadPolicy {
+    static let maximumBytes = 1 << 20
+    static let maximumAttempts = 3
+
+    static func elementCount<Value>(
+        byteCount: Int, for _: Value.Type,
+        selector: AudioObjectPropertySelector,
+        capacity: Int? = nil
+    ) throws -> Int {
+        let stride = MemoryLayout<Value>.stride
+        guard byteCount <= maximumBytes else {
+            throw AudioHALError.propertyTooLarge(
+                limit: maximumBytes, actual: byteCount, selector: selector)
+        }
+        if let capacity, byteCount > capacity {
+            throw AudioHALError.unexpectedSize(
+                expected: capacity, actual: byteCount, selector: selector)
+        }
+        guard stride > 0, byteCount >= 0, byteCount.isMultiple(of: stride) else {
+            throw AudioHALError.misalignedArraySize(
+                actual: byteCount, elementStride: stride, selector: selector)
+        }
+        return byteCount / stride
+    }
+}
+
+/// Property-specific ceilings applied before callers perform one HAL query per
+/// returned object. The byte ceiling prevents a giant allocation; these stop a
+/// still-valid one-megabyte list from becoming hundreds of thousands of
+/// synchronous messages to `coreaudiod`.
+enum HALSemanticArrayPolicy {
+    static let maximumDevices = 4_096
+    static let maximumProcesses = 16_384
+    static let maximumTaps = 4_096
+    static let maximumStreamsPerDevice = 256
+    static let maximumFormatsPerObject = 4_096
+    static let maximumOwnedObjects = 4_096
+    static let maximumProcessDevices = 256
+
+    static func validate(
+        count: Int, maximum: Int, selector: AudioObjectPropertySelector
+    ) throws {
+        guard count >= 0, maximum >= 0, count <= maximum else {
+            throw AudioHALError.tooManyElements(
+                limit: max(0, maximum), actual: count, selector: selector)
+        }
+    }
+}
+
+/// Validates the trailing-array layout of `AudioBufferList` before any buffer
+/// entry is dereferenced.
+///
+/// Unlike an ordinary HAL array this structure declares its own element count
+/// in the first word. Both the outer byte count and the inner count come from
+/// another process; trusting either one can turn a device census into an
+/// unbounded allocation or an out-of-bounds walk.
+enum HALAudioBufferListPolicy {
+    static let headerBytes =
+        MemoryLayout<AudioBufferList>.size - MemoryLayout<AudioBuffer>.stride
+
+    static func bufferCount(
+        byteCount: Int,
+        declaredCount: UInt32,
+        selector: AudioObjectPropertySelector
+    ) throws -> Int {
+        _ = try HALArrayReadPolicy.elementCount(
+            byteCount: byteCount, for: UInt8.self, selector: selector)
+        guard byteCount >= headerBytes else {
+            throw AudioHALError.unexpectedSize(
+                expected: headerBytes, actual: byteCount, selector: selector)
+        }
+        let count = Int(declaredCount)
+        let (payloadBytes, overflowed) = count.multipliedReportingOverflow(
+            by: MemoryLayout<AudioBuffer>.stride)
+        let (requiredBytes, additionOverflowed) = headerBytes.addingReportingOverflow(
+            payloadBytes)
+        guard !overflowed, !additionOverflowed, requiredBytes <= byteCount else {
+            throw AudioHALError.unexpectedSize(
+                expected: overflowed || additionOverflowed ? Int.max : requiredBytes,
+                actual: byteCount, selector: selector)
+        }
+        return count
     }
 }
 
@@ -122,21 +224,45 @@ extension AudioObjectID {
 
     /// Reads a variable-length array of fixed-layout values.
     public func array<Value>(of property: AudioProperty<Value>) throws -> [Value] {
-        let byteCount = try dataSize(of: property)
-        let count = byteCount / MemoryLayout<Value>.stride
-        guard count > 0 else { return [] }
+        for attempt in 0..<HALArrayReadPolicy.maximumAttempts {
+            let byteCount = try dataSize(of: property)
+            let count = try HALArrayReadPolicy.elementCount(
+                byteCount: byteCount, for: Value.self, selector: property.selector)
+            guard count > 0 else { return [] }
 
-        var address = property.address
-        var size = UInt32(byteCount)
-        let buffer = UnsafeMutableBufferPointer<Value>.allocate(capacity: count)
-        defer { buffer.deallocate() }
+            var address = property.address
+            var size = UInt32(byteCount)
+            let buffer = UnsafeMutableBufferPointer<Value>.allocate(capacity: count)
+            defer { buffer.deallocate() }
 
-        let status = AudioObjectGetPropertyData(
-            self, &address, 0, nil, &size, buffer.baseAddress!)
-        guard status == noErr else {
-            throw AudioHALError.status(status, selector: property.selector, object: self)
+            let status = AudioObjectGetPropertyData(
+                self, &address, 0, nil, &size, buffer.baseAddress!)
+            if status == kAudioHardwareBadPropertySizeError,
+                attempt + 1 < HALArrayReadPolicy.maximumAttempts
+            {
+                continue
+            }
+            guard status == noErr else {
+                throw AudioHALError.status(
+                    status, selector: property.selector, object: self)
+            }
+            let returnedCount = try HALArrayReadPolicy.elementCount(
+                byteCount: Int(size), for: Value.self, selector: property.selector,
+                capacity: byteCount)
+            return Array(buffer[0..<returnedCount])
         }
-        return Array(buffer[0..<(Int(size) / MemoryLayout<Value>.stride)])
+        preconditionFailure("the bounded HAL array retry loop did not return")
+    }
+
+    /// Reads an array and rejects a semantically impossible object count before
+    /// a caller turns every entry into another synchronous HAL operation.
+    public func array<Value>(
+        of property: AudioProperty<Value>, maximumCount: Int
+    ) throws -> [Value] {
+        let values = try array(of: property)
+        try HALSemanticArrayPolicy.validate(
+            count: values.count, maximum: maximumCount, selector: property.selector)
+        return values
     }
 
     /// Reads a `CFString` property.

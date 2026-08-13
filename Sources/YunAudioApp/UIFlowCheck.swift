@@ -125,6 +125,24 @@ enum UIFlowCheck {
         }
     }
 
+    /// Reads the preferences domain only after the background writer has
+    /// crossed its explicit synchronisation boundary. `PreferencesStore.load`
+    /// deliberately includes the latest in-memory snapshot, which is right for
+    /// model code but would let a persistence check pass before any write ran.
+    private static func persistedPreferences() async -> Preferences {
+        let result = await PreferencesStore.flush(timeout: .seconds(1))
+        check("the preferences domain synchronised", result.isAccepted)
+        return PreferencesStore.loadPersisted()
+    }
+
+    private static func checkPersisted(
+        _ description: String,
+        _ condition: (Preferences) -> Bool
+    ) async {
+        let preferences = await persistedPreferences()
+        check(description, condition(preferences))
+    }
+
     private static func note(_ text: String) {
         print("  · \(text)")
         notes.append(text)
@@ -238,17 +256,23 @@ enum UIFlowCheck {
         await takeTheHardware()
         noteAnySecondSwiftRuntime()
         // A filtered run ends by throwing out of whichever section was the last
-        // one anybody asked for, which lands here. The summary is printed
-        // either way, because a run that stopped early still found whatever it
-        // found and the caller still has to be told.
+        // one anybody asked for, which lands here. No other error is a normal
+        // end: a full disk once stopped the check between sections, and treating
+        // that as the filter sentinel certified everything after it without
+        // running any of it.
+        var maySoak = true
         do {
             try await runSections(model: model)
+        } catch is NothingLeftToRun {
+            // The summary below still reports what the requested section found.
         } catch {
-            // A filtered run throws out of the last section anybody asked for.
-            // Nothing to report: the summary below says what was found either
-            // way.
+            maySoak = false
+            let whereItStopped =
+                currentSection.isEmpty ? "before the first section" : currentSection
+            failures.append(
+                "\(whereItStopped): flow check aborted with \(String(describing: error))")
         }
-        await soakAfterTheRun()
+        if maySoak { await soakAfterTheRun() }
         summarise()
     }
 
@@ -564,7 +588,11 @@ enum UIFlowCheck {
         // would be worse than no button.
         let offeredBefore = model.availablePlugins.count
         let inChain = model.enabledPlugins
+        let pluginRevision = model.pluginRefreshRevision
         model.refreshPlugins()
+        await waitUntil(
+            "the registry rescan finished",
+            { model.pluginRefreshRevision > pluginRevision }, timeout: 3)
         check(
             "rescanning finds at least what was already there",
             model.availablePlugins.count >= offeredBefore)
@@ -1723,17 +1751,20 @@ enum UIFlowCheck {
         // that touched processing before this one enabled several at once.
         let effectsBefore = model.enabledEffects
         model.enabledEffects = []
-        await waitUntil("the chain is empty", { !model.isBusy }, timeout: 12)
+        await settle(model, timeout: 12)
+        check("the chain is empty", model.activeEffectStages.isEmpty)
         for kind in EffectKind.allCases {
             model.enabledEffects = [kind]
-            await waitUntil("\(kind.rawValue) settled", { !model.isBusy }, timeout: 14)
+            await settle(model, timeout: 14)
+            check("\(kind.rawValue) settled", model.effectSwapIsSettledForFlowCheck)
             check(
                 "\(kind.rawValue) alone actually renders",
                 model.activeEffectStages.contains(kind))
             check("\(kind.rawValue) alone kept audio running", model.isRunning)
         }
         model.enabledEffects = effectsBefore
-        await waitUntil("the chain came back", { !model.isBusy }, timeout: 14)
+        await settle(model, timeout: 14)
+        check("the chain came back", model.effectSwapIsSettledForFlowCheck)
 
         try section("gain reduction")
         // A compressor set wrong is completely silent about it: it sounds like
@@ -1788,7 +1819,7 @@ enum UIFlowCheck {
         try section("recording")
         check("recording is offered while routing", model.isRunning)
         // Listening before the button is pressed, because `recordStart` and
-        // `recordStop` were names in `ScriptHost.Event` that nothing raised.
+        // `recordStop` were script event names that nothing raised.
         // The scripting help lists every case, and `installEvents` refuses an
         // unknown name so that a mistyped handler cannot silently never fire —
         // so these two were accepted, advertised, and never called. Asserted
@@ -1799,13 +1830,47 @@ enum UIFlowCheck {
             yun.on('recordStart', function (e) { yun.log('recordStart ' + e.file); });
             yun.on('recordStop', function (e) { yun.log('recordStop ' + e.seconds); });
             """
+        await waitUntil(
+            "the recording script loaded", { !model.isResidentScriptLoading }, timeout: 2)
         check("a script can ask about recording", model.residentScriptError == nil)
+        let beforeRecordingAttachment = model.engineRecordingAttachmentForFlowCheck
+        note(
+            "recording graph before start: generation "
+                + "\(beforeRecordingAttachment.graphGeneration)")
         model.toggleRecording()
+        await waitUntil("the recording start settled", { model.isRecording }, timeout: 5)
         check("the recording started", model.isRecording)
         check("no error was reported", model.lastError == nil)
+        let initialRecordingAttachment = model.engineRecordingAttachmentForFlowCheck
+        note(
+            "recording graph at start: ring \(initialRecordingAttachment.hasRing), "
+                + "channels \(initialRecordingAttachment.channels), "
+                + "generation \(initialRecordingAttachment.graphGeneration)")
         let file = model.recordingURL
         check("a file was named", file != nil)
+        await waitUntil(
+            "the record start event was handled",
+            { model.scriptLog.contains { $0.hasPrefix("recordStart ") } }, timeout: 2)
         await pause(upTo: 2.0, until: { model.recordingSeconds > 0.5 })
+        let recordingTransport = model.engineRecordingSnapshotForFlowCheck
+        note(
+            "recording transport: \(recordingTransport.producedSamples) produced, "
+                + "\(recordingTransport.droppedSamples) dropped")
+        note(
+            "route continuity: cycles "
+                + "\(model.ioContinuity.cycleCount.map(String.init) ?? "nil"), "
+                + "stalled \(model.ioContinuity.isStalled), "
+                + "clock failed \(model.clockLockFailed)")
+        let recordingAttachment = model.engineRecordingAttachmentForFlowCheck
+        note(
+            "recording graph: ring \(recordingAttachment.hasRing), "
+                + "channels \(recordingAttachment.channels), "
+                + "output \(recordingAttachment.mainOutputBuffer)/"
+                + "\(recordingAttachment.outputBufferCount), "
+                + "frames \(recordingAttachment.cycleFrames)/"
+                + "\(recordingAttachment.maximumFrames), "
+                + "generation \(recordingAttachment.graphGeneration), "
+                + "limiter failures \(recordingAttachment.limiterFailures)")
         check("the elapsed time is advancing", model.recordingSeconds > 0.5)
         // Pausing has to stop the clock as well as the writing, or the elapsed
         // time claims audio that is not in the file.
@@ -1834,6 +1899,10 @@ enum UIFlowCheck {
         check("and the elapsed time moves again", model.recordingSeconds > atPause + 0.3)
 
         model.toggleRecording()
+        await waitUntil("the recording stop settled", { !model.isRecording }, timeout: 5)
+        await waitUntil(
+            "the record stop event was handled",
+            { model.scriptLog.contains { $0.hasPrefix("recordStop ") } }, timeout: 2)
         check("the recording stopped", !model.isRecording)
         check("stopping clears the pause", !model.isRecordingPaused)
         note("script said: " + model.scriptLog.joined(separator: ", "))
@@ -1857,6 +1926,7 @@ enum UIFlowCheck {
         // matters for anything edited afterwards.
         model.recordsStems = true
         model.toggleRecording()
+        await waitUntil("the stem recording start settled", { model.isRecording }, timeout: 5)
         check("it started", model.isRecording)
         check("no error was reported", model.lastError == nil)
         let stems = model.stemURLs
@@ -1897,6 +1967,7 @@ enum UIFlowCheck {
             })
         let secondsBeforeStemStop = model.recordingSeconds
         model.toggleRecording()
+        await waitUntil("the stem recording stop settled", { !model.isRecording }, timeout: 5)
         note(
             String(
                 format: "stems ran %.2fs; %.2fs after the stop",
@@ -1949,10 +2020,13 @@ enum UIFlowCheck {
         // open, silent and still counting time with nothing saying so.
         model.recordsStems = true
         model.toggleRecording()
+        await waitUntil("the edited recording start settled", { model.isRecording }, timeout: 5)
         let editedStems = model.stemURLs
         if editedStems.isEmpty {
             note("no stems started — skipped")
             model.toggleRecording()
+            await waitUntil(
+                "the empty stem recording stopped", { !model.isRecording }, timeout: 5)
         } else {
             await pause(1.0)
             let before = editedStems.map { size(of: $0) }
@@ -1988,6 +2062,8 @@ enum UIFlowCheck {
             }
             await pause(1.5)
             model.toggleRecording()
+            await waitUntil(
+                "the edited recording stop settled", { !model.isRecording }, timeout: 5)
             await pause(0.6)
             let after = editedStems.map { size(of: $0) }
             check(
@@ -2066,8 +2142,14 @@ enum UIFlowCheck {
             // with it.
             await waitUntil(
                 "the canceller settled, one way or the other",
-                { !model.isBusy }, timeout: 12)
+                { !model.isBusy }, timeout: 20)
             let cancelling = model.echoStatus != nil
+            if let error = model.lastError { note("route error: \(error)") }
+            if !model.audioQuarantineReasonsForFlowCheck.isEmpty {
+                note(
+                    "audio quarantine: "
+                        + model.audioQuarantineReasonsForFlowCheck.joined(separator: " | "))
+            }
             check("no error was reported", model.lastError == nil)
             check("the route is up", model.isRunning)
             if let status = model.echoStatus {
@@ -2121,6 +2203,7 @@ enum UIFlowCheck {
                 note(
                     "\(status.inputCallbacks) input callback(s), "
                         + "\(status.farEndCallbacks) far-end callback(s), "
+                        + "\(status.callbackOverlaps) callback overlap(s), "
                         + "\(status.renderFailures) render failure(s), last "
                         + fourCharDescription(status.lastRenderStatus))
             }
@@ -2129,7 +2212,7 @@ enum UIFlowCheck {
             await waitUntil(
                 "the canceller left the path",
                 { !model.isBusy && model.echoStatus == nil && model.isRunning },
-                timeout: 12)
+                timeout: 20)
             check("no error on the way out", model.lastError == nil)
             check("routing continues without it", !model.activeRoutes.isEmpty)
             // Taking the canceller out is a restart, and a restart that fails
@@ -2414,9 +2497,8 @@ enum UIFlowCheck {
             // Enabling a stage rebuilds the graph, and a fixed pause lands in
             // the middle of it — the same race that made the echo canceller
             // look broken twice.
-            await waitUntil(
-                "\(kind.rawValue) came up", { !model.isBusy && model.isRunning },
-                timeout: 10)
+            await settle(model, timeout: 10)
+            check("\(kind.rawValue) came up", model.isRunning)
             check("\(kind.rawValue) built and audio kept flowing", model.isRunning)
             check("no error from \(kind.rawValue)", model.lastError == nil)
             for parameter in kind.parameters {
@@ -2427,9 +2509,8 @@ enum UIFlowCheck {
                         < 0.001)
             }
             model.setEffect(kind, enabled: false)
-            await waitUntil(
-                "\(kind.rawValue) came back out", { !model.isBusy && model.isRunning },
-                timeout: 10)
+            await settle(model, timeout: 10)
+            check("\(kind.rawValue) came back out", model.isRunning)
         }
         check("routing survived the whole chain", model.isRunning)
 
@@ -2448,7 +2529,8 @@ enum UIFlowCheck {
         // and off.
         let chainBefore = model.enabledEffects
         model.enabledEffects = []
-        await waitUntil("the chain is empty to start from", { !model.isBusy }, timeout: 12)
+        await settle(model, timeout: 12)
+        check("the chain is empty to start from", model.activeEffectStages.isEmpty)
 
         var restartedOn: [String] = []
         var stalledOn: [String] = []
@@ -2489,7 +2571,14 @@ enum UIFlowCheck {
                     slowestInspectorRead,
                     Double(DispatchTime.now().uptimeNanoseconds - inspectorBegan) / 1_000_000)
                 await settle(model, timeout: 12)
-                let cyclesAfter = await cycleAnswer(model)
+                var cyclesAfter = await cycleAnswer(model)
+                let cycleDeadline = Date().addingTimeInterval(0.25)
+                while let cyclesBefore, let observed = cyclesAfter,
+                    observed == cyclesBefore, Date() < cycleDeadline
+                {
+                    await pause(0.01)
+                    cyclesAfter = await cycleAnswer(model)
+                }
                 let label = "\(kind.rawValue) \(wanted ? "on" : "off")"
                 if !model.isRunning { stoppedOn.append(label) }
                 if let cyclesBefore, let cyclesAfter {
@@ -2538,6 +2627,9 @@ enum UIFlowCheck {
         check("and the counter could be read across every change", unreadableOn.isEmpty)
         if !unreadableOn.isEmpty {
             note("counter unreadable on: " + unreadableOn.joined(separator: ", "))
+        }
+        if !stalledOn.isEmpty {
+            note("counter stalled on: " + stalledOn.joined(separator: ", "))
         }
         check("the chain that ran was the one asked for", missingFrom.isEmpty)
         if !restartedOn.isEmpty { note("restarted on: " + restartedOn.joined(separator: ", ")) }
@@ -3081,16 +3173,25 @@ enum UIFlowCheck {
             let file = directory.appendingPathComponent("Flow Check - Björk – Jóga.lrc")
             try? "[00:01.00]first\n[00:05.00]second".write(
                 to: file, atomically: true, encoding: .utf8)
-            let found = RouterModel.findLyrics(
-                for: .init(
-                    application: "Test", title: "Joga", artist: "Bjork", album: "",
-                    position: 0, duration: 100, isPlaying: true))
+            let matching = NowPlaying.Track(
+                application: "Test", title: "Joga", artist: "Bjork", album: "",
+                position: 0, duration: 100, isPlaying: true, identity: "matching")
+            let found = NowPlayingResourceLoader.load(
+                NowPlayingResourceRequest(
+                    generation: 0, track: matching, directory: directory,
+                    needsArtwork: false)
+            ).timedLyrics
             check("accents and punctuation do not stop a match", found != nil)
             check("and the words came with it", found?.lines.count == 2)
-            let missing = RouterModel.findLyrics(
-                for: .init(
-                    application: "Test", title: "Nothing Like This", artist: "Nobody",
-                    album: "", position: 0, duration: 100, isPlaying: true))
+            let absent = NowPlaying.Track(
+                application: "Test", title: "Nothing Like This", artist: "Nobody",
+                album: "", position: 0, duration: 100, isPlaying: true,
+                identity: "absent")
+            let missing = NowPlayingResourceLoader.load(
+                NowPlayingResourceRequest(
+                    generation: 1, track: absent, directory: directory,
+                    needsArtwork: false)
+            ).timedLyrics
             check("a song with no file finds nothing", missing == nil)
             try? FileManager.default.removeItem(at: file)
         }
@@ -3228,7 +3329,11 @@ enum UIFlowCheck {
                 Filter 2: ON LSC Fc 105 Hz Gain 4.0 dB Q 0.70
                 """
             try? text.write(to: file, atomically: true, encoding: .utf8)
+            let firstProfileRevision = model.headphoneProfileRefreshRevision
             model.refreshHeadphoneProfiles()
+            await waitUntil(
+                "the headphone scan finished",
+                { model.headphoneProfileRefreshRevision > firstProfileRevision }, timeout: 2)
             check(
                 "a dropped file is found",
                 model.headphoneProfiles.contains { $0.name == "Flow Check Headphones" })
@@ -3255,7 +3360,11 @@ enum UIFlowCheck {
             // A profile deleted from the folder must stop being used rather
             // than keep running from memory.
             try? FileManager.default.removeItem(at: file)
+            let secondProfileRevision = model.headphoneProfileRefreshRevision
             model.refreshHeadphoneProfiles()
+            await waitUntil(
+                "the headphone rescan finished",
+                { model.headphoneProfileRefreshRevision > secondProfileRevision }, timeout: 2)
             check("deleting the file turns it off", model.headphoneProfileName == nil)
             check("and routing survived that too", model.isRunning)
         } else {
@@ -3289,7 +3398,14 @@ enum UIFlowCheck {
         {
             _ = try? AudioDevices.setDefault(sourceBefore, forInput: true)
         }
-        model.saveQuickConfig(named: "Flow check setup")
+        let savedResult = await model.saveQuickConfig(named: "Flow check setup")
+        let snapshotFinished: Bool
+        if case .saved = savedResult {
+            snapshotFinished = true
+        } else {
+            snapshotFinished = false
+        }
+        check("the asynchronous snapshot finished", snapshotFinished)
         check(
             "it was saved", model.quickConfigs.contains { $0.name == "Flow check setup" })
         if let saved = model.quickConfigs.first(where: { $0.name == "Flow check setup" }) {
@@ -3304,10 +3420,16 @@ enum UIFlowCheck {
                 .first(where: { $0 != sourceBefore })
             {
                 model.selectedSourceUID = elsewhere
-                let outcome = model.apply(saved)
-                check("applying put the source back", model.selectedSourceUID == sourceBefore)
-                check("and nothing was missing", outcome.isComplete)
-                note("restored \(outcome.restored) thing(s)")
+                switch await model.applyQuickConfig(saved) {
+                case .completed(let outcome):
+                    check(
+                        "applying put the source back",
+                        model.selectedSourceUID == sourceBefore)
+                    check("and nothing was missing", outcome.isComplete)
+                    note("restored \(outcome.restored) thing(s)")
+                case .superseded:
+                    check("the setup apply reached an exact outcome", false)
+                }
             } else {
                 note("only one input on this machine — the round trip was not exercised")
             }
@@ -3316,14 +3438,18 @@ enum UIFlowCheck {
             // setup away from the desk, not an error.
             var absent = saved
             absent.destinationUID = "no such device"
-            let partial = model.apply(absent)
-            check("a missing device is reported rather than thrown", !partial.isComplete)
-            check(
-                "and it is named, not printed as a UID",
-                !model.describeMissing(
-                    partial.missing
-                ).isEmpty)
-            _ = model.apply(saved)
+            switch await model.applyQuickConfig(absent) {
+            case .completed(let partial):
+                check("a missing device is reported rather than thrown", !partial.isComplete)
+                check(
+                    "and it is named, not printed as a UID",
+                    !model.describeMissing(
+                        partial.missing
+                    ).isEmpty)
+            case .superseded:
+                check("the partial setup reached an exact outcome", false)
+            }
+            _ = await model.applyQuickConfig(saved)
 
             // A setup remembers whether the router was running, and one saved
             // with it idle has to put it back down. It could not: applying a
@@ -3338,10 +3464,10 @@ enum UIFlowCheck {
             if model.isRunning {
                 var idle = saved
                 idle.isRouting = false
-                _ = model.apply(idle)
+                _ = await model.applyQuickConfig(idle)
                 await waitUntil("the idle setup settled", { !model.isBusy }, timeout: 15)
                 check("a setup saved while idle puts the route down", !model.isRunning)
-                _ = model.apply(saved)
+                _ = await model.applyQuickConfig(saved)
                 await waitUntil(
                     "and one saved while routing brings it back", { model.isRunning },
                     timeout: 15)
@@ -3527,25 +3653,24 @@ enum UIFlowCheck {
 
         // And the commands actually do what they say, against the real model.
         let wasMuted = model.isInputMuted
-        model.perform(.mute(true))
+        _ = await submit(.mute(true), to: model)
         check("mute on mutes", model.isInputMuted)
-        model.perform(.mute(true))
+        _ = await submit(.mute(true), to: model)
         check("and doing it twice is still muted", model.isInputMuted)
-        model.perform(.mute(nil))
+        _ = await submit(.mute(nil), to: model)
         check("the toggle toggles", !model.isInputMuted)
         model.isInputMuted = wasMuted
-        check(
-            "a scene that does not exist says so",
-            model.perform(.preset("no such scene")) == nil)
+        let missingScene = await submit(.preset("no such scene"), to: model)
+        check("a scene that does not exist says so", missingScene.failed)
         check(
             "a setup URL is understood",
             RemoteCommand.parse(URL(string: "yunaudio://config/Podcast")!) == .config("Podcast")
         )
-        check(
-            "and a setup that does not exist says so",
-            model.perform(.config("no such setup")) == nil)
+        let missingSetup = await submit(.config("no such setup"), to: model)
+        check("and a setup that does not exist says so", missingSetup.failed)
         if let scene = model.allPresets.first {
-            check("and one that does is applied", model.perform(.preset(scene.name)) != nil)
+            let applied = await submit(.preset(scene.name), to: model)
+            check("and one that does is applied", !applied.failed)
         }
 
         try section("falling back when a device disappears")
@@ -3912,7 +4037,7 @@ enum UIFlowCheck {
         let otherBuffer: UInt32 = originalBuffer == 256 ? 128 : 256
         model.bufferFrames = otherBuffer
         check("the buffer size was taken", model.bufferFrames == otherBuffer)
-        check("and saved", PreferencesStore.load().bufferFrames == otherBuffer)
+        await checkPersisted("and saved") { $0.bufferFrames == otherBuffer }
         note(
             String(
                 format: "%d frames is %.2f ms per IO cycle at %.0f Hz", otherBuffer,
@@ -3983,7 +4108,11 @@ enum UIFlowCheck {
         let track = NowPlaying.Track(
             application: "Test", title: "Scoring", artist: "Flow Check", album: "",
             position: 0, duration: 100, isPlaying: true)
-        let melody = RouterModel.findMelody(for: track)
+        let melody = NowPlayingResourceLoader.load(
+            NowPlayingResourceRequest(
+                generation: 0, track: track, directory: directory,
+                needsArtwork: false)
+        ).melody
         check("the tune was found beside the words", melody != nil)
         if let melody {
             note(
@@ -4024,14 +4153,16 @@ enum UIFlowCheck {
         await pause(upTo: 1.0, until: { model.isScoringSinging })
         check("scoring started", model.isScoringSinging)
         if let problem = model.singingError { note(problem) }
+        let microphones = model.sourceGroups.filter {
+            model.representative(of: $0).flatMap(model.application(of:)) == nil
+        }
+        await waitUntil(
+            "one singer per microphone",
+            { model.singers.count == microphones.count }, timeout: 5)
         note(
             "\(model.singers.count) singer(s) on \(model.engineTranscriptTaps) tap(s) "
                 + "for \(model.sourceGroups.count) source(s)")
         if let problem = model.singingError { note(problem) }
-        let microphones = model.sourceGroups.filter {
-            model.representative(of: $0).flatMap(model.application(of:)) == nil
-        }
-        check("one singer per microphone", model.singers.count == microphones.count)
         check(
             "captured applications are not shown as singers",
             model.singers.allSatisfy { singer in microphones.contains { $0.uid == singer.uid } }
@@ -4078,8 +4209,8 @@ enum UIFlowCheck {
             model.melody != nil || model.singers.allSatisfy { !$0.score.isMeaningful })
 
         model.isScoringSinging = false
-        await pause(0.3)
-        check("switching it off clears the singers", model.singers.isEmpty)
+        await waitUntil(
+            "switching it off clears the singers", { model.singers.isEmpty }, timeout: 3)
 
         // The key of real music. This is the part the project had written down
         // as unverified.
@@ -4437,6 +4568,15 @@ enum UIFlowCheck {
             await waitUntil(
                 "the route came up with the microphone monitoring itself",
                 { model.isRunning && !model.isBusy }, timeout: 20)
+            note(
+                "monitor route state: running \(model.isRunning), busy \(model.isBusy), "
+                    + "routes \(model.activeRoutes.count), error "
+                    + (model.lastError ?? "none"))
+            if !model.audioQuarantineReasonsForFlowCheck.isEmpty {
+                note(
+                    "monitor audio quarantine: "
+                        + model.audioQuarantineReasonsForFlowCheck.joined(separator: " | "))
+            }
             // The picker going quietly back to "Off" is the failure this is
             // really hunting: a list that offers a device the engine then drops
             // is worse than a list that never offered it.
@@ -4646,8 +4786,11 @@ enum UIFlowCheck {
             abs(measured - expected) < 0.01)
         // `yunaudio-chain.lrc` sits beside `yunaudio-chain.wav`, which is how
         // anybody with a folder of backing tracks already has them.
-        check("words beside the file are used", model.lyrics != nil)
-        check("and they are named as local", model.lyricsSourceName == loc("Local file"))
+        await waitUntil(
+            "words beside the file are used", { model.lyrics != nil }, timeout: 5)
+        await waitUntil(
+            "and they are named as local",
+            { model.lyricsSourceName == loc("Local file") }, timeout: 5)
 
         model.runWords(from: 0)
         try? await Task.sleep(for: .milliseconds(600))
@@ -5132,14 +5275,16 @@ enum UIFlowCheck {
             check(
                 "and the clock is where the wall clock is",
                 abs(model.songPosition - elapsed) < 0.05)
-            // How far across the line the sweep is. Every line runs a second
-            // except the last, which `Lyrics.progress(at:)` gives four — so
-            // 0.4 s in is 40% of an ordinary line and 10% of the final one, and
-            // asserting one band for both would be asserting nothing.
+            // How far across the line the sweep is. Compare both answers from
+            // this exact playback instant: a loaded full-gate machine can wake
+            // this task after 1.4 seconds, and comparing that honest 1.54-second
+            // clock against an ideal 0.4 fraction is a test of scheduling noise.
             let span = wanted == last ? 4.0 : chainNoteSeconds
+            let expectedProgress = min(
+                1, max(0, (model.songPosition - Double(wanted) * chainNoteSeconds) / span))
             check(
-                "and the sweep is \(Int(0.4 / span * 100))% across it",
-                abs(model.lyricProgress - 0.4 / span) < 0.1)
+                "and the sweep follows the playback clock",
+                abs(model.lyricProgress - expectedProgress) < 0.05)
         }
 
         // afplay holds the device for a second or two either side of the audio
@@ -6208,13 +6353,13 @@ enum UIFlowCheck {
         let other: TapMuteBehavior = originalBehaviour == .muted ? .unmuted : .muted
         model.tapMuteBehavior = other
         check("the model took it", model.tapMuteBehavior == other)
-        check(
-            "and it reached the file",
-            PreferencesStore.load().tapMuteBehavior == other.storageKey)
+        await checkPersisted("and it reached the file") {
+            $0.tapMuteBehavior == other.storageKey
+        }
         model.tapMuteBehavior = originalBehaviour
-        check(
-            "and back again",
-            PreferencesStore.load().tapMuteBehavior == originalBehaviour.storageKey)
+        await checkPersisted("and back again") {
+            $0.tapMuteBehavior == originalBehaviour.storageKey
+        }
 
         // The same shape, found the same way. The recording format had a
         // picker, an engine that read it and a preset that carried it, and no
@@ -6223,13 +6368,13 @@ enum UIFlowCheck {
         let originalFormat = model.recordingFormat
         let otherFormat: Recorder.Format = originalFormat == .aac ? .wav : .aac
         model.recordingFormat = otherFormat
-        check(
-            "the recording format reached the file",
-            PreferencesStore.load().recordingFormat == otherFormat.rawValue)
+        await checkPersisted("the recording format reached the file") {
+            $0.recordingFormat == otherFormat.rawValue
+        }
         model.recordingFormat = originalFormat
-        check(
-            "and back again",
-            PreferencesStore.load().recordingFormat == originalFormat.rawValue)
+        await checkPersisted("and back again") {
+            $0.recordingFormat == originalFormat.rawValue
+        }
 
         // And a third time, on the field added directly after `tapMuteBehavior`
         // — which is how this one was found. The script editor's own `didSet`
@@ -6239,13 +6384,11 @@ enum UIFlowCheck {
         // interface said nothing; it restored `""` and looked untouched.
         let originalScript = model.residentScript
         model.residentScript = "// survives a relaunch"
-        check(
-            "the resident script reached the file",
-            PreferencesStore.load().residentScript == "// survives a relaunch")
+        await checkPersisted("the resident script reached the file") {
+            $0.residentScript == "// survives a relaunch"
+        }
         model.residentScript = originalScript
-        check(
-            "and back again",
-            PreferencesStore.load().residentScript == originalScript)
+        await checkPersisted("and back again") { $0.residentScript == originalScript }
     }
 
     /// The monitor mix, which is carried by route *indices* rather than by
@@ -6343,23 +6486,25 @@ enum UIFlowCheck {
         defer { model.residentScript = before }
 
         // Reading. The status has to describe this machine, not a shape.
-        let reading = model.runScript(
-            "var s = yun.status(); [s.running, s.muted, yun.presets().length].join('/')")
+        let reading = await runScript(
+            "var s = yun.status(); [s.running, s.muted, yun.presets().length].join('/')",
+            on: model)
         check("a script can read the state", reading.isSuccess)
         note("status reads: \(reading.value)")
 
         // Acting, through the same vocabulary a button uses.
         let wasMuted = model.isInputMuted
-        _ = model.runScript("yun.mute(true)")
+        _ = await runScript("yun.mute(true)", on: model)
         check("a script can mute", model.isInputMuted)
-        _ = model.runScript("yun.mute(false)")
+        _ = await runScript("yun.mute(false)", on: model)
         check("and unmute", !model.isInputMuted)
         model.isInputMuted = wasMuted
 
         // A name this application does not have must stop the script rather
         // than being skipped, or the rest of it runs against an arrangement
         // nobody chose.
-        let missing = model.runScript("yun.preset('no such scene'); yun.mute(true)")
+        let missing = await runScript(
+            "yun.preset('no such scene'); yun.mute(true)", on: model)
         check("an unknown scene stops the script", !missing.isSuccess)
         check("and nothing after it ran", model.isInputMuted == wasMuted)
 
@@ -6371,6 +6516,8 @@ enum UIFlowCheck {
             yun.on('muted', function () { seen.push('muted'); yun.log('muted'); });
             yun.on('unmuted', function () { seen.push('unmuted'); yun.log('unmuted'); });
             """
+        await waitUntil(
+            "the resident script loaded", { !model.isResidentScriptLoading }, timeout: 2)
         check("a resident script loads", model.residentScriptError == nil)
         // The top level is where somebody puts the line that tells them the
         // script is the one they think it is, and it was thrown away — only a
@@ -6380,6 +6527,12 @@ enum UIFlowCheck {
         model.isInputMuted = true
         model.isInputMuted = false
         model.isInputMuted = wasMuted
+        await waitUntil(
+            "mute events reached the resident script",
+            {
+                model.scriptLog.contains("muted")
+                    && model.scriptLog.contains("unmuted")
+            }, timeout: 2)
         note("script said: " + model.scriptLog.joined(separator: ", "))
         check(
             "muting the microphone reached the script",
@@ -6388,6 +6541,9 @@ enum UIFlowCheck {
         // And a broken one is reported where somebody will see it, rather than
         // silently not running for the rest of the session.
         model.residentScript = "yun.on('nope', function () {});"
+        await waitUntil(
+            "the broken resident script finished", { !model.isResidentScriptLoading },
+            timeout: 2)
         check("an unknown event is refused at load", model.residentScriptError != nil)
         if let problem = model.residentScriptError { note(problem) }
 
@@ -6400,7 +6556,7 @@ enum UIFlowCheck {
         // indistinguishable from a button that does nothing.
         model.residentScript = "yun.log('ran once'); 6 * 7"
         let logBefore = model.scriptLog.count
-        let once = model.runScriptNow(model.residentScript)
+        let once = await runScriptNow(model.residentScript, on: model)
         check("the run button's call succeeds", once.isSuccess)
         check("its value came back", once.value == "42")
         check("and the log grew", model.scriptLog.count > logBefore)
@@ -6410,7 +6566,7 @@ enum UIFlowCheck {
         // A run that throws must say so in the same place, rather than looking
         // exactly like a run that did nothing.
         let failedBefore = model.scriptLog.count
-        let broken = model.runScriptNow("throw new Error('deliberate')")
+        let broken = await runScriptNow("throw new Error('deliberate')", on: model)
         check("a throwing run is reported as a failure", !broken.isSuccess)
         check(
             "and said so where the tab shows it",
@@ -6419,6 +6575,30 @@ enum UIFlowCheck {
         // A run that threw is not a script that would not load, and the two are
         // shown in different places on purpose.
         check("without claiming the script failed to load", model.residentScriptError == nil)
+    }
+
+    private static func submit(
+        _ command: RemoteCommand, to model: RouterModel
+    ) async -> ScriptService.CommandOutcome {
+        await withCheckedContinuation { continuation in
+            model.submitRemoteCommand(command) { continuation.resume(returning: $0) }
+        }
+    }
+
+    private static func runScript(
+        _ source: String, on model: RouterModel
+    ) async -> ScriptService.Result {
+        await withCheckedContinuation { continuation in
+            model.runScript(source) { continuation.resume(returning: $0) }
+        }
+    }
+
+    private static func runScriptNow(
+        _ source: String, on model: RouterModel
+    ) async -> ScriptService.Result {
+        await withCheckedContinuation { continuation in
+            model.runScriptNow(source) { continuation.resume(returning: $0) }
+        }
     }
 
     /// The system's own voice detector.
@@ -6456,17 +6636,22 @@ enum UIFlowCheck {
         check(
             "including the source this route is using",
             VoiceActivityWatcher.isAvailable(on: source.id))
-        check("and the model agrees it can be used", model.canDetectVoiceActivity)
-
-        // Switched on by the route coming up, since the header is explicit that
-        // the state reads 0 with input not running — an indicator wired to a
-        // detector nobody enabled would be permanently dark and look correct.
-        check("and the route switched it on", VoiceActivityWatcher.isEnabled(on: source.id))
-        // And the watcher the model is actually holding says so. The device
-        // answering yes is not the same claim: the watcher's initialiser hands
-        // back a live object even when its own enable write failed, and nothing
-        // in the application used to ask.
-        check("and the watcher the model holds is running", model.isDetectingVoiceActivity)
+        if model.warnsWhenSpeakingWhileMuted {
+            check(
+                "and the cached model answer agrees",
+                model.voiceActivityAvailability == true)
+            check(
+                "and the explicitly enabled watcher is running",
+                model.isDetectingVoiceActivity)
+        } else {
+            // Starting a route is not consent to write a device-global property.
+            // The exact zero-write contract is asserted with an injected HAL
+            // spy; the live check asserts the model did not even retain a
+            // watcher when the preference is off.
+            check(
+                "and a default route did not start the detector",
+                !model.isDetectingVoiceActivity)
+        }
         note(
             "reference for echo cancellation: "
                 + (VoiceActivityWatcher.suggestedReferenceDeviceUID(for: source.id)
@@ -6479,16 +6664,21 @@ enum UIFlowCheck {
         check("nothing to warn about while the microphone is live", !model.isSpeakingWhileMuted)
         model.isInputMuted = wasMuted
 
-        // Both properties above were written so the interface could say which
-        // of three situations this is, and both doc comments say so — and
-        // neither had a reader outside this check. The Diagnostics page shows
-        // it now, and what is asserted is that the three states read as three
-        // different things: a device that cannot do it, a detector that is not
-        // running, and one that is.
+        // The page distinguishes policy, an in-flight background probe,
+        // hardware availability and the route-owned running state. Folding any
+        // pair together would turn an intentional opt-out or a failed start
+        // into the same sentence as unsupported hardware.
         let detectorStates = [
-            PreferencesWindow.voiceDetectorState(isAvailable: false, isRunning: false),
-            PreferencesWindow.voiceDetectorState(isAvailable: true, isRunning: false),
-            PreferencesWindow.voiceDetectorState(isAvailable: true, isRunning: true),
+            PreferencesWindow.voiceDetectorState(
+                isEnabled: false, isAvailable: nil, isRunning: false),
+            PreferencesWindow.voiceDetectorState(
+                isEnabled: true, isAvailable: nil, isRunning: false),
+            PreferencesWindow.voiceDetectorState(
+                isEnabled: true, isAvailable: false, isRunning: false),
+            PreferencesWindow.voiceDetectorState(
+                isEnabled: true, isAvailable: true, isRunning: false),
+            PreferencesWindow.voiceDetectorState(
+                isEnabled: true, isAvailable: true, isRunning: true),
         ]
         check(
             "every detector state reads as something", detectorStates.allSatisfy { !$0.isEmpty }
@@ -6498,9 +6688,11 @@ enum UIFlowCheck {
             Set(detectorStates).count == detectorStates.count)
         check(
             "the page describes this machine",
-            PreferencesWindow.voiceDetectorState(
-                isAvailable: model.canDetectVoiceActivity,
-                isRunning: model.isDetectingVoiceActivity) == detectorStates[2])
+            detectorStates.contains(
+                PreferencesWindow.voiceDetectorState(
+                    isEnabled: model.warnsWhenSpeakingWhileMuted,
+                    isAvailable: model.voiceActivityAvailability,
+                    isRunning: model.isDetectingVoiceActivity)))
     }
 
     /// MIDI learn, both halves.
@@ -6540,9 +6732,9 @@ enum UIFlowCheck {
             "learn bound the control that moved",
             midi.binding(for: master) == MIDIAddress(channel: 0, kind: .controlChange(7)))
         check("and stopped listening once it had one", midi.learningTarget == nil)
-        check(
-            "the binding reached the preferences file",
-            PreferencesStore.load().midiBindings?[master.storageKey] == "0.cc.7")
+        await checkPersisted("the binding reached the preferences file") {
+            $0.midiBindings?[master.storageKey] == "0.cc.7"
+        }
 
         // Soft takeover, against the real model rather than a stand-in for it.
         model.outputDecibels = -6
@@ -6717,7 +6909,9 @@ enum UIFlowCheck {
 
         model.isAnalysisVisible = false
         await pause(0.4)
+        let quietWorkerBefore = model.analysisWorkerTelemetry
         let quiet = await measure()
+        let quietWorkerAfter = model.analysisWorkerTelemetry
         guard quiet.cost.polls > 0 else {
             note("the poll did not run")
             model.isAnalysisVisible = visible
@@ -6742,7 +6936,9 @@ enum UIFlowCheck {
 
         model.isAnalysisVisible = true
         await pause(0.4)
+        let analysingWorkerBefore = model.analysisWorkerTelemetry
         let analysing = await measure()
+        let analysingWorkerAfter = model.analysisWorkerTelemetry
         note(
             String(
                 format: "panel open:   %d polls, %.0f µs each — %.2f%% of one core",
@@ -6797,32 +6993,23 @@ enum UIFlowCheck {
             "with the panel closed the poll stays well under a millisecond",
             quiet.microseconds < 900)
 
-        // The analysers cost what they cost — an FFT, a pitch tracker and
-        // Apple's sound model, twenty times a second — and they are the feature.
-        // What matters is that the bill arrives only while somebody is looking:
-        // if the two figures were the same, the panel's switch would not be
-        // doing anything.
-        //
-        // A ratio, because that is the shape of the failure this guards
-        // against: analysers left running with the panel shut would pull the
-        // quiet figure up towards the busy one until the two met. The constant
-        // was three, and it described a poll whose idle cost was a fraction of
-        // the analysers'. It is not that poll any more — the idle side is now
-        // 78 µs of which `routePeaks` alone is 48, because everything else got
-        // cheaper and the meters did not — so three had come to mean "the
-        // analysers must cost more than twice the entire rest of the poll",
-        // which was never the claim.
-        //
-        // A third again is. It still fails long before the two figures meet,
-        // and it stops failing on a poll that got faster everywhere else.
+        let quietDrains = quietWorkerAfter.completedDrains &- quietWorkerBefore.completedDrains
+        let analysingDrains =
+            analysingWorkerAfter.completedDrains &- analysingWorkerBefore.completedDrains
+        // Analysis moved off MainActor, so a wall-clock ratio between two cheap
+        // poll turns is no longer evidence that the worker stopped. Count its
+        // completed turns instead. One quiet completion is allowed because a
+        // turn admitted before the panel closed may still be finishing.
         note(
             String(
-                format: "analysers add %.0f µs, a factor of %.2f",
-                analysing.microseconds - quiet.microseconds,
-                analysing.microseconds / max(quiet.microseconds, 1)))
+                format: "analysis worker completed %llu closed and %llu open drains",
+                quietDrains, analysingDrains))
         check(
             "and the analysers only cost while the panel is open",
-            analysing.microseconds > quiet.microseconds * 1.33)
+            quietDrains <= 1 && analysingDrains > 0)
+        check(
+            "and no analyser turn ran on MainActor",
+            analysingWorkerAfter.mainThreadTurns == quietWorkerBefore.mainThreadTurns)
 
         // The real assertion about the poll itself. With a route up and nobody
         // touching anything, most of what it assigns has not moved — the path
@@ -6834,7 +7021,7 @@ enum UIFlowCheck {
             "most of what it writes is recognised as unchanged",
             quiet.cost.unchanged * 2 > quiet.cost.writes)
 
-        try checkStartupCost(model: model)
+        try await checkStartupCost(model: model)
     }
 
     /// What launching costs, and which part of it.
@@ -6845,7 +7032,7 @@ enum UIFlowCheck {
     /// measurement. The parts are re-timed warm, which understates every one of
     /// them; what a warm number is good for is saying which of them is worth
     /// looking at cold.
-    private static func checkStartupCost(model: RouterModel) throws {
+    private static func checkStartupCost(model: RouterModel) async throws {
         try section("what launching costs")
 
         note(String(format: "exec to a live run loop: %.0f ms", launchSeconds * 1000))
@@ -6873,6 +7060,11 @@ enum UIFlowCheck {
         // that decides whether the click drops a frame is now only its AppKit
         // snapshot and queue submission.
         let apps = timed("refreshApps main-actor submission") { model.refreshApps() }
+        await waitUntil(
+            "the application refresh completed",
+            { !model.appRefreshIsInFlightForFlowCheck }, timeout: 2)
+        let workspaceTurn = Double(model.appWorkspaceSnapshotMaximumTurnNanoseconds) / 1e6
+        note(String(format: "  longest AppKit snapshot turn: %.2f ms", workspaceTurn))
         note(
             String(
                 format: "  %d cached application(s), %d captured",
@@ -6885,7 +7077,8 @@ enum UIFlowCheck {
         // a hundred milliseconds either way.
         check("launch is under three seconds", launchSeconds < 3)
         check("re-deriving everything the model derives at launch is under a second", warm < 1)
-        check("submitting an application refresh stays inside one frame", apps < 0.016)
+        check("submitting an application refresh stays under eight milliseconds", apps < 0.008)
+        check("each AppKit snapshot turn stays under eight milliseconds", workspaceTurn < 8)
     }
 
     /// What the bottom of the window is actually showing.
@@ -7227,7 +7420,9 @@ enum UIFlowCheck {
     /// what a fast change appears to cost.
     private static func settle(_ model: RouterModel, timeout: TimeInterval) async {
         let deadline = Date().addingTimeInterval(inWantedSection ? timeout : min(timeout, 6))
-        while Date() < deadline, model.isBusy {
+        while Date() < deadline,
+            model.isBusy || !model.effectSwapIsSettledForFlowCheck
+        {
             await pause(0.01)
         }
     }
@@ -7954,7 +8149,12 @@ enum UIFlowCheck {
         init?(deviceUID: String) {
             guard let device = try? AudioDevices.device(uid: deviceUID) ?? nil,
                 let rate = device.currentSampleRate, rate > 0,
-                let cycles = yun_rt_cell_create(nil)
+                // The cell's pointer is only an admission token here. Keeping
+                // it non-null makes every callback participate in the same
+                // load/retire protocol as the shipping IOProc, so an unexpected
+                // overlapping HAL callback cannot falsely advance the liveness
+                // fence.
+                let cycles = yun_rt_cell_create(UnsafeMutableRawPointer(bitPattern: 1))
             else { return nil }
             deviceID = device.id
             self.cycles = cycles
@@ -7968,6 +8168,16 @@ enum UIFlowCheck {
             let cycleCounter = self.cycles
             let status = AudioDeviceCreateIOProcIDWithBlock(&procID, device.id, nil) {
                 _, _, _, outputData, _ in
+                guard yun_rt_cell_load(cycleCounter) != nil else {
+                    let buffers = UnsafeMutableAudioBufferListPointer(outputData)
+                    for buffer in buffers {
+                        if let data = buffer.mData {
+                            memset(data, 0, Int(buffer.mDataByteSize))
+                        }
+                    }
+                    return
+                }
+                defer { yun_rt_cell_retire(cycleCounter) }
                 let buffers = UnsafeMutableAudioBufferListPointer(outputData)
                 for index in 0..<buffers.count {
                     guard let data = buffers[index].mData else { continue }
@@ -7989,7 +8199,6 @@ enum UIFlowCheck {
                     // advances once rather than once per buffer.
                     if index == buffers.count - 1 { phase.pointee = running }
                 }
-                yun_rt_cell_retire(cycleCounter)
             }
             guard status == noErr, let procID else {
                 phase.deallocate()
@@ -8281,7 +8490,7 @@ enum UIFlowCheck {
         // Reaching the engine is a separate claim from being in the model, and
         // this is the only check that makes it against a running route.
         let curves = model.busCurves
-        let installed = model.applyCorrections()
+        let installed = await model.applyCorrections()
         note("\(curves.count) curve(s) asked for, \(installed) reached an output")
         check(
             "every bus with a curve got one installed",
@@ -8289,7 +8498,7 @@ enum UIFlowCheck {
 
         // Persisted per bus, because the whole feature is worthless if it does
         // not survive a restart.
-        let saved = PreferencesStore.load()
+        let saved = await persistedPreferences()
         check(
             "each bus's bands were saved under its own device",
             (saved.busGraphicEQ?[first.id]?[5]).map { abs($0 - 4) < 0.001 } ?? false)

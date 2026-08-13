@@ -80,7 +80,7 @@ public final class SpectrumAnalyser {
         // of 0, `?? 48000` did not catch it because the value was present
         // rather than nil, and the whole application went down about one run in
         // three. The initialiser was already failable; it simply never used it.
-        guard sampleRate.isFinite, sampleRate > 0 else { return nil }
+        guard AudioProcessingContract.supports(sampleRate: sampleRate) else { return nil }
         guard let setup = vDSP_create_fftsetup(Self.log2n, FFTRadix(kFFTRadix2)) else {
             return nil
         }
@@ -127,6 +127,7 @@ public final class SpectrumAnalyser {
     /// only the most recent one — the display wants what is happening now, not
     /// an average over everything that queued up while it was not looking.
     public func add(_ samples: UnsafePointer<Float>, count: Int) {
+        guard count > 0 else { return }
         var offset = 0
         while offset < count {
             let take = min(

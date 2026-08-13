@@ -172,34 +172,36 @@ struct BackgroundResourceTests {
     @MainActor
     @Test("a hundred control changes become one preferences write")
     func preferenceWritesAreCoalesced() async throws {
-        var written: [Int] = []
+        let written = Values<Int>()
         let writer = CoalescedPreferenceWriter<Int>(delay: .milliseconds(50)) {
             written.append($0)
         }
 
         for value in 0..<100 { writer.submit(value) }
         #expect(writer.pendingValue == 99)
-        #expect(written.isEmpty)
+        #expect(written.snapshot.isEmpty)
 
         // Under the complete parallel suite, CPU-bound release benchmarks can
         // keep MainActor from running for far longer than this writer's 50 ms
         // policy. Wait for the event, not an assumed scheduler deadline; the
         // bounded loop still fails a writer that never fires.
-        for _ in 0..<100 where written.isEmpty {
+        for _ in 0..<100 where written.snapshot.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(written == [99])
+        #expect(written.snapshot == [99])
         #expect(writer.pendingValue == nil)
         #expect(!writer.hasScheduledWrite)
 
         // Quit does not wait for the window, so its flush has to write exactly
-        // once and cancel the scheduled duplicate. Inspecting the cancelled
-        // task is deterministic; sleeping and hoping a duplicate has had time
-        // to happen is not.
+        // once and advance the background worker instead of waiting for the
+        // coalescing deadline.
         writer.submit(100)
         #expect(writer.hasScheduledWrite)
-        writer.flush()
-        #expect(written == [99, 100])
+        let flush = await withCheckedContinuation { continuation in
+            writer.flush { continuation.resume(returning: $0) }
+        }
+        #expect(flush == .synchronised)
+        #expect(written.snapshot == [99, 100])
         #expect(!writer.hasScheduledWrite)
     }
 
@@ -214,12 +216,12 @@ struct BackgroundResourceTests {
             MIDITarget.fader(.master):
                 MIDIAddress(channel: 0, kind: .controlChange(7))
         ]
-        var snapshotsBuilt = 0
-        var written: [Int] = []
+        let snapshotsBuilt = Count()
+        let written = Values<Int>()
         let writer = CoalescedPreferenceWriter<PendingPreferencesSnapshot>(
             delay: .milliseconds(50)
         ) {
-            snapshotsBuilt += 1
+            snapshotsBuilt.increment()
             written.append($0.materialised().monoChannel)
         }
 
@@ -236,17 +238,17 @@ struct BackgroundResourceTests {
                     midiBindings: bindings))
         }
 
-        #expect(snapshotsBuilt == 0)
+        #expect(snapshotsBuilt.current == 0)
         // The writer's contract is one coalesced value, not that a heavily
         // loaded test process schedules its MainActor task within exactly
         // twice the 50 ms window. Poll to a bounded deadline so concurrent
         // compiler and render work cannot turn correct coalescing into a red
         // build, while a task that never fires still fails within one second.
-        for _ in 0..<100 where snapshotsBuilt == 0 {
+        for _ in 0..<100 where written.snapshot.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
-        #expect(snapshotsBuilt == 1)
-        #expect(written == [99])
+        #expect(snapshotsBuilt.current == 1)
+        #expect(written.snapshot == [99])
     }
 
     @MainActor
@@ -273,6 +275,129 @@ struct BackgroundResourceTests {
         }
         #expect(applied.snapshot == [0, 99])
         #expect(published == [99])
+    }
+
+    @MainActor
+    @Test("a blocked serial queue samples one newest rate-limited control value")
+    func rateLimitedLatestValuePublication() async throws {
+        let queue = DispatchQueue(label: "yunaudio.test.rate-limited-latest-value")
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        queue.async {
+            releaseBlocker.wait()
+        }
+
+        let applied = Values<Int>()
+        var published: [Int] = []
+        let applier = RateLimitedLatestValueApplier<Int, Int>(
+            queue: queue,
+            interval: .milliseconds(20),
+            apply: { value in
+                applied.append(value)
+                return value
+            },
+            publish: { published.append($0) })
+
+        for value in 0..<10_000 { applier.submit(value) }
+        try await Task.sleep(for: .milliseconds(40))
+        #expect(applied.snapshot.isEmpty)
+        releaseBlocker.signal()
+
+        for _ in 0..<100 where published != [9_999] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [9_999])
+        #expect(published == [9_999])
+        #expect(
+            applier.statistics
+                == .init(submissions: 10_000, coalesced: 9_999, applications: 1))
+    }
+
+    @MainActor
+    @Test("ten thousand requests behind one in-flight write retain only one latest value")
+    func rateLimitedInFlightValuePublication() async throws {
+        let queue = DispatchQueue(label: "yunaudio.test.rate-limited-in-flight")
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let applied = Values<Int>()
+        var published: [Int] = []
+        let applier = RateLimitedLatestValueApplier<Int, Int>(
+            queue: queue,
+            interval: .milliseconds(10),
+            apply: { value in
+                applied.append(value)
+                if value == 0 { releaseFirst.wait() }
+                return value
+            },
+            publish: { published.append($0) })
+
+        applier.submit(0)
+        for _ in 0..<100 where applied.snapshot != [0] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(applied.snapshot == [0])
+
+        for value in 1..<10_000 { applier.submit(value) }
+        releaseFirst.signal()
+        for _ in 0..<100 where published != [9_999] {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
+        #expect(applied.snapshot == [0, 9_999])
+        #expect(published == [9_999])
+        #expect(
+            applier.statistics
+                == .init(submissions: 10_000, coalesced: 9_998, applications: 2))
+    }
+
+    @Test("ten thousand delayed controls retain one value for each of four keys")
+    func keyedLatestValuePublication() {
+        let queue = DispatchQueue(label: "yunaudio.test.keyed-latest-value")
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        queue.async { releaseBlocker.wait() }
+
+        let applied = Values<Int>()
+        let applier = KeyedLatestValueApplier<Int, Int>(
+            queue: queue,
+            apply: { applied.append($0) })
+
+        for value in 0..<10_000 {
+            applier.submit(value, for: value % 4)
+        }
+        #expect(applied.snapshot.isEmpty)
+        releaseBlocker.signal()
+        queue.sync {}
+
+        #expect(Set(applied.snapshot) == Set([9_996, 9_997, 9_998, 9_999]))
+        #expect(
+            applier.statistics
+                == .init(
+                    submissions: 10_000, coalesced: 9_996,
+                    batches: 1, applications: 4, maximumPending: 4))
+    }
+
+    @Test("invalidation removes every delayed keyed control before Stop")
+    func keyedLatestValueInvalidation() {
+        let queue = DispatchQueue(label: "yunaudio.test.keyed-latest-lifetime")
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        queue.async { releaseBlocker.wait() }
+
+        let applied = Values<Int>()
+        let applier = KeyedLatestValueApplier<String, Int>(
+            queue: queue,
+            apply: { applied.append($0) })
+        for value in 0..<10_000 { applier.submit(value, for: "gain") }
+        applier.invalidate()
+        releaseBlocker.signal()
+        queue.sync {}
+        #expect(applied.snapshot.isEmpty)
+
+        applier.submit(10_000, for: "gain")
+        queue.sync {}
+        #expect(applied.snapshot == [10_000])
+        #expect(
+            applier.statistics
+                == .init(
+                    submissions: 10_001, coalesced: 9_999,
+                    batches: 1, applications: 1, maximumPending: 1))
     }
 
     @MainActor
@@ -392,8 +517,12 @@ struct BackgroundResourceTests {
     /// chain swap owned `isBusy`; because it was not a start, that function
     /// recorded nothing and the new state never reached audio. This is a
     /// placement bug, so assert the ordering around the asynchronous boundary.
-    @Test("effect changes arriving during a chain build are coalesced and replayed")
+    @Test("structural lint keeps effect coalescing ahead of busy admission and replay")
     func effectSwapIsLatestWins() throws {
+        // `processing chain swapped live` is the hardware acceptance for the
+        // audible handover, while the LatestValueApplier tests above measure
+        // first-and-latest coalescing. This check is only the Router wiring
+        // between those independently executable contracts.
         let root = PreferencesCompletenessTests.sourceRootForTests
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
@@ -401,20 +530,26 @@ struct BackgroundResourceTests {
         let start = try #require(source.range(of: "private func swapChainIfPossible()"))
         let end = try #require(
             source.range(
-                of: "private var activeEffectStageCache",
+                of: "private func retryEffectSwapAfterTransition()",
                 range: start.upperBound..<source.endIndex))
         let swap = source[start.lowerBound..<end.lowerBound]
 
         let busy = try #require(swap.range(of: "guard !isBusy else { return false }"))
         let pending = try #require(swap.range(of: "if effectSwapIsInFlight"))
         #expect(pending.lowerBound < busy.lowerBound)
-        #expect(swap.ranges(of: "effectSwapIsPending = true").count == 1)
-        #expect(swap.ranges(of: "effectSwapIsPending = false").count == 4)
-        #expect(swap.ranges(of: "swapChainIfPossible()").count == 2)
+        let pendingAdmission = swap[pending.lowerBound..<busy.lowerBound]
+        #expect(pendingAdmission.ranges(of: "effectSwapIsPending = true").count == 1)
+        #expect(pendingAdmission.contains("return true"))
 
         let restart = try #require(swap.range(of: "if self.restartIsPending"))
-        let replay = try #require(swap.range(of: "if self.effectSwapIsPending"))
-        #expect(restart.lowerBound < replay.lowerBound)
+        let audibleHandover = try #require(
+            swap.range(of: "if refusal == .transitionInFlight"))
+        let replay = try #require(
+            swap.range(
+                of: "if self.effectSwapIsPending",
+                range: audibleHandover.upperBound..<swap.endIndex))
+        #expect(restart.lowerBound < audibleHandover.lowerBound)
+        #expect(audibleHandover.lowerBound < replay.lowerBound)
         let staleResult = try #require(
             swap.range(
                 of: "guard swapped else",
@@ -436,8 +571,11 @@ struct BackgroundResourceTests {
     /// 200 ms for the IO thread to retire the old pointer. A cable handler must
     /// enqueue that work and return; rapid edits must also build on the pending
     /// topology rather than the last graph that happened to finish.
-    @Test("route graph publication stays off MainActor and keeps the latest topology")
+    @Test("structural lint wires route patches to the generation-bearing latest owner")
     func routeUpdatesAreAsynchronous() throws {
+        // `latestValuePublication` executes the first/latest owner contract. This
+        // source check is deliberately only wiring lint: RouterModel's production
+        // constructor owns Core Audio, so text cannot prove graph behaviour.
         let root = PreferencesCompletenessTests.sourceRootForTests
         let model = try String(
             contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
@@ -448,7 +586,14 @@ struct BackgroundResourceTests {
                 of: "private func rebuiltRoutes",
                 range: patchStart.upperBound..<model.endIndex))
         let patch = model[patchStart.lowerBound..<patchEnd.lowerBound]
-        #expect(patch.ranges(of: "routeApplier.submit(routes)").count == 1)
+        #expect(patch.ranges(of: "routeApplier.submit(").count == 1)
+        #expect(patch.ranges(of: "RouteUpdateRequest(").count == 1)
+        #expect(
+            patch.ranges(of: "routeGeneration: engineSnapshot.routeGeneration").count
+                == 1)
+        #expect(
+            patch.ranges(of: "graphGeneration: engineSnapshot.graphGeneration").count
+                == 1)
         #expect(patch.ranges(of: "guard routeUpdatesAreAccepted").count == 2)
         #expect(patch.ranges(of: "engine.updateRoutes").count == 0)
 
@@ -460,15 +605,6 @@ struct BackgroundResourceTests {
         let rebuild = model[rebuildStart.lowerBound..<rebuildEnd.lowerBound]
         #expect(rebuild.ranges(of: "scheduleCorrections()").count == 1)
         #expect(rebuild.ranges(of: "applyCorrections()").count == 0)
-
-        let liveStart = try #require(model.range(of: "private func applyLiveControl("))
-        let liveEnd = try #require(
-            model.range(
-                of: "private(set) var isBusy",
-                range: liveStart.upperBound..<model.endIndex))
-        let live = model[liveStart.lowerBound..<liveEnd.lowerBound]
-        #expect(live.ranges(of: "engineQueue.async").count == 1)
-        #expect(live.ranges(of: "if isBusy").count == 0)
 
         let connectStart = try #require(model.range(of: "func connect(source:"))
         let connectEnd = try #require(
@@ -492,7 +628,8 @@ struct BackgroundResourceTests {
         #expect(update.ranges(of: "currentBufferFrameSize").count == 0)
         #expect(update.ranges(of: "graphSampleRate").count == 1)
         #expect(update.ranges(of: "graphBufferFrames").count == 1)
-        #expect(update.ranges(of: "yun_rt_cell_wait_for_swap(cell, 200)").count == 1)
+        #expect(update.ranges(of: "retiredGenerations.enqueue").count == 1)
+        #expect(update.ranges(of: "yun_rt_cell_wait_for_swap(cell, 200)").isEmpty)
     }
 
     @Test("a deferred snapshot keeps the state from the user event")
@@ -559,7 +696,6 @@ struct BackgroundResourceTests {
                 of: "private func finishCancelledStart",
                 range: worker.upperBound..<source.endIndex))
         let workerBody = source[worker.lowerBound..<finish.lowerBound]
-        #expect(workerBody.ranges(of: "engineQueue.async").count == 1)
         #expect(workerBody.ranges(of: "Self.prepareCapture(").count == 1)
         #expect(workerBody.ranges(of: "try engine.start(").count == 1)
     }
@@ -579,31 +715,6 @@ struct BackgroundResourceTests {
         #expect(body.ranges(of: "NSWorkspace.shared.runningApplications").count == 1)
         #expect(body.ranges(of: "foreground[bundle] = info").count == 1)
         #expect(body.ranges(of: "named[bundle] = info").count == 1)
-    }
-
-    @Test("an interface refresh leaves HAL enumeration on the engine queue")
-    func applicationRefreshDoesNotBlockMainActor() throws {
-        let root = PreferencesCompletenessTests.sourceRootForTests
-        let source = try String(
-            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
-            encoding: .utf8)
-        let refresh = try #require(source.range(of: "func refreshApps()"))
-        let queue = try #require(
-            source.range(
-                of: "engineQueue.async",
-                range: refresh.upperBound..<source.endIndex))
-        let verification = try #require(
-            source.range(
-                of: "func refreshAppsForVerification()",
-                range: queue.upperBound..<source.endIndex))
-        let mainActor = source[refresh.lowerBound..<queue.lowerBound]
-        let worker = source[queue.lowerBound..<verification.lowerBound]
-
-        #expect(mainActor.ranges(of: "AudioApplications.workspaceSnapshot()").count == 1)
-        #expect(mainActor.ranges(of: "AudioApplications.grouped").count == 0)
-        #expect(worker.ranges(of: "AudioApplications.grouped").count == 1)
-        #expect(source.ranges(of: "guard !appRefreshInFlight else { return }").count == 1)
-        #expect(source.ranges(of: "appRefreshPending = true").count == 2)
     }
 
     @MainActor
@@ -1070,23 +1181,34 @@ struct BackgroundResourceTests {
         #expect(count == 0)
     }
 
-    @Test("the source-tap drain never dereferences a released scratch")
-    func sourceTapDrainChecksTheScratch() throws {
-        let root = PreferencesCompletenessTests.sourceRootForTests
-        let source = try String(
-            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
-            encoding: .utf8)
-        let start = try #require(source.range(of: "private func pumpSourceTaps()"))
-        let end = try #require(
-            source.range(
-                of: "private func recognitionApplication",
-                range: start.upperBound..<source.endIndex))
-        let body = source[start.lowerBound..<end.lowerBound]
+    @Test("a revoked source generation forwards no late PCM")
+    func sourceTapGenerationRevokesPCM() {
+        let forwarded = Count()
+        let key = RouteOccurrenceKey(
+            source: ChannelRef(deviceUID: "source", channel: 0),
+            destination: ChannelRef(deviceUID: "output", channel: 0), occurrence: 0)
+        let identity = SourceTapPCMForwarder.Identity(uid: "source", routeKey: key)
+        let source = SingingAnalysisSource(
+            slot: 0, uid: "source", name: "Source", routeKey: key,
+            consumers: .transcription)
+        let forwarder = SourceTapPCMForwarder()
+        forwarder.replace(
+            generation: 7,
+            endpoints: [
+                SourceTapPCMForwarder.Endpoint(identity: identity) { _, _ in
+                    forwarded.increment()
+                }
+            ])
 
-        #expect(body.contains("guard let base = buffer.baseAddress"))
-        #expect(
-            !body.contains("buffer.baseAddress!"),
-            "the drain force-unwraps a base address that is nil on an idle route")
+        forwarder.forward(
+            generation: 7, source: source, samples: [0.25], sampleRate: 48_000)
+        forwarder.invalidate()
+        forwarder.forward(
+            generation: 7, source: source, samples: [0.5], sampleRate: 48_000)
+
+        #expect(forwarded.current == 1)
+        #expect(forwarder.statistics.activeEndpoints == 0)
+        #expect(forwarder.statistics.forwardedBlocks == 1)
     }
 
     @Test("new transcript lines stay chronological and are never duplicated")
@@ -1106,58 +1228,18 @@ struct BackgroundResourceTests {
         #expect(transcript.map(\.text) == ["early", "later", "same time"])
     }
 
-    /// The old poll created twenty Tasks per second, crossed every transcriber
-    /// actor and sorted the complete transcript even when no line had changed.
-    /// Keep both the event boundary and the full-stop invalidation structural:
-    /// a fake performance test would otherwise miss their placement.
-    @Test("the source poll neither scans transcript history nor trusts stopped taps")
-    func sourceTapPollingIsEventDriven() throws {
-        let root = PreferencesCompletenessTests.sourceRootForTests
-        let source = try String(
-            contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
-            encoding: .utf8)
-        let pumpStart = try #require(source.range(of: "private func pumpSourceTaps()"))
-        let pumpEnd = try #require(
-            source.range(
-                of: "private func recognitionApplication",
-                range: pumpStart.upperBound..<source.endIndex))
-        let pump = source[pumpStart.lowerBound..<pumpEnd.lowerBound]
-        #expect(pump.ranges(of: "collectTranscript").count == 0)
-        #expect(pump.ranges(of: "Task {").count == 0)
+    @Test("Stop synchronously rejects every poll and late generation")
+    func sourceTapStopAdmissionIsExecutable() {
+        var gate = SourceTapRequestGate()
+        gate.activate()
+        #expect(gate.accepts(generation: 10, currentGeneration: 10))
+        gate.revoke()
 
-        let openStart = try #require(source.range(of: "private func openSourceTaps()"))
-        let openEnd = try #require(
-            source.range(
-                of: "private func invalidateSourceTaps",
-                range: openStart.upperBound..<source.endIndex))
-        let open = source[openStart.lowerBound..<openEnd.lowerBound]
-        #expect(open.ranges(of: "engine.transcriptTapCount").count == 0)
-        let reuse = try #require(open.range(of: "Self.reusableSourceTapCount("))
-        let materialise = try #require(open.range(of: "groups.compactMap("))
-        #expect(reuse.lowerBound < materialise.lowerBound)
-
-        let singersStart = try #require(
-            source.range(of: "private func refreshSingerTracks()"))
-        let singersEnd = try #require(
-            source.range(
-                of: "private func releaseSingerTracks()",
-                range: singersStart.upperBound..<source.endIndex))
-        let singers = source[singersStart.lowerBound..<singersEnd.lowerBound]
-        let stableCheck = try #require(singers.range(of: "Self.sourceUIDsMatch("))
-        let rebuild = try #require(singers.range(of: "Array(allGroups.prefix(groupCount))"))
-        #expect(stableCheck.lowerBound < rebuild.lowerBound)
-
-        let stopStart = try #require(source.range(of: "private func finishStop()"))
-        let stopEnd = try #require(
-            source.range(
-                of: "func toggle()",
-                range: stopStart.upperBound..<source.endIndex))
-        let stop = source[stopStart.lowerBound..<stopEnd.lowerBound]
-        #expect(stop.ranges(of: "invalidateSourceTaps()").count == 1)
-        #expect(
-            source.ranges(
-                of: "guard generation == transcriptSessionGeneration else { return }"
-            ).count == 2)
+        var admitted = 0
+        for _ in 0..<10_000 where gate.acceptsRequests { admitted += 1 }
+        #expect(admitted == 0)
+        #expect(!gate.accepts(generation: 10, currentGeneration: 11))
+        #expect(!gate.accepts(generation: 11, currentGeneration: 11))
     }
 }
 

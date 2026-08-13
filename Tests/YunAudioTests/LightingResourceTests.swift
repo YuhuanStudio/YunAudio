@@ -1,9 +1,181 @@
+import Foundation
 import Testing
 
 @testable import YunAudioApp
 
+private final class LightingAccessRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [String] = []
+
+    func record(_ event: String) { lock.withLock { events.append(event) } }
+
+    var snapshot: [String] { lock.withLock { events } }
+}
+
+private final class LightingAccessCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    func increment() { lock.withLock { storage += 1 } }
+
+    var value: Int { lock.withLock { storage } }
+}
+
 @Suite("Lighting background resource use")
 struct LightingResourceTests {
+    @Test("10,000 revoked HID callers perform zero device operations")
+    func revokedEpochRejectsEveryOldCaller() {
+        let access = LightingDeviceAccessGate()
+        let token = access.advance()
+        let deviceLock = NSLock()
+        let operations = LightingAccessCounter()
+        var refusals = 0
+
+        access.revoke()
+        for _ in 0..<10_000 {
+            let result = access.perform(token, deviceLock: deviceLock) {
+                operations.increment()
+                return true
+            }
+            if result == nil { refusals += 1 }
+        }
+
+        #expect(refusals == 10_000)
+        #expect(operations.value == 0)
+    }
+
+    @Test("a caller queued on the device lock cannot write after revocation")
+    func queuedCallerCannotRelightAfterTeardown() {
+        let access = LightingDeviceAccessGate()
+        let token = access.advance()
+        let deviceLock = NSLock()
+        let beganWaiting = DispatchSemaphore(value: 0)
+        let requestFinished = DispatchSemaphore(value: 0)
+        let teardownFinished = DispatchSemaphore(value: 0)
+        let normalOperations = LightingAccessCounter()
+        let teardownOperations = LightingAccessCounter()
+
+        deviceLock.lock()
+        DispatchQueue.global(qos: .utility).async {
+            beganWaiting.signal()
+            _ = access.perform(token, deviceLock: deviceLock) {
+                normalOperations.increment()
+            }
+            requestFinished.signal()
+        }
+        #expect(beganWaiting.wait(timeout: .now() + 1) == .success)
+
+        access.revoke()
+        DispatchQueue.global(qos: .utility).async {
+            deviceLock.withLock { teardownOperations.increment() }
+            teardownFinished.signal()
+        }
+        deviceLock.unlock()
+
+        #expect(requestFinished.wait(timeout: .now() + 1) == .success)
+        #expect(teardownFinished.wait(timeout: .now() + 1) == .success)
+        #expect(normalOperations.value == 0)
+        #expect(teardownOperations.value == 1)
+    }
+
+    @Test("teardown is the final device operation after an entered HID call")
+    func enteredCallPrecedesFinalDarken() {
+        let access = LightingDeviceAccessGate()
+        let token = access.advance()
+        let deviceLock = NSLock()
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let normalFinished = DispatchSemaphore(value: 0)
+        let teardownFinished = DispatchSemaphore(value: 0)
+        let recorder = LightingAccessRecorder()
+
+        DispatchQueue.global(qos: .utility).async {
+            _ = access.perform(token, deviceLock: deviceLock) {
+                recorder.record("normal-entered")
+                entered.signal()
+                _ = release.wait(timeout: .now() + 1)
+                recorder.record("normal-returned")
+            }
+            normalFinished.signal()
+        }
+        #expect(entered.wait(timeout: .now() + 1) == .success)
+
+        access.revoke()
+        DispatchQueue.global(qos: .utility).async {
+            deviceLock.withLock { recorder.record("darkened") }
+            teardownFinished.signal()
+        }
+        release.signal()
+
+        #expect(normalFinished.wait(timeout: .now() + 1) == .success)
+        #expect(teardownFinished.wait(timeout: .now() + 1) == .success)
+        #expect(recorder.snapshot == ["normal-entered", "normal-returned", "darkened"])
+    }
+
+    @Test("no current device still waits for the shared access lock")
+    func absentDeviceDoesNotBypassLockFence() {
+        let deviceLock = NSLock()
+        let entered = DispatchSemaphore(value: 0)
+        let resourceQuarantine = ProcessLifetimeResourceQuarantine()
+        let worker = BoundedOwnerShutdownWorker<LightingTerminationOwner>(
+            operationTimeout: 0.03,
+            label: "yunaudio.test.lighting-absent-device-lock",
+            resourceQuarantine: resourceQuarantine,
+            quarantineReason: "test absent light ring",
+            operation: { owner, gate in
+                entered.signal()
+                return owner.darken(using: gate)
+            })
+
+        deviceLock.lock()
+        let fence = worker.submit(
+            LightingTerminationOwner(
+                device: nil, deviceLock: deviceLock, renderThread: nil))
+        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(fence.wait(timeout: 0.25) == .timedOut)
+        #expect(worker.telemetry.timedOutAfterEntry == 1)
+        #expect(resourceQuarantine.count == 1)
+        deviceLock.unlock()
+
+        // A return after the deadline cannot weaken the settled ownership claim.
+        #expect(fence.wait(timeout: 0.05) == .timedOut)
+        #expect(fence.completionCount == 1)
+        #expect(resourceQuarantine.count == 1)
+    }
+
+    @Test("an absent-device lock fence preserves before-entry retry")
+    func absentDeviceRetryUsesTheSameOwner() {
+        let workerQueue = DispatchQueue(label: "yunaudio.test.lighting-retry-queue")
+        let queueEntered = DispatchSemaphore(value: 0)
+        let releaseQueue = DispatchSemaphore(value: 0)
+        workerQueue.async {
+            queueEntered.signal()
+            _ = releaseQueue.wait(timeout: .now() + 1)
+        }
+        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+
+        let resourceQuarantine = ProcessLifetimeResourceQuarantine()
+        let worker = BoundedOwnerShutdownWorker<LightingTerminationOwner>(
+            operationTimeout: 0.05,
+            label: "yunaudio.test.lighting-absent-device-retry",
+            resourceQuarantine: resourceQuarantine,
+            quarantineReason: "test queued absent light ring",
+            workerQueue: workerQueue,
+            operation: { $0.darken(using: $1) })
+        let first = worker.submit(
+            LightingTerminationOwner(
+                device: nil, deviceLock: NSLock(), renderThread: nil))
+
+        #expect(first.wait(timeout: 0.2) == .timedOutBeforeEntry)
+        let retry = worker.retryAfterTimeoutBeforeEntry()
+        #expect(retry != nil)
+        releaseQueue.signal()
+        #expect(retry?.wait(timeout: 0.5) == .complete)
+        #expect(worker.telemetry.startedOperations == 1)
+        #expect(worker.telemetry.retriedBeforeEntry == 1)
+        #expect(resourceQuarantine.count == 0)
+    }
+
     @Test("ten idle minutes schedule no light rendering in every mode")
     func inactiveModesHaveZeroLoops() {
         var loops = 0

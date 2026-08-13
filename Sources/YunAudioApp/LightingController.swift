@@ -80,6 +80,60 @@ final class LightingRenderState: @unchecked Sendable {
     }
 }
 
+/// Revokes every normal HID caller before teardown waits for the device lock.
+///
+/// A generation check made before `deviceLock.lock()` is too early: an outgoing
+/// frame can wait there while Quit darkens the ring, then acquire the lock and
+/// put the old frame back. `perform` deliberately validates only after taking
+/// that lock. A caller already inside a synchronous HID call may finish, but the
+/// teardown operation is then ordered behind it and remains the final writer.
+final class LightingDeviceAccessGate: @unchecked Sendable {
+    struct Token: Equatable, Sendable {
+        fileprivate let generation: UInt64
+    }
+
+    private let lock = NSLock()
+    private var generation: UInt64 = 0
+    private var acceptsAccess = true
+
+    /// Supersedes queued work without permanently closing normal operation.
+    func advance() -> Token {
+        lock.withLock {
+            generation &+= 1
+            return Token(generation: generation)
+        }
+    }
+
+    /// Captures the current device ownership epoch for a read-only request.
+    func current() -> Token? {
+        lock.withLock {
+            acceptsAccess ? Token(generation: generation) : nil
+        }
+    }
+
+    /// Permanently closes access for this controller before teardown admission.
+    func revoke() {
+        lock.withLock {
+            generation &+= 1
+            acceptsAccess = false
+        }
+    }
+
+    /// Runs one normal operation only if its epoch is current after lock acquisition.
+    func perform<Result>(
+        _ token: Token, deviceLock: NSLock, operation: () -> Result
+    ) -> Result? {
+        deviceLock.lock()
+        defer { deviceLock.unlock() }
+        guard accepts(token) else { return nil }
+        return operation()
+    }
+
+    private func accepts(_ token: Token) -> Bool {
+        lock.withLock { acceptsAccess && generation == token.generation }
+    }
+}
+
 /// Everything one background render loop owns.
 ///
 /// The device itself is not `Sendable`; this box is, because every access to it
@@ -89,16 +143,22 @@ final class LightingRenderState: @unchecked Sendable {
 private final class LightingRenderWorker: @unchecked Sendable {
     private let device: RazerDevice
     private let deviceLock: NSLock
+    private let accessGate: LightingDeviceAccessGate
+    private let accessToken: LightingDeviceAccessGate.Token
     private let state: LightingRenderState
     private let generation: Int
     private let frameInterval: TimeInterval
 
     init(
-        device: RazerDevice, deviceLock: NSLock, state: LightingRenderState,
-        generation: Int, frameInterval: TimeInterval
+        device: RazerDevice, deviceLock: NSLock,
+        accessGate: LightingDeviceAccessGate,
+        accessToken: LightingDeviceAccessGate.Token,
+        state: LightingRenderState, generation: Int, frameInterval: TimeInterval
     ) {
         self.device = device
         self.deviceLock = deviceLock
+        self.accessGate = accessGate
+        self.accessToken = accessToken
         self.state = state
         self.generation = generation
         self.frameInterval = frameInterval
@@ -124,9 +184,14 @@ private final class LightingRenderWorker: @unchecked Sendable {
             if frameGate.shouldSend(colours) {
                 let frame = RazerLightingCommand.frame(
                     colours, transactionID: UInt8(step % 0x1F))
-                delivered = deviceLock.withLock {
-                    (try? device.send(frame)) == .success
-                }
+                guard
+                    let admitted = accessGate.perform(
+                        accessToken, deviceLock: deviceLock,
+                        operation: {
+                            (try? device.send(frame)) == .success
+                        })
+                else { return }
+                delivered = admitted
                 // A busy or failed request did not put these pixels on the
                 // hardware. Retry even if the image is unchanged, but not at
                 // video rate: a missing device otherwise makes 1,800 blocking
@@ -155,6 +220,145 @@ private final class LightingDiscoveryResult: @unchecked Sendable {
 
     init(device: RazerDevice?) {
         self.device = device
+    }
+}
+
+/// One immutable desired HID state owned by the normal-operation lane.
+private final class LightingCommandRequest: @unchecked Sendable {
+    let device: RazerDevice
+    let deviceLock: NSLock
+    let accessGate: LightingDeviceAccessGate
+    let accessToken: LightingDeviceAccessGate.Token
+    let generation: Int
+    let mode: LightingMode
+    let colour: RazerRing.Colour
+    let brightness: UInt8
+    let isSignalActive: Bool
+
+    init(
+        device: RazerDevice, deviceLock: NSLock,
+        accessGate: LightingDeviceAccessGate,
+        accessToken: LightingDeviceAccessGate.Token, generation: Int,
+        mode: LightingMode, colour: RazerRing.Colour, brightness: UInt8,
+        isSignalActive: Bool
+    ) {
+        self.device = device
+        self.deviceLock = deviceLock
+        self.accessGate = accessGate
+        self.accessToken = accessToken
+        self.generation = generation
+        self.mode = mode
+        self.colour = colour
+        self.brightness = brightness
+        self.isSignalActive = isSignalActive
+    }
+}
+
+private final class LightingCommandResult: @unchecked Sendable {
+    let request: LightingCommandRequest
+    let error: String?
+    let enteredDeviceAccess: Bool
+
+    init(
+        request: LightingCommandRequest, error: String?, enteredDeviceAccess: Bool
+    ) {
+        self.request = request
+        self.error = error
+        self.enteredDeviceAccess = enteredDeviceAccess
+    }
+}
+
+private enum LightingNormalOperation {
+    static func apply(_ request: LightingCommandRequest) -> LightingCommandResult {
+        var commandError: String?
+        let enteredDeviceAccess =
+            request.accessGate.perform(
+                request.accessToken, deviceLock: request.deviceLock
+            ) {
+                do {
+                    guard request.mode != .off else {
+                        _ = try request.device.send(RazerLightingCommand.brightness(0))
+                        return
+                    }
+                    guard request.mode == .solid || request.isSignalActive else {
+                        _ = try request.device.send(RazerLightingCommand.brightness(0))
+                        return
+                    }
+                    _ = try request.device.send(RazerLightingCommand.streamMode())
+                    _ = try request.device.send(
+                        RazerLightingCommand.brightness(request.brightness))
+                    if request.mode == .solid {
+                        _ = try request.device.send(
+                            RazerLightingCommand.frame(
+                                LightingController.frame(
+                                    mode: request.mode, colour: request.colour,
+                                    level: 0, isMuted: false, step: 0),
+                                transactionID: 0))
+                    }
+                } catch {
+                    commandError = String(describing: error)
+                }
+            } != nil
+        return LightingCommandResult(
+            request: request, error: commandError,
+            enteredDeviceAccess: enteredDeviceAccess)
+    }
+}
+
+private final class LightingFrameReadRequest: @unchecked Sendable {
+    let device: RazerDevice
+    let deviceLock: NSLock
+    let accessGate: LightingDeviceAccessGate
+    let accessToken: LightingDeviceAccessGate.Token
+
+    init(
+        device: RazerDevice, deviceLock: NSLock,
+        accessGate: LightingDeviceAccessGate,
+        accessToken: LightingDeviceAccessGate.Token
+    ) {
+        self.device = device
+        self.deviceLock = deviceLock
+        self.accessGate = accessGate
+        self.accessToken = accessToken
+    }
+}
+
+/// A detached HID owner plus the render loop which may still be inside it.
+///
+/// The render generation is revoked before this capsule is made. Retaining the
+/// thread and lock is still essential: a timed-out `IOHIDDeviceSetReport` may
+/// be holding that lock and the thread's worker still has the same device.
+final class LightingTerminationOwner: @unchecked Sendable {
+    private let device: RazerDevice?
+    private let deviceLock: NSLock
+    private let renderThread: Thread?
+
+    init(device: RazerDevice?, deviceLock: NSLock, renderThread: Thread?) {
+        self.device = device
+        self.deviceLock = deviceLock
+        self.renderThread = renderThread
+    }
+
+    func darken(using gate: OwnedResourceShutdownGate) -> Bool {
+        withExtendedLifetime(renderThread) {
+            var acquired = false
+            let lockCompleted = gate.perform {
+                deviceLock.lock()
+                acquired = true
+                return true
+            }
+            guard lockCompleted == true else {
+                // The lock was eventually acquired after the deadline. Give it
+                // back without beginning the HID round trip.
+                if acquired { deviceLock.unlock() }
+                return false
+            }
+            defer { deviceLock.unlock() }
+            guard let device else { return true }
+            return gate.perform {
+                (try? device.send(RazerLightingCommand.brightness(0))) == .success
+            } ?? false
+        }
     }
 }
 
@@ -253,7 +457,9 @@ final class LightingController {
     private var device: RazerDevice?
     private var thread: Thread?
     private let renderState = LightingRenderState()
+    private let deviceAccessGate = LightingDeviceAccessGate()
     private var isSignalActive = false
+    private var isTerminating = false
     @ObservationIgnored private var discoveryGate = LatestRefreshGate()
     private static let discoveryQueue = DispatchQueue(
         label: "com.yuhuanstudio.yunaudio.lighting-discovery", qos: .utility)
@@ -266,18 +472,51 @@ final class LightingController {
     /// for a ring that was working. Contention is one HID round trip, about a
     /// millisecond, and nothing here is realtime.
     private let deviceLock = NSLock()
+    @ObservationIgnored private lazy var commandLane =
+        LatestExternalWorkLane<LightingCommandRequest, LightingCommandResult>(
+            queue: DispatchQueue(
+                label: "com.yuhuanstudio.yunaudio.lighting-control", qos: .utility),
+            apply: LightingNormalOperation.apply,
+            publish: { [weak self] result in self?.finishNormalOperation(result) })
+    @ObservationIgnored private lazy var frameReadLane =
+        LatestExternalWorkLane<LightingFrameReadRequest, [UInt8]?>(
+            queue: DispatchQueue(
+                label: "com.yuhuanstudio.yunaudio.lighting-read", qos: .utility),
+            apply: { request in
+                guard
+                    let frame = request.accessGate.perform(
+                        request.accessToken, deviceLock: request.deviceLock,
+                        operation: { () -> [UInt8]? in
+                            guard
+                                let bytes = try? request.device.readFeatureReport(
+                                    id: 0x07, size: 63),
+                                bytes.count >= 50
+                            else { return nil }
+                            return Array(bytes[14..<50])
+                        })
+                else { return nil }
+                return frame
+            },
+            publish: { [weak self] frame in self?.lastFrameRead = frame })
+    @ObservationIgnored private var lastFrameRead: [UInt8]?
+    @ObservationIgnored private let terminationWorker =
+        BoundedOwnerShutdownWorker<LightingTerminationOwner>(
+            label: "com.yuhuanstudio.yunaudio.lighting-shutdown",
+            quarantineReason: "light ring teardown is unresolved",
+            operation: { $0.darken(using: $1) })
+    @ObservationIgnored private var terminationFence: OwnedResourceTeardownFence?
 
     init() {}
 
     /// Performs an explicit, deterministic rescan for the settings action.
     func refreshDevice() {
-        discoveryGate.invalidate()
-        applyDiscoveredDevice(RazerDevice.discover().first)
+        refreshDeviceAsynchronously()
     }
 
     /// Discovers the optional HID device without delaying the application's
     /// first MainActor frame.
     func refreshDeviceAsynchronously() {
+        guard !isTerminating else { return }
         guard let token = discoveryGate.request() else { return }
         runDeviceDiscovery(token)
     }
@@ -285,7 +524,7 @@ final class LightingController {
     private func runDeviceDiscovery(_ token: LatestRefreshGate.Token) {
         Self.discoveryQueue.async {
             let result = LightingDiscoveryResult(device: RazerDevice.discover().first)
-            Task { @MainActor in
+            MainRunLoopDelivery.perform {
                 self.finishDeviceDiscovery(result, token: token)
             }
         }
@@ -294,7 +533,7 @@ final class LightingController {
     private func finishDeviceDiscovery(
         _ result: LightingDiscoveryResult, token: LatestRefreshGate.Token
     ) {
-        guard discoveryGate.accepts(token) else { return }
+        guard !isTerminating, discoveryGate.accepts(token) else { return }
         applyDiscoveredDevice(result.device)
         if case .start(let next) = discoveryGate.finish(token) {
             runDeviceDiscovery(next)
@@ -304,10 +543,11 @@ final class LightingController {
     /// Publishes only an already-discovered object on the MainActor.
     private func applyDiscoveredDevice(_ discoveredDevice: RazerDevice?) {
         renderState.advanceGeneration()
+        _ = deviceAccessGate.advance()
         thread = nil
-        deviceLock.withLock {
-            device = discoveredDevice
-        }
+        frameReadLane.invalidate()
+        lastFrameRead = nil
+        device = discoveredDevice
         let available = discoveredDevice != nil
         if isAvailable != available { isAvailable = available }
         if available {
@@ -352,81 +592,81 @@ final class LightingController {
         if mode == .level || mode == .spectrum { restart() }
     }
 
-    func stop() {
+    /// Invalidates every renderer and hands the HID owner to one bounded lane.
+    ///
+    /// No device lock or IOKit call is made on MainActor. If an outgoing frame
+    /// is already stuck while holding the lock, the worker times out and keeps
+    /// the device, lock and render thread together for the process lifetime.
+    func requestTerminationStop() -> OwnedResourceTeardownFence {
+        if let terminationFence {
+            guard terminationFence.result?.permitsSameOwnerRetry == true,
+                let retry = terminationWorker.retryAfterTimeoutBeforeEntry()
+            else { return terminationFence }
+            self.terminationFence = retry
+            return retry
+        }
+        isTerminating = true
+        deviceAccessGate.revoke()
+        discoveryGate.invalidate()
+        commandLane.shutdown()
+        frameReadLane.shutdown()
         renderState.advanceGeneration()
+        isSignalActive = false
+        isAvailable = false
+        let renderThread = thread
         thread = nil
-        guard let device else { return }
-        // Left dark rather than holding the last frame: a ring stuck on a
-        // colour after the application quit would look like a fault.
-        deviceLock.lock()
-        defer { deviceLock.unlock() }
-        _ = try? device.send(RazerLightingCommand.brightness(0))
+        let device = device
+        self.device = nil
+        let fence = terminationWorker.submit(
+            LightingTerminationOwner(
+                device: device, deviceLock: deviceLock, renderThread: renderThread))
+        terminationFence = fence
+        return fence
     }
 
     private func applyBrightness() {
-        guard let device,
-            Self.shouldApplyBrightness(mode: mode, isSignalActive: isSignalActive)
+        guard Self.shouldApplyBrightness(mode: mode, isSignalActive: isSignalActive)
         else { return }
-        deviceLock.lock()
-        defer { deviceLock.unlock() }
-        _ = try? device.send(RazerLightingCommand.brightness(brightness))
+        requestConfiguration()
     }
 
     private func restart() {
-        let generation = renderState.advanceGeneration()
+        guard !isTerminating else { return }
         thread = nil
-        guard let device else { return }
+        requestConfiguration()
+    }
 
-        deviceLock.lock()
-        defer { deviceLock.unlock() }
+    private func requestConfiguration() {
+        guard !isTerminating, let device else { return }
+        let generation = renderState.advanceGeneration()
+        let accessToken = deviceAccessGate.advance()
+        _ = commandLane.submit(
+            LightingCommandRequest(
+                device: device, deviceLock: deviceLock,
+                accessGate: deviceAccessGate, accessToken: accessToken,
+                generation: generation,
+                mode: mode, colour: colour, brightness: brightness,
+                isSignalActive: isSignalActive))
+    }
 
-        guard mode != .off else {
-            _ = try? device.send(RazerLightingCommand.brightness(0))
-            return
-        }
-        if mode == .solid {
-            do {
-                _ = try device.send(RazerLightingCommand.streamMode())
-                _ = try device.send(RazerLightingCommand.brightness(brightness))
-                _ = try device.send(
-                    RazerLightingCommand.frame(
-                        Self.frame(
-                            mode: mode, colour: colour, level: 0,
-                            isMuted: false, step: 0),
-                        transactionID: 0))
-                lastError = nil
-            } catch {
-                lastError = String(describing: error)
-            }
-            return
-        }
-        guard
+    private func finishNormalOperation(_ result: LightingCommandResult) {
+        guard !isTerminating, result.enteredDeviceAccess,
+            device === result.request.device
+        else { return }
+        lastError = result.error
+        guard result.error == nil,
             let frameInterval = Self.workerInterval(
-                mode: mode, isSignalActive: isSignalActive
-            )
-        else {
-            // Animated modes with no route are absence of signal, not the last
-            // frame that happened to arrive before Stop.
-            _ = try? device.send(RazerLightingCommand.brightness(0))
-            return
-        }
-
-        do {
-            _ = try device.send(RazerLightingCommand.streamMode())
-            _ = try device.send(RazerLightingCommand.brightness(brightness))
-            lastError = nil
-        } catch {
-            lastError = String(describing: error)
-            return
-        }
-
+                mode: result.request.mode,
+                isSignalActive: result.request.isSignalActive)
+        else { return }
         let worker = LightingRenderWorker(
-            device: device, deviceLock: deviceLock, state: renderState,
-            generation: generation, frameInterval: frameInterval)
+            device: result.request.device, deviceLock: deviceLock,
+            accessGate: deviceAccessGate,
+            accessToken: result.request.accessToken,
+            state: renderState, generation: result.request.generation,
+            frameInterval: frameInterval)
         let thread = Thread { worker.run() }
         thread.name = "com.yuhuanstudio.yunaudio.lighting"
-        // Below the audio threads and above nothing: a late frame is a late
-        // frame, and this must never compete with the IO cycle.
         thread.qualityOfService = .utility
         thread.start()
         self.thread = thread
@@ -456,17 +696,14 @@ final class LightingController {
     /// it: the device keeps the last frame it was given, so two reads a moment
     /// apart say whether anything is moving.
     func currentFrame() -> [UInt8]? {
-        guard let device else { return nil }
-        // 64 including the report id, as the frame is written.
-        deviceLock.lock()
-        defer { deviceLock.unlock() }
-        guard let bytes = try? device.readFeatureReport(id: 0x07, size: 63),
-            bytes.count >= 50
+        guard !isTerminating, let device,
+            let accessToken = deviceAccessGate.current()
         else { return nil }
-        // The device returns the report id as byte 0, so the buffer it hands
-        // back has the same layout as the one that was written: nine bytes of
-        // header, then the five-byte prefix, then the twelve triples at 14.
-        return Array(bytes[14..<50])
+        _ = frameReadLane.submit(
+            LightingFrameReadRequest(
+                device: device, deviceLock: deviceLock,
+                accessGate: deviceAccessGate, accessToken: accessToken))
+        return lastFrameRead
     }
 
     /// Dispatches to the ring renderer, which lives beside the protocol

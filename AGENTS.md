@@ -65,9 +65,14 @@ Then:
 
 ```bash
 swift build && swift test           # the whole suite
-"$(xcrun --find swift-format)" lint --recursive Sources Tests
+"$(xcrun --find swift-format)" lint --strict --recursive Sources Tests
 "$(xcrun --find swift-format)" format --in-place --recursive Sources Tests
 ```
+
+`swift test` is safe on an everyday machine: eight live-HAL cases remain in
+the inventory but are disabled by default. Only an explicitly authorised
+isolated run may set `YUNAUDIO_LIVE_HAL_TESTS=1`; `App/verify.sh --full` is the
+ordinary way to request that evidence.
 
 `swift-format` is in the Xcode toolchain rather than on `PATH`; that is why the
 invocation goes through `xcrun`. Line length 96, four spaces, and
@@ -105,6 +110,11 @@ YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp  # real 
   to look at them was to install the app, which meant nobody did.
 - **Screenshot** photographs the actual window at its minimum size, including
   the title bar. An offscreen render structurally cannot show that.
+  Writing every PNG is not completion: after the capture writes its completion
+  marker, the application has five seconds to terminate normally. A process
+  stuck releasing CoreAudio used to be killed and accepted because the images
+  already existed — exactly the shutdown failure that can leave the system
+  Sound menu spinning.
   Note what neither of them covers: `MainWindow.column` takes an `isRendering`
   branch that **skips the scroll view entirely**, so nothing the scroll view
   contributes — the fade at the bottom of a column, where the clip lands — is
@@ -114,9 +124,11 @@ YUNAUDIO_SCREENSHOT=out ./build/YunAudio.app/Contents/MacOS/YunAudioApp  # real 
   people actually work at. If you add something to that branch's shadow, assert
   it directly — `ScrollFadeTests` renders the modifier itself at two heights.
 - **`--verify`** copies the app elsewhere, moves the build tree out of reach and
-  runs it. `Bundle.module` falls back to the build directory, so an app that
-  never copied its resource bundle in works perfectly on the machine that built
-  it and dies on launch everywhere else.
+  runs a model-free resource probe. `Bundle.module` falls back to the build
+  directory, so an app that never copied its resource bundle in works perfectly
+  on the machine that built it and dies on launch everywhere else. The probe
+  constructs no router and touches no audio hardware; a trap restores the build
+  tree after success, failure or interruption.
 - **`check-strings.sh`** fails on any user-facing literal that never went
   through `loc()`. A wrapped literal looks exactly like an unwrapped one; four
   survived every other check, including the entire preferences sidebar sitting
@@ -239,9 +251,10 @@ What it does, and why each is not redundant with the others:
 | step | what only it can catch |
 |---|---|
 | `swift build` | it compiles — and nothing after this means anything without it, so a failure stops the run |
+| strict `swift-format` | source and documentation comments match the repository's checked-in style contract |
 | `swift test` | the arithmetic, and every rule that can be a pure function |
 | `check-strings.sh` | a literal that never reaches a translator, a duplicate key, a `%@` lost in translation |
-| `build-app.sh` | the bundle is assembled — resources, translations, the driver |
+| `build-app.sh --verify` | the bundle is assembled and every resource loads with the build tree hidden |
 | offscreen render | colour and spacing, in both appearances, on every panel |
 | **photograph the real window** | the title bar, clipping at the minimum size, whether a control is *missing*, whether a row of six fits |
 | flow check (`--full`) | real devices, real routes, real audio |

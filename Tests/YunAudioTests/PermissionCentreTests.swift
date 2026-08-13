@@ -7,6 +7,88 @@ import Testing
 
 @Suite("Permission centre")
 struct PermissionCentreTests {
+    @MainActor
+    @Test("synthetic permission centres submit exactly zero system probes")
+    func syntheticStatusDiscoveryPolicy() {
+        var ownerConstructions = 0
+        var probeSubmissions = 0
+        let centre = PermissionCentre(
+            startupPolicy: AppStartup.ModelPolicy(kind: .syntheticEvidence),
+            makeSafeStatusService: { _ in
+                ownerConstructions += 1
+                return PermissionCentre.SafeStatusService(
+                    submit: { _ in
+                        probeSubmissions += 1
+                        return true
+                    },
+                    invalidate: {},
+                    shutdown: {})
+            })
+
+        centre.refreshSafeStatuses()
+        centre.refreshSafeStatuses()
+
+        #expect(ownerConstructions == 0)
+        #expect(probeSubmissions == 0)
+        #expect(centre.safeStatusProbeSubmissions == 0)
+    }
+
+    @MainActor
+    @Test("synthetic permission controls retain zero prompt ownership")
+    func syntheticPromptPolicy() {
+        let centre = PermissionCentre(
+            startupPolicy: AppStartup.ModelPolicy(kind: .syntheticEvidence),
+            makeSafeStatusService: { _ in
+                Issue.record("synthetic policy constructed a system-service owner")
+                return PermissionCentre.SafeStatusService(
+                    submit: { _ in true }, invalidate: {}, shutdown: {})
+            })
+        var completions = 0
+
+        #expect(!centre.requestAll { completions += 1 })
+        centre.requestMicrophone()
+        centre.requestSystemAudio()
+        centre.requestAutomation(for: "com.apple.Music")
+        centre.openSettings(.microphone)
+
+        #expect(completions == 1)
+        #expect(centre.requestInFlightCountForDiagnostics == 0)
+        #expect(centre.safeStatusProbeSubmissions == 0)
+    }
+
+    @MainActor
+    @Test("authorised permission centres retain launch and explicit refresh probes")
+    func authorisedStatusDiscoveryPolicy() {
+        for kind in [
+            AppStartup.ModelPolicy.Kind.production,
+            AppStartup.ModelPolicy.Kind.liveVerification,
+        ] {
+            var ownerConstructions = 0
+            var probeSubmissions = 0
+            let centre = PermissionCentre(
+                startupPolicy: AppStartup.ModelPolicy(kind: kind),
+                makeSafeStatusService: { _ in
+                    ownerConstructions += 1
+                    return PermissionCentre.SafeStatusService(
+                        submit: { _ in
+                            probeSubmissions += 1
+                            return true
+                        },
+                        invalidate: {},
+                        shutdown: {})
+                })
+
+            #expect(ownerConstructions == 1)
+            #expect(probeSubmissions == 1)
+            #expect(centre.safeStatusProbeSubmissions == 1)
+
+            centre.refreshSafeStatuses()
+            #expect(ownerConstructions == 1)
+            #expect(probeSubmissions == 2)
+            #expect(centre.safeStatusProbeSubmissions == 2)
+        }
+    }
+
     @Test("microphone status maps without opening a capture device")
     func microphoneStates() {
         #expect(PermissionCentre.microphoneState(.authorized) == .allowed)
@@ -260,7 +342,8 @@ struct PermissionCentreTests {
 
         #expect(request.contains("guard tapID != kAudioObjectUnknown"))
         #expect(request.contains("status == noErr ? kAudioHardwareUnspecifiedError : status"))
-        #expect(request.ranges(of: "AudioHardwareDestroyProcessTap(tapID)").count == 1)
+        #expect(request.contains("requestRawDestruction("))
+        #expect(request.contains("status == noErr ? destroyStatus : status"))
     }
 
     @Test("all three TCC prompts ship in every interface language")

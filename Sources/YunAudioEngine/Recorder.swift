@@ -14,9 +14,26 @@ import YunAudioRT
 /// recording something subtly different would make the file useless as evidence
 /// of what was sent.
 /// `@unchecked Sendable` because the writer thread and the caller genuinely
-/// share it: the stop flag is behind a lock, `framesWritten` is only ever
-/// written by the writer, and the ring is lock-free by construction.
+/// share it: mutable lifecycle and progress state is behind locks, and the
+/// ring is lock-free by construction.
 public final class Recorder: @unchecked Sendable {
+    static let maximumChannelCount = 64
+    /// Thirty-two MiB of float storage. Four seconds of 384 kHz stereo fits;
+    /// a corrupt format cannot turn one recorder into a multi-gigabyte request.
+    static let maximumRingSamples = 8 * 1_024 * 1_024
+    /// File progress and failure from one writer-thread observation.
+    public struct ProgressSnapshot: Sendable, Equatable {
+        public let framesWritten: Int64
+        public let duration: TimeInterval
+        public let error: String?
+
+        public init(framesWritten: Int64, duration: TimeInterval, error: String?) {
+            self.framesWritten = framesWritten
+            self.duration = duration
+            self.error = error
+        }
+    }
+
     public enum Format: String, CaseIterable, Sendable {
         /// Lossless, and the only choice that keeps a bit-exact path bit-exact.
         case wav
@@ -53,8 +70,30 @@ public final class Recorder: @unchecked Sendable {
     /// Handed to the graph so the IO thread can write without going through
     /// this object, which is a Swift class and must not be touched there.
     public var ringHandle: OpaquePointer { ring }
-    public private(set) var framesWritten: Int64 = 0
-    public private(set) var lastError: String?
+
+    /// Frames durably handed to the file writer.
+    ///
+    /// The writer updates this from its utility thread while the interface
+    /// polls progress. A plain stored property was a data race even though
+    /// there was only one writer.
+    public var framesWritten: Int64 {
+        progressSnapshot.framesWritten
+    }
+
+    /// The terminal file error, when writing stopped early.
+    public var lastError: String? {
+        progressSnapshot.error
+    }
+
+    /// One coherent read of progress and terminal state.
+    public var progressSnapshot: ProgressSnapshot {
+        progressLock.withLock {
+            ProgressSnapshot(
+                framesWritten: storedFramesWritten,
+                duration: sampleRate > 0 ? Double(storedFramesWritten) / sampleRate : 0,
+                error: storedLastError)
+        }
+    }
 
     private let file: AVAudioFile
     private let ring: OpaquePointer
@@ -63,9 +102,25 @@ public final class Recorder: @unchecked Sendable {
     private var writer: Thread?
     private var isStopping = false
     private let stopLock = NSLock()
+    private var storedFramesWritten: Int64 = 0
+    private var storedLastError: String?
+    private let progressLock = NSLock()
     private let writerWake = DispatchSemaphore(value: 0)
     private let writerReady = DispatchSemaphore(value: 0)
-    private let writerFinished = DispatchSemaphore(value: 0)
+    private let writerFinished = DispatchGroup()
+
+    /// Exact float-ring storage for one admitted writer.
+    static func ringSampleCapacity(sampleRate: Double, channels: Int) -> Int? {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate),
+            (1...Self.maximumChannelCount).contains(channels)
+        else { return nil }
+        let requested = sampleRate * 4 * Double(channels)
+        guard requested.isFinite,
+            let capacity = Int(exactly: requested.rounded(.up)),
+            capacity > 0, capacity <= Self.maximumRingSamples
+        else { return nil }
+        return capacity
+    }
 
     /// - Parameters:
     ///   - directory: Where the file goes. The caller owns the choice so the
@@ -83,7 +138,13 @@ public final class Recorder: @unchecked Sendable {
         directory: URL, format: Format, channels: Int, sampleRate: Double,
         timestamp: Date, name: String? = nil
     ) throws {
-        self.channels = max(1, channels)
+        guard
+            let admittedCapacity = Self.ringSampleCapacity(
+                sampleRate: sampleRate, channels: channels),
+            let capacity = UInt32(exactly: admittedCapacity)
+        else { throw RecorderError.couldNotAllocate }
+
+        self.channels = channels
         self.sampleRate = sampleRate
 
         let stamp = DateFormatter()
@@ -122,7 +183,6 @@ public final class Recorder: @unchecked Sendable {
 
         // Four seconds of headroom. The writer wakes ten times a second, so this
         // survives a long stall on the file system without losing audio.
-        let capacity = UInt32(sampleRate * 4) * UInt32(self.channels)
         guard let ring = yun_rt_ring_create(capacity) else {
             throw RecorderError.couldNotAllocate
         }
@@ -130,10 +190,11 @@ public final class Recorder: @unchecked Sendable {
 
         let thread = Thread { [weak self] in
             self?.drain()
-            self?.writerFinished.signal()
+            self?.writerFinished.leave()
         }
         thread.name = "com.yuhuanstudio.yunaudio.recorder"
         thread.qualityOfService = .utility
+        writerFinished.enter()
         thread.start()
         writer = thread
     }
@@ -145,22 +206,43 @@ public final class Recorder: @unchecked Sendable {
     /// as the recording.
     @inline(__always)
     public func write(_ samples: UnsafePointer<Float>, count: Int) {
-        _ = yun_rt_ring_write(ring, samples, UInt32(count))
+        guard let count = UInt32(exactly: count) else { return }
+        _ = yun_rt_ring_write(ring, samples, count)
+    }
+
+    /// Tells the writer to drain and exit without waiting for storage.
+    ///
+    /// Split from the join so every stem can be woken before a slow file is
+    /// awaited. Only the recording finalisation lane calls the two halves
+    /// separately; ordinary callers retain the synchronous `stop()` contract.
+    func requestStop() {
+        let shouldWake = stopLock.withLock {
+            guard writer != nil else { return false }
+            isStopping = true
+            return true
+        }
+        if shouldWake { writerWake.signal() }
+    }
+
+    /// Joins a requested stop only until the caller's monotonic deadline.
+    ///
+    /// False means the recorder still owns its ring and writer. Its caller must
+    /// retain the recorder; releasing it would turn a storage timeout into an
+    /// IO-thread use-after-free.
+    func joinWriter(until deadline: DispatchTime) -> Bool {
+        guard stopLock.withLock({ writer != nil }) else { return true }
+        guard writerFinished.wait(timeout: deadline) == .success else { return false }
+        stopLock.withLock { writer = nil }
+        return true
     }
 
     public func stop() {
-        guard writer != nil else { return }
-        stopLock.lock()
-        isStopping = true
-        stopLock.unlock()
+        requestStop()
         // The writer normally sleeps for 100 ms between empty reads. Waking it
         // directly makes an idle stop immediate without raising its permanent
         // wake rate, and the completion semaphore is a real join rather than a
         // 20 ms polling loop on whichever thread asked to stop.
-        Self.wakeWriterAndJoin(
-            signal: { self.writerWake.signal() },
-            wait: { self.writerFinished.wait() })
-        writer = nil
+        _ = joinWriter(until: .distantFuture)
     }
 
     /// Makes the ordering testable without asking wall-clock scheduling to
@@ -227,9 +309,13 @@ public final class Recorder: @unchecked Sendable {
             }
             do {
                 try file.write(from: buffer)
-                framesWritten += Int64(frames)
+                progressLock.lock()
+                storedFramesWritten += Int64(frames)
+                progressLock.unlock()
             } catch {
-                lastError = error.localizedDescription
+                progressLock.lock()
+                storedLastError = error.localizedDescription
+                progressLock.unlock()
                 break
             }
         }
@@ -237,6 +323,9 @@ public final class Recorder: @unchecked Sendable {
 
     /// Samples the realtime side had to drop because the writer fell behind.
     public var droppedSamples: UInt64 { yun_rt_ring_dropped(ring) }
+
+    /// Samples the realtime producer offered to this recorder's ring.
+    public var producedSamples: UInt64 { UInt64(yun_rt_ring_written(ring)) }
 
     /// An application's name can contain anything, including a path separator.
     public static func sanitised(_ name: String) -> String {
@@ -247,7 +336,7 @@ public final class Recorder: @unchecked Sendable {
     }
 
     public var duration: TimeInterval {
-        sampleRate > 0 ? Double(framesWritten) / sampleRate : 0
+        progressSnapshot.duration
     }
 }
 

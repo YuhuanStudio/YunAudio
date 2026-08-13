@@ -3,6 +3,18 @@ import Foundation
 import YunAudioHAL
 import YunAudioRT
 
+/// Observable shutdown result for the process-tap half of echo cancellation.
+public enum FarEndCaptureTeardownResult: Sendable, Equatable {
+    case complete
+    case ioProcStopFailed(OSStatus)
+    case ioProcDestroyFailed(OSStatus)
+    case ioProcTimedOut(step: AudioIOProcTeardownStep)
+    case aggregate(HALDestructionResult)
+    case processTap(uid: String, result: HALDestructionResult)
+
+    public var isComplete: Bool { self == .complete }
+}
+
 /// What the far end is saying, taken straight from the conferencing
 /// application, so echo cancellation has something real to cancel.
 ///
@@ -36,15 +48,20 @@ public final class FarEndCapture: @unchecked Sendable {
     private struct Context {
         var ring: OpaquePointer
         var scratch: UnsafeMutablePointer<Float>
-        var scratchCapacity: Int32
+        var scratchCapacity: UInt32
+        var callbacks: OpaquePointer
     }
 
     private let tap: ProcessTap
     private let aggregate: AggregateDevice
     private let context: UnsafeMutablePointer<Context>
     private let ring: OpaquePointer
+    private let callbacks: OpaquePointer
     private var procID: AudioDeviceIOProcID?
+    private var ioProcTeardownState = AudioIOProcTeardownState()
     private var isRunning = false
+    private var isFullyTornDown = false
+    public private(set) var lastTeardownResult: FarEndCaptureTeardownResult?
 
     /// Rate the tap delivers at. The canceller has to run at the same rate;
     /// resampling here would mean cancelling a signal that no longer lines up
@@ -62,40 +79,91 @@ public final class FarEndCapture: @unchecked Sendable {
     ///   - ringSeconds: How much slack the ring carries between the two IO
     ///     threads. A quarter second is far more than the few milliseconds of
     ///     jitter expected, and costs 48 kB.
-    public init?(
+    public convenience init?(
         processIDs: [AudioObjectID],
         muteBehavior: TapMuteBehavior = .mutedWhenTapped,
         ringSeconds: Double = 0.25
     ) {
+        self.init(
+            processIDs: processIDs, muteBehavior: muteBehavior,
+            ringSeconds: ringSeconds, constructionContext: nil)
+    }
+
+    /// Route construction passes its cancellation boundary so a process-tap
+    /// retry or aggregate creation cannot begin after the caller timed out.
+    init?(
+        processIDs: [AudioObjectID],
+        muteBehavior: TapMuteBehavior,
+        ringSeconds: Double = 0.25,
+        constructionContext: AudioUnitConstructionContext?
+    ) {
         guard !processIDs.isEmpty,
-            let tap = try? ProcessTap(processIDs: processIDs, muteBehavior: muteBehavior)
+            EchoCancellationCapacityPolicy.isValidRingSeconds(ringSeconds),
+            constructionContext?.mayBeginOperation ?? true,
+            let tap = try? ProcessTap(
+                processIDs: processIDs, muteBehavior: muteBehavior,
+                retryAdmission: { constructionContext?.mayBeginOperation ?? true })
         else { return nil }
+        constructionContext?.record(.processTap)
+        guard constructionContext?.mayBeginOperation ?? true else {
+            constructionContext?.retainAfterCancellation(tap)
+            return nil
+        }
         self.tap = tap
 
         // Unknown is not 48 kHz. Treating a missing format as that convenient
         // default would let this ring pass the rate contract with no evidence
         // that its frames use the same clock as the canceller.
         guard let format = tap.format,
-            format.mSampleRate.isFinite, format.mSampleRate > 0,
-            Self.supportsTapFormat(format)
+            Self.supportsTapFormat(format),
+            let allocation = EchoCancellationCapacityPolicy.ringAllocation(
+                sampleRate: format.mSampleRate,
+                seconds: ringSeconds,
+                requestedSliceFrames:
+                    AudioProcessingContract.maximumFramesPerSlice,
+                sourceChannels: format.mChannelsPerFrame)
         else { return nil }
         sampleRate = format.mSampleRate
         sourceChannels = Int(format.mChannelsPerFrame)
 
-        guard
-            let aggregate = try? AggregateDevice(
-                name: "YunAudio Far End", tapsOnly: [tap])
-        else { return nil }
+        guard constructionContext?.mayBeginOperation ?? true else {
+            constructionContext?.retainAfterCancellation(tap)
+            return nil
+        }
+        let aggregate = try? AggregateDevice(
+            name: "YunAudio Far End", tapsOnly: [tap])
+        guard let aggregate else {
+            if constructionContext?.mayBeginOperation == false {
+                constructionContext?.retainAfterCancellation(tap)
+            }
+            return nil
+        }
+        constructionContext?.record(.aggregate)
+        guard constructionContext?.mayBeginOperation ?? true else {
+            constructionContext?.retainAfterCancellation(aggregate)
+            constructionContext?.retainAfterCancellation(tap)
+            return nil
+        }
         self.aggregate = aggregate
 
-        guard let ring = yun_rt_ring_create(UInt32(sampleRate * ringSeconds)) else {
+        guard constructionContext?.mayBeginOperation ?? true else {
+            constructionContext?.retainAfterCancellation(aggregate)
+            constructionContext?.retainAfterCancellation(tap)
+            return nil
+        }
+        guard let ring = yun_rt_ring_create(allocation.ringFrames) else {
             return nil
         }
         self.ring = ring
+        guard let callbacks = yun_rt_counter_create(0) else {
+            yun_rt_ring_free(ring)
+            return nil
+        }
+        self.callbacks = callbacks
 
         // Sized for a generous block; the IOProc refuses to write more than
         // this rather than growing a buffer on the realtime thread.
-        let scratchCapacity = 8192
+        let scratchCapacity = allocation.scratchFrames
         let scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         scratch.initialize(repeating: 0, count: scratchCapacity)
 
@@ -103,7 +171,8 @@ public final class FarEndCapture: @unchecked Sendable {
         context.initialize(
             to: Context(
                 ring: ring, scratch: scratch,
-                scratchCapacity: Int32(scratchCapacity)))
+                scratchCapacity: allocation.scratchFrameCount,
+                callbacks: callbacks))
     }
 
     /// Whether the callback can interpret the tap without conversion.
@@ -114,54 +183,221 @@ public final class FarEndCapture: @unchecked Sendable {
     /// converter before it reached this callback.
     static func supportsTapFormat(_ format: AudioStreamBasicDescription) -> Bool {
         guard format.mFormatID == kAudioFormatLinearPCM,
+            EchoCancellationCapacityPolicy.isValidSampleRate(format.mSampleRate),
             format.mFormatFlags & kAudioFormatFlagIsFloat != 0,
             format.mFormatFlags & kAudioFormatFlagIsPacked != 0,
             format.mFormatFlags & kAudioFormatFlagIsBigEndian == 0,
             format.mBitsPerChannel == 32,
-            format.mChannelsPerFrame > 0
+            EchoCancellationCapacityPolicy.isValidChannelCount(
+                format.mChannelsPerFrame),
+            format.mFramesPerPacket == 1,
+            format.mReserved == 0
         else { return false }
 
         let nonInterleaved =
             format.mFormatFlags & kAudioFormatFlagIsNonInterleaved != 0
-        let expectedBytes =
-            UInt32(MemoryLayout<Float>.size)
-            * (nonInterleaved ? 1 : format.mChannelsPerFrame)
+        guard
+            let expectedBytes = EchoCancellationCapacityPolicy.bytesPerFrame(
+                channels: format.mChannelsPerFrame,
+                nonInterleaved: nonInterleaved)
+        else { return false }
         return format.mBytesPerFrame == expectedBytes
+            && format.mBytesPerPacket == expectedBytes
     }
 
     deinit {
-        stop()
-        if let procID { AudioDeviceDestroyIOProcID(aggregate.id, procID) }
-        aggregate.destroy()
-        tap.destroy()
+        // The bridge already ran the complete lifecycle on the sole bounded
+        // worker. Re-entering aggregate and tap destruction here would put
+        // synchronous HAL IPC back onto whichever thread released the bridge.
+        let result: FarEndCaptureTeardownResult =
+            isFullyTornDown ? .complete : stop()
+        guard result.isComplete else {
+            // A failed callback fence makes bounded leakage the only safe
+            // deinitialisation policy. Keep both HAL owners; the POD callback
+            // context and ring below deliberately remain allocated as well.
+            _ = Unmanaged.passRetained(aggregate).toOpaque()
+            _ = Unmanaged.passRetained(tap).toOpaque()
+            return
+        }
         context.pointee.scratch.deallocate()
         context.deinitialize(count: 1)
         context.deallocate()
+        yun_rt_counter_free(callbacks)
         yun_rt_ring_free(ring)
+    }
+
+    /// Moves a partially built or unselected reference off its releasing thread.
+    ///
+    /// Bridge construction can reject this reference after its tap and private
+    /// aggregate already exist. Letting the local value simply fall out of scope
+    /// would run synchronous HAL removal in `deinit`, including on a route or UI
+    /// caller. The sole lifecycle worker either proves complete teardown or
+    /// retains this entire object in its process quarantine.
+    func disposeAfterFence() {
+        let command = BoundedAudioUnitLifecycleCommand(
+            retaining: self, step: .stop, quarantineOnError: true
+        ) { [self] in
+            stop(until: HALTeardownDeadline(timeout: 2)).isComplete
+                ? noErr : kAudioHardwareUnspecifiedError
+        }
+        BoundedAudioUnitDisposer.shared.disposeAfterFence(command)
     }
 
     public func start() -> Bool {
         guard !isRunning else { return true }
+        guard !isFullyTornDown, procID == nil, ioProcTeardownState.phase == .absent else {
+            return false
+        }
+        lastTeardownResult = nil
 
+        let callbacksBefore = callbackCount
         var created: AudioDeviceIOProcID?
         let status = AudioDeviceCreateIOProcID(
             aggregate.id, Self.ioProc, UnsafeMutableRawPointer(context), &created)
-        guard status == noErr, let created else { return false }
-        procID = created
+        if let created {
+            procID = created
+            ioProcTeardownState.didCreate()
+        }
+        guard status == noErr, let created else {
+            if let created {
+                let result = ioProcTeardownState.tearDown(
+                    stop: { noErr },
+                    destroy: { AudioDeviceDestroyIOProcID(aggregate.id, created) })
+                if result == .complete { procID = nil }
+                if case .destroyFailed(let status) = result {
+                    lastTeardownResult = .ioProcDestroyFailed(status)
+                }
+            }
+            return false
+        }
 
         guard AudioDeviceStart(aggregate.id, created) == noErr else {
-            AudioDeviceDestroyIOProcID(aggregate.id, created)
-            procID = nil
+            let result = ioProcTeardownState.tearDown(
+                stop: { noErr },
+                destroy: { AudioDeviceDestroyIOProcID(aggregate.id, created) })
+            if result == .complete { procID = nil }
+            if case .destroyFailed(let status) = result {
+                lastTeardownResult = .ioProcDestroyFailed(status)
+            }
             return false
         }
         isRunning = true
-        return true
+        ioProcTeardownState.didStart()
+        // `AudioDeviceStart` acknowledges a request; it does not prove that
+        // the tap aggregate delivered anything. Two callback entries are the
+        // same numeric start boundary used by the main router, and distinguish
+        // a silent application from an IOProc which never ran at all.
+        let deadline = DispatchTime.now() + .milliseconds(750)
+        while DispatchTime.now() < deadline {
+            if Self.startWasProven(
+                callbacksBefore: callbacksBefore,
+                callbacksAfter: callbackCount)
+            {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+
+        // Keep the aggregate and tap owned for the bridge's ordinary Stop, but
+        // fence this unproven callback before allowing blind AEC to continue.
+        let cleanupDeadline = HALTeardownDeadline(timeout: 2)
+        let result = ioProcTeardownState.tearDown(
+            stop: {
+                cleanupDeadline.perform {
+                    AudioDeviceStop(aggregate.id, created)
+                }
+            },
+            destroy: {
+                cleanupDeadline.perform {
+                    AudioDeviceDestroyIOProcID(aggregate.id, created)
+                }
+            })
+        isRunning = ioProcTeardownState.phase == .running
+        switch result {
+        case .complete:
+            procID = nil
+        case .stopFailed(let status):
+            lastTeardownResult = .ioProcStopFailed(status)
+        case .destroyFailed(let status):
+            lastTeardownResult = .ioProcDestroyFailed(status)
+        case .timedOut(let step):
+            lastTeardownResult = .ioProcTimedOut(step: step)
+        }
+        return false
     }
 
-    public func stop() {
-        guard isRunning, let procID else { return }
-        AudioDeviceStop(aggregate.id, procID)
+    /// Callback proof separated from the wait so silence and exact boundaries
+    /// can be asserted without starting a live aggregate.
+    static func startWasProven(
+        callbacksBefore: UInt64, callbacksAfter: UInt64
+    ) -> Bool {
+        callbacksAfter &- callbacksBefore >= 2
+    }
+
+    /// Stops and destroys the IOProc before removing its aggregate and tap.
+    /// A failed phase is retained and retried by the next call.
+    @discardableResult
+    public func stop(timeout: TimeInterval = 2) -> FarEndCaptureTeardownResult {
+        stop(until: HALTeardownDeadline(timeout: timeout))
+    }
+
+    /// Uses the remaining portion of the enclosing route teardown.
+    @discardableResult
+    public func stop(until deadline: HALTeardownDeadline) -> FarEndCaptureTeardownResult {
+        if let procID {
+            let ioResult = ioProcTeardownState.tearDown(
+                stop: {
+                    deadline.perform {
+                        AudioDeviceStop(aggregate.id, procID)
+                    }
+                },
+                destroy: {
+                    deadline.perform {
+                        AudioDeviceDestroyIOProcID(aggregate.id, procID)
+                    }
+                })
+            isRunning = ioProcTeardownState.phase == .running
+            switch ioResult {
+            case .complete:
+                self.procID = nil
+            case .stopFailed(let status):
+                let result = FarEndCaptureTeardownResult.ioProcStopFailed(status)
+                lastTeardownResult = result
+                return result
+            case .destroyFailed(let status):
+                let result = FarEndCaptureTeardownResult.ioProcDestroyFailed(status)
+                lastTeardownResult = result
+                return result
+            case .timedOut(let step):
+                let result = FarEndCaptureTeardownResult.ioProcTimedOut(step: step)
+                lastTeardownResult = result
+                return result
+            }
+        } else if ioProcTeardownState.phase != .absent {
+            let result = FarEndCaptureTeardownResult.ioProcDestroyFailed(
+                kAudioHardwareBadObjectError)
+            lastTeardownResult = result
+            return result
+        }
         isRunning = false
+
+        let aggregateResult = aggregate.destroyAndWait(until: deadline)
+        guard aggregateResult == .destroyed else {
+            let result = FarEndCaptureTeardownResult.aggregate(aggregateResult)
+            lastTeardownResult = result
+            return result
+        }
+
+        let tapResult = tap.destroyAndWait(until: deadline)
+        guard tapResult == .destroyed else {
+            let result = FarEndCaptureTeardownResult.processTap(
+                uid: tap.uid, result: tapResult)
+            lastTeardownResult = result
+            return result
+        }
+        isFullyTornDown = true
+        lastTeardownResult = .complete
+        return .complete
     }
 
     /// Drains mono frames for the canceller to render. Realtime-safe on the
@@ -172,7 +408,10 @@ public final class FarEndCapture: @unchecked Sendable {
     ///   tail rather than leave stale audio there.
     @inline(__always)
     public func read(into buffer: UnsafeMutablePointer<Float>, frames: Int) -> Int {
-        Int(yun_rt_ring_read(ring, buffer, UInt32(frames)))
+        guard
+            let frames = EchoCancellationCapacityPolicy.requestedSliceFrames(frames)
+        else { return 0 }
+        return Int(yun_rt_ring_read(ring, buffer, frames))
     }
 
     /// Discards only the backlog visible when this call begins.
@@ -195,12 +434,18 @@ public final class FarEndCapture: @unchecked Sendable {
         into scratch: UnsafeMutablePointer<Float>,
         capacity: Int
     ) -> Int {
-        guard capacity > 0 else { return 0 }
-        let target = Int(yun_rt_ring_available(ring))
+        guard capacity > 0,
+            capacity <= EchoCancellationCapacityPolicy.scratchFrames,
+            let capacity = UInt32(exactly: capacity)
+        else { return 0 }
+        let target = min(
+            Int(yun_rt_ring_available(ring)),
+            Int(EchoCancellationCapacityPolicy.maximumRingStorageFrames))
         var discarded = 0
         while discarded < target {
-            let wanted = min(capacity, target - discarded)
-            let taken = Int(yun_rt_ring_read(ring, scratch, UInt32(wanted)))
+            let wanted = min(Int(capacity), target - discarded)
+            guard let wantedFrames = UInt32(exactly: wanted) else { break }
+            let taken = Int(yun_rt_ring_read(ring, scratch, wantedFrames))
             guard taken > 0 else { break }
             discarded += taken
         }
@@ -217,9 +462,18 @@ public final class FarEndCapture: @unchecked Sendable {
     /// that is being drained as fast as it fills looks empty either way.
     public var producedFrames: UInt32 { yun_rt_ring_written(ring) }
 
+    /// IOProc entries, including silent blocks. Unlike ring fill this proves
+    /// that Core Audio is driving the tap even when the application emits zero.
+    public var callbackCount: UInt64 { yun_rt_counter_load(callbacks) }
+
     /// Frames sitting in the ring. Steady is healthy; climbing means the
     /// canceller is consuming slower than the tap produces.
     public var bufferedFrames: UInt32 { yun_rt_ring_available(ring) }
+
+    /// Raw consumer handle retained by `EchoCancellationBridge` until both
+    /// callback fences hold. Exposing the ring avoids borrowing this Swift
+    /// owner from AUVoiceProcessingIO's realtime render callback.
+    var realtimeRing: OpaquePointer { ring }
 
     // MARK: Realtime
 
@@ -227,17 +481,22 @@ public final class FarEndCapture: @unchecked Sendable {
     /// so nothing can retain, release or allocate.
     private static let ioProc: AudioDeviceIOProc = {
         _, _, inputData, _, _, _, clientData in
+        yun_rt_tripwire_mark_realtime(true)
+        defer { yun_rt_tripwire_mark_realtime(false) }
         guard let clientData else { return noErr }
         let context = clientData.assumingMemoryBound(to: Context.self)
+        yun_rt_counter_increment(context.pointee.callbacks)
         let buffers = UnsafeMutableAudioBufferListPointer(
             UnsafeMutablePointer(mutating: inputData))
         let frames = FarEndCapture.downmix(
             buffers,
             into: context.pointee.scratch,
             capacity: Int(context.pointee.scratchCapacity))
-        guard frames > 0 else { return noErr }
+        guard
+            let frameCount = EchoCancellationCapacityPolicy.requestedSliceFrames(frames)
+        else { return noErr }
         _ = yun_rt_ring_write(
-            context.pointee.ring, context.pointee.scratch, UInt32(frames))
+            context.pointee.ring, context.pointee.scratch, frameCount)
         return noErr
     }
 
@@ -254,18 +513,31 @@ public final class FarEndCapture: @unchecked Sendable {
         into destination: UnsafeMutablePointer<Float>,
         capacity: Int
     ) -> Int {
-        guard capacity > 0 else { return 0 }
+        guard AudioProcessingContract.supports(framesPerSlice: capacity)
+        else { return 0 }
 
         var totalChannels = 0
         var frames = capacity
         var hasPopulatedBuffer = false
         for buffer in buffers {
-            let channels = Int(buffer.mNumberChannels)
-            guard channels > 0 else { continue }
-            totalChannels += channels
+            guard
+                let channels = AudioProcessingContract.admittedChannelCount(
+                    buffer.mNumberChannels), channels > 0
+            else { return 0 }
+            let (nextTotal, channelOverflow) =
+                totalChannels.addingReportingOverflow(channels)
+            guard !channelOverflow,
+                nextTotal <= AudioProcessingContract.maximumChannelTopology
+            else { return 0 }
+            totalChannels = nextTotal
             guard buffer.mData != nil else { continue }
-            let samples = Int(buffer.mDataByteSize) / MemoryLayout<Float>.size
-            frames = min(frames, samples / channels)
+            guard
+                let bytesPerFrame = EchoCancellationCapacityPolicy.bytesPerFrame(
+                    channels: buffer.mNumberChannels,
+                    nonInterleaved: false),
+                buffer.mDataByteSize % bytesPerFrame == 0
+            else { return 0 }
+            frames = min(frames, Int(buffer.mDataByteSize / bytesPerFrame))
             hasPopulatedBuffer = true
         }
         guard hasPopulatedBuffer, totalChannels > 0, frames > 0 else { return 0 }
@@ -276,10 +548,15 @@ public final class FarEndCapture: @unchecked Sendable {
         for frame in 0..<frames {
             var total: Float = 0
             for buffer in buffers {
-                let channels = Int(buffer.mNumberChannels)
-                guard channels > 0, let raw = buffer.mData else { continue }
+                guard
+                    let channels = AudioProcessingContract.admittedChannelCount(
+                        buffer.mNumberChannels), channels > 0
+                else { return 0 }
+                guard let raw = buffer.mData else { continue }
                 let source = raw.assumingMemoryBound(to: Float.self)
-                let offset = frame * channels
+                let (offset, offsetOverflow) =
+                    frame.multipliedReportingOverflow(by: channels)
+                guard !offsetOverflow else { return 0 }
                 for channel in 0..<channels {
                     total += source[offset + channel]
                 }

@@ -50,6 +50,7 @@ enum KTVWindowSize {
     /// - Parameter visible: `NSScreen.visibleFrame.size` — what is left after
     ///   the menu bar and the Dock, which is the only area a window can
     ///   actually occupy.
+    /// - Returns: A whole-point stage size bounded by the usable screen area.
     static func size(forVisible visible: CGSize) -> CGSize {
         // A screen smaller than the minimum is not a reason to refuse to open;
         // it is a reason to take what there is. Somebody on a small external

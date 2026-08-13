@@ -1244,13 +1244,37 @@ public final class SingerPitch {
     public static let isForcedOff =
         ProcessInfo.processInfo.environment["YUNAUDIO_NO_LEARNED_PITCH"] != nil
 
-    /// Set from the model's setting. Read on the audio-analysis path, so it is
-    /// a plain `Bool` written from the main actor and read without
-    /// synchronisation — the worst a torn read could do is use the previous
-    /// value for one 43 ms frame.
-    public nonisolated(unsafe) static var usesLearnedHead = !isForcedOff
+    private final class LearnedHeadSelection: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = !SingerPitch.isForcedOff
 
-    public init?(sampleRate: Double) {
+        func read() -> Bool { lock.withLock { value } }
+
+        func write(_ value: Bool) {
+            lock.withLock { self.value = value && !SingerPitch.isForcedOff }
+        }
+    }
+
+    private static let learnedHeadSelection = LearnedHeadSelection()
+
+    /// The default for subsequently constructed trackers.
+    ///
+    /// A KTV worker snapshots this into each tracker it owns. Keeping the
+    /// preference behind one lock also closes the old cross-thread plain-memory
+    /// read for callers which still use the convenience initialiser.
+    public static var usesLearnedHead: Bool {
+        get { learnedHeadSelection.read() }
+        set { learnedHeadSelection.write(newValue) }
+    }
+
+    /// Immutable for this tracker generation, so changing a preference cannot
+    /// switch Core ML on halfway through the frame being analysed.
+    private let consultsLearnedHead: Bool
+
+    public init?(
+        sampleRate: Double,
+        usesLearnedHead: Bool = SingerPitch.usesLearnedHead
+    ) {
         // The sung range, not the spoken one. Above 400 Hz the speaking search
         // returns the octave below, note for note — see `lowestSungHertz`.
         guard
@@ -1261,10 +1285,12 @@ public final class SingerPitch {
         else { return nil }
         self.tracker = tracker
         self.sampleRate = sampleRate
+        consultsLearnedHead = usesLearnedHead && !Self.isForcedOff
         // Optional by design: a build without the model, or a machine that will
         // not compile it, keeps the rule and loses only the case the rule was
-        // already losing.
-        head = LearnedPitch(sampleRate: sampleRate)
+        // already losing. A disabled immutable snapshot avoids loading the
+        // model at all, rather than merely declining to call it later.
+        head = consultsLearnedHead ? LearnedPitch(sampleRate: sampleRate) : nil
         pending = .allocate(capacity: PitchTracker.frameSize)
     }
 
@@ -1319,7 +1345,7 @@ public final class SingerPitch {
                 // note. It is consulted only on the singing path — the voice
                 // changer and the analysis panel hear one person in a room, and
                 // have nothing to settle. See `LearnedPitch`.
-                if let head, SingerPitch.usesLearnedHead, !SingerPitch.isForcedOff {
+                if let head, consultsLearnedHead {
                     let curve = tracker.correlationCurve(
                         frame: Array(
                             UnsafeBufferPointer(

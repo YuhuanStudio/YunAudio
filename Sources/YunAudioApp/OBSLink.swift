@@ -2,6 +2,133 @@ import Foundation
 import YunAudioOBS
 import YunDesign
 
+/// Serial async delivery with one active command and one latest replacement.
+///
+/// A connection generation change revokes pending work, but an old operation
+/// remains the sole active one until it actually returns. Starting a replacement
+/// beside a socket call which has not returned would recreate the very task storm
+/// this mailbox exists to contain.
+@MainActor
+final class OBSOneActiveLatestMailbox<Value: Sendable, Output: Sendable> {
+    struct Statistics: Sendable, Equatable {
+        let submitted: UInt64
+        let startedApplications: UInt64
+        let completedApplications: UInt64
+        let superseded: UInt64
+        let revoked: UInt64
+        let staleCompletions: UInt64
+        let pendingCount: Int
+        let activeCount: Int
+        let maximumPendingCount: Int
+        let maximumConcurrentApplications: Int
+    }
+
+    private struct Command: Sendable {
+        let identifier: UInt64
+        let generation: UInt64
+        let value: Value
+    }
+
+    private let apply: @Sendable (Value) async -> Output
+    private let publish: @MainActor @Sendable (UInt64, Value, Output) -> Void
+    private var generation: UInt64 = 0
+    private var nextIdentifier: UInt64 = 0
+    private var active: Command?
+    private var pending: Command?
+    private var submitted: UInt64 = 0
+    private var startedApplications: UInt64 = 0
+    private var completedApplications: UInt64 = 0
+    private var superseded: UInt64 = 0
+    private var revoked: UInt64 = 0
+    private var staleCompletions: UInt64 = 0
+    private var maximumPendingCount = 0
+    private var concurrentApplications = 0
+    private var maximumConcurrentApplications = 0
+
+    init(
+        apply: @escaping @Sendable (Value) async -> Output,
+        publish: @escaping @MainActor @Sendable (UInt64, Value, Output) -> Void
+    ) {
+        self.apply = apply
+        self.publish = publish
+    }
+
+    func activate(generation: UInt64) {
+        guard self.generation != generation else { return }
+        self.generation = generation
+        if pending != nil {
+            pending = nil
+            revoked &+= 1
+        }
+    }
+
+    func submit(generation: UInt64, value: Value) {
+        submitted &+= 1
+        guard generation == self.generation else {
+            revoked &+= 1
+            return
+        }
+        nextIdentifier &+= 1
+        let command = Command(
+            identifier: nextIdentifier, generation: generation, value: value)
+        guard active != nil else {
+            start(command)
+            return
+        }
+        if pending != nil { superseded &+= 1 }
+        pending = command
+        maximumPendingCount = max(maximumPendingCount, 1)
+    }
+
+    var statistics: Statistics {
+        Statistics(
+            submitted: submitted,
+            startedApplications: startedApplications,
+            completedApplications: completedApplications,
+            superseded: superseded,
+            revoked: revoked,
+            staleCompletions: staleCompletions,
+            pendingCount: pending == nil ? 0 : 1,
+            activeCount: active == nil ? 0 : 1,
+            maximumPendingCount: maximumPendingCount,
+            maximumConcurrentApplications: maximumConcurrentApplications)
+    }
+
+    private func start(_ command: Command) {
+        precondition(active == nil)
+        active = command
+        startedApplications &+= 1
+        concurrentApplications += 1
+        maximumConcurrentApplications = max(
+            maximumConcurrentApplications, concurrentApplications)
+        let apply = apply
+        Task { [weak self] in
+            let output = await apply(command.value)
+            self?.finish(command, output: output)
+        }
+    }
+
+    private func finish(_ command: Command, output: Output) {
+        guard active?.identifier == command.identifier else { return }
+        active = nil
+        concurrentApplications -= 1
+        completedApplications &+= 1
+        if command.generation == generation {
+            publish(command.generation, command.value, output)
+        } else {
+            staleCompletions &+= 1
+        }
+
+        guard let next = pending else { return }
+        pending = nil
+        guard next.generation == generation else {
+            revoked &+= 1
+            return
+        }
+        start(next)
+    }
+}
+
 /// This application's end of an OBS session.
 ///
 /// Deliberately small, and the reason is worth stating: this project's problem
@@ -26,6 +153,12 @@ import YunDesign
 @Observable
 @MainActor
 final class OBSLink {
+
+    struct MuteCommand: Sendable {
+        let client: OBSClient
+        let inputName: String
+        let muted: Bool
+    }
 
     /// Where the conversation is. Every state a person can be in has a sentence
     /// attached, because "not connected" and "connected but there is no such
@@ -79,6 +212,11 @@ final class OBSLink {
     @ObservationIgnored var persist: (() -> Void)?
 
     private var client: OBSClient?
+    @ObservationIgnored private var connectionGeneration: UInt64 = 0
+    @ObservationIgnored private let muteMailbox:
+        OBSOneActiveLatestMailbox<
+            MuteCommand, Bool
+        >
 
     init(
         host: String = "127.0.0.1", port: Int = OBSConnection.defaultPort,
@@ -88,6 +226,17 @@ final class OBSLink {
         self.port = port
         self.inputName = inputName
         self.mirrorsMute = mirrorsMute
+        muteMailbox = OBSOneActiveLatestMailbox(
+            apply: { command in
+                do {
+                    try await command.client.send(
+                        .setMute(command.inputName, command.muted))
+                    return true
+                } catch {
+                    return false
+                }
+            },
+            publish: { _, _, _ in })
     }
 
     var isConnected: Bool {
@@ -109,28 +258,40 @@ final class OBSLink {
 
     func connect() async {
         guard state != .connecting else { return }
+        connectionGeneration &+= 1
+        let generation = connectionGeneration
+        muteMailbox.activate(generation: generation)
         state = .connecting
         let client = OBSClient(OBSConnection(host: host, port: port, password: password))
         do {
             let version = try await client.connect()
+            guard generation == connectionGeneration else {
+                await client.disconnect()
+                return
+            }
             self.client = client
             state = .connected(version)
-            await refreshInputs()
+            await refreshInputs(client: client, generation: generation)
         } catch let error as OBSError {
+            guard generation == connectionGeneration else { return }
             self.client = nil
             state = .failed(error.message)
         } catch {
+            guard generation == connectionGeneration else { return }
             self.client = nil
             state = .failed(error.localizedDescription)
         }
     }
 
     func disconnect() async {
-        await client?.disconnect()
+        connectionGeneration &+= 1
+        muteMailbox.activate(generation: connectionGeneration)
+        let disconnectedClient = client
         client = nil
         inputs = []
         pushedOffsetMilliseconds = nil
         state = .off
+        await disconnectedClient?.disconnect()
     }
 
     /// Asks OBS what its audio sources are called.
@@ -141,6 +302,10 @@ final class OBSLink {
     /// person will not find in a scene and will assume are missing.
     func refreshInputs() async {
         guard let client else { return }
+        await refreshInputs(client: client, generation: connectionGeneration)
+    }
+
+    private func refreshInputs(client: OBSClient, generation: UInt64) async {
         var names: [String] = []
         if let response = try? await client.send(.specialInputs()) {
             for key in ["mic1", "mic2", "mic3", "mic4", "desktop1", "desktop2"] {
@@ -158,6 +323,7 @@ final class OBSLink {
                 }
             }
         }
+        guard generation == connectionGeneration, self.client === client else { return }
         inputs = names
         if inputName.isEmpty, let first = names.first { inputName = first }
     }
@@ -172,22 +338,39 @@ final class OBSLink {
     ///   - sampleRate: The rate those frames are counted at.
     func pushSyncOffset(latencyFrames: Int, sampleRate: Double) async {
         guard let client, !inputName.isEmpty else { return }
+        let generation = connectionGeneration
         let offset = OBSSyncOffset.forProcessingLatency(
             frames: latencyFrames, sampleRate: sampleRate)
         do {
             try await client.send(.setSyncOffset(inputName, milliseconds: offset))
+            guard generation == connectionGeneration, self.client === client else { return }
             pushedOffsetMilliseconds = offset
         } catch let error as OBSError {
+            guard generation == connectionGeneration, self.client === client else { return }
             state = .failed(error.message)
         } catch {
+            guard generation == connectionGeneration, self.client === client else { return }
             state = .failed(error.localizedDescription)
         }
     }
 
     /// Mirrors a mute. Silent when the link is off or the mirror is switched
     /// off, so callers do not have to ask first.
-    func mirrorMute(_ muted: Bool) async {
+    func requestMuteMirror(_ muted: Bool) {
         guard mirrorsMute, let client, !inputName.isEmpty else { return }
-        _ = try? await client.send(.setMute(inputName, muted))
+        muteMailbox.submit(
+            generation: connectionGeneration,
+            value: MuteCommand(client: client, inputName: inputName, muted: muted))
+    }
+
+    /// Kept for source compatibility with callers which already await this
+    /// fire-and-forget mirror. New event paths submit synchronously so a burst
+    /// cannot create one task per mute edge.
+    func mirrorMute(_ muted: Bool) async {
+        requestMuteMirror(muted)
+    }
+
+    var muteDeliveryStatistics: OBSOneActiveLatestMailbox<MuteCommand, Bool>.Statistics {
+        muteMailbox.statistics
     }
 }

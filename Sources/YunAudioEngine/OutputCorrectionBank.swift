@@ -84,13 +84,11 @@ final class OutputCorrectionBank: @unchecked Sendable {
     }
 
     init?(sampleRate: Double, maximumFrames: Int) {
-        guard sampleRate.isFinite, sampleRate > 0,
-            sampleRate <= Double(Int.max) / Self.fadeSeconds,
-            maximumFrames > 0,
-            maximumFrames <= Int.max / Self.maximumChannels
+        guard AudioProcessingContract.supports(sampleRate: sampleRate),
+            AudioProcessingContract.supports(framesPerSlice: maximumFrames)
         else { return nil }
         guard let commands = yun_rt_queue_create(2) else { return nil }
-        guard let completion = yun_rt_cell_create(nil) else {
+        guard let completion = yun_rt_counter_create(0) else {
             yun_rt_queue_free(commands)
             return nil
         }
@@ -141,7 +139,7 @@ final class OutputCorrectionBank: @unchecked Sendable {
         scratch.deinitialize(count: maximumFrames * Self.maximumChannels)
         scratch.deallocate()
         yun_rt_queue_free(commands)
-        yun_rt_cell_free(completion)
+        yun_rt_counter_free(completion)
     }
 
     /// Installs setup state before this bank is visible to the IO thread.
@@ -199,7 +197,7 @@ final class OutputCorrectionBank: @unchecked Sendable {
         }
         guard changedMask != 0 else { return installedCount }
 
-        let completionAfter = yun_rt_cell_cycles(completion) &+ 1
+        let completionAfter = yun_rt_counter_load(completion) &+ 1
         let command = YunRTCommand(
             kind: 0, index: Int32(changedMask), value: Float(targetMask))
         guard yun_rt_queue_push(commands, command) else { return installedCount }
@@ -302,7 +300,7 @@ final class OutputCorrectionBank: @unchecked Sendable {
             }
         }
         if transitionWasActive, transitionMask == 0 {
-            yun_rt_cell_retire(completion)
+            yun_rt_counter_increment(completion)
         }
     }
 
@@ -342,7 +340,7 @@ final class OutputCorrectionBank: @unchecked Sendable {
         let deadline =
             DispatchTime.now().uptimeNanoseconds
             &+ timeoutMilliseconds &* 1_000_000
-        while yun_rt_cell_cycles(completion) < pending.completionAfter {
+        while yun_rt_counter_load(completion) < pending.completionAfter {
             if DispatchTime.now().uptimeNanoseconds >= deadline { return false }
             Thread.sleep(forTimeInterval: 0.001)
         }

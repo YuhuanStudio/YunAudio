@@ -11,7 +11,51 @@ import Testing
 /// copy disappears without changing the native processor or its history.
 @Suite("Formant copy fast path", .serialized)
 struct FormantCopyFastPathTests {
+    private final class FormantHandle: @unchecked Sendable {
+        let shifter: FormantShifter
+
+        init(_ shifter: FormantShifter) {
+            self.shifter = shifter
+        }
+    }
+
     private static let rates = [44_100.0, 48_000.0, 96_000.0]
+
+    @Test("one hundred thousand live ratio writes cannot tear a render hop")
+    func ratioPublicationIsAtomic() throws {
+        let handle = FormantHandle(
+            try #require(FormantShifter(sampleRate: 48_000)))
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue(label: "yunaudio.test.formant-control").async {
+            started.wait()
+            for turn in 0..<100_000 {
+                handle.shifter.ratio = turn.isMultiple(of: 2) ? 0.6 : 1.6
+            }
+            handle.shifter.ratio = 1.25
+            finished.signal()
+        }
+
+        let frames = handle.shifter.configuration.hop
+        var block = [Float](repeating: 0, count: frames)
+        var finiteSamples = 0
+        started.signal()
+        for turn in 0..<1_000 {
+            for frame in 0..<frames {
+                block[frame] = Float(sin(Double(turn * frames + frame) * 0.071)) * 0.2
+            }
+            block.withUnsafeMutableBufferPointer {
+                handle.shifter.process($0.baseAddress!, count: frames)
+            }
+            finiteSamples += block.reduce(into: 0) { count, sample in
+                if sample.isFinite { count += 1 }
+            }
+        }
+
+        #expect(finished.wait(timeout: .now() + 2) == .success)
+        #expect(finiteSamples == frames * 1_000)
+        #expect(handle.shifter.ratio == 1.25)
+    }
 
     @Test("formant-only output is bit-identical with half the staging traffic")
     func nativeOnly() throws {

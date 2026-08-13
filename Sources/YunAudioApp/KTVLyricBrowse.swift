@@ -48,19 +48,18 @@ struct KTVLyricBrowse: Equatable, Sendable {
     ///
     /// The sign follows the platform: a positive `scrollingDeltaY` is the
     /// content being dragged downwards, which shows what came *before*.
-    /// - Parameter precise: Whether the device reports pixel deltas.
-    ///
-    ///   This is the whole of a defect that made the wheel read as broken. A
-    ///   trackpad and a Magic Mouse send `scrollingDeltaY` in points, and 24 of
-    ///   them is a line. **A wheel mouse does not**: its delta is in *lines*,
-    ///   about one to three a notch. Measured against a 24-point line that is
-    ///   roughly a dozen notches to move the column once — which is
-    ///   indistinguishable from nothing happening, and was reported as the
-    ///   wheel "almost not working".
-    ///
-    ///   So a notch is converted to what a notch means. `linesPerNotch` is
-    ///   deliberately generous: a wheel is a coarse instrument and somebody
-    ///   using one to look ahead in a song wants to travel.
+    /// - Parameters:
+    ///   - deltaY: The vertical distance reported by the pointing device.
+    ///   - playing: The line currently being sung, when no browse position has
+    ///     been established yet.
+    ///   - lineCount: The bound that keeps browsing inside the song.
+    ///   - precise: Whether the device reports pixel deltas. This is the whole
+    ///     of a defect that made the wheel read as broken. A trackpad and a
+    ///     Magic Mouse send `scrollingDeltaY` in points, and 24 of them is a
+    ///     line. **A wheel mouse does not**: its delta is in *lines*, about one
+    ///     to three a notch. Measured against a 24-point line that is roughly a
+    ///     dozen notches to move the column once — indistinguishable from
+    ///     nothing happening. So a notch is converted to what a notch means.
     mutating func scroll(
         by deltaY: CGFloat, playing: Int?, lineCount: Int, precise: Bool = true
     ) {

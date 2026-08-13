@@ -91,6 +91,7 @@ struct LoudnessLayoutTests {
 /// than the layout had been measured for, so every figure overlapped the label
 /// of the one beside it.
 @Suite("what the loudness readout prints")
+@MainActor
 struct LoudnessReadingTests {
 
     @Test("a real reading is printed to a tenth")

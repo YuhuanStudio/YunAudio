@@ -31,6 +31,54 @@ final class ExactlyOnceSnapshot<Value>: @unchecked Sendable {
     }
 }
 
+/// Raw aggregate cleanup progress which survives bounded retry attempts.
+///
+/// Once a UID census proves the aggregate absent, its numeric object ID may be
+/// reused by Core Audio. A retry must therefore continue only with retained tap
+/// dependencies, never send another destroy or interpret that stale ID again.
+final class RawAggregateCleanupState: @unchecked Sendable {
+    let request: HALDestructionRequestCoordinator
+    private let lock = NSLock()
+    private var aggregateAbsenceConfirmed = false
+
+    init(requestWasAccepted: Bool) {
+        request = HALDestructionRequestCoordinator(
+            requestWasAccepted: requestWasAccepted)
+    }
+
+    var hasConfirmedAbsence: Bool {
+        lock.withLock { aggregateAbsenceConfirmed }
+    }
+
+    func confirmAbsence() {
+        lock.withLock { aggregateAbsenceConfirmed = true }
+    }
+}
+
+/// Separates a failed create status from ownership returned through its out parameter.
+///
+/// Core Audio follows the C ownership pattern where an out parameter can contain a
+/// real object even when the status reports failure. The caller may publish only the
+/// successful case; a nonzero value beside an error belongs to bounded cleanup.
+struct AggregateDeviceCreationOwnership: Sendable, Equatable {
+    let status: OSStatus
+    let createdDeviceID: AudioObjectID?
+    let orphanedDeviceID: AudioObjectID?
+
+    init(status: OSStatus, returnedDeviceID: AudioObjectID) {
+        let returned =
+            returnedDeviceID == kAudioObjectUnknown ? nil : returnedDeviceID
+        self.status = status
+        if status == noErr {
+            createdDeviceID = returned
+            orphanedDeviceID = nil
+        } else {
+            createdDeviceID = nil
+            orphanedDeviceID = returned
+        }
+    }
+}
+
 /// A private aggregate device assembled at runtime.
 ///
 /// This is the whole reason the router works. `AVAudioEngine` drives a single
@@ -118,7 +166,9 @@ public final class AggregateDevice {
     /// that references them.
     public let taps: [ProcessTap]
 
-    private var isDestroyed = false
+    private let destructionLock = NSLock()
+    private var destructionState = HALDestructionRequestState()
+    private var removalWasConfirmed = false
     private let deviceSnapshot = ExactlyOnceSnapshot<AudioDevice?>()
 
     /// Builds the aggregate.
@@ -140,9 +190,12 @@ public final class AggregateDevice {
         clockMasterUID: String,
         taps: [ProcessTap] = []
     ) throws {
-        guard !subDevices.isEmpty else { throw AggregateError.noSubDevices }
-        guard subDevices.contains(where: { $0.uid == clockMasterUID }) else {
-            throw AggregateError.clockMasterNotAMember(clockMasterUID)
+        try AggregateCapacityPolicy.validate(
+            name: name, subDevices: subDevices, clockMasterUID: clockMasterUID,
+            tapUIDs: taps.map(\.uid))
+        let quarantine = ProcessLifetimeAudioQuarantine.shared
+        if let residue = quarantine.refusalForNewAudioOwnership() {
+            throw AggregateError.audioResiduePresent(residue)
         }
 
         let generatedUID = "com.yuhuanstudio.yunaudio.aggregate.\(UUID().uuidString)"
@@ -176,13 +229,8 @@ public final class AggregateDevice {
             description[kAudioAggregateDeviceTapAutoStartKey] = 1
         }
 
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        let status = AudioHardwareCreateAggregateDevice(
-            description as CFDictionary, &deviceID)
-        guard status == noErr, deviceID != kAudioObjectUnknown else {
-            throw AggregateError.creationFailed(status)
-        }
-        id = deviceID
+        id = try Self.createAggregate(
+            description: description, uid: generatedUID, taps: taps)
     }
 
     /// An aggregate whose only members are process taps.
@@ -207,6 +255,13 @@ public final class AggregateDevice {
     private init(
         name: String, taps: [ProcessTap], subDevices: [SubDevice], clockMasterUID: String?
     ) throws {
+        try AggregateCapacityPolicy.validate(
+            name: name, subDevices: subDevices, clockMasterUID: clockMasterUID,
+            tapUIDs: taps.map(\.uid))
+        let quarantine = ProcessLifetimeAudioQuarantine.shared
+        if let residue = quarantine.refusalForNewAudioOwnership() {
+            throw AggregateError.audioResiduePresent(residue)
+        }
         let generatedUID = "com.yuhuanstudio.yunaudio.aggregate.\(UUID().uuidString)"
         uid = generatedUID
         self.subDevices = subDevices
@@ -225,21 +280,208 @@ public final class AggregateDevice {
             [kAudioSubTapUIDKey: tap.uid, kAudioSubTapDriftCompensationKey: 0]
         }
 
-        var deviceID = AudioObjectID(kAudioObjectUnknown)
-        let status = AudioHardwareCreateAggregateDevice(
-            description as CFDictionary, &deviceID)
-        guard status == noErr, deviceID != kAudioObjectUnknown else {
-            throw AggregateError.creationFailed(status)
-        }
-        id = deviceID
+        id = try Self.createAggregate(
+            description: description, uid: generatedUID, taps: taps)
     }
 
-    deinit { destroy() }
+    private static func createAggregate(
+        description: [String: Any], uid: String, taps: [ProcessTap]
+    ) throws -> AudioObjectID {
+        try resolveCreationAttempt(
+            create: { deviceID in
+                AudioHardwareCreateAggregateDevice(
+                    description as CFDictionary, &deviceID)
+            },
+            handOffOrphan: { orphanedID in
+                quarantineRawDestruction(
+                    id: orphanedID, uid: uid, taps: taps,
+                    requestWasAccepted: false,
+                    reason: "failed aggregate creation \(uid) requires census")
+            })
+    }
 
-    public func destroy() {
-        guard !isDestroyed else { return }
-        isDestroyed = true
-        AudioHardwareDestroyAggregateDevice(id)
+    /// Injectable out-parameter boundary used without touching HAL in tests.
+    static func resolveCreationAttempt(
+        create: (_ deviceID: inout AudioObjectID) -> OSStatus,
+        handOffOrphan: (AudioObjectID) -> Void
+    ) throws -> AudioObjectID {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        let status = create(&deviceID)
+        let ownership = AggregateDeviceCreationOwnership(
+            status: status, returnedDeviceID: deviceID)
+        return try resolveCreationOwnership(
+            ownership, handOffOrphan: handOffOrphan)
+    }
+
+    /// Publishes a successful ID or transfers an error-side ID before throwing.
+    private static func resolveCreationOwnership(
+        _ ownership: AggregateDeviceCreationOwnership,
+        handOffOrphan: (AudioObjectID) -> Void
+    ) throws -> AudioObjectID {
+        if let orphaned = ownership.orphanedDeviceID {
+            handOffOrphan(orphaned)
+        }
+        guard let created = ownership.createdDeviceID else {
+            throw AggregateError.creationFailed(ownership.status)
+        }
+        return created
+    }
+
+    deinit {
+        let id = id
+        let uid = uid
+        let taps = taps
+        let lifecycle = destructionLock.withLock {
+            (destructionState.wasAccepted, removalWasConfirmed)
+        }
+        guard !lifecycle.1 else { return }
+        Self.quarantineRawDestruction(
+            id: id, uid: uid, taps: taps,
+            requestWasAccepted: lifecycle.0,
+            reason: "aggregate \(uid) requires deinit census")
+    }
+
+    /// Owns an aggregate ID which has no fully initialised Swift wrapper.
+    ///
+    /// The quarantine entry exists before this returns. Cleanup uses HAL's one
+    /// bounded retry owner, so a wedged destroy cannot create another worker and
+    /// no new audio owner is admitted while this raw identity remains uncertain.
+    private static func quarantineRawDestruction(
+        id: AudioObjectID,
+        uid: String,
+        taps: [ProcessTap],
+        requestWasAccepted: Bool,
+        reason: String
+    ) {
+        let cleanupState = RawAggregateCleanupState(
+            requestWasAccepted: requestWasAccepted)
+        BoundedHALDeinitCleanup.quarantine(reason: reason) {
+            let deadline = HALTeardownDeadline(timeout: 2)
+            return cleanUpRawAggregate(
+                until: deadline,
+                state: cleanupState,
+                destroy: { AudioHardwareDestroyAggregateDevice(id) },
+                isPresent: {
+                    do {
+                        return try censusContains(uid: uid) {
+                            try AudioDevices.objectID(forUID: $0)
+                        }
+                    } catch {
+                        return true
+                    }
+                },
+                destroyDependencies: {
+                    ProcessTap.destroyAllAndWait(taps, until: deadline) == .destroyed
+                })
+        }
+    }
+
+    /// One injected raw-owner attempt, shared by failed creation and `deinit`.
+    static func cleanUpRawAggregate(
+        until deadline: HALTeardownDeadline,
+        state: RawAggregateCleanupState,
+        destroy: () -> OSStatus,
+        isPresent: () -> Bool,
+        destroyDependencies: () -> Bool
+    ) -> Bool {
+        if !state.hasConfirmedAbsence {
+            // A failed destroy status does not prove the error-side out owner is
+            // still present. Conversely, it is never treated as success by
+            // itself: only an exact UID census may close this ownership fact.
+            guard
+                deadline.perform({ state.request.request(using: destroy) }) != nil
+            else { return false }
+            let aggregateIsAbsent = HALRemovalWaiter.wait(
+                until: deadline,
+                pollInterval: 0.01,
+                betweenAttempts: { Thread.sleep(forTimeInterval: $0) },
+                isPresent: isPresent)
+            guard aggregateIsAbsent else { return false }
+            state.confirmAbsence()
+        }
+
+        // Only an absent aggregate has stopped referring to its taps. Their
+        // wrappers stay captured until every dependency has disappeared too.
+        // A later retry skips the stale aggregate ID and resumes here.
+        guard deadline.hasTimeRemaining else { return false }
+        return destroyDependencies()
+    }
+
+    /// Requests removal once and retains the returned status for diagnosis.
+    ///
+    /// A failed request does not mark the aggregate destroyed. A later teardown
+    /// attempt may retry it; doing what the old implementation did — setting a
+    /// Boolean first and discarding the status — made one transient refusal
+    /// indistinguishable from successful cleanup for the rest of the process.
+    @discardableResult
+    public func destroy() -> OSStatus {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return destructionState.request {
+            AudioHardwareDestroyAggregateDevice(id)
+        }
+    }
+
+    private func destroy(until deadline: HALTeardownDeadline) -> OSStatus? {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return deadline.perform {
+            destructionState.request {
+                AudioHardwareDestroyAggregateDevice(id)
+            }
+        }
+    }
+
+    /// Requests removal and waits for UID translation to report absence.
+    ///
+    /// This belongs on a control queue, never an IO callback or the main actor.
+    /// - Parameter timeout: Bounded time to wait after Core Audio accepts the
+    ///   request. Zero starts no synchronous HAL operation.
+    /// - Returns: The request and completion outcome separately.
+    public func destroyAndWait(timeout: TimeInterval = 2) -> HALDestructionResult {
+        destroyAndWait(until: HALTeardownDeadline(timeout: timeout))
+    }
+
+    /// Uses the remaining portion of a route-wide teardown budget.
+    public func destroyAndWait(until deadline: HALTeardownDeadline) -> HALDestructionResult {
+        guard let status = destroy(until: deadline) else { return .timedOut }
+        guard status == noErr else { return .requestFailed(status) }
+
+        let interval = 0.01
+        let absent = HALRemovalWaiter.wait(
+            until: deadline,
+            pollInterval: interval,
+            betweenAttempts: { Thread.sleep(forTimeInterval: $0) },
+            isPresent: {
+                do {
+                    return try Self.censusContains(uid: self.uid) {
+                        try AudioDevices.objectID(forUID: $0)
+                    }
+                } catch {
+                    // A failed census is not evidence of absence. Treat it as
+                    // present and let the bounded deadline report the problem.
+                    return true
+                }
+            })
+        if absent {
+            destructionLock.withLock { removalWasConfirmed = true }
+            return .destroyed
+        }
+        return .timedOut
+    }
+
+    static func censusContains(
+        uid: String,
+        translate: (String) throws -> AudioObjectID?
+    ) throws -> Bool {
+        try translate(uid) != nil
+    }
+
+    /// Last status returned by the removal request, even when it failed.
+    public var destructionStatus: OSStatus? {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return destructionState.lastStatus
     }
 
     // MARK: Configuration
@@ -268,17 +510,79 @@ public final class AggregateDevice {
     /// did not choose is a side effect, not a feature.
     @discardableResult
     public static func alignSampleRate(
-        _ rate: Double, across devices: [AudioDevice]
+        _ rate: Double, across devices: [AudioDevice],
+        recordOriginal: (String, Double) -> Void = { _, _ in }
     ) throws -> [String: Double] {
+        try alignSampleRate(
+            rate, across: devices, deadline: nil,
+            operationAdmission: { true }, recordOriginal: recordOriginal)
+    }
+
+    /// Package construction path whose per-device writes share one deadline.
+    /// Restoration is still attempted after cancellation: undoing a rate
+    /// already changed is cleanup, not a new graph-construction stage.
+    @discardableResult
+    package static func alignSampleRate(
+        _ rate: Double, across devices: [AudioDevice],
+        until deadline: HALTeardownDeadline,
+        operationAdmission: () -> Bool,
+        recordOriginal: (String, Double) -> Void = { _, _ in },
+        callerOwnsPublishedOriginals: Bool = false
+    ) throws -> [String: Double] {
+        try alignSampleRate(
+            rate, across: devices, deadline: deadline,
+            operationAdmission: operationAdmission,
+            recordOriginal: recordOriginal,
+            callerOwnsPublishedOriginals: callerOwnsPublishedOriginals)
+    }
+
+    private static func alignSampleRate(
+        _ rate: Double, across devices: [AudioDevice],
+        deadline: HALTeardownDeadline?,
+        operationAdmission: () -> Bool,
+        recordOriginal: (String, Double) -> Void,
+        callerOwnsPublishedOriginals: Bool = false
+    ) throws -> [String: Double] {
+        guard AudioHardwareValuePolicy.supports(sampleRate: rate) else {
+            throw AudioHardwareValueError.unsupportedSampleRate(rate)
+        }
+        // Validate every restoration value before changing the first device.
+        // Otherwise a legitimate but unsupported current format discovered
+        // late in this loop could leave an earlier member changed with no safe
+        // value this process is willing to write back.
+        for device in devices {
+            guard operationAdmission() else { throw CancellationError() }
+            guard let current = device.currentSampleRate else {
+                throw AggregateError.sampleRateUnavailable(device.uid)
+            }
+            if !AudioHardwareValuePolicy.supports(sampleRate: current) {
+                throw AudioHardwareValueError.unsupportedSampleRate(current)
+            }
+        }
         var previous: [String: Double] = [:]
         do {
             for device in devices {
-                guard let current = device.currentSampleRate, current != rate else { continue }
+                guard operationAdmission() else { throw CancellationError() }
+                guard let current = device.currentSampleRate else {
+                    throw AggregateError.sampleRateUnavailable(device.uid)
+                }
+                guard current != rate else { continue }
                 previous[device.uid] = current
-                let arrived = try device.setNominalSampleRate(rate)
+                // Publish the undo value before the setter. A setter may change
+                // the device and then time out waiting for notification, so a
+                // success-only return value is too late to own that mutation.
+                recordOriginal(device.uid, current)
+                guard operationAdmission() else { throw CancellationError() }
+                let operationTimeout = min(
+                    1, max(0, deadline?.remainingTimeInterval ?? 1))
+                guard operationTimeout > 0 else { throw CancellationError() }
+                let arrived = try device.setNominalSampleRate(
+                    rate, timeout: operationTimeout)
+                guard operationAdmission() else { throw CancellationError() }
                 try requireSampleRateArrival(arrived, uid: device.uid, rate: rate)
             }
         } catch {
+            if callerOwnsPublishedOriginals { throw error }
             // This function has not returned the originals to its caller yet.
             // Put back every earlier member here, or a late failure leaves a
             // successfully changed microphone at a rate nobody chose and gives
@@ -312,10 +616,35 @@ public final class AggregateDevice {
     ///   left somewhere the user did not put it.
     @discardableResult
     public static func restoreSampleRates(_ rates: [String: Double]) -> [String] {
+        restoreSampleRates(rates, deadline: nil)
+    }
+
+    /// Restores rates without extending an enclosing teardown transaction.
+    @discardableResult
+    public static func restoreSampleRates(
+        _ rates: [String: Double], until deadline: HALTeardownDeadline
+    ) -> [String] {
+        restoreSampleRates(rates, deadline: deadline)
+    }
+
+    private static func restoreSampleRates(
+        _ rates: [String: Double], deadline: HALTeardownDeadline?
+    ) -> [String] {
         var stubborn: [String] = []
         for (uid, rate) in rates {
+            guard deadline?.remainingTimeInterval ?? 1 > 0 else {
+                stubborn.append(uid)
+                continue
+            }
             guard let device = try? AudioDevices.device(uid: uid) else { continue }
-            if (try? device.setNominalSampleRate(rate)) != true { stubborn.append(uid) }
+            let timeout = deadline?.remainingTimeInterval ?? 1
+            guard timeout > 0 else {
+                stubborn.append(uid)
+                continue
+            }
+            if (try? device.setNominalSampleRate(rate, timeout: timeout)) != true {
+                stubborn.append(uid)
+            }
         }
         return stubborn
     }
@@ -331,6 +660,9 @@ public final class AggregateDevice {
     }
 
     public func setBufferFrameSize(_ frames: UInt32) throws {
+        guard AudioHardwareValuePolicy.supports(framesPerSlice: frames) else {
+            throw AudioHardwareValueError.unsupportedFramesPerSlice(frames)
+        }
         try id.setValue(frames, for: .bufferFrameSize)
     }
 
@@ -348,7 +680,11 @@ public enum AggregateError: Error, CustomStringConvertible {
     case noSubDevices
     case clockMasterNotAMember(String)
     case creationFailed(OSStatus)
+    case sampleRateUnavailable(String)
     case sampleRateDidNotSet(String, Double)
+    case configurationExceedsLimit(resource: String, requested: Int, maximum: Int)
+    case invalidConfiguration(String)
+    case audioResiduePresent(AudioResidueTelemetry)
 
     public var description: String {
         switch self {
@@ -358,8 +694,16 @@ public enum AggregateError: Error, CustomStringConvertible {
             "clock master \(uid) is not among the sub-devices"
         case let .creationFailed(status):
             "AudioHardwareCreateAggregateDevice failed with \(fourCharDescription(status))"
+        case let .sampleRateUnavailable(uid):
+            "\(uid) did not report a current sample rate"
         case let .sampleRateDidNotSet(uid, rate):
             "\(uid) did not reach \(rate) Hz before the sample-rate deadline"
+        case let .configurationExceedsLimit(resource, requested, maximum):
+            "\(resource) requested \(requested), above the supported maximum of \(maximum)"
+        case .invalidConfiguration(let reason):
+            "invalid aggregate configuration: \(reason)"
+        case .audioResiduePresent(let telemetry):
+            "aggregate refused while \(telemetry.retainedEntries) cleanup owner(s) remain"
         }
     }
 }

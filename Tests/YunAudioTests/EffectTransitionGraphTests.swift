@@ -19,9 +19,10 @@ private final class EffectTransitionGraphHarness {
     let controller: EffectTransition
 
     private let chain: EffectChain
-    private let counter: UnsafeMutablePointer<UInt64>
+    private let counter: OpaquePointer
     private let stage: UnsafeMutablePointer<RTVoiceIsolation>
     private let handover: UnsafeMutablePointer<RTEffectTransition>
+    private let alignmentHistories: [RTGraph.SharedAlignmentHistory]
     private let initialGraph: UnsafeMutablePointer<RTGraph>
     private var transitionGraph: UnsafeMutablePointer<RTGraph>?
     private let cell: OpaquePointer
@@ -39,8 +40,8 @@ private final class EffectTransitionGraphHarness {
         else { return nil }
         self.chain = chain
 
-        counter = .allocate(capacity: 1)
-        counter.initialize(to: 0)
+        guard let counter = yun_rt_counter_create(0) else { return nil }
+        self.counter = counter
         stage = .allocate(capacity: 1)
         stage.initialize(
             to: RTVoiceIsolation(
@@ -65,6 +66,9 @@ private final class EffectTransitionGraphHarness {
             oldAlignmentFrames: 0,
             newAlignmentFrames: chain.latencyFrames)
 
+        alignmentHistories = (0..<2).map { _ in
+            RTGraph.SharedAlignmentHistory.allocate()
+        }
         initialGraph = RTGraph.allocate(
             routes: [
                 RTRoute(
@@ -74,14 +78,15 @@ private final class EffectTransitionGraphHarness {
                 RTRoute(
                     sourceBuffer: 0, sourceChannel: 1,
                     destinationBuffer: 0, destinationChannel: 1),
-            ], bufferFrames: blockFrames, sampleRate: 48_000)
+            ], bufferFrames: blockFrames, sampleRate: 48_000,
+            sharedAlignmentHistories: alignmentHistories)
         guard let cell = yun_rt_cell_create(UnsafeMutableRawPointer(initialGraph)) else {
             RTGraph.deallocate(initialGraph)
+            for history in alignmentHistories { history.deallocate() }
             RTEffectTransition.deallocate(handover)
             stage.deinitialize(count: 1)
             stage.deallocate()
-            counter.deinitialize(count: 1)
-            counter.deallocate()
+            yun_rt_counter_free(counter)
             return nil
         }
         self.cell = cell
@@ -106,11 +111,11 @@ private final class EffectTransitionGraphHarness {
         yun_rt_cell_free(cell)
         if let transitionGraph { RTGraph.deallocate(transitionGraph) }
         RTGraph.deallocate(initialGraph)
+        for history in alignmentHistories { history.deallocate() }
         RTEffectTransition.deallocate(handover)
         stage.deinitialize(count: 1)
         stage.deallocate()
-        counter.deinitialize(count: 1)
-        counter.deallocate()
+        yun_rt_counter_free(counter)
         input.deinitialize(count: blockFrames * 2)
         input.deallocate()
         output.deinitialize(count: blockFrames * 2)
@@ -132,18 +137,15 @@ private final class EffectTransitionGraphHarness {
                 RTRoute(
                     sourceBuffer: 0, sourceChannel: 1,
                     destinationBuffer: 0, destinationChannel: 1),
-            ], bufferFrames: blockFrames, sampleRate: 48_000)
+            ], bufferFrames: blockFrames, sampleRate: 48_000,
+            sharedAlignmentHistories: alignmentHistories)
         next.pointee.voiceIsolation = stage
         next.pointee.isolationIsChain = 1
         next.pointee.effectTransition = handover
         next.pointee.alignmentFrames = Int32(chain.latencyFrames)
-        var carriedEveryRoute = true
-        for slot in 0..<Int(next.pointee.routeCount) {
-            carriedEveryRoute =
-                RTGraph.carryAlignment(
-                    from: initialGraph, slot: slot,
-                    to: next, slot: slot)
-                && carriedEveryRoute
+        let carriedEveryRoute = (0..<Int(next.pointee.routeCount)).allSatisfy {
+            initialGraph.pointee.alignmentHistories[$0]
+                == next.pointee.alignmentHistories[$0]
         }
         let retired = yun_rt_cell_publish(cell, UnsafeMutableRawPointer(next))
         transitionGraph = next

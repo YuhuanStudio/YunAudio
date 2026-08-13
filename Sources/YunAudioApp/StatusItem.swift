@@ -352,7 +352,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         guard let name = sender.representedObject as? String,
             let configuration = model.quickConfigs.first(where: { $0.name == name })
         else { return }
-        model.apply(configuration)
+        model.requestApplyQuickConfig(configuration)
     }
 
     /// Named after what it captures rather than asked for, because a menu is
@@ -361,7 +361,7 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     @objc private func saveConfig() {
         let stamp = DateFormatter()
         stamp.dateFormat = "HH:mm"
-        model.saveQuickConfig(named: loc("Setup") + " " + stamp.string(from: Date()))
+        model.requestSaveQuickConfig(named: loc("Setup") + " " + stamp.string(from: Date()))
     }
 
     @objc private func toggleMute() { model.toggleMute() }
@@ -740,7 +740,6 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     }
 
     @objc private func quit() {
-        model.shutDown()
         NSApp.terminate(nil)
     }
 }

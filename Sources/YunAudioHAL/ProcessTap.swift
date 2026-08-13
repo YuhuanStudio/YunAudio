@@ -164,7 +164,15 @@ public struct ProcessTapCreationSnapshot: Sendable, Equatable {
 /// is what makes this possible with no driver of our own: Loopback and its peers
 /// ship a kernel-adjacent plug-in to intercept application audio, whereas this
 /// is a documented API that has existed since macOS 14.2.
-public final class ProcessTap {
+///
+/// `@unchecked Sendable` covers immutable creation evidence plus one mutable
+/// destruction state, and that state is serialised by `destructionLock`.
+public final class ProcessTap: @unchecked Sendable {
+    struct CensusIdentity: Sendable, Equatable {
+        let id: AudioObjectID
+        let uid: String
+    }
+
     public let id: AudioObjectID
     public let uid: String
     /// Format the tap presents. Reported so the aggregate can be built to match.
@@ -175,7 +183,9 @@ public final class ProcessTap {
     /// neither an object ID nor a matching object in the system tap list.
     public let creationAttempts: Int
 
-    private var isDestroyed = false
+    private let destructionLock = NSLock()
+    private var destructionState = HALDestructionRequestState()
+    private var removalWasConfirmed = false
 
     /// True when the tap was asked to remember its processes by bundle
     /// identifier and reattach to them when they come back.
@@ -191,6 +201,11 @@ public final class ProcessTap {
     /// private global tap that is destroyed before it ever joins an aggregate.
     /// It neither mutes nor reads another application.
     public static func requestCaptureAccess() -> OSStatus {
+        guard
+            ProcessLifetimeAudioQuarantine.shared.refusalForNewAudioOwnership() == nil
+        else {
+            return kAudioHardwareNotReadyError
+        }
         let description = capturePermissionDescription()
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
@@ -200,8 +215,10 @@ public final class ProcessTap {
             // not turn it into an Allowed badge.
             return status == noErr ? kAudioHardwareUnspecifiedError : status
         }
-        AudioHardwareDestroyProcessTap(tapID)
-        return status
+        let uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
+        let destroyStatus = requestRawDestruction(
+            id: tapID, uid: uid, reason: "capture-permission tap \(uid) requires census")
+        return status == noErr ? destroyStatus : status
     }
 
     static func capturePermissionDescription() -> CATapDescription {
@@ -222,11 +239,32 @@ public final class ProcessTap {
     ///     application quitting and reattaches when it launches again.
     /// - Throws: `ProcessTapError.creationFailed` when CoreAudio refuses, which
     ///   happens when the process has gone away between listing and tapping.
-    public init(
+    public convenience init(
         processIDs: [AudioObjectID],
         muteBehavior: TapMuteBehavior = .unmuted,
         bundleIDs: [String] = []
     ) throws {
+        try self.init(
+            processIDs: processIDs, muteBehavior: muteBehavior,
+            bundleIDs: bundleIDs, retryAdmission: { true })
+    }
+
+    /// Package construction path whose retry shares the route's absolute
+    /// admission boundary. The first creation and its ownership census are one
+    /// indivisible stage; expiry suppresses the otherwise useful second call.
+    package init(
+        processIDs: [AudioObjectID],
+        muteBehavior: TapMuteBehavior = .unmuted,
+        bundleIDs: [String] = [],
+        retryAdmission: @escaping @Sendable () -> Bool
+    ) throws {
+        try ProcessTapCapacityPolicy.validate(
+            processIDs: processIDs, bundleIDs: bundleIDs)
+        let quarantine = ProcessLifetimeAudioQuarantine.shared
+        if let residue = quarantine.refusalForNewAudioOwnership() {
+            throw ProcessTapError.audioResiduePresent(residue)
+        }
+        guard retryAdmission() else { throw CancellationError() }
         // NS_REFINED_FOR_SWIFT turns the NSNumber array in the header into a
         // plain [AudioObjectID] on this side.
         let description = CATapDescription(stereoMixdownOfProcesses: processIDs)
@@ -308,15 +346,18 @@ public final class ProcessTap {
                 returned: attempt.tapID,
                 descriptionUUID: description.uuid,
                 snapshot: attempt.snapshot) == nil,
-            Self.shouldRetryMissingTap(attempt.snapshot)
+            Self.shouldRetryMissingTap(attempt.snapshot),
+            retryAdmission()
         {
             Thread.sleep(forTimeInterval: 0.02)
-            attempt = Self.create(
-                description: description,
-                requestedProcessIDs: processIDs,
-                requestedBundleIDs: realBundleIDs,
-                ignoredBundleIDs: ignoredBundleIDs)
-            attempts += 1
+            if retryAdmission() {
+                attempt = Self.create(
+                    description: description,
+                    requestedProcessIDs: processIDs,
+                    requestedBundleIDs: realBundleIDs,
+                    ignoredBundleIDs: ignoredBundleIDs)
+                attempts += 1
+            }
         }
 
         guard attempt.status == noErr else {
@@ -328,7 +369,11 @@ public final class ProcessTap {
                 descriptionUUID: description.uuid,
                 snapshot: attempt.snapshot)
             {
-                AudioHardwareDestroyProcessTap(leaked)
+                let leakedUID =
+                    (try? leaked.string(of: .tapUID)) ?? description.uuid.uuidString
+                Self.requestRawDestruction(
+                    id: leaked, uid: leakedUID,
+                    reason: "failed process-tap creation \(leakedUID) requires census")
             }
             throw ProcessTapError.creationFailed(attempt.status)
         }
@@ -356,7 +401,20 @@ public final class ProcessTap {
         creationSnapshot = attempt.snapshot
         creationAttempts = attempts
         id = tapID
+        guard retryAdmission() else {
+            // The create call and its before/after census are one ownership
+            // transaction: stopping between them could lose a real tap whose
+            // out parameter stayed empty. Once its exact ID is adopted, later
+            // descriptive property reads are optional and are suppressed.
+            uid = description.uuid.uuidString
+            format = nil
+            return
+        }
         uid = (try? tapID.string(of: .tapUID)) ?? description.uuid.uuidString
+        guard retryAdmission() else {
+            format = nil
+            return
+        }
         format = tapID.optionalValue(of: .tapFormat)
     }
 
@@ -401,8 +459,10 @@ public final class ProcessTap {
         requestedBundleIDs: [String],
         ignoredBundleIDs: [String]
     ) -> CreationAttempt {
-        let processIDsBefore = try? AudioObjectID.system.array(of: .processList)
-        let tapIDsBefore = try? AudioObjectID.system.array(of: .tapList)
+        let processIDsBefore = try? AudioObjectID.system.array(
+            of: .processList, maximumCount: HALSemanticArrayPolicy.maximumProcesses)
+        let tapIDsBefore = try? AudioObjectID.system.array(
+            of: .tapList, maximumCount: HALSemanticArrayPolicy.maximumTaps)
         var tapID = AudioObjectID(kAudioObjectUnknown)
         let status = AudioHardwareCreateProcessTap(description, &tapID)
         let snapshot = snapshot(
@@ -449,8 +509,10 @@ public final class ProcessTap {
         processIDsBefore: [AudioObjectID]?,
         tapIDsBefore: [AudioObjectID]?
     ) -> ProcessTapCreationSnapshot {
-        let processIDsAfter = try? AudioObjectID.system.array(of: .processList)
-        let tapIDsAfter = try? AudioObjectID.system.array(of: .tapList)
+        let processIDsAfter = try? AudioObjectID.system.array(
+            of: .processList, maximumCount: HALSemanticArrayPolicy.maximumProcesses)
+        let tapIDsAfter = try? AudioObjectID.system.array(
+            of: .tapList, maximumCount: HALSemanticArrayPolicy.maximumTaps)
         let oldTaps = Set(tapIDsBefore ?? [])
         let newTaps = (tapIDsAfter ?? []).filter { !oldTaps.contains($0) }.map { id in
             let held = description(of: id)
@@ -469,13 +531,235 @@ public final class ProcessTap {
             newTaps: newTaps)
     }
 
-    deinit { destroy() }
-
-    public func destroy() {
-        guard !isDestroyed else { return }
-        isDestroyed = true
-        AudioHardwareDestroyProcessTap(id)
+    deinit {
+        let id = id
+        let uid = uid
+        let lifecycle = destructionLock.withLock {
+            (destructionState.wasAccepted, removalWasConfirmed)
+        }
+        guard !lifecycle.1 else { return }
+        Self.quarantineRawDestruction(
+            id: id, uid: uid, requestWasAccepted: lifecycle.0,
+            reason: "process tap \(uid) requires deinit census")
     }
+
+    /// Requests destruction for a tap which has no `ProcessTap` owner.
+    ///
+    /// Permission probes and partially failed creation can both leave a real
+    /// object behind without a wrapper to carry its lifecycle. The same
+    /// fail-closed census used by `deinit` must own those objects too; a bare
+    /// destroy call would turn an accepted asynchronous request into assumed
+    /// absence.
+    @discardableResult
+    private static func requestRawDestruction(
+        id: AudioObjectID,
+        uid: String,
+        reason: String
+    ) -> OSStatus {
+        let status = AudioHardwareDestroyProcessTap(id)
+        quarantineRawDestruction(
+            id: id, uid: uid, requestWasAccepted: status == noErr, reason: reason)
+        return status
+    }
+
+    private static func quarantineRawDestruction(
+        id: AudioObjectID,
+        uid: String,
+        requestWasAccepted: Bool,
+        reason: String
+    ) {
+        let request = HALDestructionRequestCoordinator(
+            requestWasAccepted: requestWasAccepted)
+        BoundedHALDeinitCleanup.quarantine(
+            reason: reason
+        ) {
+            let deadline = HALTeardownDeadline(timeout: 2)
+            guard
+                let status = deadline.perform({
+                    request.request {
+                        AudioHardwareDestroyProcessTap(id)
+                    }
+                }), status == noErr
+            else { return false }
+
+            return HALRemovalWaiter.wait(
+                until: deadline,
+                pollInterval: 0.01,
+                betweenAttempts: { Thread.sleep(forTimeInterval: $0) },
+                isPresent: {
+                    do {
+                        return try Self.censusContains(
+                            id: id, uid: uid,
+                            tapIDs: {
+                                try AudioObjectID.system.array(
+                                    of: .tapList,
+                                    maximumCount: HALSemanticArrayPolicy.maximumTaps)
+                            },
+                            tapUID: { try $0.string(of: .tapUID) })
+                    } catch {
+                        return true
+                    }
+                })
+        }
+    }
+
+    /// Requests removal once, retrying only when Core Audio refused it.
+    @discardableResult
+    public func destroy() -> OSStatus {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return destructionState.request {
+            AudioHardwareDestroyProcessTap(id)
+        }
+    }
+
+    private func destroy(until deadline: HALTeardownDeadline) -> OSStatus? {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return deadline.perform {
+            destructionState.request {
+                AudioHardwareDestroyProcessTap(id)
+            }
+        }
+    }
+
+    /// Waits until neither this object ID nor this tap UID remains in HAL.
+    ///
+    /// Reading only the original object ID is insufficient: HAL object IDs can
+    /// be recycled while an asynchronous removal is in flight. Conversely,
+    /// treating a census error as absence is exactly how an owner gets released
+    /// while Core Audio can still call through it.
+    public func destroyAndWait(timeout: TimeInterval = 2) -> HALDestructionResult {
+        destroyAndWait(until: HALTeardownDeadline(timeout: timeout))
+    }
+
+    /// Uses the remaining portion of a route-wide teardown budget.
+    public func destroyAndWait(until deadline: HALTeardownDeadline) -> HALDestructionResult {
+        switch Self.destroyAllAndWait([self], until: deadline) {
+        case .destroyed:
+            return .destroyed
+        case .failed(_, let result):
+            return result
+        }
+    }
+
+    /// Requests every removal first, then verifies all taps with one census per
+    /// poll rather than giving every tap its own full timeout.
+    ///
+    /// The caller continues retaining the complete array until this returns
+    /// `.destroyed`. On timeout no wrapper is marked confirmed, including taps
+    /// which happened to disappear earlier in the same batch, so a later Stop
+    /// retries the proof without relying on stale partial evidence.
+    public static func destroyAllAndWait(
+        _ taps: [ProcessTap], until deadline: HALTeardownDeadline
+    ) -> ProcessTapBatchDestructionResult {
+        var seen = Set<ObjectIdentifier>()
+        let uniqueTaps = taps.filter {
+            seen.insert(ObjectIdentifier($0)).inserted
+        }
+        guard !uniqueTaps.isEmpty else { return .destroyed }
+
+        var firstRequestFailure: (tap: ProcessTap, status: OSStatus)?
+        for tap in uniqueTaps {
+            guard let status = tap.destroy(until: deadline) else {
+                return .failed(uid: tap.uid, result: .timedOut)
+            }
+            if status != noErr, firstRequestFailure == nil {
+                firstRequestFailure = (tap, status)
+            }
+        }
+        if let failure = firstRequestFailure {
+            return .failed(
+                uid: failure.tap.uid, result: .requestFailed(failure.status))
+        }
+
+        let interval = 0.01
+        let identities = uniqueTaps.map { CensusIdentity(id: $0.id, uid: $0.uid) }
+        var presentUIDs = Set(identities.map(\.uid))
+        let absent = HALRemovalWaiter.wait(
+            until: deadline,
+            pollInterval: interval,
+            betweenAttempts: { Thread.sleep(forTimeInterval: $0) },
+            isPresent: {
+                do {
+                    presentUIDs = try Self.censusPresentUIDs(
+                        identities: identities,
+                        tapIDs: {
+                            try AudioObjectID.system.array(
+                                of: .tapList,
+                                maximumCount: HALSemanticArrayPolicy.maximumTaps)
+                        },
+                        tapUID: { try $0.string(of: .tapUID) },
+                        shouldContinue: { deadline.remainingTimeInterval > 0 })
+                    return !presentUIDs.isEmpty
+                } catch {
+                    presentUIDs = Set(identities.map(\.uid))
+                    return true
+                }
+            })
+        if absent {
+            for tap in uniqueTaps {
+                tap.destructionLock.withLock { tap.removalWasConfirmed = true }
+            }
+            return .destroyed
+        }
+        let unresolved = identities.first { presentUIDs.contains($0.uid) } ?? identities[0]
+        return .failed(uid: unresolved.uid, result: .timedOut)
+    }
+
+    /// Last status returned by the removal request, even when it failed.
+    public var destructionStatus: OSStatus? {
+        destructionLock.lock()
+        defer { destructionLock.unlock() }
+        return destructionState.lastStatus
+    }
+
+    static func censusContains(
+        id: AudioObjectID,
+        uid: String,
+        tapIDs: () throws -> [AudioObjectID],
+        tapUID: (AudioObjectID) throws -> String
+    ) throws -> Bool {
+        for candidate in try tapIDs() {
+            let candidateUID = try tapUID(candidate)
+            // A reused numeric object ID carrying another UID is another tap,
+            // not evidence that this one survived asynchronous removal.
+            if candidate == id {
+                if candidateUID == uid { return true }
+                continue
+            }
+            if candidateUID == uid { return true }
+        }
+        return false
+    }
+
+    /// UIDs from this ownership batch which are still present in one HAL tap
+    /// list snapshot. Each candidate UID is read once regardless of how many
+    /// taps YunAudio owns.
+    static func censusPresentUIDs(
+        identities: [CensusIdentity],
+        tapIDs: () throws -> [AudioObjectID],
+        tapUID: (AudioObjectID) throws -> String,
+        shouldContinue: () -> Bool = { true }
+    ) throws -> Set<String> {
+        let wanted = Set(identities.map(\.uid))
+        var present = Set<String>()
+        guard shouldContinue() else { throw BatchCensusError.deadlineExpired }
+        let candidates = try tapIDs()
+        for candidate in candidates {
+            guard shouldContinue() else { throw BatchCensusError.deadlineExpired }
+            let uid = try tapUID(candidate)
+            if wanted.contains(uid) { present.insert(uid) }
+        }
+        return present
+    }
+
+    private enum BatchCensusError: Error { case deadlineExpired }
+}
+
+public enum ProcessTapBatchDestructionResult: Sendable, Equatable {
+    case destroyed
+    case failed(uid: String, result: HALDestructionResult)
 }
 
 public enum TapMuteBehavior: Sendable, CaseIterable {
@@ -506,6 +790,9 @@ public enum TapMuteBehavior: Sendable, CaseIterable {
 
 public enum ProcessTapError: Error, CustomStringConvertible {
     case creationFailed(OSStatus)
+    case configurationExceedsLimit(resource: String, requested: Int, maximum: Int)
+    case invalidConfiguration(String)
+    case audioResiduePresent(AudioResidueTelemetry)
     /// The HAL accepted the description, returned `noErr`, and produced no tap
     /// object. The arguments it was given, because the cause is not known and
     /// they are what would identify it.
@@ -515,6 +802,12 @@ public enum ProcessTapError: Error, CustomStringConvertible {
         switch self {
         case let .creationFailed(status):
             "AudioHardwareCreateProcessTap failed with \(fourCharDescription(status))"
+        case let .configurationExceedsLimit(resource, requested, maximum):
+            "\(resource) requested \(requested), above the supported maximum of \(maximum)"
+        case .invalidConfiguration(let reason):
+            "invalid process-tap configuration: \(reason)"
+        case .audioResiduePresent(let telemetry):
+            "process tap refused while \(telemetry.retainedEntries) cleanup owner(s) remain"
         case let .noTapReturned(snapshot):
             "AudioHardwareCreateProcessTap returned noErr and no tap; "
                 + snapshot.diagnostic
@@ -526,7 +819,10 @@ extension AudioProcess {
     /// Devices this process currently has open, per scope.
     public func devices(scope: AudioObjectPropertyScope) -> [AudioObjectID] {
         let property = AudioProperty<AudioObjectID>.processDevices.scoped(to: scope)
-        return (try? id.array(of: property)) ?? []
+        return
+            (try? id.array(
+                of: property,
+                maximumCount: HALSemanticArrayPolicy.maximumProcessDevices)) ?? []
     }
 }
 
@@ -536,7 +832,9 @@ public enum AudioProcesses {
     /// A tap that outlives the process that made it keeps duplicating audio,
     /// so this is the first thing to check when something sounds doubled.
     public static func liveTaps() -> [(id: AudioObjectID, uid: String)] {
-        let ids = (try? AudioObjectID.system.array(of: .tapList)) ?? []
+        let ids =
+            (try? AudioObjectID.system.array(
+                of: .tapList, maximumCount: HALSemanticArrayPolicy.maximumTaps)) ?? []
         return ids.map { ($0, (try? $0.string(of: .tapUID)) ?? "—") }
     }
 
@@ -547,7 +845,8 @@ public enum AudioProcesses {
     /// pick from a menu.
     public static func all(includingSilent: Bool = false) throws -> [AudioProcess] {
         let names = runningApplicationNames()
-        let ids = try AudioObjectID.system.array(of: .processList)
+        let ids = try AudioObjectID.system.array(
+            of: .processList, maximumCount: HALSemanticArrayPolicy.maximumProcesses)
         return
             ids
             .compactMap { AudioProcess(id: $0, names: names) }

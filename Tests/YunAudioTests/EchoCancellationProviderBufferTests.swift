@@ -79,6 +79,38 @@ struct EchoCancellationProviderBufferTests {
         #expect(storage == [99, 0, 0, 0, 77])
     }
 
+    @Test("malformed frame capacities fail without touching memory")
+    func malformedCapacitiesFailClosed() {
+        var sample: Float = 99
+        withUnsafeMutablePointer(to: &sample) { destination in
+            #expect(
+                EchoCancellingCapture.fillFarEnd(
+                    into: destination,
+                    requestedFrames: Int.max,
+                    sampleCapacity: 1,
+                    provider: nil)
+                    == .init(
+                        requestedFrames: 0,
+                        bufferFrames: 0,
+                        writtenFrames: 0))
+            #expect(
+                EchoCancellingCapture.fillFarEnd(
+                    into: destination,
+                    requestedFrames: 1,
+                    sampleCapacity: Int.max,
+                    provider: nil
+                ).bufferFrames == 0)
+            #expect(
+                EchoCancellingCapture.fillFarEnd(
+                    into: destination,
+                    requestedFrames: -1,
+                    sampleCapacity: -1,
+                    provider: nil
+                ).bufferFrames == 0)
+        }
+        #expect(sample == 99)
+    }
+
     #if DEBUG
         @Test(
             "short-read handling stays inside the realtime budget",

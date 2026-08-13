@@ -67,6 +67,21 @@ public struct PitchSample: Sendable, Hashable {
 /// So: a melody file. Where there is none, the panel says so rather than
 /// inventing a number.
 public struct MidiMelody: Sendable, Hashable {
+    /// Semantic limits for an inert reference file.
+    ///
+    /// A four-byte MIDI delta can describe centuries. File byte bounds alone
+    /// therefore do not bound the timeline or the evenly sampled reference it
+    /// can ask this process to materialise.
+    /// Largest inert MIDI reference accepted by any application entry point.
+    ///
+    /// Public so a file owner can reject the byte after the parser's own limit
+    /// before materialising an otherwise unbounded sidecar.
+    public static let maximumFileBytes = 8 * 1024 * 1024
+    static let maximumTrackCount = 256
+    static let maximumEventCount = 500_000
+    static let maximumNoteCount = 100_000
+    static let maximumDurationSeconds = 6.0 * 60 * 60
+    static let maximumReferenceSamples = 1_000_000
 
     /// One sounding note.
     public struct Note: Sendable, Hashable {
@@ -96,10 +111,19 @@ public struct MidiMelody: Sendable, Hashable {
     public let melody: [Note]
 
     public init(notes: [Note], trackNames: [String] = []) {
-        let ordered = notes.sorted { $0.start < $1.start }
+        let admitted = notes.lazy.filter(Self.admits).prefix(Self.maximumNoteCount)
+        let ordered = Array(admitted).sorted { $0.start < $1.start }
         self.notes = ordered
-        self.trackNames = trackNames
-        self.melody = Self.reduceToOneLine(ordered, trackNames: trackNames)
+        let boundedNames = Array(trackNames.prefix(Self.maximumTrackCount))
+        self.trackNames = boundedNames
+        self.melody = Self.reduceToOneLine(ordered, trackNames: boundedNames)
+    }
+
+    private static func admits(_ note: Note) -> Bool {
+        note.start.isFinite && note.end.isFinite
+            && note.start >= 0 && note.end > note.start
+            && note.end <= maximumDurationSeconds
+            && (0...127).contains(note.midi) && note.track >= 0
     }
 
     /// Where the tune ends, which is the span a score is measured over.
@@ -156,7 +180,10 @@ public struct MidiMelody: Sendable, Hashable {
             $0.time == $1.time ? (!$0.isOn && $1.isOn) : $0.time < $1.time
         }
 
-        var sounding: [Int] = []
+        // MIDI notes have a fixed 0...127 domain. A list plus `max()` made a
+        // legal but heavily overlapping arrangement quadratic; fixed counts
+        // keep every edge at a bounded 128 probes.
+        var sounding = [Int](repeating: 0, count: 128)
         var line: [Note] = []
         var currentTop: Int?
         var currentStart: Double = 0
@@ -167,14 +194,14 @@ public struct MidiMelody: Sendable, Hashable {
             while index < edges.count, edges[index].time == time {
                 let edge = edges[index]
                 if edge.isOn {
-                    sounding.append(edge.midi)
+                    sounding[edge.midi] += 1
                     currentTrack = edge.track
-                } else if let position = sounding.lastIndex(of: edge.midi) {
-                    sounding.remove(at: position)
+                } else if sounding[edge.midi] > 0 {
+                    sounding[edge.midi] -= 1
                 }
                 index += 1
             }
-            let top = sounding.max()
+            let top = sounding.lastIndex { $0 > 0 }
             guard top != currentTop else { continue }
             if let previous = currentTop, time > currentStart {
                 line.append(
@@ -212,16 +239,37 @@ public struct MidiMelody: Sendable, Hashable {
     /// - Returns: One sample per interval that a note is sounding, in time
     ///   order.
     public func samples(every interval: Double) -> [PitchSample] {
-        guard interval > 0, !melody.isEmpty else { return [] }
-        var out: [PitchSample] = []
+        guard interval.isFinite, interval > 0, !melody.isEmpty else { return [] }
+        var admitted: [(note: Note, first: Int, last: Int)] = []
+        admitted.reserveCapacity(melody.count)
+        var sampleCount = 0
         // Multiplied from an index rather than accumulated: adding a float to
         // itself ten thousand times drifts, and the drift is measured against a
         // pairing window of tens of milliseconds.
         for note in melody {
-            let first = Int((note.start / interval).rounded(.up))
-            let last = Int((note.end / interval).rounded(.up)) - 1
+            let firstValue = (note.start / interval).rounded(.up)
+            let endValue = (note.end / interval).rounded(.up)
+            guard firstValue.isFinite, endValue.isFinite,
+                let first = Int(exactly: firstValue),
+                let end = Int(exactly: endValue), end > 0
+            else { return [] }
+            let last = end - 1
             guard first <= last else { continue }
-            for step in first...last {
+            let (distance, distanceOverflowed) = last.subtractingReportingOverflow(first)
+            let (count, countOverflowed) = distance.addingReportingOverflow(1)
+            let (nextCount, totalOverflowed) = sampleCount.addingReportingOverflow(count)
+            guard !distanceOverflowed, !countOverflowed, !totalOverflowed,
+                nextCount <= Self.maximumReferenceSamples
+            else { return [] }
+            sampleCount = nextCount
+            admitted.append((note, first, last))
+        }
+
+        var out: [PitchSample] = []
+        out.reserveCapacity(sampleCount)
+        for item in admitted {
+            let note = item.note
+            for step in item.first...item.last {
                 out.append(
                     PitchSample(time: Double(step) * interval, midi: Double(note.midi)))
             }
@@ -254,10 +302,12 @@ public struct MidiMelody: Sendable, Hashable {
     ///   answer from "this is not a MIDI file" and the interface says different
     ///   things about them.
     public static func parse(_ data: Data) -> MidiMelody? {
+        guard data.count <= maximumFileBytes else { return nil }
         var reader = Reader(bytes: [UInt8](data))
         guard reader.tag() == "MThd", let headerLength = reader.uint32(),
             headerLength >= 6, reader.uint16() != nil,
-            let trackCount = reader.uint16(), let division = reader.uint16()
+            let trackCount = reader.uint16(), trackCount <= maximumTrackCount,
+            let division = reader.uint16()
         else { return nil }
         // Longer headers are legal and their extra bytes are not ours.
         if headerLength > 6, !reader.skip(headerLength - 6) { return nil }
@@ -265,6 +315,8 @@ public struct MidiMelody: Sendable, Hashable {
         var tempos: [(tick: Int, microsecondsPerQuarter: Int)] = []
         var raw: [(startTick: Int, endTick: Int, midi: Int, track: Int)] = []
         var names: [String] = []
+        var exceededLimit = false
+        var eventCount = 0
 
         var track = 0
         while track < trackCount, !reader.isAtEnd {
@@ -272,16 +324,23 @@ public struct MidiMelody: Sendable, Hashable {
                 var chunk = reader.slice(length)
             else { return nil }
             readTrack(
-                &chunk, track: track, tempos: &tempos, notes: &raw, names: &names)
+                &chunk, track: track, tempos: &tempos, notes: &raw, names: &names,
+                eventCount: &eventCount, exceededLimit: &exceededLimit)
+            guard !exceededLimit else { return nil }
             if names.count == track { names.append("") }
             track += 1
         }
 
         let clock = Clock(division: division, tempos: tempos)
-        let notes = raw.map {
-            Note(
-                start: clock.seconds(at: $0.startTick), end: clock.seconds(at: $0.endTick),
-                midi: $0.midi, track: $0.track)
+        var notes: [Note] = []
+        notes.reserveCapacity(raw.count)
+        for rawNote in raw {
+            let note = Note(
+                start: clock.seconds(at: rawNote.startTick),
+                end: clock.seconds(at: rawNote.endTick),
+                midi: rawNote.midi, track: rawNote.track)
+            guard admits(note) else { return nil }
+            notes.append(note)
         }
         return MidiMelody(notes: notes, trackNames: names)
     }
@@ -295,11 +354,15 @@ public struct MidiMelody: Sendable, Hashable {
     ///   - notes: Notes found here, appended to.
     ///   - names: One name per chunk seen so far, appended to when this one
     ///     names itself.
+    ///   - eventCount: Total decoded events across all chunks in the file.
+    ///   - exceededLimit: Set when another event would exceed the semantic cap.
     private static func readTrack(
         _ chunk: inout Reader, track: Int,
         tempos: inout [(tick: Int, microsecondsPerQuarter: Int)],
         notes: inout [(startTick: Int, endTick: Int, midi: Int, track: Int)],
-        names: inout [String]
+        names: inout [String],
+        eventCount: inout Int,
+        exceededLimit: inout Bool
     ) {
         var tick = 0
         var status: UInt8 = 0
@@ -308,8 +371,18 @@ public struct MidiMelody: Sendable, Hashable {
         var open: [Int: [Int]] = [:]
 
         while !chunk.isAtEnd {
+            eventCount += 1
+            guard eventCount <= maximumEventCount else {
+                exceededLimit = true
+                return
+            }
             guard let delta = chunk.variableLength() else { return }
-            tick += delta
+            let (nextTick, tickOverflowed) = tick.addingReportingOverflow(delta)
+            guard !tickOverflowed else {
+                exceededLimit = true
+                return
+            }
+            tick = nextTick
             guard var byte = chunk.byte() else { return }
             if byte < 0x80 {
                 // Running status: the sender omitted a status byte that had not
@@ -327,11 +400,16 @@ public struct MidiMelody: Sendable, Hashable {
                     let payload = chunk.bytes(length)
                 else { return }
                 if kind == 0x51, payload.count == 3 {
-                    tempos.append(
-                        (tick, Int(payload[0]) << 16 | Int(payload[1]) << 8 | Int(payload[2])))
+                    let tempo =
+                        Int(payload[0]) << 16 | Int(payload[1]) << 8 | Int(payload[2])
+                    guard tempo > 0 else {
+                        exceededLimit = true
+                        return
+                    }
+                    tempos.append((tick, tempo))
                 } else if kind == 0x03, names.count == track {
                     names.append(
-                        String(decoding: payload, as: UTF8.self)
+                        String(decoding: payload.prefix(256), as: UTF8.self)
                             .trimmingCharacters(in: .whitespaces))
                 } else if kind == 0x2F {
                     return
@@ -356,7 +434,13 @@ public struct MidiMelody: Sendable, Hashable {
                     open[key, default: []].append(tick)
                 } else if var starts = open[key], let start = starts.popLast() {
                     open[key] = starts.isEmpty ? nil : starts
-                    if tick > start { notes.append((start, tick, note, track)) }
+                    if tick > start {
+                        guard notes.count < maximumNoteCount else {
+                            exceededLimit = true
+                            return
+                        }
+                        notes.append((start, tick, note, track))
+                    }
                 }
             }
         }
@@ -458,13 +542,13 @@ public struct MidiMelody: Sendable, Hashable {
         mutating func rewind() { if index > 0 { index -= 1 } }
 
         mutating func bytes(_ count: Int) -> [UInt8]? {
-            guard count >= 0, index + count <= end else { return nil }
+            guard count >= 0, index <= end, count <= end - index else { return nil }
             defer { index += count }
             return Array(bytes[index..<(index + count)])
         }
 
         mutating func skip(_ count: Int) -> Bool {
-            guard count >= 0, index + count <= end else { return false }
+            guard count >= 0, index <= end, count <= end - index else { return false }
             index += count
             return true
         }
@@ -499,7 +583,7 @@ public struct MidiMelody: Sendable, Hashable {
         }
 
         mutating func slice(_ count: Int) -> Reader? {
-            guard count >= 0, index + count <= end else { return nil }
+            guard count >= 0, index <= end, count <= end - index else { return nil }
             defer { index += count }
             return Reader(bytes: bytes, from: index, to: index + count)
         }

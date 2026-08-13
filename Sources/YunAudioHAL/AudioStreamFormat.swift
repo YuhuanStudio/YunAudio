@@ -1,6 +1,14 @@
 import CoreAudio
 import Foundation
 
+/// Formats an untrusted HAL floating-point value without using a trapping
+/// `Double`-to-`Int` conversion on the error-reporting path.
+public func audioIntegerDescription(_ value: Double) -> String {
+    let rounded = value.rounded(.towardZero)
+    guard let integer = Int(exactly: rounded) else { return String(describing: value) }
+    return String(integer)
+}
+
 extension AudioProperty {
     public static var streamDirection: AudioProperty<UInt32> {
         .init(kAudioStreamPropertyDirection)
@@ -78,7 +86,7 @@ public struct StreamFormat: Sendable, Hashable, CustomStringConvertible {
     }
 
     public var description: String {
-        let rate = sampleRate == 0 ? "any" : "\(Int(sampleRate)) Hz"
+        let rate = sampleRate == 0 ? "any" : "\(audioIntegerDescription(sampleRate)) Hz"
         return
             "\(rate) · \(channels)ch · \(encoding)\(isInterleaved ? "" : " · non-interleaved")"
     }
@@ -100,7 +108,10 @@ public struct AudioStream: Sendable, Identifiable {
         startingChannel = Int(id.optionalValue(of: .startingChannel) ?? 1)
         currentPhysicalFormat = id.optionalValue(of: .physicalFormat).map(StreamFormat.init)
 
-        let ranged = (try? id.array(of: .availablePhysicalFormats)) ?? []
+        let ranged =
+            (try? id.array(
+                of: .availablePhysicalFormats,
+                maximumCount: HALSemanticArrayPolicy.maximumFormatsPerObject)) ?? []
         var seen: Set<StreamFormat> = []
         availablePhysicalFormats = ranged.compactMap { entry in
             let format = StreamFormat(entry.mFormat)
@@ -116,7 +127,10 @@ public struct AudioStream: Sendable, Identifiable {
 extension AudioDevice {
     public func streams(scope: AudioObjectPropertyScope) -> [AudioStream] {
         let property = AudioProperty<AudioObjectID>.streams.scoped(to: scope)
-        let ids = (try? id.array(of: property)) ?? []
+        let ids =
+            (try? id.array(
+                of: property,
+                maximumCount: HALSemanticArrayPolicy.maximumStreamsPerDevice)) ?? []
         return ids.map(AudioStream.init(id:))
     }
 

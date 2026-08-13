@@ -17,12 +17,14 @@ One command runs everything, and says what it did **not** run:
 ./App/verify.sh --fresh         # and a clone into a directory of its own, built from nothing
 ```
 
-It compiles, runs the tests, checks every user-facing string goes through a
-translator, assembles the bundle, renders every panel offscreen, photographs the
-real window in every tab, and — with `--full` — proves the path is bit-exact and
-the realtime thread allocates nothing, in a release build. A run that skipped
-something says so in as many words, because a green summary that quietly omitted
-the only check touching real hardware is worse than a red one.
+It compiles, enforces strict formatting, runs the tests, checks every
+user-facing string goes through a translator, assembles the bundle and proves
+its resources load with the build tree hidden, renders every panel offscreen,
+photographs the real window in every tab, and — with `--full` — proves the path
+is bit-exact and the realtime thread allocates nothing, in a release build. A
+run that skipped something says so in as many words, because a green summary
+that quietly omitted the only check touching real hardware is worse than a red
+one.
 
 Then look at `build/screenshots`. The gate can tell you a photograph was taken;
 it cannot tell you the layout in it is wrong.
@@ -48,8 +50,12 @@ swift run -c release yunaudio-cli capture 10         # write the routed signal t
 `soak` is the only check that runs long enough to see what a call actually does
 to this. Everything else here measures a few seconds; a leak of a few kilobytes
 a minute, a cycle rate that wanders, or a clock lock that gives up an hour in
-are all invisible at that scale and all ruin the thing this is for. Measured
-over six minutes against the real driver:
+are all invisible at that scale and all ruin the thing this is for. The block
+below is a historical six-minute run against the real driver, retained as a
+reproducible shape rather than current-release evidence. A later recorded
+baseline was 0.42% and 7.1 MB; the next hardware gate must replace both runs
+with one manifest containing the revision, OS build, hardware, frame size and
+topology.
 
 ```
 cycle rate                    375.0/s, worst deviation 0.1
@@ -60,9 +66,9 @@ path at the end               bit-exact
 clock                         locked, 0.999983 – 0.999985 throughout
 ```
 
-375.0 is 48000/128 exactly. The 4 kB a minute is allocator noise rather than
-growth — the footprint ends lower than its own midpoint — and the whole process
-sits at 4.7 MB. It fails the run if memory climbs past a megabyte an hour, if
+375.0 is 48000/128 exactly. In that historical run, 4 kB a minute was allocator
+noise rather than growth — the footprint ended lower than its own midpoint —
+and the process sat at 4.7 MB. It fails the run if memory climbs past a megabyte an hour, if
 the cycle rate wanders more than 5%, if the processor cost grows by an order of
 magnitude, or if the realtime contract breaks once.
 
@@ -111,15 +117,19 @@ appearances, which is the only way to catch a colour that works in one theme and
 vanishes in the other. The screenshot photographs the actual window at its
 minimum size, including the title bar and the traffic lights — everything the
 window itself contributes, which an offscreen render structurally cannot show.
+After the last photograph is marked complete, the application must terminate
+normally within five seconds. Existing PNGs do not turn a CoreAudio teardown
+hang into a successful capture.
 `--verify` copies the built app somewhere else, moves the build tree out of
-reach and runs it. SwiftPM's `Bundle.module` falls back to the build directory,
-so an app that never copied its resource bundle in works perfectly on the
-machine that built it and dies on launch — `could not load resource bundle` —
-on every other one. Nothing but taking the build tree away can tell the two
-apart.
+reach and runs a dedicated resource probe. SwiftPM's `Bundle.module` falls back
+to the build directory, so an app that never copied its resource bundle in
+works perfectly on the machine that built it and dies on launch — `could not
+load resource bundle` — on every other one. Nothing but taking the build tree
+away can tell the two apart. The probe constructs no router and touches no
+audio hardware, and the script restores the build tree after success, failure
+or interruption.
 
 The string check fails on any user-facing literal that never went through
 `loc()` — a wrapped literal looks exactly like an unwrapped one, so nothing but
 a scanner finds them, and four survived every other check including the whole
 preferences sidebar sitting in English beside Chinese content.
-

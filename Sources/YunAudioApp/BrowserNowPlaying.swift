@@ -419,10 +419,50 @@ enum BrowserNowPlaying {
         }
     }
 
+    /// One transport action which is valid only for the tab already observed.
+    ///
+    /// The address check lives inside the same JavaScript execution as the
+    /// mutation. Checking it in Swift before an Apple event would leave a
+    /// stalled event free to reach whatever the tab navigated to meanwhile.
+    static func script(
+        for transport: NowPlaying.Transport, expectedIdentity: String
+    ) -> String? {
+        guard !expectedIdentity.isEmpty, let action = script(for: transport) else {
+            return nil
+        }
+        let identity = javaScriptLiteral(expectedIdentity)
+        return "(function(){if(location.href!==\(identity))return '';return \(action);})()"
+    }
+
     /// JavaScript that moves the tab's video to a moment.
     static func seekScript(toSeconds seconds: Double) -> String {
         let bounded = max(0, seconds.isFinite ? seconds : 0)
+        let position = String(
+            format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), bounded)
         return "(function(){var v=document.querySelector('video');"
-            + "if(!v)return '';v.currentTime=\(String(format: "%.3f", bounded));return 'ok'})()"
+            + "if(!v)return '';v.currentTime=\(position);return 'ok'})()"
+    }
+
+    /// One seek which cannot escape onto a newer page in the same tab.
+    static func seekScript(
+        toSeconds seconds: Double, expectedIdentity: String
+    ) -> String? {
+        guard !expectedIdentity.isEmpty else { return nil }
+        let identity = javaScriptLiteral(expectedIdentity)
+        return "(function(){if(location.href!==\(identity))return '';return "
+            + "\(seekScript(toSeconds: seconds));})()"
+    }
+
+    /// A JSON string is also a JavaScript string literal, including U+2028,
+    /// quotes and backslashes which hand-written escaping routinely misses.
+    static func javaScriptLiteral(_ value: String) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+            let literal = String(data: data, encoding: .utf8)
+        else { return "\"\"" }
+
+        return
+            literal
+            .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
+            .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
 }

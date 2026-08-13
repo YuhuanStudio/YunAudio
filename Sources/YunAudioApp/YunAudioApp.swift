@@ -17,6 +17,63 @@ enum MainWindowReopenPolicy {
     }
 }
 
+/// Idempotent policy for AppKit's deferred termination handshake.
+struct ApplicationTerminationGate {
+    enum Decision: Equatable {
+        case terminateNow
+        case beginLater
+        case awaitExistingReply
+    }
+
+    private(set) var isPending = false
+
+    mutating func begin(hasTeardown: Bool) -> Decision {
+        guard hasTeardown else { return .terminateNow }
+        guard !isPending else { return .awaitExistingReply }
+        isPending = true
+        return .beginLater
+    }
+
+    mutating func complete() {
+        precondition(isPending)
+        isPending = false
+    }
+}
+
+/// Joins audio ownership and the control socket without making either owner wait for the other.
+@MainActor
+final class ApplicationControlTerminationJoin {
+    typealias Completion =
+        @MainActor @Sendable (ApplicationAudioTeardownResult, Bool) -> Void
+
+    private var audio: ApplicationAudioTeardownResult?
+    private var controlAcknowledged: Bool?
+    private var didPublish = false
+    private let completion: Completion
+
+    init(completion: @escaping Completion) {
+        self.completion = completion
+    }
+
+    func receive(audio result: ApplicationAudioTeardownResult) {
+        precondition(audio == nil)
+        audio = result
+        publishIfComplete()
+    }
+
+    func receiveControl(acknowledged: Bool) {
+        precondition(controlAcknowledged == nil)
+        controlAcknowledged = acknowledged
+        publishIfComplete()
+    }
+
+    private func publishIfComplete() {
+        guard !didPublish, let audio, let controlAcknowledged else { return }
+        didPublish = true
+        completion(audio, controlAcknowledged)
+    }
+}
+
 /// Watches for the application quitting.
 ///
 /// Routing changes the sample rate of real hardware, and that change outlives
@@ -32,7 +89,9 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     /// actual observer through this weak reference.
     private(set) static weak var current: TerminationObserver?
 
-    var onTerminate: (@MainActor () -> Void)?
+    /// Starts teardown and calls back only after every audio owner has drained.
+    var onTerminate: (@MainActor (@escaping @MainActor (Bool) -> Void) -> Void)?
+    private var terminationGate = ApplicationTerminationGate()
     /// The Dock represents the application, so reopening it means the main
     /// router — never whichever auxiliary window happened to close last.
     var onReopenMainWindow: (@MainActor () -> Void)?
@@ -42,15 +101,28 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
     /// The control socket, for the same reason. Held so that quitting can take
     /// the socket file away — a stale one left on disk is what the next launch
     /// has to reason about.
-    var controlListener: ControlListener?
+    var controlLifecycle: ControlListenerLifecycleOwner?
 
     override init() {
         super.init()
         Self.current = self
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
-        onTerminate?()
+    func applicationShouldTerminate(
+        _ sender: NSApplication
+    ) -> NSApplication.TerminateReply {
+        switch terminationGate.begin(hasTeardown: onTerminate != nil) {
+        case .terminateNow:
+            return .terminateNow
+        case .awaitExistingReply:
+            return .terminateLater
+        case .beginLater:
+            onTerminate? { shouldTerminate in
+                self.terminationGate.complete()
+                sender.reply(toApplicationShouldTerminate: shouldTerminate)
+            }
+            return .terminateLater
+        }
     }
 
     func applicationShouldHandleReopen(
@@ -104,8 +176,10 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
             return
         }
 
-        flowCheckModel?.beginMIDI()
-        flowCheckModel?.beginInitialDeviceDiscovery()
+        if AppStartup.startsLiveSystemServices(environment: environment) {
+            flowCheckModel?.beginMIDI()
+            flowCheckModel?.beginInitialDeviceDiscovery()
+        }
 
         if environment["YUNAUDIO_SETTINGS_CHECK"] != nil {
             NSApp.activate(ignoringOtherApps: true)
@@ -129,7 +203,9 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
             }
             Task { @MainActor in
                 let passed = await WindowCapture.write(to: directory, model: flowCheckModel)
-                if passed {
+                if passed,
+                    Self.markCaptureComplete(environment["YUNAUDIO_CAPTURE_COMPLETION"])
+                {
                     NSApp.terminate(nil)
                 } else {
                     exit(1)
@@ -142,6 +218,25 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         else { return }
         Task { @MainActor in
             await UIFlowCheck.run(model: model)
+        }
+    }
+
+    /// Marks the boundary between drawing and application teardown.
+    ///
+    /// A complete set of images used to be accepted even when the process then
+    /// wedged while releasing CoreAudio. The gate gives termination five seconds
+    /// from this marker, so a shutdown hang is evidence rather than a process it
+    /// silently kills and calls successful.
+    private static func markCaptureComplete(_ path: String?) -> Bool {
+        guard let path else { return true }
+        do {
+            try Data("capture complete\n".utf8).write(
+                to: URL(fileURLWithPath: path), options: .atomic)
+            return true
+        } catch {
+            NonBlockingDiagnostic.write(
+                "could not write capture completion marker: \(error)\n")
+            return false
         }
     }
 
@@ -216,6 +311,10 @@ struct YunAudioApp: App {
 
     init() {
         let environment = ProcessInfo.processInfo.environment
+        onTheMainThread {
+            UIResourceBenchmark.beginColdLaunchProbe(environment: environment)
+        }
+        let modelPolicy = AppStartup.modelPolicy(environment: environment)
         // The .lproj folders ship with this module, not with the main bundle.
         YunStrings.bundle = AppResources.bundle
 
@@ -227,12 +326,14 @@ struct YunAudioApp: App {
             AppStartup.prepare(
                 environment: environment,
                 claimSingleInstance: { SingleInstance.claim() },
-                makeModel: { RouterModel() })
+                makeModel: { RouterModel(startupPolicy: modelPolicy) })
         }
 
         switch startup {
         case .duplicate:
             exit(0)
+        case .bundleCheck:
+            exit(BundleSmokeCheck.run() ? 0 : 1)
         case .normal(let model):
             _model = State(initialValue: model)
         case .icon:
@@ -278,11 +379,13 @@ struct YunAudioApp: App {
             // and somebody debugging a Stream Deck button has nothing else to
             // look at.
             guard let command = RemoteCommand.parse(url) else {
-                FileHandle.standardError.write(Data("yunaudio: ignored \(url)\n".utf8))
+                NonBlockingDiagnostic.write("yunaudio: ignored \(url)\n")
                 return
             }
-            let outcome = model.perform(command) ?? "no such scene"
-            FileHandle.standardError.write(Data("yunaudio: \(url) — \(outcome)\n".utf8))
+            model.submitRemoteCommand(command) { outcome in
+                let detail = outcome.message ?? loc("The command was refused.")
+                NonBlockingDiagnostic.write("yunaudio: \(url) — \(detail)\n")
+            }
         }
         termination.installURLHandler()
 
@@ -297,7 +400,7 @@ struct YunAudioApp: App {
         // a timeout expires; a reply belongs to its request without an id
         // invented to correlate them; and the access control is the
         // filesystem's rather than "anything on the machine can watch".
-        termination.controlListener = ControlServer.start(model: model)
+        termination.controlLifecycle = ControlServer.start(model: model)
     }
 
     /// Creates the menu bar presence once, on whichever scene is evaluated
@@ -306,14 +409,72 @@ struct YunAudioApp: App {
     private func installStatusItem() {
         guard termination.statusItem == nil else { return }
         installRemoteControl()
-        termination.onTerminate = { [termination] in
-            // The ring is hardware state that outlives the process. Leaving it
-            // lit after quitting would look like a fault rather than a setting.
-            model.lighting.stop()
-            // Before the model goes: a socket still accepting connections would
-            // hand requests to a torn-down router.
-            termination.controlListener?.stop()
-            model.shutDown()
+        termination.onTerminate = { [termination] reply in
+            let controlLifecycle = termination.controlLifecycle
+            let join = ApplicationControlTerminationJoin { result, controlAcknowledged in
+                if !controlAcknowledged {
+                    NonBlockingDiagnostic.write(
+                        "control listener did not acknowledge termination\n")
+                }
+                if !result.allowsProcessExit {
+                    // AppKit keeps the process alive after a refused reply. Put
+                    // control back too, so Stop can be retried without finding
+                    // a healthy UI behind a stale absent socket.
+                    if let controlLifecycle {
+                        ControlServer.start(controlLifecycle, model: model) { start in
+                            if case .failed(let message) = start {
+                                NonBlockingDiagnostic.write(
+                                    "control listener recovery: \(message)\n")
+                            }
+                            reply(false)
+                        }
+                    } else {
+                        reply(false)
+                    }
+                    return
+                }
+                termination.controlLifecycle = nil
+                // Stop was reversible until the route proved process exit safe.
+                // Only now close this owner's admission permanently.
+                controlLifecycle?.shutdown()
+                model.finaliseAcceptedTermination()
+                let persistence = ApplicationPersistenceFlushJoin { persistence in
+                    if !result.isComplete {
+                        NonBlockingDiagnostic.write(
+                            "secondary owner did not acknowledge termination: \(result)\n")
+                    }
+                    if !persistence.isAccepted {
+                        NonBlockingDiagnostic.write(
+                            "persistence flush before termination: \(persistence)\n")
+                    }
+                    reply(true)
+                }
+                // Persistence is lower-priority ownership than CoreAudio: route
+                // teardown gets its complete deadline first. All three sole
+                // writers then share one parallel bounded window to reach
+                // UserDefaults' explicit synchronisation boundary. A stuck
+                // preferences daemon must not turn Quit into another spinning
+                // system surface, and serial one-second waits would triple the
+                // application's own exit budget.
+                PreferencesStore.flush(timeout: .seconds(1)) {
+                    persistence.receivePreferences($0)
+                }
+                QuickConfigStore.flush(timeout: .seconds(1)) {
+                    persistence.receiveQuickConfigurations($0)
+                }
+                UserPresets.flush(timeout: .seconds(1)) {
+                    persistence.receiveUserPresets($0)
+                }
+            }
+            // `shutDown` submits every audio owner before listener revocation.
+            // The socket's 250 ms join runs on its dedicated lifecycle owner,
+            // so it cannot delay either Core Audio release or MainActor delivery.
+            model.shutDown { join.receive(audio: $0) }
+            if let controlLifecycle {
+                controlLifecycle.stop { join.receiveControl(acknowledged: $0) }
+            } else {
+                join.receiveControl(acknowledged: true)
+            }
         }
         termination.flowCheckModel = model
         // Again here, and for the reason the appearance is applied from the
@@ -354,14 +515,12 @@ struct YunAudioApp: App {
                     // clicking the Dock icon came to bring Settings forward,
                     // and a guard that returns without a word is a guard that
                     // hides the reason for a year.
-                    FileHandle.standardError.write(
-                        Data(
-                            "reopen found no visible window titled YunAudio among "
-                                .appending(
-                                    NSApp.windows
-                                        .map { "\($0.title):\($0.isVisible)" }
-                                        .joined(separator: ", ") + "\n"
-                                ).utf8))
+                    NonBlockingDiagnostic.write(
+                        "reopen found no visible window titled YunAudio among "
+                            .appending(
+                                NSApp.windows
+                                    .map { "\($0.title):\($0.isVisible)" }
+                                    .joined(separator: ", ") + "\n"))
                     return
                 }
                 NSApp.activate(ignoringOtherApps: true)

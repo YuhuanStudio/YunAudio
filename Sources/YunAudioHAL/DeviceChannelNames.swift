@@ -33,8 +33,20 @@ public enum DeviceChannelNames {
     public static func channels(
         modelUID: String?, name: String, scope: AudioObjectPropertyScope
     ) -> [Channel]? {
+        channels(
+            in: shared.library, modelUID: modelUID, name: name, scope: scope)
+    }
+
+    /// Resolves names from a caller-owned immutable profile snapshot.
+    ///
+    /// Application views use this form so the first label they draw cannot be
+    /// the event which lazily walks both profile directories on MainActor.
+    public static func channels(
+        in library: DeviceProfileLibrary,
+        modelUID: String?, name: String, scope: AudioObjectPropertyScope
+    ) -> [Channel]? {
         guard scope == kAudioObjectPropertyScopeInput else { return nil }
-        guard let profile = shared.library.profile(modelUID: modelUID, name: name) else {
+        guard let profile = library.profile(modelUID: modelUID, name: name) else {
             return nil
         }
         return profile.inputChannels.map {
@@ -44,7 +56,14 @@ public enum DeviceChannelNames {
 
     /// Anything worth saying about the device as a whole.
     public static func note(modelUID: String?, name: String) -> String? {
-        shared.library.profile(modelUID: modelUID, name: name)?.note
+        note(in: shared.library, modelUID: modelUID, name: name)
+    }
+
+    /// Resolves a note from a caller-owned immutable profile snapshot.
+    public static func note(
+        in library: DeviceProfileLibrary, modelUID: String?, name: String
+    ) -> String? {
+        library.profile(modelUID: modelUID, name: name)?.note
     }
 
     /// The loaded profiles, and anything that would not load.

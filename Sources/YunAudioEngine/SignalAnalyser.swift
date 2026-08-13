@@ -1,5 +1,105 @@
 import Foundation
 
+/// Fixed storage for a chronological tail whose oldest samples are replaceable.
+///
+/// This is deliberately not `Array.removeFirst`: when analysis falls behind,
+/// every full ring read used to move almost half a second of samples merely to
+/// discard its oldest quarter-second. The write index makes eviction constant
+/// time and the two physical segments are borrowed without allocating.
+struct SignalAnalysisTail {
+    private var storage: [Float] = []
+    private(set) var count = 0
+    private var first = 0
+
+    var capacity: Int { storage.count }
+    var storageBytes: Int { storage.count * MemoryLayout<Float>.stride }
+
+    mutating func allocate(capacity: Int) {
+        guard storage.count != capacity else {
+            clear()
+            return
+        }
+        storage = capacity > 0 ? [Float](repeating: 0, count: capacity) : []
+        count = 0
+        first = 0
+    }
+
+    mutating func release() {
+        storage = []
+        count = 0
+        first = 0
+    }
+
+    mutating func clear() {
+        count = 0
+        first = 0
+    }
+
+    /// Retains the newest `capacity` samples and returns how many were evicted.
+    @discardableResult
+    mutating func append(_ samples: UnsafePointer<Float>, count incoming: Int) -> Int {
+        guard incoming > 0, !storage.isEmpty else { return max(0, incoming) }
+
+        if incoming >= capacity {
+            let fixedCapacity = capacity
+            let discarded = count + incoming - fixedCapacity
+            storage.withUnsafeMutableBufferPointer { destination in
+                destination.baseAddress!.update(
+                    from: samples.advanced(by: incoming - fixedCapacity),
+                    count: fixedCapacity)
+            }
+            count = fixedCapacity
+            first = 0
+            return discarded
+        }
+
+        let discarded = max(0, count + incoming - capacity)
+        if discarded > 0 {
+            first = (first + discarded) % capacity
+            count -= discarded
+        }
+
+        let write = (first + count) % capacity
+        let leading = min(incoming, capacity - write)
+        storage.withUnsafeMutableBufferPointer { destination in
+            destination.baseAddress!.advanced(by: write).update(
+                from: samples, count: leading)
+            if leading < incoming {
+                destination.baseAddress!.update(
+                    from: samples.advanced(by: leading), count: incoming - leading)
+            }
+        }
+        count += incoming
+        return discarded
+    }
+
+    /// Borrows a chronological suffix as one or two physical segments.
+    func forEachSuffix(
+        count requested: Int,
+        _ consume: (UnsafePointer<Float>, Int) -> Void
+    ) {
+        let retained = min(max(0, requested), count)
+        guard retained > 0 else { return }
+        let suffix = (first + count - retained) % capacity
+        let leading = min(retained, capacity - suffix)
+        storage.withUnsafeBufferPointer { source in
+            consume(source.baseAddress!.advanced(by: suffix), leading)
+            if leading < retained {
+                consume(source.baseAddress!, retained - leading)
+            }
+        }
+    }
+
+    /// Copies the chronological tail into caller-owned fixed storage.
+    func copyAll(into destination: UnsafeMutablePointer<Float>) {
+        var offset = 0
+        forEachSuffix(count: count) { samples, segmentCount in
+            destination.advanced(by: offset).update(from: samples, count: segmentCount)
+            offset += segmentCount
+        }
+    }
+}
+
 /// Everything measured off the routed signal that is too expensive to compute
 /// on the IO thread.
 ///
@@ -7,9 +107,36 @@ import Foundation
 /// the loudness meter grows an array of block energies for the whole session,
 /// the FFT keeps a window. Neither belongs anywhere near a time-constrained
 /// thread. So the IO thread does the one cheap thing it can do safely, folding
-/// the output bus to mono into a ring, and everything else happens here on a
-/// timer.
+/// the output bus to mono into a ring, and a bounded worker does everything
+/// else away from MainActor.
 public final class SignalAnalyser {
+
+    /// A non-failable analyser still needs a complete, numerically valid
+    /// configuration when malformed metadata reaches this public boundary.
+    static let fallbackSampleRate = 48_000.0
+
+    /// Evidence that the lossless and latest-only paths are doing different
+    /// jobs rather than merely running on a different queue.
+    public struct Statistics: Sendable, Equatable {
+        /// Every retained ring sample handed to integrated loudness.
+        public fileprivate(set) var loudnessSamples = 0
+        /// Samples discarded only from replaceable, present-time analysis.
+        public fileprivate(set) var coalescedLatestSamples = 0
+        /// Bounded batches handed to spectrum, pitch or classification.
+        public fileprivate(set) var latestBatches = 0
+        public fileprivate(set) var spectrumSamples = 0
+        public fileprivate(set) var classifierSamples = 0
+        public fileprivate(set) var pitchFrames = 0
+    }
+
+    /// One bounded pull from the engine ring.
+    public struct DrainProgress: Sendable, Equatable {
+        public let samples: Int
+        /// True after a short read. A full read may still have audio behind it.
+        public let isDrained: Bool
+        /// True when the latest-only analysers received the newest retained batch.
+        public let processedLatest: Bool
+    }
 
     /// One reading, as the interface consumes it.
     public struct Reading: Sendable, Equatable {
@@ -85,8 +212,10 @@ public final class SignalAnalyser {
     public private(set) var classifier: SoundClassifier?
     private let makeClassifier: (Double) -> SoundClassifier?
     private var tracker: PitchTracker?
-    /// Samples waiting for a whole tracker frame.
-    private var pitchPending: [Float] = []
+    /// The newest tracker frame, never a queue of historical frames.
+    private var pitchPending = SignalAnalysisTail()
+    /// One contiguous view for the transform, allocated with the tracker.
+    private var pitchFrame: [Float] = []
     private var lastPitch: Float = 0
 
     /// How many silent frames a reading survives before it goes.
@@ -98,6 +227,22 @@ public final class SignalAnalyser {
     private var pitchHold = 0
     private let sampleRate: Double
     private var buffer: [Float]
+    /// Tail retained while loudness catches up with every sample in the ring.
+    ///
+    /// Present-time analysers consume this only after the ring is dry. If ten
+    /// seconds accumulated while the application was busy, integrated
+    /// loudness sees ten seconds and the display sees the newest half-second,
+    /// instead of burning through ten seconds of obsolete FFTs on the way.
+    private var latestPending = SignalAnalysisTail()
+    private let latestCapacity: Int
+    /// SoundAnalysis receives one buffer per retained batch. Its batching is
+    /// observable model input, so a wrapped tail is linearised once rather than
+    /// being split into two independently classified buffers.
+    private var classificationFrame: [Float] = []
+    /// The retained tail no longer joins continuously onto analyser state from
+    /// the previous batch, so their own partial windows must be discarded too.
+    private var latestWasCoalesced = false
+    public private(set) var statistics = Statistics()
     /// Frames which actually reached loudness, not frames consumed by some
     /// other analyser before loudness was requested.
     private var loudnessMeasuredFrames: Int = 0
@@ -118,6 +263,15 @@ public final class SignalAnalyser {
     /// allocator metadata.
     var loudnessStorageBytes: Int {
         loudness == nil ? 0 : LoudnessMeter.retainedArrayBytes(sampleRate: sampleRate)
+    }
+
+    /// Maximum history retained for replaceable present-time analysis.
+    var latestBufferLimitFrames: Int { latestCapacity }
+
+    /// Storage which must return to zero when no present-time analyser needs it.
+    var latestOnlyStorageBytes: Int {
+        latestPending.storageBytes + pitchPending.storageBytes
+            + (pitchFrame.count + classificationFrame.count) * MemoryLayout<Float>.stride
     }
 
     /// What the caller currently wants computed. Everything not asked for is
@@ -169,17 +323,37 @@ public final class SignalAnalyser {
 
         if wanted.contains(.classification) {
             if classifier == nil { classifier = makeClassifier(sampleRate) }
+            if classifier != nil, classificationFrame.count != latestCapacity {
+                classificationFrame = [Float](repeating: 0, count: latestCapacity)
+            } else if classifier == nil {
+                classificationFrame = []
+            }
         } else {
             classifier = nil
+            classificationFrame = []
         }
 
         if wanted.contains(.pitch) {
             if tracker == nil { tracker = PitchTracker(sampleRate: sampleRate) }
+            if pitchPending.capacity != PitchTracker.frameSize {
+                pitchPending.allocate(capacity: PitchTracker.frameSize)
+            }
+            if pitchFrame.count != PitchTracker.frameSize {
+                pitchFrame = [Float](repeating: 0, count: PitchTracker.frameSize)
+            }
         } else {
             tracker = nil
-            pitchPending.removeAll(keepingCapacity: true)
+            pitchPending.release()
+            pitchFrame = []
             lastPitch = 0
             pitchHold = 0
+        }
+
+        if wanted.intersection([.spectrum, .classification, .pitch]).isEmpty {
+            latestPending.release()
+            latestWasCoalesced = false
+        } else if latestPending.capacity != latestCapacity {
+            latestPending.allocate(capacity: latestCapacity)
         }
     }
 
@@ -191,77 +365,150 @@ public final class SignalAnalyser {
         sampleRate: Double,
         makeClassifier: @escaping (Double) -> SoundClassifier?
     ) {
-        self.sampleRate = sampleRate
+        let admittedRate =
+            AudioProcessingContract.supports(sampleRate: sampleRate)
+            ? sampleRate : Self.fallbackSampleRate
+        self.sampleRate = admittedRate
         self.makeClassifier = makeClassifier
+        latestCapacity = max(
+            SpectrumAnalyser.windowSize,
+            PitchTracker.frameSize,
+            Int(admittedRate * 0.5))
         loudness = nil
         buffer = []
     }
 
-    /// Pulls from the engine and folds the result into both meters.
+    /// Pulls until the ring is dry for direct and legacy callers.
     ///
-    /// Loops until the ring is dry rather than taking one bufferful, so a
-    /// backlog is measured rather than discarded — dropping it would make the
-    /// integrated reading depend on how busy the interface happened to be.
+    /// The background worker uses `drainStep` so each control request gets a
+    /// chance between chunks. Both paths preserve every sample they receive;
+    /// ring overflow is reported separately by `SignalAnalysisWorker`.
     public func drain(from engine: RoutingEngine) {
-        // `drain` is public and can be called independently of RouterModel's
-        // `isIdle` gate. An empty Array has no base address to force-unwrap,
-        // and an idle analyser has deliberately released this buffer.
-        guard !buffer.isEmpty else { return }
         while true {
-            let taken = buffer.withUnsafeMutableBufferPointer { pointer in
-                engine.drainAnalysis(into: pointer.baseAddress!, capacity: pointer.count)
-            }
-            guard taken > 0 else { return }
-            buffer.withUnsafeBufferPointer { pointer in
-                add(pointer.baseAddress!, count: taken)
-            }
-            // One frame at a time, keeping only the newest: a backlog of pitch
-            // frames is a backlog of answers nobody will read.
-            while pitchPending.count >= PitchTracker.frameSize {
-                if let tracker {
-                    let frame = Array(pitchPending.prefix(PitchTracker.frameSize))
-                    let found = tracker.track(frame: frame)
-                    // Held through a frame or two of consonant rather than
-                    // dropping to nothing: a readout that blinks off on every
-                    // plosive is unreadable.
-                    //
-                    // **Held, not faded.** This used to decay with
-                    // `lastPitch *= 0.5`, which is what one writes for a level
-                    // and is wrong for a frequency: halving a pitch does not
-                    // make it quieter, it makes it a different note an octave
-                    // down. A voice that stopped at 128 Hz was reported as
-                    // 64 Hz, then 32, then 16 — three readings of notes nobody
-                    // sang, below the range the tracker even searches, printed
-                    // with the same confidence as a real one. The flow check
-                    // caught it as "32 Hz" in a silent room.
-                    //
-                    // The value stands for a few frames and then goes. That is
-                    // what "held through a consonant" always meant.
-                    if found > 0 {
-                        lastPitch = found
-                        pitchHold = Self.pitchHoldFrames
-                    } else if pitchHold > 0 {
-                        pitchHold -= 1
-                    } else {
-                        lastPitch = 0
-                    }
-                }
-                pitchPending.removeFirst(PitchTracker.frameSize)
-            }
-            if taken < buffer.count { return }
+            let progress = drainStep(from: engine)
+            if progress.isDrained { return }
         }
     }
 
-    private func add(_ samples: UnsafePointer<Float>, count: Int) {
+    /// Takes at most one fixed buffer from the engine.
+    ///
+    /// A full read deliberately does not run FFT, pitch or classification: it
+    /// says there may be a newer block waiting. Loudness consumes it now, the
+    /// replaceable analysers retain only its bounded tail, and a later short
+    /// read tells them that tail really is the newest one.
+    @discardableResult
+    public func drainStep(from engine: RoutingEngine) -> DrainProgress {
+        drainStep { destination, capacity in
+            engine.drainAnalysis(into: destination, capacity: capacity)
+        }
+    }
+
+    @discardableResult
+    func drainStep(
+        _ take: (UnsafeMutablePointer<Float>, Int) -> Int
+    ) -> DrainProgress {
+        // `drainStep` can be called independently of the worker's idle gate.
+        // An empty Array has no base address to force-unwrap, and an idle
+        // analyser has deliberately released this buffer.
+        guard !buffer.isEmpty else {
+            return DrainProgress(samples: 0, isDrained: true, processedLatest: false)
+        }
+        let taken = buffer.withUnsafeMutableBufferPointer { pointer in
+            take(pointer.baseAddress!, pointer.count)
+        }
+        guard taken >= 0, taken <= buffer.count else {
+            return DrainProgress(samples: 0, isDrained: true, processedLatest: false)
+        }
+
+        if taken > 0 {
+            buffer.withUnsafeBufferPointer { pointer in
+                addLossless(pointer.baseAddress!, count: taken)
+                retainLatest(pointer.baseAddress!, count: taken)
+            }
+        }
+        let isDrained = taken < buffer.count
+        let processedLatest = isDrained ? processLatest() : false
+        return DrainProgress(
+            samples: taken, isDrained: isDrained, processedLatest: processedLatest)
+    }
+
+    private func addLossless(_ samples: UnsafePointer<Float>, count: Int) {
         if loudness != nil {
             loudness?.add(samples, count: count)
             loudnessMeasuredFrames += count
+            statistics.loudnessSamples += count
         }
-        spectrum?.add(samples, count: count)
-        classifier?.add(samples, count: count)
+    }
+
+    private func retainLatest(_ samples: UnsafePointer<Float>, count: Int) {
+        guard count > 0,
+            !needs.intersection([.spectrum, .classification, .pitch]).isEmpty
+        else { return }
+
+        let discarded = latestPending.append(samples, count: count)
+        if discarded > 0 {
+            statistics.coalescedLatestSamples += discarded
+            latestWasCoalesced = true
+        }
+    }
+
+    @discardableResult
+    private func processLatest() -> Bool {
+        guard latestPending.count > 0 else { return false }
+        statistics.latestBatches += 1
+        if latestWasCoalesced {
+            // Joining a fresh tail onto half a stale FFT or classifier window
+            // would still spend work on history and could report a hybrid that
+            // never existed. Keep the last complete answer only until the new
+            // tail replaces it.
+            spectrum?.reset()
+            classifier?.reset()
+            pitchPending.clear()
+        }
+        let latestCount = latestPending.count
+        if let spectrum {
+            let count = min(latestCount, SpectrumAnalyser.windowSize)
+            latestPending.forEachSuffix(count: count) { samples, segmentCount in
+                spectrum.add(samples, count: segmentCount)
+            }
+            statistics.spectrumSamples += count
+        }
+        if let classifier {
+            classificationFrame.withUnsafeMutableBufferPointer { frame in
+                latestPending.copyAll(into: frame.baseAddress!)
+                classifier.add(frame.baseAddress!, count: latestCount)
+            }
+            statistics.classifierSamples += latestCount
+        }
         if tracker != nil {
-            pitchPending.append(
-                contentsOf: UnsafeBufferPointer(start: samples, count: count))
+            latestPending.forEachSuffix(count: latestCount) { samples, segmentCount in
+                pitchPending.append(samples, count: segmentCount)
+            }
+            finishLatestPitch()
+        }
+        latestPending.clear()
+        latestWasCoalesced = false
+        return true
+    }
+
+    private func finishLatestPitch() {
+        guard pitchPending.count == PitchTracker.frameSize, let tracker else { return }
+
+        let found = pitchFrame.withUnsafeMutableBufferPointer { frame in
+            pitchPending.copyAll(into: frame.baseAddress!)
+            return tracker.track(
+                frame: UnsafeBufferPointer(start: frame.baseAddress!, count: frame.count))
+        }
+        statistics.pitchFrames += 1
+        // Held through a frame or two of consonant rather than dropping to
+        // nothing. Held, not faded: halving a frequency invents lower notes.
+        if found > 0 {
+            lastPitch = found
+            pitchHold = Self.pitchHoldFrames
+        } else if pitchHold > 0 {
+            pitchHold -= 1
+        } else {
+            lastPitch = 0
         }
     }
 
@@ -273,8 +520,10 @@ public final class SignalAnalyser {
     func addForTesting(_ samples: [Float]) {
         samples.withUnsafeBufferPointer {
             guard let base = $0.baseAddress else { return }
-            add(base, count: $0.count)
+            addLossless(base, count: $0.count)
+            retainLatest(base, count: $0.count)
         }
+        _ = processLatest()
     }
 
     /// True when nothing at all is wanted, so the drain can skip the ring
@@ -311,9 +560,12 @@ public final class SignalAnalyser {
         loudness?.reset()
         spectrum?.reset()
         classifier?.reset()
-        pitchPending.removeAll(keepingCapacity: true)
+        latestPending.clear()
+        latestWasCoalesced = false
+        pitchPending.clear()
         lastPitch = 0
         pitchHold = 0
         loudnessMeasuredFrames = 0
+        statistics = Statistics()
     }
 }

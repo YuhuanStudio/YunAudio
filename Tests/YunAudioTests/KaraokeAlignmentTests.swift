@@ -86,9 +86,11 @@ struct KaraokeAlignmentTests {
             from: 0.2,
             midi: [Double](repeating: 60, count: 100)
                 + [Double](repeating: 67, count: 100))
-        // The same notes, but the second half rushes back past the beat.
+        // The same notes, but the first is cut short and the second rushes back
+        // past the beat. Samples still have to be chronological: the analyser
+        // cannot emit a sample at 0.8 seconds after one at 1.19 seconds.
         let ragged =
-            series(from: 0.2, midi: [Double](repeating: 60, count: 100))
+            series(from: 0.2, midi: [Double](repeating: 60, count: 60))
             + series(from: 0.8, midi: [Double](repeating: 67, count: 100))
         let a = try #require(KaraokeAlignment.align(sung: steady, reference: tune))
         let b = try #require(KaraokeAlignment.align(sung: ragged, reference: tune))

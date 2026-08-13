@@ -65,6 +65,22 @@ struct EchoCancellationRateContractTests {
                 producerRate: 48_000, consumerRate: 96_000) == -48_000)
     }
 
+    @Test("one duplex UID binds directly and is aligned exactly once")
+    func sameUIDDoesNotPlanADuplicateAggregate() {
+        let duplex = EchoCancellingCapture.deviceBindingPlan(
+            microphoneUID: "duplex", speakerUID: "duplex")
+        #expect(duplex == .directDuplex(uid: "duplex"))
+        #expect(duplex.alignmentUIDs == ["duplex"])
+
+        let separate = EchoCancellingCapture.deviceBindingPlan(
+            microphoneUID: "microphone", speakerUID: "speaker")
+        #expect(
+            separate
+                == .aggregate(
+                    microphoneUID: "microphone", speakerUID: "speaker"))
+        #expect(separate.alignmentUIDs == ["microphone", "speaker"])
+    }
+
     @Test(
         "the dedicated canceller honours the router's exact shared clock",
         arguments: [44_100.0, 48_000.0, 96_000.0]
@@ -94,6 +110,21 @@ struct EchoCancellationRateContractTests {
                 microphoneRates: [48_000],
                 speakerRates: [48_000],
                 requiredRate: 0) == nil)
+        for required in [
+            Double.nan, .infinity, -.infinity, -1, 7_999, 384_001,
+            .greatestFiniteMagnitude,
+        ] {
+            #expect(
+                EchoCancellingCapture.sampleRate(
+                    microphoneRates: [8_000, 48_000, 384_000],
+                    speakerRates: [8_000, 48_000, 384_000],
+                    requiredRate: required) == nil)
+        }
+        #expect(
+            EchoCancellingCapture.sampleRate(
+                microphoneRates: [.nan, .infinity, .greatestFiniteMagnitude],
+                speakerRates: [48_000],
+                requiredRate: 48_000) == nil)
     }
 
     /// The pair that killed this feature on the machine it is developed on.

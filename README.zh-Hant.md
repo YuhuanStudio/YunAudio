@@ -7,7 +7,7 @@
 [![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系統需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![1400 tests](https://img.shields.io/badge/tests-1400-brightgreen)](#驗證)
+[![2016 tests](https://img.shields.io/badge/tests-2016-brightgreen)](#驗證)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系統需求)
 
 [English](README.md) · 繁體中文 · [简体中文](README.zh-Hans.md)
@@ -234,7 +234,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 單一 flow check 段落，44 秒
 ```
 
-各步驟刻意互相獨立：1400 個單元測試、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
+各步驟刻意互相獨立：2016 個單元測試、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
 實際繪製之視窗的照片、「無其他實例佔用音訊裝置」的斷言、release 建置的位元精確量測，
 以及一次驅動整個介面對真實硬體執行的 flow check。
 
@@ -264,6 +264,10 @@ App/                bundle 組裝、圖示與 verify.sh
 
 ## 限制
 
+- **issue #9 仍未關閉。** 過去一次 session 在 YunAudio 已退出後仍讓 `coreaudiod` 與系統
+  Sound 選單劣化。0.1.2 已移除會提高此類故障機率的已量測 driver、teardown 與 ownership
+  缺陷，但 [issue #9](https://github.com/YuhuanStudio/YunAudio/issues/9) 的隔離系統音訊恢復
+  驗證仍未完成。使用可選驅動時，請保留移除指令備用。
 - 驅動為 ad-hoc 簽章。要在散布時不出現首次啟動對話框，需要 Developer ID 身分與公證。
 - 人聲隔離會使 `AudioUnitRender` 在 IO 執行緒上配置記憶體，約每週期 0.3 次，來自 Apple
   模型內部。旁路路徑維持為零。目前未觀察到斷音，但該功能啟用期間即時契約是破的。

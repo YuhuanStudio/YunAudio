@@ -2,6 +2,69 @@ import AVFoundation
 import Foundation
 import SoundAnalysis
 
+/// Fixed storage which turns any contiguous public batch into model-sized windows.
+///
+/// Its count can reach `capacity` while a window is borrowed, but never exceeds
+/// it. Keeping the tail in the same storage also preserves sample continuity
+/// across calls without making allocation proportional to caller input.
+final class SoundClassifierWindowBuffer {
+    static let maximumCapacity = Int(AudioProcessingContract.maximumSampleRate * 0.5)
+
+    let capacity: Int
+    private var storage: [Float]
+    private(set) var count = 0
+    private(set) var highWaterMark = 0
+
+    var storageBytes: Int { storage.count * MemoryLayout<Float>.stride }
+
+    init?(capacity: Int) {
+        guard capacity > 0, capacity <= Self.maximumCapacity else { return nil }
+        self.capacity = capacity
+        storage = [Float](repeating: 0, count: capacity)
+    }
+
+    /// Consumes every input sample, presenting each complete window in order.
+    @discardableResult
+    func append(
+        _ samples: UnsafePointer<Float>,
+        count incoming: Int,
+        consume: (UnsafeBufferPointer<Float>) -> Void
+    ) -> Int {
+        guard incoming > 0 else { return 0 }
+
+        var offset = 0
+        var completedWindows = 0
+        while offset < incoming {
+            let copied = min(capacity - count, incoming - offset)
+            storage.withUnsafeMutableBufferPointer { destination in
+                destination.baseAddress!.advanced(by: count).update(
+                    from: samples.advanced(by: offset), count: copied)
+            }
+            count += copied
+            offset += copied
+            highWaterMark = max(highWaterMark, count)
+
+            if count == capacity {
+                storage.withUnsafeBufferPointer(consume)
+                count = 0
+                completedWindows += 1
+            }
+        }
+        return completedWindows
+    }
+
+    func withPendingSamples(_ consume: (UnsafeBufferPointer<Float>) -> Void) {
+        storage.withUnsafeBufferPointer { storage in
+            consume(UnsafeBufferPointer(start: storage.baseAddress, count: count))
+        }
+    }
+
+    func reset() {
+        count = 0
+        highWaterMark = 0
+    }
+}
+
 /// What the microphone is actually hearing, from Apple's on-device sound model.
 ///
 /// `SNClassifySoundRequest(classifierIdentifier: .version1)` is a three-hundred
@@ -82,10 +145,8 @@ public final class SoundClassifier: @unchecked Sendable {
     private let format: AVAudioFormat
     private let observer = Observer()
     private var sampleTime: AVAudioFramePosition = 0
-    /// The model wants its own window; feeding it a hundred tiny buffers per
-    /// second is wasted work, so samples are accumulated first.
-    private var pending: [Float] = []
-    private let windowFrames: Int
+    private let pending: SoundClassifierWindowBuffer
+    private let windowFrameCount: AVAudioFrameCount
 
     /// Bridges the delegate callbacks, which arrive on the analyser's queue,
     /// back onto plain stored values.
@@ -111,17 +172,21 @@ public final class SoundClassifier: @unchecked Sendable {
     }
 
     public init?(sampleRate: Double) {
-        guard
+        guard AudioProcessingContract.supports(sampleRate: sampleRate),
             let format = AVAudioFormat(
                 standardFormatWithSampleRate: sampleRate, channels: 1)
         else { return nil }
-        self.format = format
-        analyser = SNAudioStreamAnalyzer(format: format)
         // Half a second. The model's own window is shorter, but classifying
         // twice a second is plenty for something a person reads, and it keeps
         // the work off the poll that feeds it.
-        windowFrames = Int(sampleRate * 0.5)
-        pending.reserveCapacity(windowFrames)
+        let windowFrames = Int(sampleRate * 0.5)
+        guard let pending = SoundClassifierWindowBuffer(capacity: windowFrames),
+            let windowFrameCount = AVAudioFrameCount(exactly: windowFrames)
+        else { return nil }
+        self.format = format
+        self.pending = pending
+        self.windowFrameCount = windowFrameCount
+        analyser = SNAudioStreamAnalyzer(format: format)
 
         do {
             let request = try SNClassifySoundRequest(classifierIdentifier: .version1)
@@ -136,27 +201,26 @@ public final class SoundClassifier: @unchecked Sendable {
 
     /// Feeds samples. Classifies whenever a window has accumulated.
     public func add(_ samples: UnsafePointer<Float>, count: Int) {
-        pending.append(contentsOf: UnsafeBufferPointer(start: samples, count: count))
-        guard pending.count >= windowFrames else { return }
+        pending.append(samples, count: count) { [self] window in
+            analyse(window)
+        }
+    }
 
-        let frames = pending.count
-        guard
-            let buffer = AVAudioPCMBuffer(
-                pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
-            let channel = buffer.floatChannelData
-        else {
-            pending.removeAll(keepingCapacity: true)
+    private func analyse(_ window: UnsafeBufferPointer<Float>) {
+        guard window.count == Int(windowFrameCount), let samples = window.baseAddress else {
             return
         }
-        buffer.frameLength = AVAudioFrameCount(frames)
-        pending.withUnsafeBufferPointer {
-            channel[0].update(from: $0.baseAddress!, count: frames)
-        }
-        pending.removeAll(keepingCapacity: true)
+        guard
+            let buffer = AVAudioPCMBuffer(
+                pcmFormat: format, frameCapacity: windowFrameCount),
+            let channel = buffer.floatChannelData
+        else { return }
+        buffer.frameLength = windowFrameCount
+        channel[0].update(from: samples, count: window.count)
 
         analyser.analyze(buffer, atAudioFramePosition: sampleTime)
-        sampleTime += AVAudioFramePosition(frames)
-        refresh(rootMeanSquare: rootMeanSquare(of: buffer, frames: frames))
+        sampleTime += AVAudioFramePosition(windowFrameCount)
+        refresh(rootMeanSquare: rootMeanSquare(of: buffer, frames: window.count))
     }
 
     private func rootMeanSquare(of buffer: AVAudioPCMBuffer, frames: Int) -> Float {
@@ -200,7 +264,7 @@ public final class SoundClassifier: @unchecked Sendable {
     }
 
     public func reset() {
-        pending.removeAll(keepingCapacity: true)
+        pending.reset()
         verdict = .quiet
         confidence = 0
         label = ""

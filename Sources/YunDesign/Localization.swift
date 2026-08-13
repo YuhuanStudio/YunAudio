@@ -51,9 +51,22 @@ public enum YunLanguage: String, CaseIterable, Identifiable, Sendable {
 /// under another. Looking in one place turned the whole Chinese interface back
 /// into English, in a build that was otherwise correct and said nothing.
 public enum YunStrings {
+    /// Protects the launch-time bundle, language and resolved table as one
+    /// coherent snapshot. `loc()` is also used by background result builders;
+    /// changing the language while one of those was resolving a table used to
+    /// race three `nonisolated(unsafe)` globals.
+    private static let stateLock = NSRecursiveLock()
+
     /// Set at launch to the bundle carrying the `.lproj` folders.
-    public nonisolated(unsafe) static var bundle: Bundle = .main {
-        didSet { resolved = nil }
+    private nonisolated(unsafe) static var storedBundle: Bundle = .main
+    public static var bundle: Bundle {
+        get { stateLock.withLock { storedBundle } }
+        set {
+            stateLock.withLock {
+                storedBundle = newValue
+                resolved = nil
+            }
+        }
     }
 
     private nonisolated(unsafe) static var resolved: Bundle?
@@ -72,22 +85,26 @@ public enum YunStrings {
     /// which is what this did unconditionally before.
     public static var language: YunLanguage {
         get {
-            if let stored { return stored }
-            let value =
-                UserDefaults.standard.string(forKey: defaultsKey)
-                .flatMap(YunLanguage.init(rawValue:)) ?? .system
-            stored = value
-            return value
+            stateLock.withLock {
+                if let stored { return stored }
+                let value =
+                    UserDefaults.standard.string(forKey: defaultsKey)
+                    .flatMap(YunLanguage.init(rawValue:)) ?? .system
+                stored = value
+                return value
+            }
         }
         set {
-            guard newValue != language else { return }
-            stored = newValue
-            if newValue == .system {
-                UserDefaults.standard.removeObject(forKey: defaultsKey)
-            } else {
-                UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+            stateLock.withLock {
+                guard newValue != language else { return }
+                stored = newValue
+                if newValue == .system {
+                    UserDefaults.standard.removeObject(forKey: defaultsKey)
+                } else {
+                    UserDefaults.standard.set(newValue.rawValue, forKey: defaultsKey)
+                }
+                resolved = nil
             }
-            resolved = nil
         }
     }
 
@@ -99,13 +116,17 @@ public enum YunStrings {
     /// application in English afterwards. A documentation build must not change
     /// the settings of the person running it.
     public static func useForThisLaunchOnly(_ language: YunLanguage) {
-        stored = language
-        resolved = nil
+        stateLock.withLock {
+            stored = language
+            resolved = nil
+        }
     }
 
     /// The bundle for the language the user actually reads, or the container
     /// itself when nothing better matches.
     private static func table() -> Bundle {
+        stateLock.lock()
+        defer { stateLock.unlock() }
         if let resolved { return resolved }
 
         // Both layouts, in the order that costs least: `resourceURL` is right
@@ -141,8 +162,8 @@ public enum YunStrings {
                 return localized
             }
         }
-        resolved = bundle
-        return bundle
+        resolved = storedBundle
+        return storedBundle
     }
 
     static func lookUp(_ key: String) -> String {

@@ -789,6 +789,7 @@ enum CompositedLyricKeyFrames {
     ///   - row: Where this row sits in the line, from 0 to 1.
     ///   - syllables: Word times for the whole line, in order.
     ///   - line: When the line begins and ends, in the track's own seconds.
+    ///   - text: The complete line whose word boundaries place the syllables.
     /// - Returns: Times from 0 to 1 across the animation, with the row's scale
     ///   at each, or nil when the line carries no word times and the caller
     ///   should keep its linear animation.

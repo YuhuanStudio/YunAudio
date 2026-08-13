@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 
@@ -565,25 +566,68 @@ struct ControlSocketTests {
     /// hangs a run rather than failing it, which is the worst way for this to
     /// go wrong.
     private final class Box: @unchecked Sendable {
-        var outcome: Result<ControlReply, any Error>?
+        private let lock = NSLock()
+        private var storage: Result<ControlReply, any Error>?
+
+        var outcome: Result<ControlReply, any Error>? {
+            get { lock.withLock { storage } }
+            set { lock.withLock { storage = newValue } }
+        }
     }
 
-    private func send(_ client: ControlClient, _ request: ControlRequest) throws -> ControlReply
-    {
+    private final class LockedValue<Value: Sendable>: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: Value?
+
+        func store(_ value: Value) { lock.withLock { storage = value } }
+        var value: Value? { lock.withLock { storage } }
+    }
+
+    private final class HeldMainActorScheduler: @unchecked Sendable {
+        typealias Operation = @MainActor @Sendable () -> Void
+
+        private let lock = NSLock()
+        private var operations: [Operation] = []
+
+        func schedule(_ operation: @escaping Operation) {
+            lock.withLock { operations.append(operation) }
+        }
+
+        var count: Int { lock.withLock { operations.count } }
+
+        @MainActor
+        func releaseAll() {
+            let released = lock.withLock {
+                let released = operations
+                operations = []
+                return released
+            }
+            for operation in released { operation() }
+        }
+    }
+
+    private func send(
+        _ client: ControlClient, _ request: ControlRequest,
+        transportTimeout: TimeInterval? = nil
+    ) throws -> ControlReply {
         let box = Box()
         let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
-            box.outcome = Result { try client.send(request) }
+        let thread = Thread {
+            box.outcome = Result {
+                if let transportTimeout {
+                    try client.send(request, transportTimeout: transportTimeout)
+                } else {
+                    try client.send(request)
+                }
+            }
             done.signal()
         }
-        // Generous on purpose. The deadline is here to turn a deadlock into a
-        // failure rather than a hung run, and a deadlock never completes — so
-        // there is nothing to gain from a short one and something real to lose.
-        // At five seconds these two cases failed whenever the machine was busy
-        // with a flow check, which teaches people to re-run rather than to look,
-        // and a check that is sometimes right is worse than one that is slow.
-        guard done.wait(timeout: .now() + 60) == .success else {
-            throw ControlError.transport("the reply did not arrive within a minute")
+        thread.name = "yunaudio.test.control-client"
+        thread.start()
+        // Longer than the client's own 1.5-second transport bound, so this is a
+        // deadlock sentinel rather than the mechanism under test.
+        guard done.wait(timeout: .now() + 3) == .success else {
+            throw ControlError.transport("the bounded client did not return within 3 seconds")
         }
         return try #require(box.outcome).get()
     }
@@ -591,7 +635,9 @@ struct ControlSocketTests {
     /// The stub application, standing where `RouterModel` stands.
     @MainActor private final class Model {
         var isMuted = false
+        var requestCount = 0
         func answer(_ request: ControlRequest) -> ControlReply {
+            requestCount += 1
             switch request {
             case .perform(.mute(let wanted)):
                 isMuted = wanted ?? !isMuted
@@ -613,7 +659,7 @@ struct ControlSocketTests {
         let path = Self.temporaryPath()
         let model = await MainActor.run { Model() }
         let listener = ControlListener(path: path)
-        try listener.start { request in model.answer(request) }
+        try listener.start { request, _, reply in reply(model.answer(request)) }
         defer { listener.stop() }
 
         let client = ControlClient(path: path)
@@ -633,6 +679,209 @@ struct ControlSocketTests {
                 == .failure("There is no scene called \"Nope\"."))
     }
 
+    @Test("the callback receives the caller deadline rather than a fresh budget")
+    func callbackUsesCallerDeadline() async throws {
+        let path = Self.temporaryPath()
+        let scheduler = HeldMainActorScheduler()
+        let observedRemaining = LockedValue<UInt64>()
+        let listener = ControlListener(
+            path: path, scheduleOnMainActor: { scheduler.schedule($0) })
+        try listener.start { _, deadline, reply in
+            observedRemaining.store(deadline.remainingNanoseconds)
+            reply(.message("within the original deadline"))
+        }
+        defer { listener.stop() }
+
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            box.outcome = Result { try ControlClient(path: path).send(.status) }
+            done.signal()
+        }
+        thread.name = "yunaudio.test.control-deadline"
+        thread.start()
+
+        try #require(
+            waitUntil(timeout: 0.5) {
+                listener.pendingReplyCount == 1 && scheduler.count == 1
+            })
+        try await Task.sleep(for: .milliseconds(300))
+        await MainActor.run { scheduler.releaseAll() }
+        try #require(waitUntil(timeout: 1) { box.outcome != nil })
+        #expect(
+            try #require(box.outcome).get() == .message("within the original deadline"))
+
+        let remaining = try #require(observedRemaining.value)
+        #expect(remaining > 500_000_000)
+        #expect(remaining < 1_300_000_000)
+        #expect(listener.acceptedReplyCount == 1)
+        #expect(listener.rejectedReplyCount == 0)
+    }
+
+    @Test("a caller deadline expires queued work before the application runs")
+    func callerDeadlineStopsQueuedApplicationWork() async throws {
+        let path = Self.temporaryPath()
+        let scheduler = HeldMainActorScheduler()
+        let model = await MainActor.run { Model() }
+        let listener = ControlListener(
+            path: path, scheduleOnMainActor: { scheduler.schedule($0) })
+        try listener.start { request, _, reply in reply(model.answer(request)) }
+        defer { listener.stop() }
+
+        let box = Box()
+        let thread = Thread {
+            box.outcome = Result {
+                try ControlClient(path: path).send(.status, transportTimeout: 0.2)
+            }
+        }
+        thread.name = "yunaudio.test.control-caller-deadline"
+        thread.start()
+
+        try #require(waitUntil(timeout: 0.5) { scheduler.count == 1 })
+        try await Task.sleep(for: .milliseconds(250))
+        await MainActor.run { scheduler.releaseAll() }
+        try #require(waitUntil(timeout: 0.5) { box.outcome != nil })
+
+        #expect(throws: ControlError.self) { try #require(box.outcome).get() }
+        #expect(await model.requestCount == 0)
+        #expect(listener.acceptedReplyCount == 0)
+        #expect(listener.rejectedReplyCount == 0)
+    }
+
+    @Test("a far-future caller deadline is clamped to the server admission budget")
+    func serverClampsFarFutureCallerDeadline() throws {
+        let path = Self.temporaryPath()
+        let observedRemaining = LockedValue<UInt64>()
+        let listener = ControlListener(path: path)
+        try listener.start { _, deadline, reply in
+            observedRemaining.store(deadline.remainingNanoseconds)
+            reply(.message("bounded by the server"))
+        }
+        defer { listener.stop() }
+
+        #expect(
+            try send(
+                ControlClient(path: path), .status,
+                transportTimeout: 60) == .message("bounded by the server"))
+        let remaining = try #require(observedRemaining.value)
+        #expect(remaining > 0)
+        #expect(
+            remaining
+                <= UInt64(ControlSocket.serverTotalTimeout * 1_000_000_000))
+    }
+
+    @Test("a legacy request without deadline metadata uses the admission budget")
+    func legacyRequestUsesAdmissionDeadline() async throws {
+        let path = Self.temporaryPath()
+        let observedRemaining = LockedValue<UInt64>()
+        let listener = ControlListener(path: path)
+        try listener.start { _, deadline, reply in
+            observedRemaining.store(deadline.remainingNanoseconds)
+            reply(.message("legacy request accepted"))
+        }
+        defer { listener.stop() }
+
+        let answers = try await raw(path, lines: [ControlRequest.status.json.text])
+        #expect(answers.count == 1)
+        #expect(
+            ControlReply(json: try #require(JSONValue.parse(answers[0])))
+                == .message("legacy request accepted"))
+        let remaining = try #require(observedRemaining.value)
+        #expect(remaining > 0)
+        #expect(
+            remaining
+                <= UInt64(ControlSocket.serverTotalTimeout * 1_000_000_000))
+    }
+
+    @Test("only the first of two callback replies is published")
+    func callbackIsExactOnce() throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in
+            reply(.message("first"))
+            reply(.message("second"))
+        }
+        defer { listener.stop() }
+
+        #expect(try send(ControlClient(path: path), .status) == .message("first"))
+        #expect(listener.acceptedReplyCount == 1)
+        #expect(listener.rejectedReplyCount == 1)
+    }
+
+    @Test("oversized and escaped replies become one bounded failure frame")
+    func oversizedRepliesUseBoundedFailure() throws {
+        let emptyReplyBytes = ControlReply.message("").json.text.utf8.count
+        let maximumPayloadBytes = ControlSocket.maximumFrameBytes - emptyReplyBytes
+        let exact = ControlReply.message(String(repeating: "x", count: maximumPayloadBytes))
+        #expect(exact.json.text.utf8.count == ControlSocket.maximumFrameBytes)
+        #expect(exact.boundedWireText == exact.json.text)
+
+        let oneByteOver = ControlReply.message(
+            String(repeating: "x", count: maximumPayloadBytes + 1))
+        let escapingExpansion = ControlReply.message(
+            String(repeating: "\n", count: ControlSocket.maximumFrameBytes / 2))
+        #expect(oneByteOver.json.text.utf8.count == ControlSocket.maximumFrameBytes + 1)
+        #expect(escapingExpansion.json.text.utf8.count > ControlSocket.maximumFrameBytes)
+        for oversized in [oneByteOver, escapingExpansion] {
+            let wire = oversized.boundedWireText
+            #expect(wire.utf8.count <= ControlSocket.maximumFrameBytes)
+            #expect(
+                ControlReply(json: try #require(JSONValue.parse(wire)))
+                    == ControlReply.oversizedWireFailure)
+        }
+
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in
+            reply(oneByteOver)
+            reply(.message("late second answer"))
+        }
+        defer { listener.stop() }
+
+        #expect(
+            try send(ControlClient(path: path), .status)
+                == ControlReply.oversizedWireFailure)
+        #expect(listener.acceptedReplyCount == 1)
+        #expect(listener.rejectedReplyCount == 1)
+    }
+
+    @Test("stop cancels an outstanding callback and a late reply publishes nothing")
+    func stopCancelsCallback() throws {
+        let path = Self.temporaryPath()
+        let capturedReply = LockedValue<ControlListener.Reply>()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in capturedReply.store(reply) }
+        defer { listener.stop() }
+
+        let box = Box()
+        let done = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            box.outcome = Result { try ControlClient(path: path).send(.status) }
+            done.signal()
+        }
+        thread.name = "yunaudio.test.control-stop-callback"
+        thread.start()
+
+        try #require(
+            waitUntil(timeout: 0.5) {
+                listener.pendingReplyCount == 1 && capturedReply.value != nil
+            })
+        let began = DispatchTime.now().uptimeNanoseconds
+        #expect(listener.stop())
+        #expect(done.wait(timeout: .now() + 0.5) == .success)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - began
+        #expect(elapsed < 500_000_000)
+        #expect(throws: ControlError.self) { try #require(box.outcome).get() }
+        #expect(listener.stoppedReplyCount == 1)
+        #expect(listener.acceptedReplyCount == 0)
+
+        let lateReply = try #require(capturedReply.value)
+        lateReply(.message("too late"))
+        #expect(listener.acceptedReplyCount == 0)
+        #expect(listener.rejectedReplyCount == 1)
+        #expect(listener.openClientCount == 0)
+    }
+
     /// Nothing listening has to be an answer rather than a wait. An agent told
     /// to hold on has nothing to do with that.
     @Test("nothing listening is an immediate answer")
@@ -649,7 +898,7 @@ struct ControlSocketTests {
         let path = "/tmp/" + String(repeating: "a", count: 200) + ".sock"
         #expect(throws: ControlError.self) { try ControlClient(path: path).send(.status) }
         #expect(throws: ControlError.self) {
-            try ControlListener(path: path).start { _ in .message("") }
+            try ControlListener(path: path).start { _, _, reply in reply(.message("")) }
         }
     }
 
@@ -661,11 +910,11 @@ struct ControlSocketTests {
         let path = Self.temporaryPath()
         let model = await MainActor.run { Model() }
         let first = ControlListener(path: path)
-        try first.start { request in model.answer(request) }
+        try first.start { request, _, reply in reply(model.answer(request)) }
         defer { first.stop() }
 
         #expect(throws: ControlError.self) {
-            try ControlListener(path: path).start { _ in .message("") }
+            try ControlListener(path: path).start { _, _, reply in reply(.message("")) }
         }
         // And the original is still the one answering.
         #expect(try send(ControlClient(path: path), .names).isNames)
@@ -675,9 +924,26 @@ struct ControlSocketTests {
         first.stop()
         FileManager.default.createFile(atPath: path, contents: nil)
         let second = ControlListener(path: path)
-        try second.start { request in model.answer(request) }
+        try second.start { request, _, reply in reply(model.answer(request)) }
         defer { second.stop() }
         #expect(try send(ControlClient(path: path), .names).isNames)
+    }
+
+    @Test("one listener cannot overwrite its own live generation")
+    func doesNotReplaceItsOwnGeneration() async throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in reply(.message("first")) }
+        defer { listener.stop() }
+        let descriptor = listener.listeningDescriptor
+        let epoch = listener.listenerEpoch
+
+        #expect(throws: ControlError.self) {
+            try listener.start { _, _, reply in reply(.message("second")) }
+        }
+        #expect(listener.listeningDescriptor == descriptor)
+        #expect(listener.listenerEpoch == epoch)
+        #expect(try send(ControlClient(path: path), .status) == .message("first"))
     }
 
     /// A line that is not a request must come back as a refusal. The listener
@@ -688,15 +954,238 @@ struct ControlSocketTests {
         let path = Self.temporaryPath()
         let model = await MainActor.run { Model() }
         let listener = ControlListener(path: path)
-        try listener.start { request in model.answer(request) }
+        try listener.start { request, _, reply in reply(model.answer(request)) }
         defer { listener.stop() }
 
+        // Keep this assertion on the parser path it names. A valid command is
+        // intentionally handed to MainActor, whose queue is shared by every UI
+        // test in the process; making that unrelated scheduling delay the last
+        // sentinel turned a parser-safety test into a full-suite timing flake.
+        // The ordinary request/reply tests above exercise the actor hand-off.
         let answers = try await raw(
-            path, lines: ["not json", #"{"request":"detonate"}"#, "", #"{"request":"status"}"#])
+            path,
+            lines: ["not json", #"{"request":"detonate"}"#, "", #"{"still":"not a request"}"#])
         #expect(answers.count == 3)
         #expect(JSONValue.parse(answers[0])?["ok"] == .bool(false))
         #expect(JSONValue.parse(answers[1])?["ok"] == .bool(false))
-        #expect(JSONValue.parse(answers[2])?["ok"] == .bool(true))
+        #expect(JSONValue.parse(answers[2])?["ok"] == .bool(false))
+    }
+
+    @Test("one connection carries exactly one request")
+    func oneRequestPerConnection() async throws {
+        let path = Self.temporaryPath()
+        let model = await MainActor.run { Model() }
+        let listener = ControlListener(path: path)
+        try listener.start { request, _, reply in reply(model.answer(request)) }
+        defer { listener.stop() }
+
+        let descriptor = try rawConnection(path)
+        defer { close(descriptor) }
+        let twoRequests = #"{"request":"status"}"# + "\n" + #"{"request":"names"}"#
+        let writeDeadline = UnixSocket.Deadline(after: 1)
+        #expect(
+            UnixSocket.writeAll(
+                descriptor, twoRequests, timeout: 1, total: writeDeadline))
+        // Longer than the server's own total deadline: this sentinel observes
+        // the server decision instead of racing it under a loaded full suite.
+        let firstDeadline = UnixSocket.Deadline(after: 2)
+        let first = try UnixSocket.readLine(
+            descriptor, timeout: 2, total: firstDeadline)
+        #expect(JSONValue.parse(first)?["status"] != nil)
+
+        let secondDeadline = UnixSocket.Deadline(after: 0.5)
+        #expect(throws: UnixSocket.IOError.self) {
+            try UnixSocket.readLine(descriptor, timeout: 0.5, total: secondDeadline)
+        }
+        #expect(await model.requestCount == 1)
+    }
+
+    @Test("a silent peer is closed at the read deadline")
+    func silentPeerExpires() async throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in reply(.message("unexpected")) }
+        defer { listener.stop() }
+
+        let descriptor = try rawConnection(path)
+        defer { close(descriptor) }
+        try #require(waitUntil { listener.activeClientCount == 1 })
+        let started = Date()
+        try #require(waitUntil(timeout: 2) { listener.activeClientCount == 0 })
+        #expect(Date().timeIntervalSince(started) < 2)
+        #expect(listener.openClientCount == 0)
+    }
+
+    @Test("a frame over 64 KiB is dropped before reaching the handler")
+    func oversizedFrameIsDropped() async throws {
+        let path = Self.temporaryPath()
+        let model = await MainActor.run { Model() }
+        let listener = ControlListener(path: path)
+        try listener.start { request, _, reply in reply(model.answer(request)) }
+        defer { listener.stop() }
+
+        let descriptor = try rawConnection(path)
+        defer { close(descriptor) }
+        var bytes = [UInt8](
+            repeating: UInt8(ascii: "x"), count: ControlSocket.maximumFrameBytes + 1)
+        bytes.append(UInt8(ascii: "\n"))
+        _ = writeUnbounded(descriptor, bytes)
+        shutdown(descriptor, SHUT_WR)
+
+        try #require(waitUntil(timeout: 2) { listener.activeClientCount == 0 })
+        #expect(listener.openClientCount == 0)
+        #expect(await model.requestCount == 0)
+    }
+
+    @Test("sixteen silent clients are the fixed admission ceiling")
+    func clientCap() async throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in reply(.message("ok")) }
+        defer { listener.stop() }
+
+        var peers: [Int32] = []
+        defer { peers.filter { $0 >= 0 }.forEach { close($0) } }
+        for _ in 0..<ControlSocket.maximumActiveClients {
+            peers.append(try rawConnection(path))
+        }
+        try #require(
+            waitUntil(timeout: 0.5) {
+                listener.activeClientCount == ControlSocket.maximumActiveClients
+            })
+
+        for _ in 0..<32 {
+            if let excess = try? rawConnection(path) { close(excess) }
+        }
+        usleep(50_000)
+        #expect(listener.activeClientCount <= ControlSocket.maximumActiveClients)
+        #expect(listener.openClientCount <= ControlSocket.maximumActiveClients)
+        #expect(listener.peakClientCount == ControlSocket.maximumActiveClients)
+
+        let began = Date()
+        #expect(throws: ControlError.self) {
+            try send(ControlClient(path: path), .status)
+        }
+        #expect(Date().timeIntervalSince(began) < 2)
+
+        peers.forEach { close($0) }
+        peers = []
+        try #require(waitUntil(timeout: 2) { listener.activeClientCount == 0 })
+        #expect(listener.openClientCount == 0)
+    }
+
+    /// A closed descriptor is just an integer, and Unix deliberately recycles
+    /// the lowest available one. A stale accept loop must therefore be gone —
+    /// not merely asked to stop — before the next handler owns that integer.
+    @Test("128 rapid listener generations survive descriptor reuse")
+    func rapidRestartGenerations() async throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        defer { listener.stop() }
+
+        var previousDescriptor: Int32?
+        var descriptorReuses = 0
+        var longestStopNanoseconds: UInt64 = 0
+
+        for index in 1...128 {
+            let expected = "generation \(index)"
+            try listener.start { _, _, reply in reply(.message(expected)) }
+            #expect(listener.listenerEpoch == UInt64(index))
+            let descriptor = listener.listeningDescriptor
+            #expect(descriptor >= 0)
+            if descriptor == previousDescriptor { descriptorReuses += 1 }
+
+            // Half stop before the accept thread is known to have scheduled;
+            // the other half prove that a reused FD still reaches this epoch's
+            // handler rather than the previous one.
+            if !index.isMultiple(of: 2) {
+                #expect(try send(ControlClient(path: path), .status) == .message(expected))
+            }
+
+            let began = DispatchTime.now().uptimeNanoseconds
+            #expect(listener.stop())
+            let elapsed = DispatchTime.now().uptimeNanoseconds - began
+            longestStopNanoseconds = max(longestStopNanoseconds, elapsed)
+            try #require(waitUntil(timeout: 0.5) { listener.openClientCount == 0 })
+            #expect(listener.activeAcceptLoopCount == 0)
+            #expect(listener.lastStopAcknowledged)
+            previousDescriptor = descriptor
+        }
+
+        // The exact descriptor is deliberately not assumed, because the full
+        // suite opens files concurrently. At least one reuse proves that the
+        // assertion crossed the hazard this test exists to exercise.
+        #expect(descriptorReuses > 0)
+        #expect(longestStopNanoseconds < 500_000_000)
+        #expect(listener.listenerEpoch == 128)
+    }
+
+    @Test("stop wakes all sixteen silent peers within its fixed bound")
+    func stopWithSilentPeers() throws {
+        let path = Self.temporaryPath()
+        let listener = ControlListener(path: path)
+        try listener.start { _, _, reply in reply(.message("unexpected")) }
+        defer { listener.stop() }
+
+        var peers: [Int32] = []
+        defer { peers.forEach { close($0) } }
+        for _ in 0..<ControlSocket.maximumActiveClients {
+            peers.append(try rawConnection(path))
+        }
+        try #require(
+            waitUntil(timeout: 0.5) {
+                listener.activeClientCount == ControlSocket.maximumActiveClients
+            })
+
+        let began = DispatchTime.now().uptimeNanoseconds
+        #expect(listener.stop())
+        let elapsed = DispatchTime.now().uptimeNanoseconds - began
+
+        #expect(elapsed < 500_000_000)
+        #expect(listener.activeAcceptLoopCount == 0)
+        try #require(waitUntil(timeout: 0.5) { listener.activeClientCount == 0 })
+        #expect(listener.openClientCount == 0)
+
+        try listener.start { _, _, reply in reply(.message("restarted")) }
+        #expect(try send(ControlClient(path: path), .status) == .message("restarted"))
+        #expect(listener.stop())
+    }
+
+    @Test("the client regains control when a server accepts and stays silent")
+    func clientTransportDeadline() throws {
+        let path = Self.temporaryPath()
+        unlink(path)
+        var address = try UnixSocket.address(for: path)
+        let listening = try UnixSocket.make()
+        guard UnixSocket.withSockaddr(&address, { bind(listening, $0, $1) }) == 0,
+            listen(listening, 1) == 0
+        else {
+            close(listening)
+            throw ControlError.transport("could not start the silent test server")
+        }
+        let release = DispatchSemaphore(value: 0)
+        let thread = Thread {
+            let client = accept(listening, nil, nil)
+            guard client >= 0 else { return }
+            _ = release.wait(timeout: .now() + 3)
+            close(client)
+        }
+        thread.name = "yunaudio.test.silent-server"
+        thread.start()
+        defer {
+            release.signal()
+            shutdown(listening, SHUT_RDWR)
+            close(listening)
+            unlink(path)
+        }
+
+        let began = Date()
+        #expect(throws: ControlError.self) {
+            try ControlClient(path: path).send(.status)
+        }
+        let elapsed = Date().timeIntervalSince(began)
+        #expect(elapsed >= 1)
+        #expect(elapsed < 2)
     }
 
     /// Writes lines straight at the socket, bypassing `ControlClient`, because
@@ -704,27 +1193,63 @@ struct ControlSocketTests {
     /// client would never produce.
     private func raw(_ path: String, lines: [String]) async throws -> [String] {
         try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global().async {
+            let thread = Thread {
                 continuation.resume(
                     with: Result {
-                        var address = try UnixSocket.address(for: path)
-                        let descriptor = try UnixSocket.make()
-                        defer { close(descriptor) }
-                        guard
-                            UnixSocket.withSockaddr(&address, { connect(descriptor, $0, $1) })
-                                == 0
-                        else { throw ControlError.notRunning(path: path) }
                         var answers: [String] = []
                         for line in lines {
-                            UnixSocket.writeAll(descriptor, line)
+                            let descriptor = try rawConnection(path)
+                            defer { close(descriptor) }
+                            let total = UnixSocket.Deadline(after: 2)
+                            guard
+                                UnixSocket.writeAll(
+                                    descriptor, line, timeout: 1, total: total)
+                            else { throw ControlError.transport("raw write failed") }
                             guard !line.isEmpty else { continue }
-                            guard let answer = UnixSocket.readLine(descriptor) else { break }
+                            let answer = try UnixSocket.readLine(
+                                descriptor, timeout: 1, total: total)
                             answers.append(answer)
                         }
                         return answers
                     })
             }
+            thread.name = "yunaudio.test.raw-control"
+            thread.start()
         }
+    }
+
+    private func rawConnection(_ path: String) throws -> Int32 {
+        var address = try UnixSocket.address(for: path)
+        let descriptor = try UnixSocket.make()
+        guard UnixSocket.withSockaddr(&address, { connect(descriptor, $0, $1) }) == 0 else {
+            close(descriptor)
+            throw ControlError.notRunning(path: path)
+        }
+        return descriptor
+    }
+
+    private func writeUnbounded(_ descriptor: Int32, _ bytes: [UInt8]) -> Bool {
+        var offset = 0
+        while offset < bytes.count {
+            let written = bytes[offset...].withUnsafeBufferPointer {
+                Darwin.write(descriptor, $0.baseAddress, $0.count)
+            }
+            if written < 0, errno == EINTR { continue }
+            guard written > 0 else { return false }
+            offset += written
+        }
+        return true
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 1, _ condition: () -> Bool
+    ) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            usleep(5_000)
+        }
+        return condition()
     }
 }
 
@@ -786,7 +1311,7 @@ struct MCPBinaryTests {
         let path = NSTemporaryDirectory() + "yunaudio-mcp-\(UUID().uuidString.prefix(8)).sock"
         let model = await MainActor.run { Model() }
         let listener = ControlListener(path: path)
-        try listener.start { request in model.answer(request) }
+        try listener.start { request, _, reply in reply(model.answer(request)) }
         defer { listener.stop() }
 
         let requests = [
@@ -837,7 +1362,7 @@ struct MCPBinaryTests {
         async throws -> [String]
     {
         try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global().async {
+            let thread = Thread {
                 continuation.resume(
                     with: Result {
                         let process = Process()
@@ -859,6 +1384,8 @@ struct MCPBinaryTests {
                             .split(separator: "\n").map(String.init)
                     })
             }
+            thread.name = "yunaudio.test.mcp-process"
+            thread.start()
         }
     }
 }

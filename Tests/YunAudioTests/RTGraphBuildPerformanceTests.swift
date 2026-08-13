@@ -85,6 +85,11 @@ struct RTGraphBuildPerformanceTests {
             bufferFrames: Self.frames,
             sampleRate: Double(Self.sampleRate))
         defer { RTGraph.deallocate(graph) }
+        let incident = yun_rt_incident_callback_create()!
+        defer { yun_rt_incident_callback_free(incident) }
+        graph.pointee.incidentTelemetry = incident
+        graph.pointee.incidentDeadlineNanoseconds =
+            UInt64(Self.frames) * 1_000_000_000 / UInt64(Self.sampleRate)
         graph.pointee.mainOutputBuffer = 0
         graph.pointee.masterExemptBuffer = 1
 
@@ -133,6 +138,8 @@ struct RTGraphBuildPerformanceTests {
         let cyclesPerProcessorSecond =
             Double(cycles) * 1_000_000_000 / Double(max(processorNanoseconds, 1))
         let checksum = output.checksum
+        var callbackTail = YunRTIncidentCallbackSnapshot()
+        yun_rt_incident_callback_snapshot(incident, false, &callbackTail)
 
         #if DEBUG
             let build = "debug"
@@ -147,6 +154,9 @@ struct RTGraphBuildPerformanceTests {
 
         #expect(combinedStatus == noErr)
         #expect(cycles == Self.expectedCycles)
+        #expect(callbackTail.samples == UInt64(Self.expectedCycles + 32))
+        #expect(callbackTail.allocationViolations == allocations)
+        #expect(!callbackTail.isCoherent)
         #expect(checksum.isFinite && abs(checksum) > 1)
         #if !DEBUG
             #expect(allocations == 0)

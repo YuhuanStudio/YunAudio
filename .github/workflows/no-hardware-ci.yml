@@ -1,0 +1,124 @@
+name: No-hardware CI
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 9 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: no-hardware-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  YUNAUDIO_CI_NO_HARDWARE: "1"
+
+jobs:
+  verify-matrix:
+    name: Verify (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS 26
+            lane: macos-26
+            expected_os_major: "26"
+            runner: ${{ vars.YUNAUDIO_RUNNER_MACOS_26 || '["self-hosted","macOS","yunaudio-ci","macos-26"]' }}
+            developer_dir: ${{ vars.YUNAUDIO_XCODE_MACOS_26 }}
+          - name: macOS 27
+            lane: macos-27
+            expected_os_major: "27"
+            runner: ${{ vars.YUNAUDIO_RUNNER_MACOS_27 || '["self-hosted","macOS","yunaudio-ci","macos-27"]' }}
+            developer_dir: ${{ vars.YUNAUDIO_XCODE_MACOS_27 }}
+          - name: latest macOS beta
+            lane: macos-beta
+            expected_os_major: ${{ vars.YUNAUDIO_BETA_OS_MAJOR }}
+            runner: ${{ vars.YUNAUDIO_RUNNER_MACOS_BETA || '["self-hosted","macOS","yunaudio-ci","macos-beta"]' }}
+            developer_dir: ${{ vars.YUNAUDIO_XCODE_MACOS_BETA }}
+    runs-on: ${{ fromJSON(matrix.runner) }}
+    timeout-minutes: 60
+    env:
+      YUNAUDIO_CI_LANE: ${{ matrix.lane }}
+      YUNAUDIO_CI_EXPECTED_OS_MAJOR: ${{ matrix.expected_os_major }}
+      YUNAUDIO_CI_DEVELOPER_DIR: ${{ matrix.developer_dir }}
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record and validate the host
+        run: ./ci/no-hardware.sh inventory
+      - name: Enforce the workflow safety policy
+        run: ./ci/no-hardware.sh policy
+      - name: Build every Swift product
+        run: ./ci/no-hardware.sh build
+      - name: Run every deterministic no-hardware test
+        run: ./ci/no-hardware.sh test
+      - name: Enforce strict Swift formatting
+        run: ./ci/no-hardware.sh lint
+      - name: Check every localised string
+        run: ./ci/no-hardware.sh strings
+      - name: Build and statically test the driver
+        run: ./ci/no-hardware.sh driver
+      - name: Assemble and isolate the application bundle
+        run: ./ci/no-hardware.sh bundle
+
+  release-evidence:
+    name: Release realtime and benchmark evidence
+    needs: verify-matrix
+    runs-on: ${{ fromJSON(vars.YUNAUDIO_RUNNER_RELEASE || vars.YUNAUDIO_RUNNER_MACOS_27 || '["self-hosted","macOS","yunaudio-ci","macos-27"]') }}
+    timeout-minutes: 45
+    env:
+      YUNAUDIO_CI_LANE: release
+      YUNAUDIO_CI_EXPECTED_OS_MAJOR: "27"
+      YUNAUDIO_CI_DEVELOPER_DIR: ${{ vars.YUNAUDIO_XCODE_RELEASE || vars.YUNAUDIO_XCODE_MACOS_27 }}
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record and validate the host
+        run: ./ci/no-hardware.sh inventory
+      - name: Run release-only no-hardware assertions and benchmarks
+        run: ./ci/no-hardware.sh release
+
+  sanitizers:
+    name: ${{ matrix.name }}
+    needs: verify-matrix
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include:
+          - name: Address Sanitizer
+            sanitizer: address
+          - name: Thread Sanitizer
+            sanitizer: thread
+          - name: Undefined Behaviour Sanitizer
+            sanitizer: undefined
+    runs-on: ${{ fromJSON(vars.YUNAUDIO_RUNNER_SANITIZERS || vars.YUNAUDIO_RUNNER_MACOS_27 || '["self-hosted","macOS","yunaudio-ci","macos-27"]') }}
+    timeout-minutes: 45
+    env:
+      YUNAUDIO_CI_LANE: sanitizer-${{ matrix.sanitizer }}
+      YUNAUDIO_CI_EXPECTED_OS_MAJOR: "27"
+      YUNAUDIO_CI_DEVELOPER_DIR: ${{ vars.YUNAUDIO_XCODE_SANITIZERS || vars.YUNAUDIO_XCODE_MACOS_27 }}
+    steps:
+      - name: Check out the exact revision
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Record and validate the host
+        run: ./ci/no-hardware.sh inventory
+      - name: Run bounded high-risk tests under ${{ matrix.name }}
+        env:
+          YUNAUDIO_CI_SANITIZER: ${{ matrix.sanitizer }}
+        run: ./ci/no-hardware.sh sanitizer "$YUNAUDIO_CI_SANITIZER"

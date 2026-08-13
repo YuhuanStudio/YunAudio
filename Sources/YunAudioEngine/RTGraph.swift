@@ -101,9 +101,9 @@ struct RTGraph {
     /// intermediate value.
     var routeGainSlews: UnsafeMutablePointer<RTGainSlew>
 
-    /// Peak magnitude per route since the last read. Written by the realtime
-    /// thread and read by the UI; a torn float is not worth a lock here,
-    /// because the worst case is one frame of a meter being stale.
+    /// Peak magnitude per route since the last cycle. Realtime code owns this
+    /// mutable working storage; control readers use the atomic telemetry frame
+    /// below rather than racing these ordinary floats.
     var peaks: UnsafeMutablePointer<Float>
 
     /// Smoothed RMS per route, alongside the peaks.
@@ -113,11 +113,19 @@ struct RTGraph {
     /// one of the two worth using — a plosive and a shout have similar peaks
     /// and nothing like the same level.
     var rms: UnsafeMutablePointer<Float>
+    /// Coherent atomic publication of the realtime-owned meter arrays and
+    /// output counters. Control code reads this storage, never the mutable
+    /// fields above directly.
+    var telemetry: OpaquePointer
 
     // MARK: Calibration
 
     /// Non-zero while a calibration pass is accumulating.
     var calibrating: Int32
+    /// Identity of the most recent reset, carried as raw Float bits through the
+    /// scalar mailbox. A replacement graph copies accumulated energy only when
+    /// it names the same pass.
+    var calibrationEpoch: UInt32
     /// Sum of squares per route since the pass started, and how many frames
     /// went into it. Double because a ten-second pass at 48 kHz is half a
     /// million samples and float would start losing the quiet ones.
@@ -131,10 +139,17 @@ struct RTGraph {
     /// same reasoning as the loudness standard's gate, applied per source.
     var calibrationGate: Float
 
-    /// Incremented once per IO cycle. The control thread watches this to know
-    /// the realtime thread has moved past a graph it is about to free, and it
-    /// doubles as the sequence number guarding the clock anchor below.
+    /// Incremented once per IO cycle for the synthetic callback benchmark.
+    /// Live graph retirement uses the atomic counter in `YunRTCell`; sharing
+    /// this ordinary Swift allocation across threads would itself be a race.
     var cycleCounter: UnsafeMutablePointer<UInt64>
+
+    /// Route-lifetime callback distribution; borrowed from the engine owner.
+    /// Every graph generation receives the same fixed C allocation, and the
+    /// engine frees it only after the IOProc destruction fence.
+    var incidentTelemetry: OpaquePointer?
+    /// The complete IO deadline for the settled route format, in nanoseconds.
+    var incidentDeadlineNanoseconds: UInt64
 
     /// Per-cycle decay applied to the peak meters.
     ///
@@ -147,12 +162,13 @@ struct RTGraph {
     /// Most recent input timestamp from the aggregate, which is the clock
     /// master's own sample time. Published to the virtual driver so it can lock
     /// its clock to the microphone instead of free-running on the host clock.
-    /// Written before `cycleCounter` is bumped, so a reader that sees the same
-    /// counter either side of its read got a consistent pair.
-    var clockSampleTime: UnsafeMutablePointer<Float64>
-    var clockHostTime: UnsafeMutablePointer<UInt64>
-    /// Zero when this graph borrowed the counter and clock storage above from
-    /// the engine rather than allocating its own.
+    /// C11 atomics keep both the sequence and the payload free of data races.
+    /// An unchanged ordinary Swift counter either side of two ordinary loads
+    /// does not: the writer can pause between payload stores before touching
+    /// that counter at all.
+    var clock: OpaquePointer
+    /// Zero when this graph borrowed the clock storage above from the engine
+    /// rather than allocating its own.
     ///
     /// A patchbay edit swaps in a new graph and frees the old one, and the
     /// clock publisher reads that storage from its own queue — so storage tied
@@ -267,6 +283,9 @@ struct RTGraph {
     /// Samples at or beyond full scale on the destination bus since the last
     /// read. Non-zero means audible damage has already happened.
     var outputClipped: UInt64
+    /// Identity of the most recent manual reset. This prevents a graph swap
+    /// from restoring a predecessor's latch while its reset command is pending.
+    var outputClippingEpoch: UInt32
     /// Final linked limiter shared by every output buffer, retained by the
     /// engine and reached here without touching a reference count.
     var outputLimiter: UnsafeMutableRawPointer?
@@ -374,15 +393,16 @@ struct RTGraph {
     /// nothing in the chain adds any, which is the ordinary case and costs one
     /// branch per route.
     var alignmentFrames: Int32
-    /// One delay line per route, `maximumAlignmentFrames` apart.
+    /// One route-lifetime history owner per slot.
     ///
-    /// Per route rather than per source channel: two routes reading one channel
-    /// are two lines and a few kilobytes, whereas sharing would need a table
-    /// mapping channels to lines that has to be rebuilt in step with the routes
-    /// — one more thing to get out of step, for memory nobody is short of.
-    var alignmentLines: UnsafeMutablePointer<Float>
-    /// Where each line is being read and written.
-    var alignmentPositions: UnsafeMutablePointer<Int32>
+    /// Graph generations borrow these pointers. Reusing the route's owner
+    /// makes a publication O(routes): the first callback adopts meters and
+    /// slews, but never copies 8192 samples for every retained route.
+    var alignmentHistories: UnsafeMutablePointer<UnsafeMutablePointer<AlignmentHistory>>
+    /// Non-zero only when this standalone graph allocated the owners above.
+    /// Production graphs borrow owners from `RoutingEngine` until their route's
+    /// retirement fence passes.
+    var ownsAlignmentHistories: Int32
     /// Packed scratch for one route's delayed block, reused by each in turn.
     var alignmentScratch: UnsafeMutablePointer<Float>
     var alignmentCapacity: Int32
@@ -394,6 +414,16 @@ struct RTGraph {
     /// allocated once and handed to the IO thread, and a delay that could grow
     /// without bound would mean allocating there.
     static let maximumAlignmentFrames = 8192
+    /// Hard topology admission bound for the realtime graph.
+    ///
+    /// Every per-route loop and scratch allocation is therefore measurable at
+    /// one finite worst case. Sixty-four covers the external parity target and
+    /// keeps the shortest supported 64-frame/96-kHz callback bounded.
+    static let maximumRoutes = 64
+    /// The publisher refuses a ninth unreclaimed generation. Mirroring that
+    /// bound here turns corrupted handover metadata into one fresh-state cycle
+    /// instead of an unbounded walk on the audio thread.
+    static let maximumStateHandoverDepth = 8
 
     // MARK: Per-bus correction
 
@@ -436,6 +466,11 @@ struct RTGraph {
     /// would mean the loudness meter reading nothing until somebody pressed
     /// record.
     var analysisRing: OpaquePointer?
+    /// Zero when the route owns the analysis ring and every graph only borrows
+    /// it. A consumer keeps one read cursor across live publications, so
+    /// transferring ownership by clearing the retiring graph is itself an
+    /// illegal mutation of memory a callback may still be reading.
+    var ownsAnalysisRing: Int32
     /// Where the mono fold is built before it goes into the ring. The IO thread
     /// cannot allocate, and the output bus is interleaved and usually wider
     /// than two channels.
@@ -445,10 +480,30 @@ struct RTGraph {
     /// Parameter changes waiting to be applied. Drained at the top of each
     /// cycle so a fader move lands without rebuilding anything.
     var commands: OpaquePointer?
+    /// Latest value of every continuous control.
+    ///
+    /// Engine changes use this rather than the FIFO above: a full event queue
+    /// must never discard the final microphone mute. The FIFO remains for
+    /// discrete compatibility probes and is drained before this mailbox, so
+    /// the latest desired value always wins.
+    var controlMailbox: OpaquePointer?
 
     /// Null unless a loopback integrity check is running. Checked once per
     /// cycle, so the normal path costs one predictable branch.
     var selftest: UnsafeMutablePointer<RTSelftest>?
+
+    // MARK: Publication handover
+
+    /// The graph which held the preceding callback's moving state.
+    ///
+    /// The control thread may publish a replacement while the callback is
+    /// still inside this predecessor, so copying its slews, meters or delay
+    /// lines before publication is a data race. Core Audio serialises calls to
+    /// one IOProc. The first callback which observes the replacement is
+    /// therefore the first context that can safely copy this state.
+    var stateHandover: UnsafeMutablePointer<RTGraph>?
+    /// For each new route, its slot in `stateHandover`, or -1 when it is new.
+    var stateHandoverRoutes: UnsafeMutablePointer<Int32>
 
     /// Peak meters fall by 20 dB per second, which is the usual ballistic for
     /// a peak-reading meter and slow enough to read.
@@ -496,35 +551,161 @@ struct RTGraph {
 
     /// Storage whose lifetime is the route's rather than any one graph's.
     struct SharedClock {
-        var cycleCounter: UnsafeMutablePointer<UInt64>
-        var sampleTime: UnsafeMutablePointer<Float64>
-        var hostTime: UnsafeMutablePointer<UInt64>
+        let storage: OpaquePointer
 
         static func allocate() -> SharedClock {
-            let counter = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-            counter.initialize(to: 0)
-            let sample = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
-            sample.initialize(to: 0)
-            let host = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-            host.initialize(to: 0)
-            return SharedClock(cycleCounter: counter, sampleTime: sample, hostTime: host)
+            guard let storage = yun_rt_clock_create() else {
+                preconditionFailure("could not allocate the realtime clock")
+            }
+            return SharedClock(storage: storage)
         }
 
         func deallocate() {
-            cycleCounter.deinitialize(count: 1)
-            cycleCounter.deallocate()
-            sampleTime.deinitialize(count: 1)
-            sampleTime.deallocate()
-            hostTime.deinitialize(count: 1)
-            hostTime.deallocate()
+            yun_rt_clock_free(storage)
         }
     }
 
+    /// Analysis storage belongs to one running route, not one graph generation.
+    struct SharedAnalysisRing {
+        let storage: OpaquePointer
+
+        static func allocate() -> SharedAnalysisRing {
+            guard let storage = yun_rt_ring_create(131_072) else {
+                preconditionFailure("could not allocate the analysis ring")
+            }
+            return SharedAnalysisRing(storage: storage)
+        }
+
+        func deallocate() {
+            yun_rt_ring_free(storage)
+        }
+    }
+
+    /// Mutable delay state which survives graph generations for one route.
+    struct AlignmentHistory {
+        var line: UnsafeMutablePointer<Float>
+        var position: Int32
+    }
+
+    /// Explicit owner for one route's fixed-capacity alignment history.
+    struct SharedAlignmentHistory: @unchecked Sendable {
+        let storage: UnsafeMutablePointer<AlignmentHistory>
+
+        static func allocate() -> SharedAlignmentHistory {
+            let line = UnsafeMutablePointer<Float>.allocate(
+                capacity: maximumAlignmentFrames)
+            line.initialize(repeating: 0, count: maximumAlignmentFrames)
+            let storage = UnsafeMutablePointer<AlignmentHistory>.allocate(capacity: 1)
+            storage.initialize(to: AlignmentHistory(line: line, position: 0))
+            return SharedAlignmentHistory(storage: storage)
+        }
+
+        func deallocate() {
+            storage.pointee.line.deinitialize(count: RTGraph.maximumAlignmentFrames)
+            storage.pointee.line.deallocate()
+            storage.deinitialize(count: 1)
+            storage.deallocate()
+        }
+    }
+
+    static func supportsRouteCount(_ count: Int) -> Bool {
+        count >= 0 && count <= maximumRoutes
+    }
+
+    /// Every derived allocation and narrow integer needed by one graph.
+    ///
+    /// Constructed before the first allocation so an invalid HAL value cannot
+    /// leave a half-built graph or reach a trapping integer conversion.
+    struct AllocationPlan: Equatable {
+        let routeStorageCount: Int
+        let routeCount: Int32
+        let routeStorageCount32: Int32
+        let routeCountForC: UInt32
+        let processingCapacity: Int
+        let processingCapacity32: Int32
+        let recordScratchCount: Int
+        let recordScratchCount32: Int32
+        let stemScratchCount: Int
+        let gainEnvelopeCount: Int
+    }
+
+    static func allocationPlan(
+        routeCount: Int, bufferFrames: Int, sampleRate: Double
+    ) -> AllocationPlan? {
+        guard supportsRouteCount(routeCount),
+            AudioProcessingContract.supports(framesPerSlice: bufferFrames),
+            AudioProcessingContract.supports(sampleRate: sampleRate)
+        else { return nil }
+
+        let routeStorageCount = max(routeCount, 1)
+        let processingCapacity = AudioProcessingContract.maximumFramesPerSlice
+        guard
+            let recordScratchCount = AudioProcessingContract.checkedProduct(
+                processingCapacity, 2),
+            let stemScratchCount = AudioProcessingContract.checkedProduct(
+                routeStorageCount, processingCapacity, maxStemChannels),
+            let gainEnvelopeCount = AudioProcessingContract.checkedProduct(
+                processingCapacity, 3),
+            let routeCount32 = Int32(exactly: routeCount),
+            let routeStorageCount32 = Int32(exactly: routeStorageCount),
+            let routeCountForC = UInt32(exactly: routeCount),
+            let processingCapacity32 = Int32(exactly: processingCapacity),
+            let recordScratchCount32 = Int32(exactly: recordScratchCount)
+        else { return nil }
+
+        return AllocationPlan(
+            routeStorageCount: routeStorageCount,
+            routeCount: routeCount32,
+            routeStorageCount32: routeStorageCount32,
+            routeCountForC: routeCountForC,
+            processingCapacity: processingCapacity,
+            processingCapacity32: processingCapacity32,
+            recordScratchCount: recordScratchCount,
+            recordScratchCount32: recordScratchCount32,
+            stemScratchCount: stemScratchCount,
+            gainEnvelopeCount: gainEnvelopeCount)
+    }
+
+    /// Production entry point. Invalid numeric dimensions are a refused graph,
+    /// not a precondition failure or a request to the allocator.
+    static func allocateIfSupported(
+        routes routeList: [RTRoute], bufferFrames: Int = 128, sampleRate: Double = 48000,
+        sharedClock: SharedClock? = nil,
+        sharedAnalysisRing: SharedAnalysisRing? = nil,
+        sharedAlignmentHistories: [SharedAlignmentHistory]? = nil
+    ) -> UnsafeMutablePointer<RTGraph>? {
+        guard
+            allocationPlan(
+                routeCount: routeList.count, bufferFrames: bufferFrames,
+                sampleRate: sampleRate) != nil,
+            sharedAlignmentHistories == nil
+                || sharedAlignmentHistories?.count == routeList.count
+        else { return nil }
+        return allocate(
+            routes: routeList, bufferFrames: bufferFrames, sampleRate: sampleRate,
+            sharedClock: sharedClock, sharedAnalysisRing: sharedAnalysisRing,
+            sharedAlignmentHistories: sharedAlignmentHistories)
+    }
+
+    /// Trusted fixture entry point. Production code uses `allocateIfSupported`.
     static func allocate(
         routes routeList: [RTRoute], bufferFrames: Int = 128, sampleRate: Double = 48000,
-        sharedClock: SharedClock? = nil
+        sharedClock: SharedClock? = nil,
+        sharedAnalysisRing: SharedAnalysisRing? = nil,
+        sharedAlignmentHistories: [SharedAlignmentHistory]? = nil
     ) -> UnsafeMutablePointer<RTGraph> {
-        let count = max(routeList.count, 1)
+        guard
+            let plan = allocationPlan(
+                routeCount: routeList.count, bufferFrames: bufferFrames,
+                sampleRate: sampleRate)
+        else {
+            preconditionFailure("unsupported realtime graph dimensions")
+        }
+        precondition(
+            sharedAlignmentHistories == nil
+                || sharedAlignmentHistories?.count == routeList.count,
+            "one alignment history is required for every route")
+        let count = plan.routeStorageCount
 
         let routeStorage = UnsafeMutablePointer<RTRoute>.allocate(capacity: count)
         routeStorage.initialize(
@@ -541,6 +722,8 @@ struct RTGraph {
         for (index, route) in routeList.enumerated() {
             routeSlewStorage[index] = RTGainSlew(route.muted != 0 ? 0 : route.gain)
         }
+        let handoverRouteStorage = UnsafeMutablePointer<Int32>.allocate(capacity: count)
+        handoverRouteStorage.initialize(repeating: -1, count: count)
 
         let peakStorage = UnsafeMutablePointer<Float>.allocate(capacity: count)
         peakStorage.initialize(repeating: 0, count: count)
@@ -550,24 +733,22 @@ struct RTGraph {
         energyStorage.initialize(repeating: 0, count: count)
         let framesStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: count)
         framesStorage.initialize(repeating: 0, count: count)
+        guard let telemetryStorage = yun_rt_telemetry_create(plan.routeCountForC) else {
+            preconditionFailure("could not allocate realtime telemetry")
+        }
 
-        let counterStorage =
-            sharedClock?.cycleCounter
-            ?? {
-                let storage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-                storage.initialize(to: 0)
-                return storage
-            }()
+        let counterStorage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
+        counterStorage.initialize(to: 0)
 
         // Sized for the largest block the device is likely to ask for, times a
         // stereo frame.
-        let scratchCapacity = max(bufferFrames, 4096) * 2
+        let scratchCapacity = plan.recordScratchCount
         let scratchStorage = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
         scratchStorage.initialize(repeating: 0, count: scratchCapacity)
 
         // Sized for the largest block the device is likely to ask for. Mono, so
         // no channel factor.
-        let cancelledCapacity = max(bufferFrames, 4096)
+        let cancelledCapacity = plan.processingCapacity
         let cancelledStorage = UnsafeMutablePointer<Float>.allocate(
             capacity: cancelledCapacity)
         cancelledStorage.initialize(repeating: 0, count: cancelledCapacity)
@@ -578,79 +759,77 @@ struct RTGraph {
         stemRingStorage.initialize(repeating: nil, count: count)
         let stemChannelStorage = UnsafeMutablePointer<Int32>.allocate(capacity: count)
         stemChannelStorage.initialize(repeating: 0, count: count)
-        let stemCapacity = max(bufferFrames, 4096)
-        let stemScratchCount = count * stemCapacity * maxStemChannels
+        let stemScratchCount = plan.stemScratchCount
         let stemScratchStorage = UnsafeMutablePointer<Float>.allocate(
             capacity: stemScratchCount)
         stemScratchStorage.initialize(repeating: 0, count: stemScratchCount)
 
-        let alignmentLineCount = count * maximumAlignmentFrames
-        let alignmentLineStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: alignmentLineCount)
-        alignmentLineStorage.initialize(repeating: 0, count: alignmentLineCount)
-        let alignmentPositionStorage = UnsafeMutablePointer<Int32>.allocate(capacity: count)
-        alignmentPositionStorage.initialize(repeating: 0, count: count)
-        let alignmentCapacity = max(bufferFrames, 4096)
+        let alignmentHistoryStorage = UnsafeMutablePointer<
+            UnsafeMutablePointer<AlignmentHistory>
+        >.allocate(capacity: count)
+        let ownsAlignmentHistories = sharedAlignmentHistories == nil || routeList.isEmpty
+        if let sharedAlignmentHistories, !routeList.isEmpty {
+            for index in routeList.indices {
+                alignmentHistoryStorage[index] = sharedAlignmentHistories[index].storage
+            }
+        } else {
+            for index in 0..<count {
+                alignmentHistoryStorage[index] = SharedAlignmentHistory.allocate().storage
+            }
+        }
+        let alignmentCapacity = plan.processingCapacity
         let alignmentScratchStorage = UnsafeMutablePointer<Float>.allocate(
             capacity: alignmentCapacity)
         alignmentScratchStorage.initialize(repeating: 0, count: alignmentCapacity)
 
         let correctionBank = OutputCorrectionBank(
-            sampleRate: sampleRate, maximumFrames: max(bufferFrames, 4096))!
+            sampleRate: sampleRate, maximumFrames: plan.processingCapacity)!
         let correctionStorage =
             Unmanaged.passRetained(correctionBank).toOpaque()
 
         let transcriptRingStorage = UnsafeMutablePointer<OpaquePointer?>.allocate(
             capacity: count)
         transcriptRingStorage.initialize(repeating: nil, count: count)
-        let transcriptCapacity = max(bufferFrames, 4096)
+        let transcriptCapacity = plan.processingCapacity
         let transcriptScratchStorage = UnsafeMutablePointer<Float>.allocate(
             capacity: transcriptCapacity)
         transcriptScratchStorage.initialize(repeating: 0, count: transcriptCapacity)
 
-        let analysisCapacity = max(bufferFrames, 4096)
+        let analysisCapacity = plan.processingCapacity
         let analysisScratch = UnsafeMutablePointer<Float>.allocate(
             capacity: analysisCapacity)
         analysisScratch.initialize(repeating: 0, count: analysisCapacity)
 
-        let gainEnvelopeCapacity = max(bufferFrames, 4096)
         let gainEnvelopeStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: gainEnvelopeCapacity * 3)
-        gainEnvelopeStorage.initialize(repeating: 1, count: gainEnvelopeCapacity * 3)
+            capacity: plan.gainEnvelopeCount)
+        gainEnvelopeStorage.initialize(repeating: 1, count: plan.gainEnvelopeCount)
 
-        let clockSampleStorage =
-            sharedClock?.sampleTime
-            ?? {
-                let storage = UnsafeMutablePointer<Float64>.allocate(capacity: 1)
-                storage.initialize(to: 0)
-                return storage
-            }()
-        let clockHostStorage =
-            sharedClock?.hostTime
-            ?? {
-                let storage = UnsafeMutablePointer<UInt64>.allocate(capacity: 1)
-                storage.initialize(to: 0)
-                return storage
-            }()
+        let ownsClockStorage = sharedClock == nil
+        guard let clockStorage = sharedClock?.storage ?? yun_rt_clock_create() else {
+            preconditionFailure("could not allocate the realtime clock")
+        }
 
         let graph = UnsafeMutablePointer<RTGraph>.allocate(capacity: 1)
         graph.initialize(
             to: RTGraph(
                 routes: routeStorage,
-                routeCount: Int32(routeList.count),
+                routeCount: plan.routeCount,
                 routeGainSlews: routeSlewStorage,
                 peaks: peakStorage,
                 rms: rmsStorage,
+                telemetry: telemetryStorage,
                 calibrating: 0,
+                calibrationEpoch: 0,
                 calibrationEnergy: energyStorage,
                 calibrationFrames: framesStorage,
                 // −60 dBFS. Below this nobody is talking into anything.
                 calibrationGate: 0.001,
                 cycleCounter: counterStorage,
+                incidentTelemetry: nil,
+                incidentDeadlineNanoseconds: 0,
                 peakDecay: decay(bufferFrames: bufferFrames, sampleRate: sampleRate),
-                clockSampleTime: clockSampleStorage,
-                clockHostTime: clockHostStorage,
-                ownsClockStorage: sharedClock == nil ? 1 : 0,
+                clock: clockStorage,
+                ownsClockStorage: ownsClockStorage ? 1 : 0,
                 voiceIsolation: nil,
                 isolationIsChain: 0,
                 effectTransition: nil,
@@ -660,7 +839,7 @@ struct RTGraph {
                 recordLimiter: nil,
                 recordLimiterPrimingFrames: 0,
                 recordScratch: scratchStorage,
-                recordScratchCapacity: Int32(scratchCapacity),
+                recordScratchCapacity: plan.recordScratchCount32,
                 mainOutputBuffer: 0,
                 duckEnabled: 0,
                 duckDepth: 0.1,
@@ -673,6 +852,7 @@ struct RTGraph {
                 micPeak: 0,
                 outputPeak: 0,
                 outputClipped: 0,
+                outputClippingEpoch: 0,
                 outputLimiter: nil,
                 outputLimiterEnabled: 0,
                 outputLimiterPreGain: 1,
@@ -687,11 +867,11 @@ struct RTGraph {
                 muteRampFrames: rampFrames(seconds: 0.005, sampleRate: sampleRate),
                 gainRampFrames: rampFrames(seconds: 0.010, sampleRate: sampleRate),
                 gainEnvelopeScratch: gainEnvelopeStorage,
-                gainEnvelopeCapacity: Int32(gainEnvelopeCapacity),
+                gainEnvelopeCapacity: plan.processingCapacity32,
                 hasRendered: 0,
                 cancelledRing: nil,
                 cancelledBuffer: cancelledStorage,
-                cancelledCapacity: Int32(cancelledCapacity),
+                cancelledCapacity: plan.processingCapacity32,
                 cancelledFrames: 0,
                 // Two seconds at 48 kHz. Long enough that a UI poll at any
                 // practical rate finds a whole 400 ms loudness block waiting,
@@ -701,24 +881,28 @@ struct RTGraph {
                 stemRings: stemRingStorage,
                 stemChannels: stemChannelStorage,
                 stemScratch: stemScratchStorage,
-                stemCount: Int32(count),
-                stemCapacity: Int32(stemCapacity),
+                stemCount: plan.routeStorageCount32,
+                stemCapacity: plan.processingCapacity32,
                 stemFrames: 0,
                 alignmentFrames: 0,
-                alignmentLines: alignmentLineStorage,
-                alignmentPositions: alignmentPositionStorage,
+                alignmentHistories: alignmentHistoryStorage,
+                ownsAlignmentHistories: ownsAlignmentHistories ? 1 : 0,
                 alignmentScratch: alignmentScratchStorage,
-                alignmentCapacity: Int32(alignmentCapacity),
+                alignmentCapacity: plan.processingCapacity32,
                 outputCorrections: correctionStorage,
                 transcriptRings: transcriptRingStorage,
                 transcriptScratch: transcriptScratchStorage,
-                transcriptCount: Int32(count),
-                transcriptCapacity: Int32(transcriptCapacity),
-                analysisRing: yun_rt_ring_create(131_072),
+                transcriptCount: plan.routeStorageCount32,
+                transcriptCapacity: plan.processingCapacity32,
+                analysisRing: sharedAnalysisRing?.storage ?? yun_rt_ring_create(131_072),
+                ownsAnalysisRing: sharedAnalysisRing == nil ? 1 : 0,
                 analysisScratch: analysisScratch,
-                analysisCapacity: Int32(analysisCapacity),
+                analysisCapacity: plan.processingCapacity32,
                 commands: yun_rt_queue_create(256),
-                selftest: nil))
+                controlMailbox: yun_rt_control_mailbox_create(plan.routeCountForC),
+                selftest: nil,
+                stateHandover: nil,
+                stateHandoverRoutes: handoverRouteStorage))
         return graph
     }
 
@@ -728,18 +912,19 @@ struct RTGraph {
         graph.pointee.routes.deallocate()
         graph.pointee.routeGainSlews.deinitialize(count: count)
         graph.pointee.routeGainSlews.deallocate()
+        graph.pointee.stateHandoverRoutes.deinitialize(count: count)
+        graph.pointee.stateHandoverRoutes.deallocate()
         graph.pointee.peaks.deinitialize(count: count)
         graph.pointee.peaks.deallocate()
         graph.pointee.rms.deinitialize(count: count)
         graph.pointee.rms.deallocate()
+        yun_rt_telemetry_free(graph.pointee.telemetry)
         graph.pointee.calibrationEnergy.deinitialize(count: count)
         graph.pointee.calibrationEnergy.deallocate()
         graph.pointee.calibrationFrames.deinitialize(count: count)
         graph.pointee.calibrationFrames.deallocate()
-        if graph.pointee.ownsClockStorage != 0 {
-            graph.pointee.cycleCounter.deinitialize(count: 1)
-            graph.pointee.cycleCounter.deallocate()
-        }
+        graph.pointee.cycleCounter.deinitialize(count: 1)
+        graph.pointee.cycleCounter.deallocate()
         graph.pointee.recordScratch.deinitialize(
             count: Int(graph.pointee.recordScratchCapacity))
         graph.pointee.recordScratch.deallocate()
@@ -747,10 +932,7 @@ struct RTGraph {
             count: Int(graph.pointee.cancelledCapacity))
         graph.pointee.cancelledBuffer.deallocate()
         if graph.pointee.ownsClockStorage != 0 {
-            graph.pointee.clockSampleTime.deinitialize(count: 1)
-            graph.pointee.clockSampleTime.deallocate()
-            graph.pointee.clockHostTime.deinitialize(count: 1)
-            graph.pointee.clockHostTime.deallocate()
+            yun_rt_clock_free(graph.pointee.clock)
         }
         graph.pointee.stemRings.deinitialize(count: count)
         graph.pointee.stemRings.deallocate()
@@ -760,10 +942,14 @@ struct RTGraph {
             count * Int(graph.pointee.stemCapacity) * maxStemChannels
         graph.pointee.stemScratch.deinitialize(count: stemScratchCount)
         graph.pointee.stemScratch.deallocate()
-        graph.pointee.alignmentLines.deinitialize(count: count * maximumAlignmentFrames)
-        graph.pointee.alignmentLines.deallocate()
-        graph.pointee.alignmentPositions.deinitialize(count: count)
-        graph.pointee.alignmentPositions.deallocate()
+        if graph.pointee.ownsAlignmentHistories != 0 {
+            for index in 0..<count {
+                SharedAlignmentHistory(
+                    storage: graph.pointee.alignmentHistories[index]
+                ).deallocate()
+            }
+        }
+        graph.pointee.alignmentHistories.deallocate()
         graph.pointee.alignmentScratch.deinitialize(
             count: Int(graph.pointee.alignmentCapacity))
         graph.pointee.alignmentScratch.deallocate()
@@ -780,8 +966,13 @@ struct RTGraph {
         graph.pointee.gainEnvelopeScratch.deinitialize(
             count: Int(graph.pointee.gainEnvelopeCapacity) * 3)
         graph.pointee.gainEnvelopeScratch.deallocate()
-        if let ring = graph.pointee.analysisRing { yun_rt_ring_free(ring) }
+        if graph.pointee.ownsAnalysisRing != 0, let ring = graph.pointee.analysisRing {
+            yun_rt_ring_free(ring)
+        }
         if let commands = graph.pointee.commands { yun_rt_queue_free(commands) }
+        if let mailbox = graph.pointee.controlMailbox {
+            yun_rt_control_mailbox_free(mailbox)
+        }
         graph.deinitialize(count: 1)
         graph.deallocate()
     }
@@ -840,7 +1031,11 @@ struct RTGraph {
     /// rebuild would fill a backing track with silence while the new line
     /// warmed up — the same discontinuity the effect handover exists to avoid.
     ///
-    /// - Returns: True when the line was carried.
+    /// Production generations point at the same route-lifetime owner, so the
+    /// common path is two pointer comparisons. Copying remains only for
+    /// standalone graphs and deliberately replaced owners.
+    ///
+    /// - Returns: True when the history was already shared or was copied.
     @discardableResult
     static func carryAlignment(
         from previous: UnsafeMutablePointer<RTGraph>, slot old: Int,
@@ -849,10 +1044,11 @@ struct RTGraph {
         guard old >= 0, old < Int(previous.pointee.routeCount),
             new >= 0, new < Int(next.pointee.routeCount)
         else { return false }
-        let from = previous.pointee.alignmentLines + old * maximumAlignmentFrames
-        let to = next.pointee.alignmentLines + new * maximumAlignmentFrames
-        to.update(from: from, count: maximumAlignmentFrames)
-        next.pointee.alignmentPositions[new] = previous.pointee.alignmentPositions[old]
+        let from = previous.pointee.alignmentHistories[old]
+        let to = next.pointee.alignmentHistories[new]
+        if from == to { return true }
+        to.pointee.line.update(from: from.pointee.line, count: maximumAlignmentFrames)
+        to.pointee.position = from.pointee.position
         return true
     }
 
@@ -874,7 +1070,7 @@ struct RTGraph {
         next.pointee.outputCorrections = previous.pointee.outputCorrections
     }
 
-    /// Carries the complete output and recording stages across a graph swap.
+    /// Carries only immutable owner pointers between unpublished test graphs.
     ///
     /// The limiter pointer is intentionally the same pointer. A fresh bank has
     /// an empty look-ahead line, so replacing it during a route or effect edit
@@ -882,22 +1078,19 @@ struct RTGraph {
     /// stopped. Limiter pre-gain is deliberately not copied from this live
     /// graph: the IOProc owns that copy, while the engine installs its
     /// state-lock-protected control value into the unpublished replacement.
+    /// Moving state is deliberately absent: a live publication uses
+    /// `installStateHandover`, because reading it here on the control thread is
+    /// a data race with the callback.
     static func carryOutputStages(
         from previous: UnsafeMutablePointer<RTGraph>,
         to next: UnsafeMutablePointer<RTGraph>
     ) {
         next.pointee.outputLimiter = previous.pointee.outputLimiter
         next.pointee.outputLimiterEnabled = previous.pointee.outputLimiterEnabled
-        next.pointee.outputLimiterFailures = previous.pointee.outputLimiterFailures
-        next.pointee.outputPeak = previous.pointee.outputPeak
-        next.pointee.outputClipped = previous.pointee.outputClipped
 
         next.pointee.recordRing = previous.pointee.recordRing
         next.pointee.recordChannels = previous.pointee.recordChannels
-        next.pointee.recordPaused = previous.pointee.recordPaused
         next.pointee.recordLimiter = previous.pointee.recordLimiter
-        next.pointee.recordLimiterPrimingFrames =
-            previous.pointee.recordLimiterPrimingFrames
     }
 
     /// Installs setup-time targets as audible values without opening a ramp.
@@ -941,9 +1134,315 @@ struct RTGraph {
         else { return }
         next.pointee.routeGainSlews[new] = previous.pointee.routeGainSlews[old]
     }
+
+    /// Installs only immutable handover metadata on an unpublished graph.
+    /// No field from the live predecessor is read on the control thread.
+    static func installStateHandover(
+        from previous: UnsafeMutablePointer<RTGraph>,
+        to next: UnsafeMutablePointer<RTGraph>,
+        routeSlots: [Int?]
+    ) {
+        next.pointee.incidentTelemetry = previous.pointee.incidentTelemetry
+        next.pointee.incidentDeadlineNanoseconds =
+            previous.pointee.incidentDeadlineNanoseconds
+        next.pointee.stateHandover = previous
+        for index in 0..<Int(next.pointee.routeCount) {
+            let old = index < routeSlots.count ? routeSlots[index] : nil
+            next.pointee.stateHandoverRoutes[index] = Int32(old ?? -1)
+        }
+    }
+
+    /// Commits diagnostic generation evidence after the RCU exchange.
+    ///
+    /// Counting while a candidate was merely prepared created a narrow crash
+    /// window in which the incident claimed a graph the callback never could
+    /// have observed.
+    static func recordPublication(of graph: UnsafePointer<RTGraph>) {
+        if let incident = graph.pointee.incidentTelemetry {
+            yun_rt_incident_graph_published(incident)
+        }
+    }
+
+    /// Adopts mutable state only after the IO thread has moved to the new graph.
+    ///
+    /// Rapid publications can make a chain whose middle graph never rendered.
+    /// The retirement queue bounds that chain to eight generations. Walking
+    /// every route's immutable slot map back to the last graph which actually
+    /// rendered copies each delay line once rather than once per unpublished
+    /// generation. That keeps a pointer-drag storm from multiplying work on
+    /// the first callback which gets through.
+    @inline(__always)
+    static func adoptStateHandover(on next: UnsafeMutablePointer<RTGraph>) {
+        guard let immediate = next.pointee.stateHandover else { return }
+
+        // A predecessor with no handover is the last generation seen by the
+        // callback. All generations between it and `next` contain setup-time
+        // targets but no audible moving state worth copying.
+        var audible = immediate
+        var depth = 1
+        while depth < maximumStateHandoverDepth,
+            let predecessor = audible.pointee.stateHandover
+        {
+            audible = predecessor
+            depth += 1
+        }
+        guard audible.pointee.stateHandover == nil else {
+            next.pointee.stateHandover = nil
+            return
+        }
+
+        next.pointee.outputLimiterFailures = audible.pointee.outputLimiterFailures
+        next.pointee.outputPeak = audible.pointee.outputPeak
+        if next.pointee.outputClippingEpoch == audible.pointee.outputClippingEpoch {
+            next.pointee.outputClipped = audible.pointee.outputClipped
+        }
+        if next.pointee.recordRing == audible.pointee.recordRing,
+            next.pointee.recordLimiter == audible.pointee.recordLimiter
+        {
+            next.pointee.recordLimiterPrimingFrames =
+                audible.pointee.recordLimiterPrimingFrames
+        }
+
+        next.pointee.inputGainSlew = audible.pointee.inputGainSlew
+        next.pointee.inputGainSlew.retargetLinear(
+            to: next.pointee.inputMuted != 0 ? 0 : next.pointee.inputGain,
+            frames: Int(next.pointee.gainRampFrames))
+        next.pointee.outputGainSlew = audible.pointee.outputGainSlew
+        next.pointee.outputGainSlew.retargetLinear(
+            to: next.pointee.outputMuted != 0 ? 0 : next.pointee.outputGain,
+            frames: Int(next.pointee.gainRampFrames))
+        next.pointee.duckGainSlew = audible.pointee.duckGainSlew
+        next.pointee.duckGain = audible.pointee.duckGain
+        next.pointee.micPeak = audible.pointee.micPeak
+        next.pointee.hasRendered = audible.pointee.hasRendered
+
+        for new in 0..<Int(next.pointee.routeCount) {
+            var old = Int(next.pointee.stateHandoverRoutes[new])
+            var generation = immediate
+            var routeDepth = 1
+            var mappingIsValid = old >= 0 && old < Int(generation.pointee.routeCount)
+            while mappingIsValid, routeDepth < maximumStateHandoverDepth,
+                let predecessor = generation.pointee.stateHandover
+            {
+                old = Int(generation.pointee.stateHandoverRoutes[old])
+                generation = predecessor
+                routeDepth += 1
+                mappingIsValid = old >= 0 && old < Int(generation.pointee.routeCount)
+            }
+            guard mappingIsValid, generation == audible else { continue }
+            next.pointee.peaks[new] = audible.pointee.peaks[old]
+            next.pointee.rms[new] = audible.pointee.rms[old]
+            if next.pointee.calibrating != 0 && audible.pointee.calibrating != 0
+                && next.pointee.calibrationEpoch == audible.pointee.calibrationEpoch
+            {
+                next.pointee.calibrationEnergy[new] =
+                    audible.pointee.calibrationEnergy[old]
+                next.pointee.calibrationFrames[new] =
+                    audible.pointee.calibrationFrames[old]
+            }
+            _ = carryAlignment(from: audible, slot: old, to: next, slot: new)
+            carryRouteGainSlew(from: audible, slot: old, to: next, slot: new)
+            let target =
+                next.pointee.routes[new].muted != 0
+                ? 0 : next.pointee.routes[new].gain
+            next.pointee.routeGainSlews[new].retargetLinear(
+                to: target, frames: Int(next.pointee.gainRampFrames))
+        }
+
+        // These generations can no longer become current. Clearing their
+        // links makes a later assertion distinguish a fully adopted chain from
+        // one which accidentally stopped part-way through its route maps.
+        var generation: UnsafeMutablePointer<RTGraph>? = immediate
+        var generationsCleared = 0
+        while generationsCleared < maximumStateHandoverDepth,
+            let current = generation
+        {
+            generation = current.pointee.stateHandover
+            current.pointee.stateHandover = nil
+            generationsCleared += 1
+        }
+        next.pointee.stateHandover = nil
+    }
+
+    /// Publishes one complete control-facing frame after all DSP for this cycle.
+    @inline(__always)
+    static func publishTelemetry(_ graph: UnsafeMutablePointer<RTGraph>) {
+        yun_rt_telemetry_publish(
+            graph.pointee.telemetry,
+            graph.pointee.peaks,
+            graph.pointee.rms,
+            graph.pointee.calibrationEnergy,
+            graph.pointee.calibrationFrames,
+            UInt32(graph.pointee.routeCount),
+            graph.pointee.outputPeak,
+            graph.pointee.outputClipped,
+            graph.pointee.outputLimiterFailures)
+    }
+
+    /// Pays Swift's process-wide first callback cost on the control thread.
+    ///
+    /// A release process which had never entered this IOProc measured eight
+    /// allocator calls in its first synthetic callback and zero in the second.
+    /// Core Audio's first device callback has the same deadline as every later
+    /// one, so leaving that lazy runtime work there would make the zero-
+    /// allocation contract false exactly once per launch. A disposable graph
+    /// warms the identical function without advancing any audible route state.
+    @discardableResult
+    static func prewarmRealtimeRuntime() -> OSStatus {
+        let graph = allocate(
+            routes: [
+                RTRoute(
+                    sourceBuffer: 0, sourceChannel: 0,
+                    destinationBuffer: 0, destinationChannel: 0)
+            ], bufferFrames: 1)
+        defer { deallocate(graph) }
+
+        let input = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        input.initialize(to: 0)
+        defer {
+            input.deinitialize(count: 1)
+            input.deallocate()
+        }
+        let output = UnsafeMutablePointer<Float>.allocate(capacity: 1)
+        output.initialize(to: 0)
+        defer {
+            output.deinitialize(count: 1)
+            output.deallocate()
+        }
+        let inputList = AudioBufferList.allocate(maximumBuffers: 1)
+        inputList[0] = AudioBuffer(
+            mNumberChannels: 1,
+            mDataByteSize: UInt32(MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(input))
+        defer { free(inputList.unsafeMutablePointer) }
+        let outputList = AudioBufferList.allocate(maximumBuffers: 1)
+        outputList[0] = AudioBuffer(
+            mNumberChannels: 1,
+            mDataByteSize: UInt32(MemoryLayout<Float>.size),
+            mData: UnsafeMutableRawPointer(output))
+        defer { free(outputList.unsafeMutablePointer) }
+        guard let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph)) else {
+            return kAudioHardwareUnspecifiedError
+        }
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        time.mFlags = .sampleTimeValid
+        return yunAudioIOProc(
+            0, &now, UnsafePointer(inputList.unsafeMutablePointer), &time,
+            outputList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+    }
 }
 
 // MARK: - The realtime callback
+
+/// Applies one already-published scalar without allocating or leaving a
+/// partially updated slew target behind.
+@inline(__always)
+private func applyRTControl(
+    _ command: YunRTCommand, to graph: UnsafeMutablePointer<RTGraph>
+) {
+    // The trim and the master are one control each rather than one per route,
+    // so they are handled before the index is range-checked.
+    switch command.kind {
+    case Int32(kYunRTCommandSetInputGain.rawValue):
+        if command.value.isFinite {
+            graph.pointee.inputGain = command.value
+            let target = graph.pointee.inputMuted != 0 ? 0 : command.value
+            graph.pointee.inputGainSlew.retargetLinear(
+                to: target, frames: Int(graph.pointee.gainRampFrames))
+        }
+        return
+    case Int32(kYunRTCommandSetInputMute.rawValue):
+        graph.pointee.inputMuted = command.value != 0 ? 1 : 0
+        graph.pointee.inputGainSlew.retargetLinear(
+            to: graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain,
+            frames: Int(
+                graph.pointee.inputMuted != 0
+                    ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+        return
+    case Int32(kYunRTCommandSetOutputGain.rawValue):
+        if command.value.isFinite {
+            graph.pointee.outputGain = command.value
+            let target = graph.pointee.outputMuted != 0 ? 0 : command.value
+            graph.pointee.outputGainSlew.retargetLinear(
+                to: target, frames: Int(graph.pointee.gainRampFrames))
+        }
+        return
+    case Int32(kYunRTCommandSetOutputMute.rawValue):
+        graph.pointee.outputMuted = command.value != 0 ? 1 : 0
+        graph.pointee.outputGainSlew.retargetLinear(
+            to: graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain,
+            frames: Int(
+                graph.pointee.outputMuted != 0
+                    ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+        return
+    case Int32(kYunRTCommandSetLimiterPreGain.rawValue):
+        if command.value.isFinite, command.value >= 0 {
+            graph.pointee.outputLimiterPreGain = command.value
+        }
+        return
+    case Int32(kYunRTCommandSetDuckingEnabled.rawValue):
+        graph.pointee.duckEnabled = command.value != 0 ? 1 : 0
+        return
+    case Int32(kYunRTCommandSetDuckingDepth.rawValue):
+        if command.value.isFinite {
+            graph.pointee.duckDepth = max(0, min(1, command.value))
+        }
+        return
+    case Int32(kYunRTCommandSetDuckingAllowed.rawValue):
+        graph.pointee.duckAllowed = command.value != 0 ? 1 : 0
+        return
+    case Int32(kYunRTCommandSetAnalysisEnabled.rawValue):
+        graph.pointee.analysisEnabled = command.value != 0 ? 1 : 0
+        return
+    case Int32(kYunRTCommandSetRecordingPaused.rawValue):
+        graph.pointee.recordPaused = command.value != 0 ? 1 : 0
+        return
+    case Int32(kYunRTCommandSetCalibrating.rawValue):
+        let count = max(Int(graph.pointee.routeCount), 1)
+        let epoch = command.value.bitPattern
+        if epoch != 0 {
+            for index in 0..<count {
+                graph.pointee.calibrationEnergy[index] = 0
+                graph.pointee.calibrationFrames[index] = 0
+            }
+            graph.pointee.calibrating = 1
+            graph.pointee.calibrationEpoch = epoch
+        } else {
+            graph.pointee.calibrating = 0
+        }
+        return
+    case Int32(kYunRTCommandClearOutputClipping.rawValue):
+        graph.pointee.outputClipped = 0
+        graph.pointee.outputClippingEpoch = command.value.bitPattern
+        return
+    default:
+        break
+    }
+
+    let index = Int(command.index)
+    guard index >= 0, index < Int(graph.pointee.routeCount) else { return }
+    switch command.kind {
+    case Int32(kYunRTCommandSetGain.rawValue):
+        if command.value.isFinite {
+            graph.pointee.routes[index].gain = command.value
+            let target = graph.pointee.routes[index].muted != 0 ? 0 : command.value
+            graph.pointee.routeGainSlews[index].retargetLinear(
+                to: target, frames: Int(graph.pointee.gainRampFrames))
+        }
+    case Int32(kYunRTCommandSetMute.rawValue):
+        graph.pointee.routes[index].muted = command.value != 0 ? 1 : 0
+        graph.pointee.routeGainSlews[index].retargetLinear(
+            to: graph.pointee.routes[index].muted != 0
+                ? 0 : graph.pointee.routes[index].gain,
+            frames: Int(
+                graph.pointee.routes[index].muted != 0
+                    ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
+    default:
+        break
+    }
+}
 
 /// The IO callback. Runs on a time-constrained thread.
 ///
@@ -964,94 +1463,79 @@ func yunAudioIOProc(
     // thread can swap in a new one between cycles instead of stopping the
     // device to change a route.
     let cell = OpaquePointer(clientData)
-    guard let raw = yun_rt_cell_load(cell) else { return noErr }
+    guard let raw = yun_rt_cell_load(cell) else {
+        // This is either an intentionally empty cell or proof that Core Audio
+        // overlapped two calls despite exposing no non-reentrancy contract.
+        // Reusing whatever the destination buffer held would turn containment
+        // into a loud stale block, so the refused callback is explicit silence.
+        for buffer in UnsafeMutableAudioBufferListPointer(outputData) {
+            if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) }
+        }
+        return noErr
+    }
     let graph = raw.assumingMemoryBound(to: RTGraph.self)
     defer { yun_rt_cell_retire(cell) }
+
+    let incident = graph.pointee.incidentTelemetry
+    let incidentBegan = incident == nil ? 0 : AudioGetCurrentHostTime()
+    let allocationViolationsBefore =
+        incident == nil ? 0 : yun_rt_tripwire_violations()
 
     // Anything allocated between here and the matching call at the end is a
     // violation of the realtime contract and gets counted.
     //
     // Not gated on DEBUG: the allocator hook is only installed when the
     // tripwire is explicitly enabled, so the cost when it is off is two relaxed
-    // atomic stores per cycle. Gating it on the build configuration made the
+    // atomic loads per cycle. Gating it on the build configuration made the
     // optimised build — the only one whose allocation behaviour actually
     // matters — report a meaningless zero.
     yun_rt_tripwire_mark_realtime(true)
-    defer { yun_rt_tripwire_mark_realtime(false) }
+    defer {
+        yun_rt_tripwire_mark_realtime(false)
+        if let incident {
+            let elapsed = AudioConvertHostTimeToNanos(
+                AudioGetCurrentHostTime() &- incidentBegan)
+            let allocationViolations =
+                yun_rt_tripwire_violations() &- allocationViolationsBefore
+            yun_rt_incident_callback_observe(
+                incident,
+                elapsed,
+                graph.pointee.incidentDeadlineNanoseconds,
+                allocationViolations)
+        }
+    }
+
+    RTGraph.adoptStateHandover(on: graph)
 
     // Apply any pending parameter changes before touching audio, so a whole
     // cycle uses one consistent set of values.
     if let commands = graph.pointee.commands {
         var command = YunRTCommand(kind: 0, index: 0, value: 0)
         while yun_rt_queue_pop(commands, &command) {
-            // The trim and the master are one control each rather than one per
-            // route, so they are handled before the index is range-checked —
-            // they do not carry one.
-            switch command.kind {
-            case Int32(kYunRTCommandSetInputGain.rawValue):
-                if command.value.isFinite {
-                    graph.pointee.inputGain = command.value
-                    let target =
-                        graph.pointee.inputMuted != 0 ? 0 : command.value
-                    graph.pointee.inputGainSlew.retargetLinear(
-                        to: target, frames: Int(graph.pointee.gainRampFrames))
-                }
-                continue
-            case Int32(kYunRTCommandSetInputMute.rawValue):
-                graph.pointee.inputMuted = command.value != 0 ? 1 : 0
-                graph.pointee.inputGainSlew.retargetLinear(
-                    to: graph.pointee.inputMuted != 0 ? 0 : graph.pointee.inputGain,
-                    frames: Int(
-                        graph.pointee.inputMuted != 0
-                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
-                continue
-            case Int32(kYunRTCommandSetOutputGain.rawValue):
-                if command.value.isFinite {
-                    graph.pointee.outputGain = command.value
-                    let target =
-                        graph.pointee.outputMuted != 0 ? 0 : command.value
-                    graph.pointee.outputGainSlew.retargetLinear(
-                        to: target, frames: Int(graph.pointee.gainRampFrames))
-                }
-                continue
-            case Int32(kYunRTCommandSetOutputMute.rawValue):
-                graph.pointee.outputMuted = command.value != 0 ? 1 : 0
-                graph.pointee.outputGainSlew.retargetLinear(
-                    to: graph.pointee.outputMuted != 0 ? 0 : graph.pointee.outputGain,
-                    frames: Int(
-                        graph.pointee.outputMuted != 0
-                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
-                continue
-            case Int32(kYunRTCommandSetLimiterPreGain.rawValue):
-                if command.value.isFinite, command.value >= 0 {
-                    graph.pointee.outputLimiterPreGain = command.value
-                }
-                continue
-            default:
-                break
+            applyRTControl(command, to: graph)
+        }
+    }
+    if let mailbox = graph.pointee.controlMailbox {
+        let generation = yun_rt_control_mailbox_begin(mailbox)
+        if generation != 0 {
+            var command = YunRTCommand(kind: 0, index: 0, value: 0)
+            for kind in Int32(
+                kYunRTCommandSetInputGain.rawValue)...Int32(
+                    kYunRTCommandClearOutputClipping.rawValue)
+            where yun_rt_control_mailbox_take(mailbox, kind, 0, &command) {
+                applyRTControl(command, to: graph)
             }
-            let index = Int(command.index)
-            guard index >= 0, index < Int(graph.pointee.routeCount) else { continue }
-            switch command.kind {
-            case Int32(kYunRTCommandSetGain.rawValue):
-                if command.value.isFinite {
-                    graph.pointee.routes[index].gain = command.value
-                    let target =
-                        graph.pointee.routes[index].muted != 0 ? 0 : command.value
-                    graph.pointee.routeGainSlews[index].retargetLinear(
-                        to: target, frames: Int(graph.pointee.gainRampFrames))
+            for index in 0..<Int(graph.pointee.routeCount) {
+                for kind in Int32(
+                    kYunRTCommandSetGain.rawValue)...Int32(
+                        kYunRTCommandSetMute.rawValue)
+                where yun_rt_control_mailbox_take(
+                    mailbox, kind, Int32(index), &command)
+                {
+                    applyRTControl(command, to: graph)
                 }
-            case Int32(kYunRTCommandSetMute.rawValue):
-                graph.pointee.routes[index].muted = command.value != 0 ? 1 : 0
-                graph.pointee.routeGainSlews[index].retargetLinear(
-                    to: graph.pointee.routes[index].muted != 0
-                        ? 0 : graph.pointee.routes[index].gain,
-                    frames: Int(
-                        graph.pointee.routes[index].muted != 0
-                            ? graph.pointee.muteRampFrames : graph.pointee.gainRampFrames))
-            default:
-                break
             }
+            yun_rt_control_mailbox_finish(mailbox, generation)
         }
     }
 
@@ -1258,7 +1742,7 @@ func yunAudioIOProc(
                     if rendered {
                         oldSource = UnsafePointer(old.pointee.outputBuffer)
                     } else {
-                        old.pointee.renderFailures.pointee &+= 1
+                        yun_rt_counter_increment(old.pointee.renderFailures)
                     }
                 }
 
@@ -1280,7 +1764,7 @@ func yunAudioIOProc(
                     if rendered {
                         newSource = UnsafePointer(new.pointee.outputBuffer)
                     } else {
-                        new.pointee.renderFailures.pointee &+= 1
+                        yun_rt_counter_increment(new.pointee.renderFailures)
                     }
                 }
 
@@ -1340,7 +1824,7 @@ func yunAudioIOProc(
                 if rendered {
                     isolatedFrames = frames
                 } else {
-                    isolation.pointee.renderFailures.pointee &+= 1
+                    yun_rt_counter_increment(isolation.pointee.renderFailures)
                 }
             }
         }
@@ -1467,9 +1951,10 @@ func yunAudioIOProc(
             // delay. Even at zero delay it keeps receiving the source, so a
             // future effect toggle can read real samples from 1024 frames ago
             // immediately instead of manufacturing 1024 frames of silence.
-            let line = graph.pointee.alignmentLines + index * RTGraph.maximumAlignmentFrames
+            let history = graph.pointee.alignmentHistories[index]
+            let line = history.pointee.line
             let scratch = graph.pointee.alignmentScratch
-            var position = Int(graph.pointee.alignmentPositions[index])
+            var position = Int(history.pointee.position)
             if position >= RTGraph.maximumAlignmentFrames { position = 0 }
             var take = sourceChannel
             if let handover = graph.pointee.effectTransition {
@@ -1523,7 +2008,7 @@ func yunAudioIOProc(
                     sourceChannel = 0
                 }
             }
-            graph.pointee.alignmentPositions[index] = Int32(position)
+            history.pointee.position = Int32(position)
         }
 
         let destination = destinationData.assumingMemoryBound(to: Float.self)
@@ -1775,7 +2260,7 @@ func yunAudioIOProc(
             let stride = Int(input[inIndex].mNumberChannels)
             let channel = Int(selftest.pointee.inChannel)
             let capacity = Int(selftest.pointee.captureCapacity)
-            var stored = Int(selftest.pointee.captureCount.pointee)
+            var stored = Int(yun_rt_counter_load(selftest.pointee.captureCount))
             if stride > 0, channel < stride, stored < capacity {
                 if stored == 0 {
                     selftest.pointee.captureStartFrame.pointee =
@@ -1790,7 +2275,7 @@ func yunAudioIOProc(
                     capture[stored] = pointer[frame * stride + channel]
                     stored += 1
                 }
-                selftest.pointee.captureCount.pointee = Int32(stored)
+                yun_rt_counter_store(selftest.pointee.captureCount, UInt64(stored))
             }
         }
     }
@@ -1945,11 +2430,12 @@ func yunAudioIOProc(
         graph.pointee.outputClipped &+= clipped
     }
 
-    // Capture the master's clock before bumping the counter: readers use the
-    // counter as a sequence number, so the values must already be in place.
-    graph.pointee.clockSampleTime.pointee = inputTime.pointee.mSampleTime
-    graph.pointee.clockHostTime.pointee = inputTime.pointee.mHostTime
+    yun_rt_clock_publish(
+        graph.pointee.clock,
+        inputTime.pointee.mSampleTime,
+        inputTime.pointee.mHostTime)
 
+    RTGraph.publishTelemetry(graph)
     graph.pointee.cycleCounter.pointee &+= 1
     return noErr
 }
@@ -2032,10 +2518,78 @@ public enum RTBenchmark {
         public var checksum: Double
     }
 
+    static let maximumCycles = 1_000_000
+
+    /// Every loop bound, allocation count and narrowed byte count used by one
+    /// run. Public benchmark options are caller input, even though the CLI's
+    /// presets are small, so they cross the same admission boundary as HAL.
+    struct Admission: Sendable, Equatable {
+        let frames: Int
+        let routeCount: Int
+        let monitorRouteCount: Int
+        let cycles: Int
+        let eqStages: Int
+        let alignmentFrames: Int32
+        let interleavedSampleCount: Int
+        let interleavedByteCount: UInt32
+        let ringFrameCount: UInt32
+        let analysisDrainCount: UInt32
+        let recordDrainCount: UInt32
+    }
+
+    static func admission(_ options: Options, cycles: Int) -> Admission? {
+        guard AudioProcessingContract.supports(framesPerSlice: options.frames),
+            cycles > 0, cycles <= maximumCycles,
+            options.routes > 0,
+            options.monitorRoutes >= 0,
+            options.eqStages >= 0, options.eqStages <= RTGraph.maximumEQStages,
+            options.alignmentFrames >= 0,
+            options.alignmentFrames <= RTGraph.maximumAlignmentFrames,
+            options.master.isFinite, options.master >= 0
+        else { return nil }
+
+        let (routeCount, routeOverflowed) =
+            options.routes.addingReportingOverflow(options.monitorRoutes)
+        guard !routeOverflowed, RTGraph.supportsRouteCount(routeCount),
+            let alignmentFrames = Int32(exactly: options.alignmentFrames),
+            let interleavedSampleCount = AudioProcessingContract.checkedProduct(
+                options.frames, 2),
+            let interleavedBytes = AudioProcessingContract.checkedProduct(
+                interleavedSampleCount, MemoryLayout<Float>.size),
+            let interleavedByteCount = UInt32(exactly: interleavedBytes),
+            let requestedRingFrames = AudioProcessingContract.checkedProduct(
+                options.frames, 16),
+            let ringFrameCount = UInt32(exactly: max(requestedRingFrames, 4_096)),
+            let requestedRecordDrain = AudioProcessingContract.checkedProduct(
+                options.frames, 2),
+            let analysisDrainCount = UInt32(exactly: options.frames),
+            let recordDrainCount = UInt32(exactly: requestedRecordDrain),
+            RTGraph.allocationPlan(
+                routeCount: routeCount, bufferFrames: options.frames,
+                sampleRate: 48_000) != nil
+        else { return nil }
+
+        return Admission(
+            frames: options.frames,
+            routeCount: options.routes,
+            monitorRouteCount: options.monitorRoutes,
+            cycles: cycles,
+            eqStages: options.eqStages,
+            alignmentFrames: alignmentFrames,
+            interleavedSampleCount: interleavedSampleCount,
+            interleavedByteCount: interleavedByteCount,
+            ringFrameCount: ringFrameCount,
+            analysisDrainCount: analysisDrainCount,
+            recordDrainCount: recordDrainCount)
+    }
+
     /// Runs `cycles` callbacks and reports what one cost.
-    public static func run(_ options: Options, cycles: Int) -> Result {
-        let frames = max(options.frames, 1)
-        let routeCount = max(options.routes, 1)
+    ///
+    /// - Returns: Nil when an option is outside the bounded realtime contract.
+    public static func run(_ options: Options, cycles: Int) -> Result? {
+        guard let admission = admission(options, cycles: cycles) else { return nil }
+        let frames = admission.frames
+        let routeCount = admission.routeCount
 
         // Two output buffers, main second: the monitor being buffer zero is the
         // ordering the callback historically got wrong, so it is the one worth
@@ -2045,7 +2599,7 @@ public enum RTBenchmark {
         let mainIndex = 1
 
         let inputStorage = UnsafeMutablePointer<Float>.allocate(
-            capacity: frames * inputChannels)
+            capacity: admission.interleavedSampleCount)
         // A sine rather than zeros or a constant. Zeros are not representative:
         // they make every peak comparison predictable and, on some paths, keep
         // the arithmetic away from the denormal range entirely.
@@ -2059,22 +2613,25 @@ public enum RTBenchmark {
         let inputList = AudioBufferList.allocate(maximumBuffers: 1)
         inputList[0] = AudioBuffer(
             mNumberChannels: UInt32(inputChannels),
-            mDataByteSize: UInt32(frames * inputChannels * MemoryLayout<Float>.size),
+            mDataByteSize: admission.interleavedByteCount,
             mData: UnsafeMutableRawPointer(inputStorage))
 
         var outputStorage: [UnsafeMutablePointer<Float>] = []
         let outputList = AudioBufferList.allocate(maximumBuffers: outputChannels.count)
         for (index, channels) in outputChannels.enumerated() {
-            let pointer = UnsafeMutablePointer<Float>.allocate(capacity: frames * channels)
-            pointer.initialize(repeating: 0, count: frames * channels)
+            let pointer = UnsafeMutablePointer<Float>.allocate(
+                capacity: admission.interleavedSampleCount)
+            pointer.initialize(
+                repeating: 0, count: admission.interleavedSampleCount)
             outputStorage.append(pointer)
             outputList[index] = AudioBuffer(
                 mNumberChannels: UInt32(channels),
-                mDataByteSize: UInt32(frames * channels * MemoryLayout<Float>.size),
+                mDataByteSize: admission.interleavedByteCount,
                 mData: UnsafeMutableRawPointer(pointer))
         }
 
         var routes: [RTRoute] = []
+        routes.reserveCapacity(routeCount + admission.monitorRouteCount)
         for index in 0..<routeCount {
             routes.append(
                 RTRoute(
@@ -2083,7 +2640,7 @@ public enum RTBenchmark {
                     destinationChannel: Int32(index % 2),
                     gain: 0.8, appliesInputTrim: index == 0))
         }
-        for index in 0..<max(options.monitorRoutes, 0) {
+        for index in 0..<admission.monitorRouteCount {
             routes.append(
                 RTRoute(
                     sourceBuffer: 0, sourceChannel: Int32(index % inputChannels),
@@ -2095,25 +2652,23 @@ public enum RTBenchmark {
         graph.pointee.masterExemptBuffer = 0
         graph.pointee.outputGain = options.master
         graph.pointee.analysisEnabled = options.analysis ? 1 : 0
-        graph.pointee.alignmentFrames = Int32(
-            min(max(options.alignmentFrames, 0), RTGraph.maximumAlignmentFrames))
+        graph.pointee.alignmentFrames = admission.alignmentFrames
         // Benchmark the requested steady state rather than the first ten
         // milliseconds of setup being mistaken for ongoing mixer cost.
         RTGraph.synchroniseGainSlews(on: graph)
 
         var recordRing: OpaquePointer?
         if options.record {
-            recordRing = yun_rt_ring_create(UInt32(max(frames * 8, 4096)))
+            recordRing = yun_rt_ring_create(admission.ringFrameCount)
             graph.pointee.recordRing = recordRing
             graph.pointee.recordChannels = 2
         }
 
-        if options.eqStages > 0 {
-            let stages = min(options.eqStages, RTGraph.maximumEQStages)
+        if admission.eqStages > 0 {
             // A gentle peaking section repeated. The coefficients only have to
             // be stable — what is being timed is the cascade, not the curve.
             var packed: [Float] = []
-            for _ in 0..<stages {
+            for _ in 0..<admission.eqStages {
                 packed += [1.0009, -1.9781, 0.9781, -1.9781, 0.9790]
             }
             // Slot zero, which is the monitor here — the bus a correction has
@@ -2131,11 +2686,21 @@ public enum RTBenchmark {
         /// and then reject every write — which is not the cost the shipping app
         /// pays. Resetting them keeps the ring writes on their real path.
         func drainRings() {
-            if let ring = graph.pointee.analysisRing {
-                _ = yun_rt_ring_read(ring, graph.pointee.analysisScratch, UInt32(frames * 4))
-            }
-            if let ring = recordRing {
-                _ = yun_rt_ring_read(ring, graph.pointee.recordScratch, UInt32(frames * 8))
+            // Seven callbacks have produced seven complete blocks. Read them
+            // in scratch-sized chunks instead of asking either fixed graph
+            // buffer to hold their combined size. Seven leaves one complete
+            // interleaved block of slack in the SPSC ring's reserved slot.
+            for _ in 0..<7 {
+                if let ring = graph.pointee.analysisRing {
+                    _ = yun_rt_ring_read(
+                        ring, graph.pointee.analysisScratch,
+                        admission.analysisDrainCount)
+                }
+                if let ring = recordRing {
+                    _ = yun_rt_ring_read(
+                        ring, graph.pointee.recordScratch,
+                        admission.recordDrainCount)
+                }
             }
         }
 
@@ -2145,24 +2710,25 @@ public enum RTBenchmark {
                 _ = yunAudioIOProc(
                     0, &now, UnsafePointer(inputList.unsafeMutablePointer), &time,
                     outputList.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
-                if cycle % 8 == 7 { drainRings() }
+                if cycle % 7 == 6 { drainRings() }
             }
         }
 
         // Warm the caches and let the biquad state settle before the clock
         // starts; a cold first cycle is a page-fault measurement, not this one.
-        spin(min(cycles, 2000))
+        spin(min(admission.cycles, 2000))
+        drainRings()
 
         let violationsBefore = yun_rt_tripwire_violations()
         let started = DispatchTime.now().uptimeNanoseconds
-        spin(cycles)
+        spin(admission.cycles)
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         let violations = yun_rt_tripwire_violations() - violationsBefore
 
         var checksum = 0.0
-        for (index, channels) in outputChannels.enumerated() {
+        for (index, _) in outputChannels.enumerated() {
             let pointer = outputStorage[index]
-            for sample in 0..<(frames * channels) {
+            for sample in 0..<admission.interleavedSampleCount {
                 checksum += Double(pointer[sample])
             }
         }
@@ -2182,7 +2748,7 @@ public enum RTBenchmark {
         free(outputList.unsafeMutablePointer)
 
         return Result(
-            nanosecondsPerCycle: Double(elapsed) / Double(max(cycles, 1)),
+            nanosecondsPerCycle: Double(elapsed) / Double(admission.cycles),
             allocations: violations,
             checksum: checksum)
     }

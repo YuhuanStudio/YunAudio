@@ -72,4 +72,27 @@ struct ProcessingLatencyTests {
         #expect(latency.totalMilliseconds(sampleRate: 0) == 0)
         #expect(latency.totalMilliseconds(sampleRate: .nan) == 0)
     }
+
+    @Test("malformed Audio Unit latency cannot trap or claim zero")
+    func audioUnitLatencyConversionIsTotal() {
+        #expect(
+            ProcessingLatency.validatedFrames(
+                seconds: 0.056, sampleRate: 48_000) == 2_688)
+        #expect(
+            ProcessingLatency.validatedFrames(
+                seconds: 0, sampleRate: 48_000) == 0)
+
+        for seconds in [Double.nan, .infinity, -.infinity, -0.001] {
+            #expect(
+                ProcessingLatency.validatedFrames(
+                    seconds: seconds, sampleRate: 48_000) == nil)
+        }
+        #expect(
+            ProcessingLatency.validatedFrames(
+                seconds: 1, sampleRate: .nan) == nil)
+        #expect(
+            ProcessingLatency.validatedFrames(
+                seconds: Double.greatestFiniteMagnitude,
+                sampleRate: 48_000) == nil)
+    }
 }

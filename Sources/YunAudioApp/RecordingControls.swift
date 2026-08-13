@@ -96,6 +96,7 @@ struct RecordingControls: View {
             // with holes in it, which is the one thing nobody discovers until
             // they open it.
             if model.isRecording, !model.stemURLs.isEmpty {
+                let stemDrops = model.engineStemDrops
                 VStack(alignment: .leading, spacing: 2) {
                     ForEach(model.stemURLs, id: \.self) { url in
                         HStack(spacing: 5) {
@@ -109,11 +110,11 @@ struct RecordingControls: View {
                                 .truncationMode(.middle)
                         }
                     }
-                    if model.engineStemDrops > 0 {
+                    if stemDrops > 0 {
                         Text(
                             String(
                                 format: loc("%@ samples dropped — a file has gaps."),
-                                "\(model.engineStemDrops)")
+                                "\(stemDrops)")
                         )
                         .font(Yun.Text.caption)
                         .foregroundStyle(Yun.Palette.danger)

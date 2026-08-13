@@ -635,6 +635,25 @@ struct PreferencesWindow: View {
                 }
             }
 
+            heading(loc("Speaking while muted"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    Toggle(
+                        loc("Warn me when I speak while muted"),
+                        isOn: $model.warnsWhenSpeakingWhileMuted
+                    )
+                    .toggleStyle(YunToggleStyle())
+                    Text(
+                        loc(
+                            "Uses CoreAudio's system voice detector. It changes a device-global microphone property while a route is running, so YunAudio leaves it off until you explicitly enable it."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
             heading(loc("Recording"))
             YunCard {
                 VStack(alignment: .leading, spacing: Yun.Space.sm) {
@@ -834,10 +853,10 @@ struct PreferencesWindow: View {
     }
 
     private var loginItemPermissionTitle: String {
-        switch LoginItem.state {
-        case .enabled: loc("Enabled")
-        case .requiresApproval: loc("Approval required")
-        case .notRegistered: loc("Not enabled")
+        switch permissions.loginItem {
+        case .allowed: loc("Enabled")
+        case .needsRequest: loc("Approval required")
+        case .notDetermined: loc("Not enabled")
         case .unavailable: loc("Unavailable")
         }
     }
@@ -1163,11 +1182,18 @@ struct PreferencesWindow: View {
                     YunDetailRow(
                         loc("Voice detector"),
                         value: Self.voiceDetectorState(
-                            isAvailable: model.canDetectVoiceActivity,
+                            isEnabled: model.warnsWhenSpeakingWhileMuted,
+                            isAvailable: model.voiceActivityAvailability,
                             isRunning: model.isDetectingVoiceActivity),
-                        tone: model.canDetectVoiceActivity
-                            ? (model.isDetectingVoiceActivity ? .success : .neutral)
-                            : .warning)
+                        tone: !model.warnsWhenSpeakingWhileMuted
+                            ? .neutral
+                            : model.voiceActivityAvailability == false
+                                ? .warning
+                                : model.isDetectingVoiceActivity ? .success : .neutral)
+                    if let detail = model.teardownFailureDetail {
+                        YunDetailRow(
+                            loc("Audio lifecycle"), value: detail, tone: .danger)
+                    }
                 }
             }
 
@@ -1398,7 +1424,7 @@ struct PreferencesWindow: View {
                                 .textSelection(.enabled)
                         }
                     }
-                    YunDetailRow(loc("Licence"), value: "MIT")
+                    YunDetailRow(loc("Licence"), value: loc("Apache 2.0"))
                 }
             }
 
@@ -1576,11 +1602,14 @@ struct PreferencesWindow: View {
     ///
     /// Static and taking its inputs rather than reading the model, so the flow
     /// check can put it in every state and read back what a person would see.
-    /// The three states are genuinely different problems: a device that cannot
-    /// do it is somebody's hardware, a detector that is not running is a route
-    /// that has not started, and a detector that is running and silent is a
-    /// room with nobody in it.
-    static func voiceDetectorState(isAvailable: Bool, isRunning: Bool) -> String {
+    /// Policy, an in-flight probe, unsupported hardware and a stopped or live
+    /// watcher are genuinely different answers. None requires a synchronous
+    /// HAL read while the view is being evaluated.
+    static func voiceDetectorState(
+        isEnabled: Bool, isAvailable: Bool?, isRunning: Bool
+    ) -> String {
+        guard isEnabled else { return loc("off by choice") }
+        guard let isAvailable else { return loc("checking") }
         guard isAvailable else { return loc("this microphone does not publish one") }
         return isRunning ? loc("running") : loc("available, not running")
     }

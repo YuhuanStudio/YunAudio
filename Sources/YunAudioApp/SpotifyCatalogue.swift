@@ -43,6 +43,8 @@ enum SpotifyCatalogue {
     /// - Parameter identity: `id of current track`, which Spotify gives as
     ///   `spotify:track:<id>`. Anything else is not a Spotify track and is
     ///   declined rather than guessed at.
+    /// - Returns: Every credited performer, or nil when Spotify did not provide
+    ///   a usable track document.
     static func performers(forIdentity identity: String) async -> [String]? {
         guard let id = trackIdentifier(identity) else { return nil }
         if let cached = await Store.shared.cached(id) { return cached }

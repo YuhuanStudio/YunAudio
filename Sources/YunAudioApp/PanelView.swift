@@ -388,6 +388,11 @@ struct PanelView: View {
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.warning)
                 .fixedSize(horizontal: false, vertical: true)
+        } else if let warning = model.transcriptionAdmissionWarning {
+            Text(warning)
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

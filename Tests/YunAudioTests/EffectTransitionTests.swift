@@ -151,6 +151,36 @@ struct EffectTransitionTests {
         #expect(output.map(abs).max() == 0.9)
     }
 
+    @Test("a successor is admitted only after the first audible handover")
+    func successorAdmissionWaitsForCompletion() {
+        let transition = EffectTransition(
+            sampleRate: sampleRate, oldLatencyFrames: 0,
+            newLatencyFrames: 1_024)
+        var publications = 0
+        if EffectTransition.admitsSuccessor(after: transition) {
+            publications += 1
+        }
+        #expect(publications == 0)
+        #expect(
+            abs(
+                transition.expectedCompletionSeconds
+                    - Double(transition.warmupFrames + transition.fadeFrames)
+                    / sampleRate) < 1e-12)
+
+        let frames = transition.warmupFrames + transition.fadeFrames
+        let old = [Float](repeating: 0.25, count: frames)
+        let new = [Float](repeating: -0.25, count: frames)
+        _ = render(
+            transition: transition, old: old, new: new,
+            callbacks: [128])
+        if EffectTransition.admitsSuccessor(after: transition) {
+            publications += 1
+        }
+
+        #expect(transition.isComplete)
+        #expect(publications == 1)
+    }
+
     @Test("identical sine paths add no gain or distortion")
     func identicalSinePaths() {
         let transition = EffectTransition(

@@ -109,20 +109,50 @@ struct EchoCancellationUnitSetupTests {
 
         #expect(result?.step == .setMaximumFrames)
         #expect(result?.status == -50)
-        #expect(harness.setCalls == 5)
+        #expect(harness.setCalls == 0)
         #expect(harness.initialiseCalls == 0)
+    }
+
+    @Test("malformed rates and oversized slices make no Audio Unit call")
+    func malformedNumericSetupFailsBeforeConfiguration() {
+        for sampleRate in [
+            Double.nan, .infinity, -.infinity, -1, 0, 7_999, 384_001,
+            .greatestFiniteMagnitude,
+        ] {
+            let harness = SetupHarness()
+            let result = runSetup(harness: harness, sampleRate: sampleRate)
+
+            #expect(result?.step == .setCaptureFormat)
+            #expect(result?.status == -50)
+            #expect(harness.setCalls == 0)
+            #expect(harness.getCalls == 0)
+            #expect(harness.initialiseCalls == 0)
+        }
+
+        for maximumFrames in [0, 4_097, Int(UInt32.max), Int.max] {
+            let harness = SetupHarness()
+            let result = runSetup(
+                harness: harness, maximumFrames: maximumFrames)
+
+            #expect(result?.step == .setMaximumFrames)
+            #expect(result?.status == -50)
+            #expect(harness.setCalls == 0)
+            #expect(harness.getCalls == 0)
+            #expect(harness.initialiseCalls == 0)
+        }
     }
 
     private func runSetup(
         harness: SetupHarness,
         boundDeviceID: AudioObjectID? = 41,
+        sampleRate: Double = 48_000,
         maximumFrames: Int = 512
     ) -> EchoCancellationUnitSetupFailure? {
         var inputCallback = emptyCallback()
         var renderCallback = emptyCallback()
         return EchoCancellingCapture.setupVoiceProcessingUnit(
             boundDeviceID: boundDeviceID,
-            sampleRate: 48_000,
+            sampleRate: sampleRate,
             maximumFrames: maximumFrames,
             inputCallback: &inputCallback,
             renderCallback: &renderCallback,

@@ -1,5 +1,6 @@
 import Accelerate
 import Foundation
+import YunAudioRT
 
 /// Moves the resonances of a voice without moving its pitch.
 ///
@@ -83,8 +84,15 @@ public final class FormantShifter {
     public var latencyFrames: Int { configuration.latencyFrames }
 
     /// Formant ratio. 1 is unchanged; above 1 moves the resonances up, which
-    /// reads as a smaller speaker.
-    public var ratio: Float = 1
+    /// reads as a smaller speaker. A control gesture and the Audio Unit render
+    /// thread genuinely access this concurrently, so the scalar crosses the
+    /// same C11 atomic boundary as other realtime controls.
+    public var ratio: Float {
+        get { yun_rt_atomic_float_load(ratioStorage) }
+        set { yun_rt_atomic_float_store(ratioStorage, newValue) }
+    }
+
+    private let ratioStorage: OpaquePointer
 
     private let setup: FFTSetup
     private let log2n: vDSP_Length
@@ -127,8 +135,13 @@ public final class FormantShifter {
         guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else {
             return nil
         }
+        guard let ratioStorage = yun_rt_atomic_float_create(1) else {
+            vDSP_destroy_fftsetup(setup)
+            return nil
+        }
         self.configuration = configuration
         self.setup = setup
+        self.ratioStorage = ratioStorage
         self.log2n = log2n
         window = vDSP.window(
             ofType: Float.self, usingSequence: .hanningDenormalized,
@@ -161,7 +174,10 @@ public final class FormantShifter {
         symmetric = [Float](repeating: 0, count: configuration.windowSize)
     }
 
-    deinit { vDSP_destroy_fftsetup(setup) }
+    deinit {
+        yun_rt_atomic_float_free(ratioStorage)
+        vDSP_destroy_fftsetup(setup)
+    }
 
     public func reset() {
         for index in input.indices { input[index] = 0 }

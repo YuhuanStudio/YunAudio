@@ -573,16 +573,15 @@ public struct YunSwitch: View {
     @Binding private var isOn: Bool
     private let onDark: Bool
 
-    /// - Parameter onDark: For the KTV stage, which is a darkened photograph
-    ///   rather than a card. The off track is `elevated` — a dark grey, chosen
-    ///   against `card` — and over a photograph it is a switch nobody can see
-    ///   is there. The on state is untouched: the accent is the accent
-    ///   everywhere, which is the point of having one.
-    ///
-    ///   The stage is why three toggles were built out of SwiftUI's own
-    ///   `.switch` instead of this one. A surface the design system does not
-    ///   cover is a surface that stops using it, so the case belongs here
-    ///   rather than in each view that meets it.
+    /// - Parameters:
+    ///   - isOn: The state changed when the switch is pressed.
+    ///   - onDark: For the KTV stage, which is a darkened photograph rather than
+    ///     a card. The off track is `elevated` — a dark grey, chosen against
+    ///     `card` — and over a photograph it is a switch nobody can see is
+    ///     there. The on state is untouched: the accent is the accent
+    ///     everywhere, which is the point of having one. A surface the design
+    ///     system does not cover is a surface that stops using it, so the case
+    ///     belongs here rather than in each view that meets it.
     public init(isOn: Binding<Bool>, onDark: Bool = false) {
         _isOn = isOn
         self.onDark = onDark

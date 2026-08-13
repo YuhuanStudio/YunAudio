@@ -238,8 +238,12 @@ struct BluetoothEnumerationPolicyTests {
         #expect(finish.contains("runHydratedSelection(latest"))
     }
 
-    @Test("restored Bluetooth waits for topology and Stop cancels that intent")
+    @Test("structural lint keeps restored topology intent behind policy and Stop")
     func restoredAutomaticStartWaitsForTopology() throws {
+        // The transport decisions are executable in
+        // `persistedBluetoothAlwaysNeedsThisSessionToStartIt` above. This source
+        // lint checks only that RouterModel wires those decisions to hydration
+        // and revokes the pending intent at its Stop boundary.
         let root = PreferencesCompletenessTests.sourceRootForTests
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/RouterModel.swift",
@@ -264,8 +268,7 @@ struct BluetoothEnumerationPolicyTests {
                 "if automaticStartAwaitsDeviceHydration, configuredDevicesHaveCompleteTopology")
         )
 
-        let stopStart = try #require(
-            source.range(of: "func stop(then completion:"))
+        let stopStart = try #require(source.range(of: "func stop()"))
         let stopEnd = try #require(
             source.range(
                 of: "guard !isBusy",

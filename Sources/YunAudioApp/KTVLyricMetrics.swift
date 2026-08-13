@@ -183,7 +183,7 @@ struct KTVLyricMetrics: Equatable, Sendable {
 
     /// - Parameters:
     ///   - width: Space the lyric column has, after the stage's own padding.
-    ///   - height: Space it has vertically.
+    ///   - fullHeight: Space it has vertically, including reserved content.
     ///   - scale: What the person watching asked for, on top of what the
     ///     window allows. A stage is read from across a room as often as from
     ///     a desk, and the two want different type; deriving from the window
@@ -201,6 +201,8 @@ struct KTVLyricMetrics: Equatable, Sendable {
     ///     because it is drawn: without it the band above the sung line was one
     ///     label taller than its share, and at a large word size the label went
     ///     off the top of the window.
+    /// - Returns: Type sizes, spacing and visible-line counts fitted to the
+    ///   available lyric column.
     static func resolve(
         width: CGFloat, height fullHeight: CGFloat, scale: CGFloat = 1,
         extraRowsPerLine: CGFloat = 0, rowsPerLine: CGFloat = rowsPerLine,

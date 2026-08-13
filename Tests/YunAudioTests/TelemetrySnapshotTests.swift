@@ -6,6 +6,34 @@ import YunAudioRT
 
 @Suite("Engine telemetry snapshot")
 struct TelemetrySnapshotTests {
+    @Test("a calibration poll never waits behind the engine state lock")
+    func calibrationUsesTheLastCompleteFrameUnderContention() {
+        let engine = RoutingEngine()
+        engine.installCalibrationSnapshotForTesting([(energy: 0.5, frames: 2)])
+        let entered = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            engine.withStateLockForTesting {
+                entered.signal()
+                release.wait()
+            }
+            finished.signal()
+        }
+        #expect(entered.wait(timeout: .now() + 1) == .success)
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        let levels = engine.calibrationLevels(sampleRate: 2)
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+
+        release.signal()
+        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(levels.count == 1)
+        #expect(abs(levels[0].decibels + 6.020_599_913) < 0.000_001)
+        #expect(levels[0].seconds == 1)
+        #expect(elapsed < 8_000_000)
+    }
+
     @Test("contention is nil and the next snapshot is coherent")
     func contentionDoesNotInventSilence() {
         let engine = RoutingEngine()

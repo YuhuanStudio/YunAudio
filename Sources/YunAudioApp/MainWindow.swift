@@ -37,6 +37,7 @@ struct MainWindow: View {
     @State private var setupName = ""
     @State private var isNamingSetup = false
     @State private var setupOutcome: String?
+    @State private var setupOperationID: UUID?
     @State private var isNamingPreset = false
     @State private var presetName = ""
     /// Which buses have their processing open. Empty at launch on purpose.
@@ -727,10 +728,10 @@ struct MainWindow: View {
 
     /// Third-party Audio Units.
     ///
-    /// The one place in this application where somebody else's code runs, and
-    /// the right one: the format exists, the system vets it, and thousands of
-    /// these are already installed on the machine. The built-in stages stay
-    /// Apple's own because their limiter is better than one written here.
+    /// The one place in this application where somebody else's code runs.
+    /// Only in-process units which pass format, capacity and latency admission
+    /// can enter this list; that reduces realtime risk without pretending the
+    /// third-party code is sandboxed or crash-contained.
     @ViewBuilder
     private var pluginList: some View {
         VStack(alignment: .leading, spacing: Yun.Space.md) {
@@ -1400,7 +1401,7 @@ struct MainWindow: View {
         }
         .onAppear {
             model.refreshHeadphoneProfilesIfNeeded()
-            model.lighting.refreshDeviceAsynchronously()
+            model.refreshLightingDeviceIfPermitted()
         }
     }
 
@@ -1561,7 +1562,7 @@ struct MainWindow: View {
                         .buttonStyle(YunButtonStyle(.secondary, small: true))
                         .disabled(
                             model.residentScript.trimmingCharacters(in: .whitespacesAndNewlines)
-                                .isEmpty
+                                .isEmpty || model.isScriptRunPending
                         )
                         .help(loc("Run the script above once, top to bottom"))
 
@@ -1569,7 +1570,11 @@ struct MainWindow: View {
                         // status bar somewhere else: a syntax error is about the
                         // thing on screen, and a script that failed to load is
                         // otherwise indistinguishable from one that never fires.
-                        if let problem = model.residentScriptError {
+                        if model.isResidentScriptLoading {
+                            Text(loc("Loading…"))
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textSecondary)
+                        } else if let problem = model.residentScriptError {
                             Text(problem)
                                 .font(Yun.Text.caption)
                                 .foregroundStyle(Yun.Palette.danger)
@@ -1616,7 +1621,7 @@ struct MainWindow: View {
                     // closed set and a typo is refused at load, so the one
                     // thing somebody needs is the list.
                     Text(
-                        ScriptHost.Event.allCases.map(\.rawValue).sorted()
+                        ScriptService.Event.allCases.map(\.rawValue).sorted()
                             .joined(separator: "   ")
                     )
                     .font(.system(size: 11, design: .monospaced))
@@ -1668,8 +1673,13 @@ struct MainWindow: View {
                 }
                 Spacer()
                 if !model.transcript.isEmpty {
-                    Button(loc("Save")) { _ = model.saveTranscript() }
-                        .buttonStyle(YunButtonStyle(.ghost, small: true))
+                    Button(
+                        model.isSavingTranscript ? loc("Saving…") : loc("Save")
+                    ) {
+                        _ = model.saveTranscript()
+                    }
+                    .buttonStyle(YunButtonStyle(.ghost, small: true))
+                    .disabled(model.isSavingTranscript)
                 }
             }
 
@@ -1686,16 +1696,35 @@ struct MainWindow: View {
                     .font(Yun.Text.caption)
                     .foregroundStyle(Yun.Palette.warning)
                     .fixedSize(horizontal: false, vertical: true)
-            } else if model.transcript.isEmpty {
-                Text(loc("Each source is written down under its own name, on this device."))
+            } else if let warning = model.transcriptionAdmissionWarning {
+                Text(warning)
                     .font(Yun.Text.caption)
-                    .foregroundStyle(Yun.Palette.textTertiary)
+                    .foregroundStyle(Yun.Palette.warning)
                     .fixedSize(horizontal: false, vertical: true)
+            } else if let error = model.transcriptSaveError {
+                Text(error)
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if let url = model.lastSavedTranscriptURL {
+                Text(String(format: loc("Saved to %@."), url.lastPathComponent))
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.success)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if model.transcript.isEmpty {
+                Text(
+                    loc(
+                        "Up to four routed sources are written down under their own names, on this device."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
             }
 
             if !model.transcript.isEmpty {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                    LazyVStack(alignment: .leading, spacing: Yun.Space.sm) {
                         ForEach(model.transcript) { line in
                             transcriptLine(line)
                         }
@@ -1748,12 +1777,23 @@ struct MainWindow: View {
             ForEach(model.quickConfigs) { configuration in
                 HStack(spacing: Yun.Space.sm) {
                     Button(configuration.name) {
-                        let outcome = model.apply(configuration)
-                        setupOutcome =
-                            outcome.isComplete
-                            ? nil
-                            : loc("missing") + " "
-                                + model.describeMissing(outcome.missing)
+                        let operationID = UUID()
+                        setupOperationID = operationID
+                        setupOutcome = loc("Applying…")
+                        model.requestApplyQuickConfig(configuration) { result in
+                            guard setupOperationID == operationID else { return }
+                            setupOperationID = nil
+                            switch result {
+                            case .superseded:
+                                setupOutcome = nil
+                            case .completed(let outcome):
+                                setupOutcome =
+                                    outcome.isComplete
+                                    ? nil
+                                    : loc("missing") + " "
+                                        + model.describeMissing(outcome.missing)
+                            }
+                        }
                     }
                     .buttonStyle(YunButtonStyle(.secondary, small: true))
                     Spacer()
@@ -1952,9 +1992,7 @@ struct MainWindow: View {
             HStack(spacing: Yun.Space.sm) {
                 Button(loc("Open the folder")) {
                     guard let directory = RouterModel.headphoneDirectory else { return }
-                    try? FileManager.default.createDirectory(
-                        at: directory, withIntermediateDirectories: true)
-                    NSWorkspace.shared.open(directory)
+                    FolderRevealWorker.shared.submit(directory)
                 }
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
                 Button(loc("Refresh")) {
@@ -1987,7 +2025,24 @@ struct MainWindow: View {
     }
 
     private func commitSetup() {
-        model.saveQuickConfig(named: setupName)
+        let name = setupName
+        let operationID = UUID()
+        setupOperationID = operationID
+        setupOutcome = loc("Saving…")
+        model.requestSaveQuickConfig(named: name) { result in
+            guard setupOperationID == operationID else { return }
+            setupOperationID = nil
+            switch result {
+            case .saved:
+                setupOutcome = nil
+            case .failed:
+                setupOutcome = loc("The system audio defaults could not be read.")
+            case .invalidName:
+                setupOutcome = loc("Name this setup")
+            case .superseded:
+                setupOutcome = nil
+            }
+        }
         setupName = ""
         isNamingSetup = false
     }

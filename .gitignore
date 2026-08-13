@@ -25,3 +25,9 @@ build/screenshots/
 TODO.md
 CLAUDE.md
 
+# Local working notes use dated or planning-oriented names; the reference
+# documentation above remains the public source of measured product behaviour.
+docs/*-audit-*.md
+docs/*-hardening.md
+docs/*-evidence-plan.md
+ci/*-evidence-manifest.sh

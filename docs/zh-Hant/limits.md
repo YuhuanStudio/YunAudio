@@ -26,6 +26,34 @@ SwiftPM 沒辦法建置它的 Metal shader；而 MLX 在函式庫缺失時**不�
 「啟動與同步的成本高於算術本身」的尺度。vDSP 就是 Apple 為這件事寫的。MLX 值得上場
 的時機是有一個訓練好的模型要跑，那是另一個功能、另一種建置。
 
+**用 `kAudioSubDeviceInputChannelsKey` 把藍牙麥克風排除在 aggregate 外。** 實測這個
+key 是描述而不是選擇：三個輸入要求一個仍得到三個，一個輸入要求零仍得到一個。測試保留
+著，將來 HAL 改變就會被發現。macOS 也沒有 iOS
+`AVAudioSessionCategoryOptionBluetoothHighQualityRecording` 的對應 API；它明確標成
+macOS 不可用。高品質藍牙輸出必須改用另一台裝置供應麥克風，再以真實耳機驗證。
+
+**把 AVFoundation 當成乾淨監聽輸出。** macOS 27 SDK 的空間渲染能力在 AVFAudio，並
+不是 Core Audio 裝置屬性。改走 `AVAudioEngine`／`AVAudioEnvironmentNode` 會替換輸出
+路徑、增加需要另量的延遲，而且按定義終結位元精確。它最多適合明確標成 processed 的
+output-only bus，不是監聽路徑的替代品。
+
+**用 MediaRemote 擴大 now-playing 控制範圍。** 在實測主機上 private framework 與符號
+都載入成功，但查詢一律回空字典；同一個播放器同時能以 Apple Events 讀到資料。會靜默失敗
+的 private API 不是可支援的 fallback。公開 API 補上缺口以前，整合邊界仍是播放器的
+scripting dictionary。
+
+**在目前 shell 組裝的 SwiftPM bundle 裡加 App Intents。** 程式會編譯、會執行，但目前
+打包方式不會產生讓 Shortcuts 與系統體驗發現它的 metadata。未來遷移 app packaging 後，
+應直接重用現有 remote-command vocabulary；現在複製一份命令只會得到無法被發現的第二介面。
+
+**用 strided vDSP 取代交錯音訊的 routing loop。** 兩條 route、512 frames 的實測是手寫
+loop 954 ns，vDSP 1,501 ns，算術完全相同。交錯音訊使存取必然帶 stride，短迴圈的呼叫與
+fallback 成本高於純量工作。
+
+**即時神經變聲。** 48 kHz／128 frames 的期限是 2.67 ms；目前 RVC／fish-speech 類完整
+pipeline 在排程與裝置延遲以前就需要遠超過 100 ms。除非整條 pipeline 實測能通過 realtime
+admission budget，否則只能做離線或明確標成高延遲的處理。
+
 ## 現行限制
 
 - 驅動是 ad-hoc 簽章。散布需要 Developer ID 身分與公證。

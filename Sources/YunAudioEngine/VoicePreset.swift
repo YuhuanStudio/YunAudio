@@ -108,6 +108,7 @@ public enum VoicePreset: String, CaseIterable, Codable, Sendable, Identifiable {
     /// the two stages together are the most latency this application can add
     /// short of voice isolation.
     public func latencyFrames(sampleRate: Double) -> Int {
+        guard AudioProcessingContract.supports(sampleRate: sampleRate) else { return 0 }
         var frames = 0
         if formantPercent != 0 {
             frames +=

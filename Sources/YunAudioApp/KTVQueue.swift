@@ -47,6 +47,14 @@ struct KTVQueue: Equatable, Sendable {
         return queue
     }
 
+    /// Adopts paths whose existence was already resolved on a filesystem lane.
+    static func restored(songs: [URL], currentIndex: Int?) -> KTVQueue {
+        var queue = KTVQueue()
+        queue.songs = songs
+        queue.index = currentIndex.flatMap { songs.indices.contains($0) ? $0 : nil }
+        return queue
+    }
+
     var current: URL? {
         guard let index, songs.indices.contains(index) else { return nil }
         return songs[index]

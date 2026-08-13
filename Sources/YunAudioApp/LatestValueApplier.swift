@@ -84,3 +84,199 @@ final class LatestValueApplier<Value: Sendable, Result: Sendable> {
         }
     }
 }
+
+/// Applies at most one newest value per fixed window, sampled when the worker
+/// can actually run rather than when work is enqueued.
+///
+/// A Core Audio property write may sit behind a multi-second device start on
+/// the shared serial queue. Capturing the value before that wait would replay
+/// an obsolete slider position when the queue recovered, then chase every
+/// intermediate position. This gate keeps one value behind a lock and takes it
+/// only at execution time. Fifty milliseconds therefore means at most twenty
+/// HAL write batches per second, with one final value guaranteed after a burst.
+final class RateLimitedLatestValueApplier<Value: Sendable, Result: Sendable>:
+    @unchecked Sendable
+{
+    struct Statistics: Sendable, Equatable {
+        fileprivate(set) var submissions: UInt64 = 0
+        fileprivate(set) var coalesced: UInt64 = 0
+        fileprivate(set) var applications: UInt64 = 0
+    }
+
+    private struct State {
+        var pending: Value?
+        var hasScheduledWorker = false
+        var generation: UInt64 = 0
+        var statistics = Statistics()
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+    private let queue: DispatchQueue
+    private let interval: DispatchTimeInterval
+    private let apply: @Sendable (Value) -> Result
+    private let publish: @MainActor (Result) -> Void
+
+    init(
+        queue: DispatchQueue,
+        interval: DispatchTimeInterval,
+        apply: @escaping @Sendable (Value) -> Result,
+        publish: @escaping @MainActor (Result) -> Void
+    ) {
+        self.queue = queue
+        self.interval = interval
+        self.apply = apply
+        self.publish = publish
+    }
+
+    var statistics: Statistics {
+        lock.withLock { state.statistics }
+    }
+
+    func submit(_ value: Value) {
+        let shouldSchedule = lock.withLock {
+            state.statistics.submissions &+= 1
+            if state.pending != nil { state.statistics.coalesced &+= 1 }
+            state.pending = value
+            state.generation &+= 1
+            guard !state.hasScheduledWorker else { return false }
+            state.hasScheduledWorker = true
+            return true
+        }
+        if shouldSchedule { scheduleWorker() }
+    }
+
+    /// Drops work which has not begun and makes an in-flight result obsolete.
+    func invalidate() {
+        lock.withLock {
+            state.generation &+= 1
+            state.pending = nil
+        }
+    }
+
+    private func scheduleWorker() {
+        queue.asyncAfter(deadline: .now() + interval) { [weak self] in
+            self?.runNewest()
+        }
+    }
+
+    private func runNewest() {
+        let work: (value: Value, generation: UInt64)? = lock.withLock {
+            guard let value = state.pending else {
+                state.hasScheduledWorker = false
+                return nil
+            }
+            state.pending = nil
+            state.statistics.applications &+= 1
+            return (value, state.generation)
+        }
+        guard let work else { return }
+
+        let result = apply(work.value)
+        let outcome: (publishes: Bool, schedulesAgain: Bool) = lock.withLock {
+            let publishes = state.generation == work.generation
+            if state.pending == nil {
+                state.hasScheduledWorker = false
+                return (publishes, false)
+            }
+            return (publishes, true)
+        }
+        if outcome.publishes {
+            Task { @MainActor [publish] in publish(result) }
+        }
+        if outcome.schedulesAgain { scheduleWorker() }
+    }
+}
+
+/// Coalesces independent controls by identity before they reach a serial owner.
+///
+/// A route start can occupy `coreaudiod` for seconds. Enqueuing one closure for
+/// every pointer event behind that call makes Stop wait for thousands of stale
+/// fader positions after the server finally replies. One pending value per key
+/// preserves every independent control while replacing intermediate values of
+/// the same control. The worker samples the whole bounded set only when its
+/// queue can run, so an old gesture never becomes a delayed replay storm.
+final class KeyedLatestValueApplier<Key: Hashable & Sendable, Value: Sendable>:
+    @unchecked Sendable
+{
+    struct Statistics: Sendable, Equatable {
+        fileprivate(set) var submissions: UInt64 = 0
+        fileprivate(set) var coalesced: UInt64 = 0
+        fileprivate(set) var batches: UInt64 = 0
+        fileprivate(set) var applications: UInt64 = 0
+        fileprivate(set) var maximumPending: Int = 0
+    }
+
+    private struct State {
+        var pending: [Key: Value] = [:]
+        var hasScheduledWorker = false
+        var statistics = Statistics()
+    }
+
+    private let lock = NSLock()
+    private var state = State()
+    private let queue: DispatchQueue
+    private let apply: @Sendable (Value) -> Void
+
+    init(
+        queue: DispatchQueue,
+        apply: @escaping @Sendable (Value) -> Void
+    ) {
+        self.queue = queue
+        self.apply = apply
+    }
+
+    var statistics: Statistics {
+        lock.withLock { state.statistics }
+    }
+
+    func submit(_ value: Value, for key: Key) {
+        let shouldSchedule = lock.withLock {
+            state.statistics.submissions &+= 1
+            if state.pending.updateValue(value, forKey: key) != nil {
+                state.statistics.coalesced &+= 1
+            }
+            state.statistics.maximumPending = max(
+                state.statistics.maximumPending, state.pending.count)
+            guard !state.hasScheduledWorker else { return false }
+            state.hasScheduledWorker = true
+            return true
+        }
+        if shouldSchedule { scheduleWorker() }
+    }
+
+    /// Drops controls which have not begun. A batch already executing precedes
+    /// the caller on the same serial queue and therefore completes before Stop.
+    func invalidate() {
+        lock.withLock { state.pending.removeAll(keepingCapacity: true) }
+    }
+
+    private func scheduleWorker() {
+        queue.async { [weak self] in self?.runPending() }
+    }
+
+    private func runPending() {
+        let batch: [Value] = lock.withLock {
+            guard !state.pending.isEmpty else {
+                state.hasScheduledWorker = false
+                return []
+            }
+            let values = Array(state.pending.values)
+            state.pending.removeAll(keepingCapacity: true)
+            state.statistics.batches &+= 1
+            state.statistics.applications &+= UInt64(values.count)
+            return values
+        }
+        guard !batch.isEmpty else { return }
+        for value in batch { apply(value) }
+
+        let schedulesAgain = lock.withLock {
+            guard !state.pending.isEmpty else {
+                state.hasScheduledWorker = false
+                return false
+            }
+            return true
+        }
+        if schedulesAgain { scheduleWorker() }
+    }
+}

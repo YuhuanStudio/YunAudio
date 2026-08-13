@@ -589,13 +589,27 @@ struct OnlineLyricsTests {
         try OnlineLyrics.encodeCacheAttribution(expected)
             .write(to: sidecarURL, options: .atomic)
 
-        #expect(RouterModel.cachedLyricsAttribution(for: lyricsURL) == expected)
+        try "[00:01.00]line".write(
+            to: lyricsURL, atomically: true, encoding: .utf8)
+        let track = NowPlaying.Track(
+            application: "Test", title: query.title, artist: query.artist,
+            album: query.album, position: 0, duration: query.duration,
+            isPlaying: false, identity: "cache-attribution")
+        func loadAttribution() -> OnlineLyrics.CacheAttribution? {
+            NowPlayingResourceLoader.load(
+                NowPlayingResourceRequest(
+                    generation: 0, track: track, directory: directory,
+                    needsArtwork: false)
+            ).attribution
+        }
+
+        #expect(loadAttribution() == expected)
 
         let mismatched = OnlineLyrics.CacheAttribution(
             provider: .qqMusic, copyright: "Wrong catalogue", region: "CN")
         try OnlineLyrics.encodeCacheAttribution(mismatched)
             .write(to: sidecarURL, options: .atomic)
-        #expect(RouterModel.cachedLyricsAttribution(for: lyricsURL) == nil)
+        #expect(loadAttribution() == nil)
     }
 
     @Test("untrusted attribution sidecars are bounded")
@@ -977,7 +991,8 @@ struct HandRunLyricsTests {
                 of: "private func startLyricsLookup",
                 range: adoptStart.upperBound..<source.endIndex))
         let adoptionFlow = source[adoptStart.lowerBound..<adoptEnd.lowerBound]
-        let localRead = try #require(adoptionFlow.range(of: "findLyricsMatch"))
+        let localRead = try #require(
+            adoptionFlow.range(of: "nowPlayingResourceWorker.submit"))
         let onlineStart = try #require(adoptionFlow.range(of: "startLyricsLookup"))
         #expect(localRead.lowerBound < onlineStart.lowerBound)
 
@@ -1062,7 +1077,10 @@ struct MusicRecognitionTests {
         try Data().write(to: words)
         try Data([0]).write(to: cover)
 
-        #expect(RouterModel.artworkBesideWords(at: words) == cover)
+        try "[00:01.00]line".write(to: words, atomically: true, encoding: .utf8)
+        let snapshot = HandWordsResourceLoader.load(
+            HandWordsResourceRequest(generation: 0, url: words))
+        #expect(snapshot.artworkURL == cover)
     }
 
     @Test("a catalogue signature receives every captured sample at the stated rate")
@@ -1109,14 +1127,19 @@ struct MusicRecognitionTests {
         #expect(stillCooling.remaining == 200)
     }
 
-    @Test("scripted players and a closed panel construct no catalogue session")
+    @Test("structural lint demand-creates one catalogue owner and resets it in place")
     func catalogueSessionIsDemandDriven() throws {
+        // MusicRecognitionWorkerTests executes the real lifetime contract: ten
+        // thousand resets retain one entered catalogue await, zero PCM and no
+        // late publication. This source lint keeps RouterModel on that same-owner
+        // reset policy instead of replacing an await which may never return.
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
         #expect(source.contains("private var musicRecognition: MusicRecognition?"))
         #expect(!source.contains("private lazy var musicRecognition"))
         #expect(source.ranges(of: "let service = MusicRecognition {").count == 1)
+        #expect(source.ranges(of: "musicRecognition = service").count == 1)
 
         let clearStart = try #require(source.range(of: "private func clearSinging()"))
         let clearEnd = try #require(
@@ -1134,7 +1157,8 @@ struct MusicRecognitionTests {
                 of: "private func receiveTranscript",
                 range: releaseStart.upperBound..<source.endIndex))
         let release = source[releaseStart.lowerBound..<releaseEnd.lowerBound]
-        #expect(release.contains("musicRecognition = nil"))
+        #expect(release.contains("musicRecognition?.reset(releasingBuffers: true)"))
+        #expect(!release.contains("musicRecognition = nil"))
     }
 
     @Test("a player answer cannot restart KTV work after the panel closes")

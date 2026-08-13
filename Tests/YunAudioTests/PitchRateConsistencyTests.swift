@@ -95,17 +95,20 @@ struct PitchRateConsistencyTests {
 
     #if DEBUG
         @Test(
-            "steady low-pitch tracking allocates nothing at any rate",
+            "rule-only steady low-pitch tracking allocates nothing at any rate",
             .disabled("allocation evidence requires an optimised build"))
     #else
-        @Test("steady low-pitch tracking allocates nothing at any rate")
+        @Test("rule-only steady low-pitch tracking allocates nothing at any rate")
     #endif
     func releaseAllocations() throws {
         AllocationMeasurementLock.shared.lock()
         defer { AllocationMeasurementLock.shared.unlock() }
 
         for rate in rates {
-            let singer = try #require(SingerPitch(sampleRate: rate))
+            // The optional Core ML head is an off-main analysis stage and necessarily
+            // allocates. This gate measures the rule-only realtime core at every rate.
+            let singer = try #require(
+                SingerPitch(sampleRate: rate, usesLearnedHead: false))
             singer.keepsHistory = false
             let input = tone(
                 hertz: 65.41, count: Int(rate), sampleRate: rate)

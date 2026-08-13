@@ -39,6 +39,13 @@ closed with a pointer here:
   have.
 - **A driver fault takes `coreaudiod` down**, along with all system audio. The
   removal command is in the README for exactly this reason.
+- **Issue #9 remains open.** A previous session left
+  `coreaudiod` and the system Sound menu degraded after the application had
+  exited. Version 0.1.2 removes measured driver, teardown and ownership defects
+  which made that class of failure more likely, but does not claim the incident
+  closed. Please report a new deterministic reproduction or system-audio recovery
+  evidence; the existing symptom is tracked in
+  [issue #9](https://github.com/YuhuanStudio/YunAudio/issues/9).
 - **Voice isolation breaks the realtime contract** — Apple's model allocates on
   the IO thread, about 0.3 times per cycle. Measured, stated in
   `docs/limits.md`, and off by default.

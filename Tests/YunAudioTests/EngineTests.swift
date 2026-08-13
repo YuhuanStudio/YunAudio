@@ -129,6 +129,32 @@ struct NegotiatedGraphTimingTests {
         #expect(timing.sampleRate / Double(timing.cycleFrames) == 187.5)
     }
 
+    @Test("source latency admission matches delay storage and wall-time bounds")
+    func sourceLatencyHasOneExactBound() {
+        #expect(
+            RoutingEngine.maximumSourceProcessingLatencyFrames(
+                sampleRate: 48_000) == 8_192)
+        #expect(
+            RoutingEngine.supportsSourceProcessingLatency(
+                8_192, sampleRate: 48_000))
+        #expect(
+            !RoutingEngine.supportsSourceProcessingLatency(
+                8_193, sampleRate: 48_000))
+
+        #expect(
+            RoutingEngine.maximumSourceProcessingLatencyFrames(
+                sampleRate: 8_000) == 1_600)
+        #expect(
+            RoutingEngine.supportsSourceProcessingLatency(
+                1_600, sampleRate: 8_000))
+        #expect(
+            !RoutingEngine.supportsSourceProcessingLatency(
+                1_601, sampleRate: 8_000))
+        let invalidRateAccepted = RoutingEngine.supportsSourceProcessingLatency(
+            0, sampleRate: .nan)
+        #expect(invalidRateAccepted == false)
+    }
+
     @Test("a sample-rate timeout cannot start mismatched DSP")
     func sampleRateTimeoutIsAnError() throws {
         try AggregateDevice.requireSampleRateArrival(
@@ -153,6 +179,10 @@ struct NegotiatedGraphTimingTests {
 
 @Suite("Lock-free command queue")
 struct CommandQueueTests {
+    private struct CounterHandle: @unchecked Sendable {
+        let raw: OpaquePointer
+    }
+
     @Test("values survive a round trip in order")
     func roundTrip() throws {
         let queue = try #require(yun_rt_queue_create(16))
@@ -183,9 +213,9 @@ struct CommandQueueTests {
         #expect(command.index == 9)
     }
 
-    /// A full queue has to refuse rather than overwrite. Dropping the newest
-    /// fader update is recoverable — a torn command struct read by the audio
-    /// thread is not.
+    /// A full queue has to refuse rather than overwrite. Continuous controls
+    /// no longer use this queue, but a torn command struct read by the audio
+    /// thread would remain worse than an explicit refusal for discrete users.
     @Test("a full queue refuses instead of overwriting")
     func fullQueue() throws {
         let queue = try #require(yun_rt_queue_create(4))
@@ -220,6 +250,177 @@ struct CommandQueueTests {
         }
         // 5 rounds to 8, minus the slot that marks fullness.
         #expect(accepted == 7)
+    }
+
+    @Test("a latest-value mailbox coalesces without becoming full")
+    func latestValueMailbox() throws {
+        let mailbox = try #require(yun_rt_control_mailbox_create(2))
+        defer { yun_rt_control_mailbox_free(mailbox) }
+
+        for index in 0..<10_000 {
+            #expect(
+                yun_rt_control_mailbox_publish(
+                    mailbox,
+                    YunRTCommand(
+                        kind: Int32(kYunRTCommandSetGain.rawValue), index: 1,
+                        value: Float(index))))
+        }
+        let generation = yun_rt_control_mailbox_begin(mailbox)
+        #expect(generation == 10_000)
+        var command = YunRTCommand(kind: -1, index: -1, value: -1)
+        #expect(
+            yun_rt_control_mailbox_take(
+                mailbox, Int32(kYunRTCommandSetGain.rawValue), 1, &command))
+        #expect(command.value == 9_999)
+        #expect(
+            !yun_rt_control_mailbox_take(
+                mailbox, Int32(kYunRTCommandSetGain.rawValue), 1, &command))
+        yun_rt_control_mailbox_finish(mailbox, generation)
+        #expect(yun_rt_control_mailbox_begin(mailbox) == 0)
+        #expect(
+            yun_rt_control_mailbox_desired_generation(mailbox)
+                == yun_rt_control_mailbox_applied_generation(mailbox))
+    }
+
+    @Test("the mailbox rejects an unknown route without corrupting generations")
+    func mailboxBounds() throws {
+        let mailbox = try #require(yun_rt_control_mailbox_create(1))
+        defer { yun_rt_control_mailbox_free(mailbox) }
+        #expect(
+            !yun_rt_control_mailbox_publish(
+                mailbox,
+                YunRTCommand(
+                    kind: Int32(kYunRTCommandSetMute.rawValue), index: 1, value: 1)))
+        #expect(
+            !yun_rt_control_mailbox_publish(
+                mailbox,
+                YunRTCommand(
+                    kind: Int32(kYunRTCommandClearOutputClipping.rawValue) + 1,
+                    index: 0, value: 1)))
+        #expect(yun_rt_control_mailbox_desired_generation(mailbox) == 0)
+    }
+
+    @Test("realtime diagnostic increments are never lost")
+    func atomicRealtimeCounter() throws {
+        let counter = CounterHandle(raw: try #require(yun_rt_counter_create(0)))
+        defer { yun_rt_counter_free(counter.raw) }
+        let group = DispatchGroup()
+        for name in ["first", "second"] {
+            group.enter()
+            DispatchQueue(label: "yunaudio.test.counter.\(name)").async {
+                for _ in 0..<100_000 { yun_rt_counter_increment(counter.raw) }
+                group.leave()
+            }
+        }
+        group.wait()
+
+        #expect(yun_rt_counter_load(counter.raw) == 200_000)
+        yun_rt_counter_store(counter.raw, 17)
+        #expect(yun_rt_counter_load(counter.raw) == 17)
+    }
+
+    @Test("a nested callback remains measured until its outer mark leaves")
+    func tripwireMarksAreNestable() {
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
+        #expect(yun_rt_tripwire_enable())
+        defer { yun_rt_tripwire_disable() }
+
+        let markedBefore = yun_rt_tripwire_marked_thread_count()
+        #expect(yun_rt_tripwire_current_thread_depth() == 0)
+        yun_rt_tripwire_mark_realtime(true)
+        #expect(yun_rt_tripwire_current_thread_depth() == 1)
+        yun_rt_tripwire_mark_realtime(true)
+        #expect(yun_rt_tripwire_current_thread_depth() == 2)
+        yun_rt_tripwire_mark_realtime(false)
+        #expect(yun_rt_tripwire_current_thread_depth() == 1)
+        #expect(yun_rt_tripwire_marked_thread_count() == markedBefore + 1)
+
+        let violationsBefore = yun_rt_tripwire_violations()
+        let sample = UnsafeMutableRawPointer.allocate(byteCount: 64, alignment: 16)
+        sample.storeBytes(of: UInt64(0xA11C_E001), as: UInt64.self)
+        sample.deallocate()
+        let violationsAfter = yun_rt_tripwire_violations()
+
+        yun_rt_tripwire_mark_realtime(false)
+        #expect(yun_rt_tripwire_current_thread_depth() == 0)
+        #expect(yun_rt_tripwire_marked_thread_count() == markedBefore)
+        // Sanitizer runtimes replace Darwin's allocator entry points, so the zone
+        // hook cannot observe this deliberate allocation. Ordinary and Release
+        // runs still prove that the enabled tripwire counts it.
+        if ProcessInfo.processInfo.environment["YUNAUDIO_SANITIZER_RUN"] == nil {
+            #expect(violationsAfter > violationsBefore)
+        }
+    }
+
+    @Test("the allocation tripwire counts two simultaneous realtime threads")
+    func tripwireThreadRegistry() throws {
+        let first = DispatchQueue(label: "yunaudio.test.tripwire.first")
+        let second = DispatchQueue(label: "yunaudio.test.tripwire.second")
+        let ready = DispatchGroup()
+        let finished = DispatchGroup()
+        let release = DispatchSemaphore(value: 0)
+        let depths = [
+            CounterHandle(raw: try #require(yun_rt_counter_create(0))),
+            CounterHandle(raw: try #require(yun_rt_counter_create(0))),
+        ]
+        defer { for depth in depths { yun_rt_counter_free(depth.raw) } }
+
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
+        #expect(yun_rt_tripwire_enable())
+        defer { yun_rt_tripwire_disable() }
+        let failuresBefore = yun_rt_tripwire_registration_failures()
+        let markedBefore = yun_rt_tripwire_marked_thread_count()
+
+        for (index, queue) in [first, second].enumerated() {
+            ready.enter()
+            finished.enter()
+            queue.async {
+                yun_rt_tripwire_mark_realtime(true)
+                yun_rt_counter_store(
+                    depths[index].raw,
+                    UInt64(yun_rt_tripwire_current_thread_depth()))
+                ready.leave()
+                release.wait()
+                yun_rt_tripwire_mark_realtime(false)
+                finished.leave()
+            }
+        }
+
+        ready.wait()
+        #expect(depths.map { yun_rt_counter_load($0.raw) } == [1, 1])
+        #expect(yun_rt_tripwire_marked_thread_count() == markedBefore + 2)
+        release.signal()
+        release.signal()
+        finished.wait()
+        let deadline = DispatchTime.now() + .seconds(1)
+        while yun_rt_tripwire_marked_thread_count() > markedBefore,
+            DispatchTime.now() < deadline
+        {
+            Thread.sleep(forTimeInterval: 0.001)
+        }
+        #expect(yun_rt_tripwire_marked_thread_count() <= markedBefore)
+        #expect(yun_rt_tripwire_registration_failures() == failuresBefore)
+    }
+
+    @Test("overlapping allocation measurements cannot disarm each other")
+    func tripwireEnableIsReferenceCounted() {
+        AllocationMeasurementLock.shared.lock()
+        defer { AllocationMeasurementLock.shared.unlock() }
+        #expect(yun_rt_tripwire_enable())
+        #expect(yun_rt_tripwire_enable())
+
+        yun_rt_tripwire_mark_realtime(true)
+        #expect(yun_rt_tripwire_marked_thread_count() == 1)
+        yun_rt_tripwire_disable()
+        #expect(yun_rt_tripwire_marked_thread_count() == 1)
+
+        yun_rt_tripwire_mark_realtime(false)
+        #expect(yun_rt_tripwire_marked_thread_count() == 0)
+        yun_rt_tripwire_disable()
+        // An unmatched release is explicitly harmless.
+        yun_rt_tripwire_disable()
     }
 }
 
@@ -353,8 +554,10 @@ struct RealtimeCellTests {
         defer { yun_rt_cell_free(cell) }
 
         #expect(yun_rt_cell_load(cell) == first)
+        yun_rt_cell_retire(cell)
         #expect(yun_rt_cell_publish(cell, second) == first)
         #expect(yun_rt_cell_load(cell) == second)
+        yun_rt_cell_retire(cell)
     }
 
     /// The wait exists so the control thread does not free a graph a cycle
@@ -369,7 +572,9 @@ struct RealtimeCellTests {
 
     @Test("waiting succeeds once two cycles have been retired")
     func waitSucceedsAfterTwoCycles() throws {
-        let cell = try #require(yun_rt_cell_create(nil))
+        let sample = UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+        defer { sample.deallocate() }
+        let cell = try #require(yun_rt_cell_create(sample))
         let handle = CellHandle(cell)
 
         // Stand in for the IO thread.
@@ -384,7 +589,9 @@ struct RealtimeCellTests {
         let finished = DispatchSemaphore(value: 0)
         let retiring = Thread {
             for _ in 0..<8 {
-                yun_rt_cell_retire(handle.pointer)
+                if yun_rt_cell_load(handle.pointer) != nil {
+                    yun_rt_cell_retire(handle.pointer)
+                }
                 usleep(2000)
             }
             finished.signal()
@@ -400,8 +607,11 @@ struct RealtimeCellTests {
     /// has to start before the old graph is unreachable.
     @Test("one retired cycle is not enough to release the old pointer")
     func oneCycleIsNotEnough() throws {
-        let cell = try #require(yun_rt_cell_create(nil))
+        let sample = UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+        defer { sample.deallocate() }
+        let cell = try #require(yun_rt_cell_create(sample))
         defer { yun_rt_cell_free(cell) }
+        #expect(yun_rt_cell_load(cell) == sample)
         yun_rt_cell_retire(cell)
         #expect(!yun_rt_cell_wait_for_swap(cell, 5))
     }
@@ -539,11 +749,14 @@ struct LoopbackGradingTests {
         // backwards, exactly as it does on a real device.
         let startFrame = UInt64(delay + 4096)
         selftest.pointee.captureStartFrame.pointee = startFrame
-        selftest.pointee.captureCount.pointee = Int32(frames)
         for index in 0..<frames {
             let source = selftestSample(startFrame &+ UInt64(index) &- UInt64(delay))
             selftest.pointee.capture[index] = transform(source, index)
         }
+        // The release store publishes the complete prefix to the evaluator.
+        // Publishing first made a concurrent reader free to grade uninitialised
+        // samples while still reporting that every frame was available.
+        yun_rt_counter_store(selftest.pointee.captureCount, UInt64(frames))
         return RTSelftest.evaluate(selftest)
     }
 
@@ -727,7 +940,7 @@ struct LoudnessTests {
     /// answer has to be −23.0 LUFS, not merely something stable.
     @Test("a 1 kHz sine reads its own RMS level in LUFS")
     func calibration() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         // 0.1 peak → −23.01 dBFS RMS.
         sine(into: &meter, amplitude: 0.1, seconds: 5)
         #expect(abs(meter.integrated - (-23.01)) < 0.35)
@@ -738,9 +951,9 @@ struct LoudnessTests {
     /// that has become a mean-absolute somewhere.
     @Test("doubling the amplitude adds 6 units")
     func decibelLaw() {
-        var quiet = LoudnessMeter(sampleRate: 48000)
+        var quiet = LoudnessMeter(sampleRate: 48000)!
         sine(into: &quiet, amplitude: 0.1, seconds: 5)
-        var loud = LoudnessMeter(sampleRate: 48000)
+        var loud = LoudnessMeter(sampleRate: 48000)!
         sine(into: &loud, amplitude: 0.2, seconds: 5)
         #expect(abs((loud.integrated - quiet.integrated) - 6.02) < 0.1)
     }
@@ -756,14 +969,14 @@ struct LoudnessTests {
     /// the standard's high-pass is not a hum filter.
     @Test("the weighting filter attenuates subsonic energy")
     func weightingIsNotFlat() {
-        var mid = LoudnessMeter(sampleRate: 48000)
+        var mid = LoudnessMeter(sampleRate: 48000)!
         sine(into: &mid, amplitude: 0.5, seconds: 4, frequency: 1000)
 
-        var atCorner = LoudnessMeter(sampleRate: 48000)
+        var atCorner = LoudnessMeter(sampleRate: 48000)!
         sine(into: &atCorner, amplitude: 0.5, seconds: 4, frequency: 40)
         #expect(atCorner.integrated < mid.integrated - 5)
 
-        var subsonic = LoudnessMeter(sampleRate: 48000)
+        var subsonic = LoudnessMeter(sampleRate: 48000)!
         sine(into: &subsonic, amplitude: 0.5, seconds: 4, frequency: 20)
         #expect(subsonic.integrated < mid.integrated - 13)
     }
@@ -771,9 +984,9 @@ struct LoudnessTests {
     /// And it lifts the top, which is the shelf standing in for the head.
     @Test("the weighting filter lifts high frequencies")
     func shelfLifts() {
-        var mid = LoudnessMeter(sampleRate: 48000)
+        var mid = LoudnessMeter(sampleRate: 48000)!
         sine(into: &mid, amplitude: 0.5, seconds: 4, frequency: 1000)
-        var high = LoudnessMeter(sampleRate: 48000)
+        var high = LoudnessMeter(sampleRate: 48000)!
         sine(into: &high, amplitude: 0.5, seconds: 4, frequency: 8000)
         #expect(high.integrated > mid.integrated + 2)
     }
@@ -783,9 +996,9 @@ struct LoudnessTests {
     /// reads the same at either rate.
     @Test("the reading does not depend on the sample rate")
     func rateIndependent() {
-        var at48 = LoudnessMeter(sampleRate: 48000)
+        var at48 = LoudnessMeter(sampleRate: 48000)!
         sine(into: &at48, amplitude: 0.1, seconds: 4, sampleRate: 48000)
-        var at96 = LoudnessMeter(sampleRate: 96000)
+        var at96 = LoudnessMeter(sampleRate: 96000)!
         sine(into: &at96, amplitude: 0.1, seconds: 4, sampleRate: 96000)
         #expect(abs(at48.integrated - at96.integrated) < 0.2)
     }
@@ -796,10 +1009,10 @@ struct LoudnessTests {
     /// which is exactly the mistake the standard exists to prevent.
     @Test("silence between passages does not drag the reading down")
     func absoluteGate() {
-        var continuous = LoudnessMeter(sampleRate: 48000)
+        var continuous = LoudnessMeter(sampleRate: 48000)!
         sine(into: &continuous, amplitude: 0.1, seconds: 6)
 
-        var gapped = LoudnessMeter(sampleRate: 48000)
+        var gapped = LoudnessMeter(sampleRate: 48000)!
         for _ in 0..<3 {
             sine(into: &gapped, amplitude: 0.1, seconds: 2)
             let silence = [Float](repeating: 0, count: 48000 * 2)
@@ -813,10 +1026,10 @@ struct LoudnessTests {
     /// share of time it occupies.
     @Test("a passage far below the mean is gated out")
     func relativeGate() {
-        var loudOnly = LoudnessMeter(sampleRate: 48000)
+        var loudOnly = LoudnessMeter(sampleRate: 48000)!
         sine(into: &loudOnly, amplitude: 0.5, seconds: 6)
 
-        var mixed = LoudnessMeter(sampleRate: 48000)
+        var mixed = LoudnessMeter(sampleRate: 48000)!
         sine(into: &mixed, amplitude: 0.5, seconds: 6)
         // 40 dB down: well past the 10 LU relative threshold.
         sine(into: &mixed, amplitude: 0.005, seconds: 6)
@@ -827,7 +1040,7 @@ struct LoudnessTests {
     /// number that would render as a plausible reading.
     @Test("silence reads as no measurement rather than a number")
     func silenceIsNotAReading() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         let silence = [Float](repeating: 0, count: 48000 * 2)
         silence.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: $0.count) }
         #expect(meter.integrated == -.infinity)
@@ -838,7 +1051,7 @@ struct LoudnessTests {
     /// percentile arithmetic is picking up block-boundary noise.
     @Test("a steady signal has no loudness range")
     func steadyRange() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         sine(into: &meter, amplitude: 0.1, seconds: 8)
         #expect(meter.range < 1.0)
     }
@@ -846,7 +1059,7 @@ struct LoudnessTests {
     /// And material that swings has to show it, or the number says nothing.
     @Test("material that swings reports a range")
     func swingingRange() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         for _ in 0..<4 {
             sine(into: &meter, amplitude: 0.5, seconds: 1)
             sine(into: &meter, amplitude: 0.05, seconds: 1)
@@ -859,7 +1072,7 @@ struct LoudnessTests {
     /// no amount of gating may hide it.
     @Test("peak catches a lone sample the loudness reading averages away")
     func peakIsIndependent() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         sine(into: &meter, amplitude: 0.01, seconds: 2)
         let spike: [Float] = [1.0]
         spike.withUnsafeBufferPointer { meter.add($0.baseAddress!, count: 1) }
@@ -872,14 +1085,14 @@ struct LoudnessTests {
     /// first block of the next take.
     @Test("reset returns the meter to its initial state")
     func resetClears() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         sine(into: &meter, amplitude: 0.5, seconds: 3)
         meter.reset()
         #expect(meter.integrated == -.infinity)
         #expect(meter.peak == -.infinity)
         #expect(meter.momentary == -.infinity)
 
-        var fresh = LoudnessMeter(sampleRate: 48000)
+        var fresh = LoudnessMeter(sampleRate: 48000)!
         sine(into: &fresh, amplitude: 0.1, seconds: 3)
         sine(into: &meter, amplitude: 0.1, seconds: 3)
         #expect(abs(meter.integrated - fresh.integrated) < 0.01)
@@ -889,7 +1102,7 @@ struct LoudnessTests {
     /// signal changes while integrated is still remembering everything.
     @Test("short-term tracks recent material and integrated does not")
     func shortTermIsRecent() {
-        var meter = LoudnessMeter(sampleRate: 48000)
+        var meter = LoudnessMeter(sampleRate: 48000)!
         sine(into: &meter, amplitude: 0.5, seconds: 6)
         let integratedAfterLoud = meter.integrated
         sine(into: &meter, amplitude: 0.05, seconds: 4)
@@ -1214,6 +1427,32 @@ struct IOProcTests {
                 output.list.unsafeMutablePointer, &time,
                 UnsafeMutableRawPointer(cell))
         }
+    }
+
+    @Test("a mono self-test callback generates every advertised frame")
+    func selftestOutputUsesFrameCountOnce() {
+        let frames = 128
+        let graph = RTGraph.allocate(routes: [], bufferFrames: frames)
+        let selftest = RTSelftest.allocate(
+            outBuffer: 0, outChannel: 0,
+            inBuffer: 0, inChannel: 0,
+            captureFrames: frames)
+        graph.pointee.selftest = selftest
+        defer {
+            graph.pointee.selftest = nil
+            RTGraph.deallocate(graph)
+            RTSelftest.deallocate(selftest)
+        }
+        let input = Bus(channelCounts: [1], frames: frames)
+        let output = Bus(channelCounts: [1], frames: frames, fill: -0.75)
+
+        cycle(graph: graph, input: input, output: output)
+
+        #expect(selftest.pointee.generatedFrames.pointee == UInt64(frames))
+        #expect(
+            (0..<frames).allSatisfy {
+                output.channel(0, 0, $0) == selftestSample(UInt64($0))
+            })
     }
 
     /// Two output buffers: buffer 0 the monitor, buffer 1 the destination. That
@@ -1840,7 +2079,8 @@ struct LiveRecoveryConfigurationTests {
                 range: attemptStart.upperBound..<source.endIndex))
         let attempt = source[attemptStart.lowerBound..<attemptEnd.lowerBound]
 
-        let allocation = try #require(attempt.range(of: "let graph = RTGraph.allocate("))
+        let allocation = try #require(
+            attempt.range(of: "let graph = RTGraph.allocateIfSupported("))
         let initialise = try #require(
             attempt.range(of: "Self.initialisePersistedMixState("))
         let exposed = try #require(attempt.range(of: "self.graph = graph"))
@@ -1942,7 +2182,8 @@ struct LiveRecoveryConfigurationTests {
                 of: "public func updateEffects(",
                 range: routesStart.upperBound..<source.endIndex))
         let update = source[routesStart.lowerBound..<effectsStart.lowerBound]
-        let allocation = try #require(update.range(of: "let next = RTGraph.allocate("))
+        let allocation = try #require(
+            update.range(of: "let next = RTGraph.allocateIfSupported("))
         let carry = try #require(update.range(of: "RTGraph.carryCorrections("))
         let publication = try #require(update.range(of: "yun_rt_cell_publish"))
 
@@ -1962,13 +2203,61 @@ struct LiveRecoveryConfigurationTests {
                 of: "// MARK: Live control",
                 range: effectsStart.upperBound..<source.endIndex))
         let update = source[effectsStart.lowerBound..<liveControl.lowerBound]
-        let allocation = try #require(update.range(of: "let next = RTGraph.allocate("))
+        let allocation = try #require(
+            update.range(of: "let next = RTGraph.allocateIfSupported("))
         let carry = try #require(update.range(of: "RTGraph.carryCorrections("))
         let publication = try #require(update.range(of: "yun_rt_cell_publish"))
 
         #expect(allocation.lowerBound < carry.lowerBound)
         #expect(carry.lowerBound < publication.lowerBound)
         #expect(update.ranges(of: "RTGraph.carryCorrections(").count == 1)
+    }
+
+    @Test("render failures belong to one route lifetime")
+    func effectEditsShareOneFailureCounter() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let effectsStart = try #require(source.range(of: "public func updateEffects("))
+        let liveControl = try #require(
+            source.range(
+                of: "// MARK: Live control",
+                range: effectsStart.upperBound..<source.endIndex))
+        let update = source[effectsStart.lowerBound..<liveControl.lowerBound]
+
+        #expect(update.ranges(of: "var failures = isolationFailureCounter").count == 1)
+        #expect(update.ranges(of: "yun_rt_counter_create(0)").count == 1)
+        #expect(update.ranges(of: "yun_rt_counter_free").isEmpty)
+        #expect(source.ranges(of: "transitionOldFailures").isEmpty)
+    }
+
+    @Test("a completed handover publishes one steady graph before retirement")
+    func effectTransitionFinalisationIsFenced() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
+        let start = try #require(
+            source.range(of: "private func finaliseEffectTransitionLocked("))
+        let end = try #require(
+            source.range(
+                of: "public func startRecording(",
+                range: start.upperBound..<source.endIndex))
+        let finalise = source[start.lowerBound..<end.lowerBound]
+
+        let completion = try #require(finalise.range(of: "controller.isComplete"))
+        let publication = try #require(
+            finalise.range(of: "publishStructuralGraphLocked("))
+        let steady = try #require(
+            finalise.range(of: "next.pointee.effectTransition = nil"))
+        let clearOwner = try #require(
+            finalise.range(of: "effectTransitionController = nil"))
+
+        #expect(completion.lowerBound < publication.lowerBound)
+        #expect(publication.lowerBound < steady.lowerBound)
+        #expect(steady.lowerBound < clearOwner.lowerBound)
+        #expect(finalise.ranges(of: "RTEffectTransition.deallocate").count == 1)
+        #expect(finalise.ranges(of: "oldBlock.deallocate()").count == 1)
+        #expect(finalise.ranges(of: "yun_rt_counter_free").isEmpty)
     }
 
     @Test("clock recovery retains an analyser that was enabled after start")
@@ -1997,7 +2286,11 @@ struct LiveRecoveryConfigurationTests {
                 range: attemptStart.upperBound..<source.endIndex))
         let attempt = source[attemptStart.lowerBound..<attemptEnd.lowerBound]
         #expect(
-            attempt.ranges(of: "graph.pointee.analysisEnabled = analysisEnabled ? 1 : 0").count
+            attempt.ranges(of: "analysisIsEnabled = analysisEnabled").count == 1)
+        #expect(
+            attempt.ranges(
+                of: "graph.pointee.analysisEnabled = analysisIsEnabled ? 1 : 0"
+            ).count
                 == 1)
     }
 }
@@ -2315,9 +2608,9 @@ struct SoundClassifierTests {
 /// Folding labels proves the table is right. It does not prove the model ever
 /// says "speech" about speech, and the whole levelling feature rests on that.
 ///
-/// `AVSpeechSynthesizer.write` renders to buffers without touching any audio
-/// hardware, so a real utterance can be pushed through the real classifier with
-/// no microphone, no room and no timing.
+/// The baseline uses a checked-in utterance so the answer is about the model,
+/// not whether the process-wide macOS speech service answered two concurrent
+/// tests. Its live renderer remains below as an opt-in environment probe.
 @Suite("Classifier against speech")
 struct ClassifierSpeechTests {
 
@@ -2329,7 +2622,7 @@ struct ClassifierSpeechTests {
     /// version of this waited on a continuation that never resumed and took the
     /// whole suite with it. A test that cannot run has to say so and get out of
     /// the way, not block.
-    private func render(_ text: String) async -> (samples: [Float], rate: Double)? {
+    private static func render(_ text: String) async -> (samples: [Float], rate: Double)? {
         let box = Box()
         await MainActor.run {
             let synthesiser = AVSpeechSynthesizer()
@@ -2400,18 +2693,9 @@ struct ClassifierSpeechTests {
 
     /// The assertion the levelling depends on: real speech is recognised as
     /// speech, confidently enough to act on.
-    @Test("synthesised speech is recognised as speech")
+    @Test("checked speech is recognised as speech")
     func recognisesSpeech() async throws {
-        guard
-            let rendered = await render(
-                "The quick brown fox jumps over the lazy dog. "
-                    + "Testing the loudness of this microphone, one two three.")
-        else {
-            // Not a pass dressed up as one: the synthesiser did not deliver, so
-            // this run has no evidence either way and says so.
-            Issue.record("the speech synthesiser produced nothing — claim unverified")
-            return
-        }
+        let rendered = try DeterministicSpeechFixture.load()
         let classifier = try #require(SoundClassifier(sampleRate: rendered.rate))
 
         // Fed in device-sized blocks rather than one lump, because that is how
@@ -2430,6 +2714,23 @@ struct ClassifierSpeechTests {
 
         #expect(classifier.verdict == .speech)
         #expect(classifier.hearsSpeech)
+    }
+
+    /// Keeps the system renderer diagnosable without making a model baseline
+    /// depend on it. The same process-wide async admission is used by the
+    /// `/usr/bin/say` probe in `TranscriberTests`.
+    @Test(
+        "the live speech synthesiser renders when explicitly probed",
+        .enabled(
+            if: LiveSpeechProbe.isEnabled,
+            "set YUNAUDIO_LIVE_SPEECH_PROBE=1 to exercise the macOS speech service"))
+    func liveSynthesiserProbe() async throws {
+        let rendered = await LiveSpeechAdmission.shared.withPermit {
+            await Self.render("The quick brown fox jumps over the lazy dog.")
+        }
+        guard let rendered else { throw LiveSpeechProbe.Failure.synthesiserTimedOutOrEmpty }
+        #expect(rendered.rate > 0)
+        #expect(!rendered.samples.isEmpty)
     }
 
     /// And silence is not. A classifier that called silence speech would let
@@ -3524,6 +3825,22 @@ struct VoiceCharacterTests {
 /// error at the worst possible moment — after somebody has recorded something.
 @Suite("Recording formats")
 struct RecorderFormatTests {
+    private final class ConcurrentResults: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Bool] = []
+
+        func append(_ value: Bool) {
+            lock.lock()
+            values.append(value)
+            lock.unlock()
+        }
+
+        var snapshot: [Bool] {
+            lock.lock()
+            defer { lock.unlock() }
+            return values
+        }
+    }
 
     @Test("stopping an idle writer does not wait for its polling interval")
     func idleStopIsPrompt() throws {
@@ -3590,6 +3907,45 @@ struct RecorderFormatTests {
             // Roughly a second of stereo, whatever the container did with it.
             #expect(abs(recorder.duration - 1.0) < 0.05, "\(format.rawValue)")
         }
+    }
+
+    @Test("recording progress is safe to poll while the writer drains")
+    func progressCanBePolledConcurrently() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("yunaudio-progress-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let recorder = try Recorder(
+            directory: directory, format: .wav, channels: 1, sampleRate: 48000,
+            timestamp: Date(timeIntervalSince1970: 0))
+        let samples = [Float](repeating: 0.1, count: 48000 * 2)
+        samples.withUnsafeBufferPointer {
+            recorder.write($0.baseAddress!, count: $0.count)
+        }
+
+        let results = ConcurrentResults()
+        DispatchQueue.concurrentPerform(iterations: 4) { _ in
+            var previous: Int64 = 0
+            var coherent = true
+            for _ in 0..<10_000 {
+                let progress = recorder.progressSnapshot
+                coherent = coherent && progress.framesWritten >= previous
+                coherent =
+                    coherent
+                    && progress.duration == Double(progress.framesWritten) / 48_000
+                    && progress.error == nil
+                previous = progress.framesWritten
+            }
+            results.append(coherent)
+        }
+
+        recorder.stop()
+        print("40,000 concurrent recorder progress snapshots: 0 incoherent pairs")
+        #expect(results.snapshot == [true, true, true, true])
+        #expect(recorder.framesWritten > 0)
+        #expect(recorder.lastError == nil)
     }
 
     /// The lossless claim has to mean something, because the whole project is
@@ -4838,16 +5194,37 @@ struct AudioMixConstraintTests {
 @Suite("Transcription")
 struct TranscriberTests {
 
-    /// Some real speech and the rate it is at.
-    private struct SpokenAudio {
-        let samples: [Float]
-        let rate: Double
+    private actor Gate {
+        private var isOpen = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        func wait() async {
+            guard !isOpen else { return }
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+
+        func open() {
+            isOpen = true
+            let current = waiters
+            waiters.removeAll()
+            for waiter in current { waiter.resume() }
+        }
     }
 
-    @Test("the framework is present on this system")
+    /// Some real speech and the rate it is at.
+    private typealias SpokenAudio = DeterministicSpeechFixture.Audio
+
+    @Test("support and its reason match this system's transcription runtime")
     func supported() {
-        #expect(Transcriber.isSupported)
-        #expect(Transcriber.unsupportedReason == nil)
+        if TestCapabilities.hasTranscriptionRuntime {
+            #expect(Transcriber.isSupported == (Transcriber.unsupportedReason == nil))
+            #expect(Transcriber.unsupportedReason != .needsNewerSystem)
+        } else {
+            #expect(!Transcriber.isSupported)
+            #expect(Transcriber.unsupportedReason == .needsNewerSystem)
+        }
     }
 
     /// The two are one answer told twice, and an interface that showed a
@@ -4858,6 +5235,26 @@ struct TranscriberTests {
     @Test("when it cannot transcribe it says why")
     func reasonAgreesWithSupport() {
         #expect(Transcriber.isSupported == (Transcriber.unsupportedReason == nil))
+    }
+
+    /// This is the supported-system boundary, not a compile-time accident. A
+    /// macOS 26 CI host must exercise the actionable answer that its interface
+    /// will show rather than silently skipping every mention of transcription.
+    @Test(
+        "macOS 26 rejects transcription with its actionable reason",
+        .enabled(
+            if: !TestCapabilities.hasTranscriptionRuntime,
+            "only macOS 26 exercises the unsupported-system branch"))
+    func olderSystemReason() async {
+        let transcriber = Transcriber(speaker: "Microphone")
+        do {
+            try await transcriber.start(now: Date().timeIntervalSince1970)
+            Issue.record("transcription started without AnalyzerInputConverter")
+        } catch let reason as Transcriber.Unavailable {
+            #expect(reason == .needsNewerSystem)
+        } catch {
+            Issue.record("the unsupported-system error was \(error)")
+        }
     }
 
     /// A transcriber is per source and carries its speaker, which is the whole
@@ -4919,6 +5316,61 @@ struct TranscriberTests {
         #expect(await transcriber.lines == [expected])
     }
 
+    @Test("production event mode does not retain a second transcript")
+    func eventOnlyStorage() async {
+        let (events, continuation) = AsyncStream<Transcriber.Line>.makeStream()
+        let expected = Transcriber.Line(
+            speaker: "Guest", text: "stored once", start: 12, duration: 1)
+        let transcriber = Transcriber(
+            speaker: "Guest", retainsLines: false,
+            onLine: { continuation.yield($0) })
+
+        await transcriber.appendForTesting(expected)
+        continuation.finish()
+        var delivered: [Transcriber.Line] = []
+        for await line in events { delivered.append(line) }
+
+        #expect(delivered == [expected])
+        #expect(await transcriber.lines.isEmpty)
+        #expect(await transcriber.transcript().isEmpty)
+    }
+
+    @Test("Stop's result barrier delivers the final line exactly once")
+    func stopWaitsForFinalLine() async {
+        let gate = Gate()
+        let (events, eventContinuation) = AsyncStream<Transcriber.Line>.makeStream()
+        let (waiting, waitingContinuation) = AsyncStream<Void>.makeStream()
+        let expected = Transcriber.Line(
+            speaker: "Guest", text: "the final words", start: 24, duration: 1)
+        let transcriber = Transcriber(
+            speaker: "Guest", retainsLines: false,
+            onLine: { eventContinuation.yield($0) })
+        let resultTask = Task {
+            await gate.wait()
+            guard !Task.isCancelled else { return }
+            await transcriber.appendForTesting(expected)
+        }
+        await transcriber.installResultsTaskForTesting(resultTask)
+        let finishing = Task {
+            await transcriber.finishResultsForTesting {
+                waitingContinuation.yield(())
+            }
+        }
+        var waitingIterator = waiting.makeAsyncIterator()
+        _ = await waitingIterator.next()
+
+        await gate.open()
+        await finishing.value
+        waitingContinuation.finish()
+        eventContinuation.finish()
+        var delivered: [Transcriber.Line] = []
+        for await line in events { delivered.append(line) }
+
+        #expect(delivered == [expected])
+        #expect(!resultTask.isCancelled)
+        #expect(await transcriber.lines.isEmpty)
+    }
+
     /// Feeding it before it has started must not crash or queue anything up for
     /// later — a transcript that begins with audio from before somebody pressed
     /// the button is not what they asked for.
@@ -4929,33 +5381,20 @@ struct TranscriberTests {
         #expect(await transcriber.lines.isEmpty)
     }
 
-    /// Real speech, spoken by the system rather than checked in as a fixture —
-    /// there is no way to ask Apple's model a question about timing without
-    /// giving it something it will actually transcribe, and a synthesised tone
-    /// produces no lines at all.
-    private static func spokenSamples(_ words: String) throws -> SpokenAudio {
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("yunaudio-speech-\(UUID().uuidString).aiff")
-        defer { try? FileManager.default.removeItem(at: url) }
-        let say = Process()
-        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
-        say.arguments = ["-o", url.path, words]
-        try say.run()
-        say.waitUntilExit()
-        let file = try AVAudioFile(forReading: url)
-        let format = file.processingFormat
-        guard
-            let buffer = AVAudioPCMBuffer(
-                pcmFormat: format, frameCapacity: AVAudioFrameCount(file.length))
-        else { return SpokenAudio(samples: [], rate: format.sampleRate) }
-        try file.read(into: buffer)
-        guard let channel = buffer.floatChannelData else {
-            return SpokenAudio(samples: [], rate: format.sampleRate)
+    /// The real command remains an opt-in machine probe. Baseline timing uses
+    /// the checked fixture because `/usr/bin/say` and `AVSpeechSynthesizer`
+    /// share one system service and can return empty output under parallel load.
+    @Test(
+        "the live say command renders when explicitly probed",
+        .enabled(
+            if: LiveSpeechProbe.isEnabled,
+            "set YUNAUDIO_LIVE_SPEECH_PROBE=1 to exercise the macOS speech service"))
+    func liveSayProbe() async throws {
+        let rendered = try await LiveSpeechAdmission.shared.withPermit {
+            try LiveSpeechProbe.renderWithSay("one two three four five")
         }
-        return SpokenAudio(
-            samples: Array(
-                UnsafeBufferPointer(start: channel[0], count: Int(buffer.frameLength))),
-            rate: format.sampleRate)
+        #expect(rendered.rate > 0)
+        #expect(!rendered.samples.isEmpty)
     }
 
     /// In the blocks the interface's poll hands over, rather than in one lump.
@@ -4964,7 +5403,8 @@ struct TranscriberTests {
     ///   analyser's own timeline starts and therefore the answer this is
     ///   measured against.
     @discardableResult
-    private static func feed(_ audio: SpokenAudio, to transcriber: Transcriber) -> Double {
+    private static func feed(_ audio: SpokenAudio, to transcriber: Transcriber) async -> Double
+    {
         let block = Int(audio.rate / 100)
         var firstAt = Date().timeIntervalSince1970
         var isFirst = true
@@ -4975,6 +5415,11 @@ struct TranscriberTests {
                 firstAt = Date().timeIntervalSince1970
                 isFirst = false
             }
+            // The production poll hands over one 10 ms block every 10 ms. A
+            // synchronous fixture dump instead tests overload shedding and can
+            // deliberately exceed the two-second bounded backlog before the
+            // analyser has consumed its first input.
+            try? await Task.sleep(for: .milliseconds(10))
         }
         return firstAt
     }
@@ -4994,27 +5439,36 @@ struct TranscriberTests {
     /// seconds into the session, and its line has to say two seconds. Before
     /// the fix both said zero and the merge that makes several sources into one
     /// conversation was sorting on a number that meant nothing across them.
-    @Test("a line's start is seconds from the session, not from its own first audio")
+    @Test(
+        "a line's start is seconds from the session, not from its own first audio",
+        .enabled(
+            if: Transcriber.isSupported,
+            "requires macOS 27 and an available SpeechTranscriber model"))
     func startIsMeasuredFromTheSession() async throws {
-        let audio = try Self.spokenSamples("one two three four five")
-        try #require(!audio.samples.isEmpty)
+        let audio = try DeterministicSpeechFixture.load()
         let session = Date().timeIntervalSince1970
 
         let early = Transcriber(speaker: "First")
         try await early.start(now: session)
-        let earlyOrigin = Self.feed(audio, to: early) - session
+        let earlyFeed = Task { await Self.feed(audio, to: early) }
 
         // Two seconds of the session pass before the second source is open.
         try await Task.sleep(for: .seconds(2))
         let late = Transcriber(speaker: "Second")
         try await late.start(now: session)
-        let lateOrigin = Self.feed(audio, to: late) - session
+        let lateFeed = Task { await Self.feed(audio, to: late) }
+        let earlyOrigin = await earlyFeed.value - session
+        let lateOrigin = await lateFeed.value - session
 
         // `stop` finalises through the end of input, so the lines are there
         // when it returns — measured at 0.16 s, which is why nothing here
         // sleeps waiting for them.
         await early.stop()
         await late.stop()
+        #expect(early.resourceStatistics.droppedFrames == 0)
+        #expect(late.resourceStatistics.droppedFrames == 0)
+        #expect(early.resourceStatistics.mainThreadConverterTurns == 0)
+        #expect(late.resourceStatistics.mainThreadConverterTurns == 0)
         let first = try #require(await early.lines.first)
         let second = try #require(await late.lines.first)
 
@@ -5904,8 +6358,12 @@ struct AudioStartProofTests {
         #expect(source.contains("throw RoutingError.noIOCycles"))
     }
 
-    @Test("a stalled start retries the same configuration before dropping anything")
+    @Test("structural lint retries a stalled start before the fallback ladder")
     func retriesExactly() throws {
+        // The flow check supplies the live two-cycle acceptance, while
+        // RouteStartCapacityTests asserts the exact five-second retry budget.
+        // This source lint checks only that the no-cycle branch reuses the
+        // original value before any degraded configuration is constructed.
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioEngine/RoutingEngine.swift", encoding: .utf8)
@@ -5913,7 +6371,10 @@ struct AudioStartProofTests {
         let ladder = try #require(source.range(of: "var ladder:"))
         #expect(retry.lowerBound < ladder.lowerBound)
         let between = source[retry.lowerBound..<ladder.lowerBound]
-        #expect(between.contains("try startAttempt(configuration)"))
+        #expect(between.contains("try startAttempt("))
+        #expect(between.contains("configuration, audioIncidentReservation:"))
+        #expect(!between.contains("withoutAdditionalDevices()"))
+        #expect(!between.contains("withoutMonitor()"))
     }
 
     @Test("the flow check proves its own tone generator is producing cycles")
@@ -6998,13 +7459,19 @@ struct SingerPitchTests {
 
     #if DEBUG
         @Test(
-            "one second of steady-state pitch tracking allocates nothing",
+            "one second of rule-only steady-state pitch tracking allocates nothing",
             .disabled("allocation evidence requires an optimised build"))
     #else
-        @Test("one second of steady-state pitch tracking allocates nothing")
+        @Test("one second of rule-only steady-state pitch tracking allocates nothing")
     #endif
     func steadyStateDoesNotAllocate() throws {
-        let singer = try #require(SingerPitch(sampleRate: 48_000))
+        // The learned Core ML head belongs to the bounded analysis worker and
+        // necessarily allocates inside Core ML. This tripwire is the contract
+        // for the rule-only tracker which is safe to reuse on a realtime path;
+        // separate worker tests assert that learned inference never runs on the
+        // IO thread or MainActor.
+        let singer = try #require(
+            SingerPitch(sampleRate: 48_000, usesLearnedHead: false))
         singer.keepsHistory = false
         let samples = tone(hertz: 220, seconds: 1)
 
