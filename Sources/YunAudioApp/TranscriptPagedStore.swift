@@ -101,9 +101,26 @@ struct TranscriptPagedStore {
         guard line.start.isFinite, line.start >= 0, line.duration.isFinite,
             line.duration >= 0
         else { return nil }
+        return serialisedByteCount(
+            for: line,
+            speakerBytes: line.speaker.utf8.count,
+            textBytes: line.text.utf8.count)
+    }
+
+    private static func serialisedByteCount(
+        for line: Transcriber.Line, speakerBytes: Int, textBytes: Int
+    ) -> Int {
         let seconds = UInt64(min(line.start.rounded(.down), Double(7 * 24 * 60 * 60)))
-        let prefix = String(format: "[%02llu:%02llu] ", seconds / 60, seconds % 60)
-        return prefix.utf8.count + line.speaker.utf8.count + 2 + line.text.utf8.count + 1
+        let minutes = seconds / 60
+        var minuteDigits = 1
+        var remaining = minutes
+        while remaining >= 10 {
+            minuteDigits += 1
+            remaining /= 10
+        }
+        // `[MM:SS] ` is eight bytes until minutes need more than two digits.
+        let prefixBytes = 8 + max(0, minuteDigits - 2)
+        return prefixBytes + speakerBytes + 2 + textBytes + 1
     }
 
     /// Appends one finalised line. Duplicate delivery is success-with-no-change:
@@ -133,24 +150,30 @@ struct TranscriptPagedStore {
                     accepted: false, refusal: .duplicate, serialisedBytes: 0)
                 continue
             }
-            guard line.speaker.utf8.count <= Self.maximumSpeakerBytes else {
+            let speakerBytes = line.speaker.utf8.count
+            guard speakerBytes <= Self.maximumSpeakerBytes else {
                 refusedLines &+= 1
                 results[index] = Admission(
                     accepted: false, refusal: .speakerTooLarge, serialisedBytes: 0)
                 continue
             }
-            guard line.text.utf8.count <= Self.maximumTextBytes else {
+            let textBytes = line.text.utf8.count
+            guard textBytes <= Self.maximumTextBytes else {
                 refusedLines &+= 1
                 results[index] = Admission(
                     accepted: false, refusal: .textTooLarge, serialisedBytes: 0)
                 continue
             }
-            guard let lineBytes = Self.serialisedByteCount(for: line) else {
+            guard line.start.isFinite, line.start >= 0, line.duration.isFinite,
+                line.duration >= 0
+            else {
                 refusedLines &+= 1
                 results[index] = Admission(
                     accepted: false, refusal: .invalidTimestamp, serialisedBytes: 0)
                 continue
             }
+            let lineBytes = Self.serialisedByteCount(
+                for: line, speakerBytes: speakerBytes, textBytes: textBytes)
             guard projectedLines < Self.maximumLines else {
                 refusedLines &+= 1
                 results[index] = Admission(
@@ -183,7 +206,8 @@ struct TranscriptPagedStore {
             }
         }
 
-        insertSorted(accepted.map(\.line))
+        let acceptedLines = accepted.map(\.line)
+        insertSorted(acceptedLines)
         for item in accepted {
             ids.insert(item.line.id)
             bytes += item.bytes
@@ -191,7 +215,7 @@ struct TranscriptPagedStore {
                 accepted: true, refusal: nil, serialisedBytes: item.bytes)
         }
         if journalMode == .boundedIncremental {
-            enqueueJournal(accepted.map(\.line), bytes: appendedBytes)
+            enqueueJournal(acceptedLines, bytes: appendedBytes)
         }
         return results.map { $0! }
     }
@@ -288,7 +312,36 @@ struct TranscriptPagedStore {
     /// binary-searches the page and then its at-most-128 elements; splitting
     /// copies only that page. No append scans, flattens or sorts old history.
     private mutating func insertSorted(_ incoming: [Transcriber.Line]) {
+        guard let first = incoming.first else { return }
+        if pages.isEmpty {
+            appendChronological(incoming)
+            return
+        }
+        if let last = pages[pages.count - 1].last, !Self.precedes(first, last) {
+            appendChronological(incoming)
+            return
+        }
         for line in incoming { insertSorted(line) }
+    }
+
+    /// A Speech callback finalises one chronological batch at a time. Filling
+    /// page-sized slices here avoids repeating array uniqueness and tail
+    /// checks for every one of its sixty-four lines; genuinely late lines keep
+    /// the binary-search path below.
+    private mutating func appendChronological(_ incoming: [Transcriber.Line]) {
+        var offset = 0
+        while offset < incoming.count {
+            if pages.isEmpty || pages[pages.count - 1].count == Self.pageSize {
+                let end = min(offset + Self.pageSize, incoming.count)
+                pages.append(Array(incoming[offset..<end]))
+                offset = end
+                continue
+            }
+            let available = Self.pageSize - pages[pages.count - 1].count
+            let end = min(offset + available, incoming.count)
+            pages[pages.count - 1].append(contentsOf: incoming[offset..<end])
+            offset = end
+        }
     }
 
     private mutating func insertSorted(_ line: Transcriber.Line) {
