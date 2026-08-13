@@ -445,8 +445,12 @@ release_driver_matches_installed() {
 	local installed=/Library/Audio/Plug-Ins/HAL/YunAudioDriver.driver
 	local bundled=build/YunAudio.app/Contents/Resources/YunAudioDriver.driver
 	local expected
-	expected="$({ shasum -a 256 Driver/Sources/YunAudioDriver.c; \
-		shasum -a 256 Driver/Sources/YunAudioDriver.h; } | shasum -a 256 | awk '{print $1}')"
+	expected="$(
+		cd Driver || exit 1
+		{ shasum -a 256 Sources/YunAudioDriver.c; \
+			shasum -a 256 Sources/YunAudioDriver.h; } |
+			shasum -a 256 | awk '{print $1}'
+	)"
 	local installed_id bundled_id
 	installed_id=$(driver_source_identifier "${installed}")
 	bundled_id=$(driver_source_identifier "${bundled}")
