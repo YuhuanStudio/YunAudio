@@ -116,7 +116,6 @@ static YunRingFrame *CreateRingBuffer(void) {
     if (ring == NULL) return NULL;
     for (UInt32 frame = 0; frame < kRingBufferFrames; ++frame) {
         atomic_init(&ring[frame].owner, 0);
-        atomic_init(&ring[frame].ownerEndFrame, 0);
         atomic_init(&ring[frame].sampleFrame, kRingFrameUnpublished);
         atomic_init(&ring[frame].stereoBits, 0);
     }
@@ -127,8 +126,6 @@ static YunRingFrame *CreateRingBuffer(void) {
 static void ResetRingBuffer(YunRingFrame *ring) {
     if (ring == NULL) return;
     for (UInt32 frame = 0; frame < kRingBufferFrames; ++frame) {
-        atomic_store_explicit(
-            &ring[frame].ownerEndFrame, 0, memory_order_seq_cst);
         atomic_store_explicit(&ring[frame].owner, 0, memory_order_seq_cst);
         atomic_store_explicit(
             &ring[frame].sampleFrame, kRingFrameUnpublished,
@@ -2029,8 +2026,14 @@ static bool SampleTimeToFrame(Float64 sampleTime, UInt64 *outFrame) {
 static bool RingSpanCanBeTagged(UInt64 startFrame, UInt32 frames) {
     if (frames == 0) return true;
     if (frames > kRingBufferFrames) return false;
+    if (startFrame > kRingTransactionMaximumStart) return false;
     if (startFrame == kRingFrameUnpublished) return false;
     return (UInt64)(frames - 1) < kRingFrameUnpublished - startFrame;
+}
+
+static UInt64 RingWriteIdentity(UInt64 startFrame, UInt32 frames) {
+    return ((startFrame + 1) << kRingTransactionFrameBits)
+        | (UInt64)(frames - 1);
 }
 
 typedef enum {
@@ -2068,16 +2071,14 @@ static void ReleaseRingWritePrefix(YunRingFrame *ring,
     for (UInt32 frame = 0; frame < frames; ++frame) {
         UInt64 slot = (startFrame + frame) & kRingBufferMask;
         atomic_store_explicit(
-            &ring[slot].ownerEndFrame, 0, memory_order_seq_cst);
-        atomic_store_explicit(
             &ring[slot].owner, 0, memory_order_seq_cst);
     }
 }
 
 /// Claims every slot before changing a sample. One callback owns the whole
-/// block. The first slot is its transaction record: an exact start and end can
-/// coalesce an active duplicate, whereas a partial overlap cannot. No retry is
-/// deliberate: an IO deadline is a poor place for a spin loop.
+/// block. The first slot carries one atomic, collision-free start/count identity,
+/// so an active exact duplicate can coalesce while partial overlap cannot. No
+/// retry is deliberate: an IO deadline is a poor place for a spin loop.
 static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
                                                 UInt64 startFrame,
                                                 UInt32 frames) {
@@ -2085,20 +2086,14 @@ static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
         return kRingWriteCoalesced;
     }
 
-    UInt64 owner = startFrame + 1;
-    UInt64 endFrame = startFrame + frames;
+    UInt64 owner = RingWriteIdentity(startFrame, frames);
     UInt64 firstSlot = startFrame & kRingBufferMask;
     UInt64 unowned = 0;
     if (!atomic_compare_exchange_strong_explicit(
             &ring[firstSlot].owner, &unowned, owner,
             memory_order_seq_cst, memory_order_seq_cst)) {
-        UInt64 existingEnd = atomic_load_explicit(
-            &ring[firstSlot].ownerEndFrame, memory_order_seq_cst);
-        return unowned == owner && existingEnd == endFrame
-            ? kRingWriteCoalesced : kRingWriteUnsafe;
+        return unowned == owner ? kRingWriteCoalesced : kRingWriteUnsafe;
     }
-    atomic_store_explicit(
-        &ring[firstSlot].ownerEndFrame, endFrame, memory_order_seq_cst);
 
     UInt64 firstPublished = atomic_load_explicit(
         &ring[firstSlot].sampleFrame, memory_order_seq_cst);
@@ -2121,8 +2116,6 @@ static YunRingWriteAdmission ClaimRingWriteSpan(YunRingFrame *ring,
             ReleaseRingWritePrefix(ring, startFrame, claimed);
             return kRingWriteUnsafe;
         }
-        atomic_store_explicit(
-            &ring[slot].ownerEndFrame, endFrame, memory_order_seq_cst);
         UInt64 published = atomic_load_explicit(
             &ring[slot].sampleFrame, memory_order_seq_cst);
         if (published == absoluteFrame) {
@@ -2166,8 +2159,6 @@ static void PublishRingWrite(YunRingFrame *ring,
     // prefix released cannot claim the still-owned suffix and publishes none.
     for (UInt32 frame = 0; frame < frames; ++frame) {
         UInt64 slot = (startFrame + frame) & kRingBufferMask;
-        atomic_store_explicit(
-            &ring[slot].ownerEndFrame, 0, memory_order_seq_cst);
         atomic_store_explicit(&ring[slot].owner, 0, memory_order_seq_cst);
     }
 }

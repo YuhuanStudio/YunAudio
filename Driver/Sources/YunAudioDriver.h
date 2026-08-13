@@ -44,6 +44,12 @@
 /// thread. One second at 96 kHz is comfortable headroom.
 #define kRingBufferFrames 131072
 #define kRingBufferMask (kRingBufferFrames - 1)
+/// Seventeen bits encode every legal callback length as `frames - 1`.
+#define kRingTransactionFrameBits 17
+/// The remaining 47 bits cover more than 46 years at 96 kHz. The device clock
+/// restarts on every driver lifetime, so rejecting the next frame is a bounded
+/// fail-safe, not a practical session limit.
+#define kRingTransactionMaximumStart ((UINT64_C(1) << 47) - 2)
 
 #define kDevice_DefaultSampleRate 48000.0
 
@@ -140,14 +146,12 @@ typedef struct {
 ///
 /// CoreAudio identifies each callback's client but does not promise that
 /// callbacks for different clients share a thread or a serial executor. All
-/// four fields are therefore atomic. The owner records a callback's start plus
-/// one, and `ownerEndFrame` its exclusive end; together they are an exact
-/// transaction identity for variable-sized callbacks. `sampleFrame` prevents
-/// stale wraparound data and `stereoBits` keeps left and right from ever
-/// belonging to different writes.
+/// three fields are therefore atomic. `owner` packs the absolute start and
+/// frame count into one non-zero, collision-free transaction identity;
+/// `sampleFrame` prevents stale wraparound data and `stereoBits` keeps left and
+/// right from ever belonging to different writes.
 typedef struct {
     _Atomic UInt64 owner;
-    _Atomic UInt64 ownerEndFrame;
     _Atomic UInt64 sampleFrame;
     _Atomic UInt64 stereoBits;
 } YunRingFrame;

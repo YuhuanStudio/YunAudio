@@ -335,7 +335,6 @@ static void TestNominalRebaseKeepsTheTimelineContinuous(void) {
 static void TestRealtimeAtomicsAreActuallyLockFree(void) {
     YunRingFrame ringFrame;
     atomic_init(&ringFrame.owner, 0);
-    atomic_init(&ringFrame.ownerEndFrame, 0);
     atomic_init(&ringFrame.sampleFrame, 0);
     atomic_init(&ringFrame.stereoBits, 0);
     assert(atomic_is_lock_free(&gDriver.inputGainBits));
@@ -343,9 +342,28 @@ static void TestRealtimeAtomicsAreActuallyLockFree(void) {
     assert(atomic_is_lock_free(&gDriver.publishedClock.version));
     assert(atomic_is_lock_free(&gDriver.publishedClock.hostTicksPerFrameBits));
     assert(atomic_is_lock_free(&ringFrame.owner));
-    assert(atomic_is_lock_free(&ringFrame.ownerEndFrame));
     assert(atomic_is_lock_free(&ringFrame.sampleFrame));
     assert(atomic_is_lock_free(&ringFrame.stereoBits));
+}
+
+static void TestRingWriteIdentityIsOneExactAtomicValue(void) {
+    assert(kRingBufferFrames == (1U << kRingTransactionFrameBits));
+    UInt64 oneFrame = RingWriteIdentity(0, 1);
+    UInt64 longer = RingWriteIdentity(0, kDevice_BufferFrameSize + 257);
+    UInt64 offset = RingWriteIdentity(1, 1);
+    assert(oneFrame != 0);
+    assert(oneFrame != longer);
+    assert(oneFrame != offset);
+    assert(longer != offset);
+    assert(RingWriteIdentity(
+        kRingTransactionMaximumStart, kRingBufferFrames) == UINT64_MAX);
+    assert(RingSpanCanBeTagged(
+        kRingTransactionMaximumStart, kRingBufferFrames));
+    assert(!RingSpanCanBeTagged(
+        kRingTransactionMaximumStart + 1, 1));
+    double yearsAt96K = (double)kRingTransactionMaximumStart
+        / 96000.0 / (365.25 * 24.0 * 60.0 * 60.0);
+    assert(yearsAt96K > 46.0);
 }
 
 static void TestControlChangesPublishOneCoherentEffectiveGain(void) {
@@ -1835,11 +1853,7 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
            == kRingWriteClaimed);
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
            == kRingWriteCoalesced);
-    for (UInt32 frame = 0; frame < frames; ++frame) {
-        assert(atomic_load_explicit(
-            &gDriver.ringBuffer[frame].ownerEndFrame,
-            memory_order_seq_cst) == frames);
-    }
+    UInt64 identity = RingWriteIdentity(0, frames);
     // Simulate a publisher part-way through its block. A callback one ring
     // later addresses the same physical slots but must not steal the prefix
     // which already carries samples while the suffix is still being built.
@@ -1853,7 +1867,8 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
         == kRingWriteUnsafe);
     for (UInt32 frame = 0; frame < frames; ++frame) {
         assert(atomic_load_explicit(
-            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 1);
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst)
+            == identity);
     }
 
     PublishRingWrite(gDriver.ringBuffer, 0, frames, first, 1.0f);
@@ -1885,11 +1900,13 @@ static void TestPartialWriterOverlapNeverCoalesces(void) {
     assert(gDriver.ringBuffer != NULL);
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, shortFrames)
            == kRingWriteClaimed);
+    UInt64 identity = RingWriteIdentity(0, shortFrames);
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, longFrames)
            == kRingWriteUnsafe);
     for (UInt32 frame = 0; frame < shortFrames; ++frame) {
         assert(atomic_load_explicit(
-            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 1);
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst)
+            == identity);
     }
     for (UInt32 frame = shortFrames; frame < longFrames; ++frame) {
         assert(atomic_load_explicit(
@@ -1902,12 +1919,37 @@ static void TestPartialWriterOverlapNeverCoalesces(void) {
         == kRingWriteUnsafe);
     for (UInt32 frame = 0; frame < shortFrames; ++frame) {
         assert(atomic_load_explicit(
-            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 1);
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst)
+            == identity);
     }
     for (UInt32 frame = shortFrames;
          frame < offsetStart + shortFrames; ++frame) {
         assert(atomic_load_explicit(
             &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 0);
+    }
+
+    // Reverse the staged overlap so the new transaction claims its own
+    // prefix, collides only later, then has to roll back exactly that prefix.
+    ReleaseRingWritePrefix(gDriver.ringBuffer, 0, shortFrames);
+    UInt64 existingStart = offsetStart;
+    UInt64 existingIdentity = RingWriteIdentity(existingStart, shortFrames);
+    for (UInt32 frame = 0; frame < shortFrames; ++frame) {
+        UInt64 slot = existingStart + frame;
+        atomic_store_explicit(
+            &gDriver.ringBuffer[slot].owner,
+            existingIdentity, memory_order_seq_cst);
+    }
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, shortFrames)
+           == kRingWriteUnsafe);
+    for (UInt32 frame = 0; frame < offsetStart; ++frame) {
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 0);
+    }
+    for (UInt32 frame = 0; frame < shortFrames; ++frame) {
+        UInt64 slot = existingStart + frame;
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[slot].owner, memory_order_seq_cst)
+            == existingIdentity);
     }
 
     Float32 shortSignal[shortFrames * kDevice_ChannelCount];
@@ -1938,6 +1980,30 @@ static void TestStaleWriterCannotOverwriteACompletedRingWrap(void) {
         gDriver.ringBuffer, kRingBufferFrames,
         frames, received, 1.0f));
     ExpectSignalEqual(received, newer, frames);
+
+    // A newer tag reached only later in a stale span must reject the stale
+    // transaction and release its claimed prefix without touching new audio.
+    ResetRingBuffer(gDriver.ringBuffer);
+    UInt32 newerOffset = frames / 2;
+    PutSignalInRing(
+        &newer[newerOffset * kDevice_ChannelCount],
+        frames - newerOffset,
+        kRingBufferFrames + newerOffset);
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteUnsafe);
+    for (UInt32 frame = 0; frame < newerOffset; ++frame) {
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 0);
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[frame].sampleFrame, memory_order_seq_cst)
+            == kRingFrameUnpublished);
+    }
+    assert(ReadRingSpan(
+        gDriver.ringBuffer, kRingBufferFrames + newerOffset,
+        frames - newerOffset, received, 1.0f));
+    ExpectSignalEqual(
+        received, &newer[newerOffset * kDevice_ChannelCount],
+        frames - newerOffset);
 
     free(gDriver.ringBuffer);
     gDriver.ringBuffer = NULL;
@@ -2287,6 +2353,7 @@ int main(void) {
     TestTimestampCatchesUpEveryMissedPeriod();
     TestNominalRebaseKeepsTheTimelineContinuous();
     TestRealtimeAtomicsAreActuallyLockFree();
+    TestRingWriteIdentityIsOneExactAtomicValue();
     TestControlChangesPublishOneCoherentEffectiveGain();
     TestPropertyNotificationsAreCompleteAndNullSafe();
     TestNonFiniteControlsNeverReachStoredOrPublishedState();
@@ -2312,9 +2379,9 @@ int main(void) {
 #if defined(YUNAUDIO_DRIVER_PERFORMANCE_TESTS)
     TestVariableAndDuplicateCallbackCPUTail();
     TestAtomicRingCallbackCPUTail();
-    puts("driver core: 31 tests passed");
+    puts("driver core: 32 tests passed");
 #else
-    puts("driver core: 29 tests passed");
+    puts("driver core: 30 tests passed");
 #endif
     return 0;
 }
