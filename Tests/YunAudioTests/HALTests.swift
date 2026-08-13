@@ -399,17 +399,26 @@ struct LightingFrameTrafficTests {
 @Suite("Device channel names")
 struct DeviceChannelNameTests {
     @Test("the Seiren's three inputs are named from its own topology")
+    @MainActor
     func seirenInputs() throws {
         let channels = try #require(
             DeviceChannelNames.channels(
                 modelUID: nil, name: "Razer Seiren V3 Pro",
                 scope: kAudioObjectPropertyScopeInput))
         #expect(channels.count == 3)
-        #expect(channels[0].isDefault)
-        // Channel 2 is the one worth knowing about: the device has an expander
-        // ahead of its own converter, which no host-side gate can be equivalent
-        // to.
+        #expect(channels[0].name == "Device processed")
+        #expect(!channels[0].isDefault)
+        #expect(channels[1].name == "Device dry tap")
+        #expect(!channels[1].isDefault)
+        let choice = RouterModel.defaultChannelChoice(
+            inputChannels: channels.count, names: channels)
+        #expect(choice.mode == .mono)
+        #expect(choice.channel == 2)
+        // Direct three-channel capture measured channels 1 and 2 collapsing
+        // over the same sustained upper note while channel 3 remained between
+        // −35 and −46 dBFS. A topology name is not evidence that a tap is safe.
         #expect(channels[2].name == "After the expander")
+        #expect(channels[2].isDefault)
         #expect(channels.filter(\.isDefault).count == 1)
     }
 
@@ -563,8 +572,10 @@ struct DeviceProfileTests {
                 modelUID: nil, name: "Razer Seiren V3 Pro",
                 scope: kAudioObjectPropertyScopeInput))
         #expect(channels.count == 3)
-        #expect(channels[0].name == "Microphone")
+        #expect(channels[0].name == "Device processed")
+        #expect(channels[1].name == "Device dry tap")
         #expect(channels[2].name == "After the expander")
+        #expect(channels[2].isDefault)
         #expect(channels.filter(\.isDefault).count == 1)
         #expect(channels.allSatisfy { !$0.detail.isEmpty })
     }
@@ -691,8 +702,8 @@ struct DeviceProfileTests {
 
     /// The Seiren V2 X is the microphone that publishes a gain macOS can set —
     /// −15 dB to +15 dB, measured on this machine, against the V3 Pro's
-    /// nothing. Somebody reading the profile has to be told which of their two
-    /// Razer microphones that is.
+    /// 0 dB to +36 dB range. Somebody reading the profile has to be told which
+    /// of their two Razer microphones that is.
     @Test("the V2 X profile names its one channel and says what it does publish")
     func seirenV2XProfile() throws {
         let channels = try #require(
@@ -712,7 +723,9 @@ struct DeviceProfileTests {
         // The two profiles have to disagree about this, or one of them is wrong.
         let v3 = try #require(
             DeviceChannelNames.note(modelUID: nil, name: "Razer Seiren V3 Pro"))
-        #expect(note.contains("settable") && v3.contains("no settable"))
+        #expect(note.contains("-15 dB to +15 dB"))
+        #expect(v3.contains("0 dB to +36 dB"))
+        #expect(v3.contains("can clip"))
     }
 
     /// Two CoreAudio devices, one headset, and a 16 kHz input that looks like a
@@ -1642,6 +1655,22 @@ struct MIDIBindingTests {
 @Suite("Preferences round trip")
 struct PreferencesRoundTripTests {
 
+    /// A router is a transparent path until somebody opts into processing.
+    /// Defaults must never stack another speech detector or dynamics stage on
+    /// top of the microphone and the conferencing application's own choices.
+    @Test("every signal-processing feature defaults off")
+    func processingDefaultsOff() {
+        let defaults = Preferences.default
+        #expect(defaults.enabledEffects.isEmpty)
+        #expect(defaults.plugins?.isEmpty == true)
+        #expect(defaults.voiceIsolationEnabled == false)
+        #expect(defaults.cancelsEcho == false)
+        #expect(defaults.isAutoLevelling == false)
+        #expect(defaults.isDucking == false)
+        #expect(defaults.voicePreset == VoicePreset.none.rawValue)
+        #expect(defaults.autoStart == false)
+    }
+
     @Test("every tap mute behaviour survives being written down")
     func tapMuteBehaviourRoundTrip() {
         for behaviour in TapMuteBehavior.allCases {
@@ -1755,7 +1784,7 @@ struct ChannelDefaultTests {
 
     /// A device that publishes its own topology overrules the count, and it is
     /// the reason this is worth a rule at all: the Seiren V3 Pro reports three
-    /// inputs and says which one is the capsule.
+    /// inputs and the dry capsule is not first.
     @Test("a device that names its channels decides for itself")
     func namesWin() {
         let names = [
@@ -1774,6 +1803,56 @@ struct ChannelDefaultTests {
         let paired = RouterModel.defaultChannelChoice(inputChannels: 2, names: pair)
         #expect(paired.mode == SourceChannelMode.mono)
         #expect(paired.channel == 1)
+    }
+
+    @Test("a corrected default migrates inherited choices but not a person's choice")
+    func correctedDefaultMigration() throws {
+        let names = [
+            DeviceChannelNames.Channel(
+                name: "Device processed", detail: "", isDefault: false),
+            DeviceChannelNames.Channel(name: "Dry", detail: "", isDefault: false),
+            DeviceChannelNames.Channel(name: "Post", detail: "", isDefault: true),
+        ]
+        let inherited = try #require(
+            RouterModel.unrecordedChannelDefaultMigration(
+                storedChoice: nil,
+                currentMode: .mono,
+                currentChannel: 0,
+                inputChannels: 3,
+                names: names))
+        #expect(inherited.mode == .mono)
+        #expect(inherited.channel == 2)
+        #expect(
+            RouterModel.unrecordedChannelDefaultMigration(
+                storedChoice: "mono:0",
+                currentMode: .mono,
+                currentChannel: 0,
+                inputChannels: 3,
+                names: names) == nil)
+        #expect(
+            RouterModel.unrecordedChannelDefaultMigration(
+                storedChoice: nil,
+                currentMode: .mono,
+                currentChannel: 2,
+                inputChannels: 3,
+                names: names) == nil)
+    }
+
+    @Test("stored channel choices must still exist on the device")
+    func storedChannelChoiceMustExist() throws {
+        #expect(RouterModel.storedChannelChoice("stereo", inputChannels: 1) == nil)
+        #expect(RouterModel.storedChannelChoice("mono:2", inputChannels: 1) == nil)
+        #expect(RouterModel.storedChannelChoice("mono:-1", inputChannels: 3) == nil)
+        #expect(RouterModel.storedChannelChoice("mono:3", inputChannels: 3) == nil)
+
+        let stereo = try #require(
+            RouterModel.storedChannelChoice("stereo", inputChannels: 2))
+        #expect(stereo.mode == .stereo)
+        #expect(stereo.channel == 0)
+        let mono = try #require(
+            RouterModel.storedChannelChoice("mono:2", inputChannels: 3))
+        #expect(mono.mode == .mono)
+        #expect(mono.channel == 2)
     }
 
     /// Names with nothing marked fall back to the count rather than to channel

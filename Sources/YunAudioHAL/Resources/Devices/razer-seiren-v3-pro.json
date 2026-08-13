@@ -1,20 +1,20 @@
 {
   "match": "seiren v3 pro",
   "displayName": "Razer Seiren V3 Pro",
-  "note": "Publishes no settable gain to macOS. The only gain before the converter is the knob on the device.",
+  "note": "Publishes settable input gain from 0 dB to +36 dB on each capsule tap. Set it so loud speech peaks around -12 to -6 dBFS; gain applied here can clip before any software trim.",
   "inputChannels": [
     {
-      "name": "Microphone",
-      "detail": "The capsule as the device presents it.",
-      "isDefault": true
+      "name": "Device processed",
+      "detail": "The capsule with the microphone's standard processing."
     },
     {
-      "name": "Dry",
-      "detail": "The same capsule with none of the device's own processing."
+      "name": "Device dry tap",
+      "detail": "The device labels this tap as dry, but measured sustained upper notes can collapse before CoreAudio receives them."
     },
     {
       "name": "After the expander",
-      "detail": "Past the microphone's own expander, which sits before the converter — so it removes room noise without anything having to clip first."
+      "detail": "Recommended for calls: this device tap retained a continuous low-to-high note in direct three-channel capture.",
+      "isDefault": true
     }
   ]
 }

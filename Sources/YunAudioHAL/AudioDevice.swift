@@ -630,11 +630,10 @@ public struct AudioDevice: Sendable, Identifiable, Hashable {
 
     /// The device's own gain, before its converter.
     ///
-    /// Worth separating from anything the router does: this happens in the
-    /// hardware ahead of the analogue-to-digital step, so turning it up costs
-    /// nothing in headroom. A digital trim after the fact can only ever amplify
-    /// what the converter already decided, noise included. The right order is
-    /// this first, then the trim.
+    /// Worth separating from anything the router does: enough analogue gain
+    /// lifts the voice above the converter's noise, but it also consumes the
+    /// converter's headroom. A digital trim afterwards can neither recover a
+    /// clipped input nor improve its signal-to-noise ratio.
     ///
     /// The Seiren V3 Pro publishes 0 to +36 dB here; the built-in microphone
     /// publishes a scalar with no decibel mapping at all, which is why both are

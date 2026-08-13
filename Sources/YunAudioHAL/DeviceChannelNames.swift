@@ -92,10 +92,10 @@ public enum DeviceChannelNames {
     /// says what it is supposed to.
     ///
     /// The order is the device's own: channel 0 is the processed capsule,
-    /// channel 1 is untouched, channel 2 has been through the microphone's own
-    /// expander. That last one is the interesting discovery — the hardware has
-    /// a gate of its own, ahead of the converter, which is a thing no amount of
-    /// software can do after the fact.
+    /// channel 1 is labelled dry, and channel 2 has been through the
+    /// microphone's own expander. Direct three-channel capture found that only
+    /// channel 2 retained a continuous upper note, so topology names alone are
+    /// not used as evidence that a tap is safe.
     public static var seirenV3ProInputs: [Channel] {
         channels(
             modelUID: nil, name: "Razer Seiren V3 Pro",
@@ -105,18 +105,20 @@ public enum DeviceChannelNames {
     /// What the shipped profile says, in case the resource is missing.
     static let fallbackSeirenInputs: [Channel] = [
         Channel(
-            name: "Microphone",
-            detail: "The capsule as the device presents it.",
-            isDefault: true),
+            name: "Device processed",
+            detail: "The capsule with the microphone's standard processing.",
+            isDefault: false),
         Channel(
-            name: "Dry",
-            detail: "The same capsule with none of the device's own processing.",
+            name: "Device dry tap",
+            detail:
+                "The device labels this tap as dry, but measured sustained upper notes "
+                + "can collapse before CoreAudio receives them.",
             isDefault: false),
         Channel(
             name: "After the expander",
             detail:
-                "Past the microphone's own expander, which sits before the converter — "
-                + "so it removes room noise without anything having to clip first.",
-            isDefault: false),
+                "Recommended for calls: this device tap retained a continuous low-to-high "
+                + "note in direct three-channel capture.",
+            isDefault: true),
     ]
 }

@@ -19,6 +19,72 @@ private struct IndependentInputCadence {
     var peak: Float = 0
 }
 
+private struct IndependentInputCapture {
+    var channelCount: Int
+    var capacityFrames: Int
+    var capturedFrames: Int = 0
+    var callbacks: UInt64 = 0
+    var malformedCallbacks: UInt64 = 0
+    var samples: UnsafeMutablePointer<Float>
+}
+
+/// Copies every physical input channel into preallocated planar storage.
+///
+/// There is one producer and the main thread reads only after
+/// `AudioDeviceStop` returns. The callback therefore needs neither an atomic
+/// nor a lock, and it performs no allocation, logging or Objective-C work.
+private let independentInputCaptureIOProc: AudioDeviceIOProc = {
+    _, _, inputData, _, _, _, clientData in
+    guard let clientData else { return noErr }
+    let capture = clientData.assumingMemoryBound(to: IndependentInputCapture.self)
+    let buffers = UnsafeMutableAudioBufferListPointer(
+        UnsafeMutablePointer(mutating: inputData))
+
+    var reportedChannels = 0
+    var cycleFrames = Int.max
+    for buffer in buffers {
+        let channels = Int(buffer.mNumberChannels)
+        guard channels > 0 else { continue }
+        reportedChannels += channels
+        cycleFrames = min(
+            cycleFrames,
+            Int(buffer.mDataByteSize) / (MemoryLayout<Float>.size * channels))
+    }
+    guard reportedChannels == capture.pointee.channelCount, cycleFrames != Int.max,
+        cycleFrames > 0
+    else {
+        capture.pointee.malformedCallbacks &+= 1
+        return noErr
+    }
+
+    let available = capture.pointee.capacityFrames - capture.pointee.capturedFrames
+    let frames = min(cycleFrames, max(0, available))
+    guard frames > 0 else { return noErr }
+    let destinationStart = capture.pointee.capturedFrames
+    var absoluteChannel = 0
+    for buffer in buffers {
+        let channels = Int(buffer.mNumberChannels)
+        guard channels > 0, let data = buffer.mData else {
+            absoluteChannel += channels
+            continue
+        }
+        let source = data.assumingMemoryBound(to: Float.self)
+        for localChannel in 0..<channels {
+            let destination =
+                capture.pointee.samples
+                + (absoluteChannel + localChannel) * capture.pointee.capacityFrames
+                + destinationStart
+            for frame in 0..<frames {
+                destination[frame] = source[frame * channels + localChannel]
+            }
+        }
+        absoluteChannel += channels
+    }
+    capture.pointee.capturedFrames += frames
+    capture.pointee.callbacks &+= 1
+    return noErr
+}
+
 // A C IOProc rather than a Swift block. Swift 6 correctly traps when a block
 // inherited from the main actor is called on CoreAudio's realtime queue; the
 // measuring tool must obey the same isolation and realtime rules as the app.
@@ -322,7 +388,7 @@ func wrapped(_ text: String, width: Int) -> [String] {
 func runRoute(
     sourceMatch: String, destinationMatch: String, seconds: Double,
     voiceIsolation: Bool = false, effects: [EffectKind] = [], bufferFrames: UInt32 = 128,
-    preferredSampleRate: Double? = nil
+    preferredSampleRate: Double? = nil, sourceChannel: Int? = nil
 ) throws {
     let devices = try AudioDevices.all()
     guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput })
@@ -342,11 +408,26 @@ func runRoute(
     print("source      \(source.name)  (\(source.inputChannels) in)")
     print("destination \(destination.name)  (\(destination.outputChannels) out)")
 
-    let pairs = min(2, min(source.inputChannels, destination.outputChannels))
-    let signalRoutes = (0..<pairs).map { channel in
-        Route(
-            source: ChannelRef(deviceUID: source.uid, channel: channel),
-            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    let signalRoutes: [Route]
+    if let sourceChannel {
+        guard sourceChannel >= 0, sourceChannel < source.inputChannels else {
+            print(
+                "source channel \(sourceChannel + 1) is outside 1…\(source.inputChannels)")
+            exit(1)
+        }
+        signalRoutes = (0..<min(2, destination.outputChannels)).map { destinationChannel in
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: sourceChannel),
+                destination: ChannelRef(
+                    deviceUID: destination.uid, channel: destinationChannel))
+        }
+    } else {
+        let pairs = min(2, min(source.inputChannels, destination.outputChannels))
+        signalRoutes = (0..<pairs).map { channel in
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: channel),
+                destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+        }
     }
     print(
         "routes      \(signalRoutes.map { "ch\($0.source.channel + 1)→ch\($0.destination.channel + 1)" }.joined(separator: ", "))"
@@ -422,7 +503,14 @@ func runRoute(
         let lock =
             engine.isClockLocked
             ? String(format: "LOCKED %.6f", engine.measuredRateRatio) : "unlocked"
-        print("  cycles +\(delta)  \(bars.joined(separator: "  "))  \(lock)")
+        let sourcePeak = peaks.max() ?? 0
+        let outputPeak = engine.outputPeak
+        let sourceDB = sourcePeak > 0 ? 20 * log10(sourcePeak) : -.infinity
+        let outputDB = outputPeak > 0 ? 20 * log10(outputPeak) : -.infinity
+        print(
+            String(
+                format: "  cycles +%llu  source %7.1f dBFS  output %7.1f dBFS  %@  %@",
+                delta, sourceDB, outputDB, bars.joined(separator: "  "), lock))
     }
 
     // Re-read after the run: the clock lock takes about a second and a half to
@@ -1336,6 +1424,153 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "audio-start" {
 /// that a separate application is scheduled often enough to receive it. This
 /// opens YunAudio exactly as Discord does and asserts callback cadence without
 /// sharing the router's aggregate device or IOProc.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "input-channels" {
+    let match = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : "Seiren V3 Pro"
+    let requestedSeconds =
+        CommandLine.arguments.count > 3 ? Double(CommandLine.arguments[3]) ?? 15 : 15
+    let seconds = min(20, max(1, requestedSeconds))
+    let all = (try? AudioDevices.all()) ?? []
+    guard
+        let device = all.first(where: {
+            $0.name.localizedCaseInsensitiveContains(match) && $0.hasInput
+        })
+    else {
+        print("no input device matching \"\(match)\"")
+        exit(1)
+    }
+    guard device.inputChannels > 0, device.inputChannels <= 8 else {
+        print("unsupported input channel count: \(device.inputChannels)")
+        exit(1)
+    }
+    let formats = device.inputStreams.compactMap(\.currentVirtualFormat)
+    guard !formats.isEmpty,
+        formats.allSatisfy({ format in
+            if case .float(bits: 32) = format.encoding { return true }
+            return false
+        })
+    else {
+        print(
+            "direct capture requires every input stream to expose Float32 to its IOProc: "
+                + device.inputStreams.compactMap(\.currentVirtualFormat)
+                .map(\.description).joined(separator: ", "))
+        exit(1)
+    }
+    let sampleRate = device.nominalSampleRate
+    guard sampleRate > 0, sampleRate <= 192_000 else {
+        print("unsupported sample rate: \(sampleRate)")
+        exit(1)
+    }
+    let capacityFrames = Int((sampleRate * seconds).rounded(.up)) + 4_096
+    let (sampleCount, overflowed) = capacityFrames.multipliedReportingOverflow(
+        by: device.inputChannels)
+    guard !overflowed, sampleCount <= 32_000_000 else {
+        print("capture would exceed the 128 MiB diagnostic limit")
+        exit(1)
+    }
+
+    let samples = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+    samples.initialize(repeating: 0, count: sampleCount)
+    defer {
+        samples.deinitialize(count: sampleCount)
+        samples.deallocate()
+    }
+    let capture = UnsafeMutablePointer<IndependentInputCapture>.allocate(capacity: 1)
+    capture.initialize(
+        to: IndependentInputCapture(
+            channelCount: device.inputChannels,
+            capacityFrames: capacityFrames,
+            samples: samples))
+    defer {
+        capture.deinitialize(count: 1)
+        capture.deallocate()
+    }
+
+    var procID: AudioDeviceIOProcID?
+    let createStatus = AudioDeviceCreateIOProcID(
+        device.id, independentInputCaptureIOProc, UnsafeMutableRawPointer(capture), &procID)
+    guard createStatus == noErr, let procID else {
+        print("could not open \(device.name): \(fourCharDescription(createStatus))")
+        exit(1)
+    }
+    defer { AudioDeviceDestroyIOProcID(device.id, procID) }
+
+    let labels =
+        DeviceChannelNames.channels(
+            modelUID: device.modelUID, name: device.name,
+            scope: kAudioObjectPropertyScopeInput)?.map(\.name)
+        ?? (0..<device.inputChannels).map { "Channel \($0 + 1)" }
+    print("direct input  \(device.name) · \(device.inputChannels)ch · \(Int(sampleRate)) Hz")
+    print(
+        "channels      \(labels.enumerated().map { "\($0.offset + 1)=\($0.element)" }.joined(separator: " · "))"
+    )
+    print("sing one continuous low-to-high note for \(Int(seconds)) seconds")
+
+    let startStatus = AudioDeviceStart(device.id, procID)
+    guard startStatus == noErr else {
+        print("could not start \(device.name): \(fourCharDescription(startStatus))")
+        exit(1)
+    }
+    Thread.sleep(forTimeInterval: seconds)
+    let stopStatus = AudioDeviceStop(device.id, procID)
+    guard stopStatus == noErr else {
+        print("could not stop \(device.name): \(fourCharDescription(stopStatus))")
+        exit(1)
+    }
+
+    let result = capture.pointee
+    guard result.capturedFrames > 0, result.malformedCallbacks == 0 else {
+        print(
+            "capture invalid: \(result.capturedFrames) frames, "
+                + "\(result.malformedCallbacks) malformed callbacks")
+        exit(1)
+    }
+    let windowFrames = max(1, Int(sampleRate / 10))
+    var channelWindows: [[InputChannelSignalWindow]] = []
+    channelWindows.reserveCapacity(device.inputChannels)
+    for channel in 0..<device.inputChannels {
+        let start = samples + channel * capacityFrames
+        let values = Array(UnsafeBufferPointer(start: start, count: result.capturedFrames))
+        channelWindows.append(
+            InputChannelSignalEvidence.windows(
+                samples: values, windowFrames: windowFrames))
+    }
+
+    func db(_ value: Float) -> Double {
+        value > 0 ? Double(20 * log10(value)) : -.infinity
+    }
+    print("\nEach cell is peak/RMS dBFS; −inf means every sample was exactly zero.")
+    print(
+        "time     "
+            + labels.map {
+                String($0.prefix(18)).padding(toLength: 18, withPad: " ", startingAt: 0)
+            }.joined(separator: "  "))
+    let rows = channelWindows.map(\.count).max() ?? 0
+    for row in 0..<rows {
+        let time = Double(row * windowFrames) / sampleRate
+        let cells = channelWindows.map { windows -> String in
+            guard row < windows.count else { return "       —/      —" }
+            let window = windows[row]
+            return String(format: "%7.1f/%7.1f", db(window.peak), db(window.rms))
+        }
+        print(String(format: "%5.1fs  %@", time, cells.joined(separator: "  ")))
+    }
+    print("\nsummary")
+    for channel in 0..<device.inputChannels {
+        let windows = channelWindows[channel]
+        let peak = windows.map(\.peak).max() ?? 0
+        let silent = InputChannelSignalEvidence.longestSilentRunAfterSignal(windows)
+        print(
+            String(
+                format: "  ch%d %-18@ peak %7.1f dBFS · longest post-signal zero %.1f s",
+                channel + 1, String(labels[channel].prefix(18)) as NSString, db(peak),
+                Double(silent * windowFrames) / sampleRate))
+    }
+    print(
+        "callbacks \(result.callbacks) · captured \(result.capturedFrames) frames · malformed 0"
+    )
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "driver-receive" {
     let seconds = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 15 : 15
     let requiresSignal = CommandLine.arguments.contains("--require-signal")
@@ -2602,13 +2837,21 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "route" {
         ? Double(CommandLine.arguments[4]) ?? 5 : 5
     let isolation = CommandLine.arguments.contains("--isolate")
     let callChain = CommandLine.arguments.contains("--call-chain")
+    let sourceChannel: Int? = {
+        guard let flag = CommandLine.arguments.firstIndex(of: "--source-channel"),
+            flag + 1 < CommandLine.arguments.count,
+            let oneBased = Int(CommandLine.arguments[flag + 1]), oneBased > 0
+        else { return nil }
+        return oneBased - 1
+    }()
     do {
         try runRoute(
             sourceMatch: source, destinationMatch: destination, seconds: seconds,
             voiceIsolation: isolation,
             effects: callChain ? [.voiceIsolation, .equaliser, .gate, .limiter] : [],
             bufferFrames: callChain ? 256 : 128,
-            preferredSampleRate: callChain ? 48000 : nil)
+            preferredSampleRate: callChain ? 48000 : nil,
+            sourceChannel: sourceChannel)
     } catch {
         print("route failed: \(error)")
         exit(1)

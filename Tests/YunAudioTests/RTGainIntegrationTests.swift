@@ -33,6 +33,11 @@ private final class GainIntegrationBus {
         }
     }
 
+    func set(_ buffer: Int, channel: Int, frame: Int, to value: Float) {
+        let channels = Int(list[buffer].mNumberChannels)
+        storage[buffer][frame * channels + channel] = value
+    }
+
     func samples(_ buffer: Int, channel: Int) -> [Float] {
         let channels = Int(list[buffer].mNumberChannels)
         return (0..<frames).map { storage[buffer][$0 * channels + channel] }
@@ -110,6 +115,62 @@ struct RTGainIntegrationTests {
             yun_rt_queue_push(
                 commands,
                 YunRTCommand(kind: Int32(kind.rawValue), index: Int32(index), value: value)))
+    }
+
+    /// With every processing switch off the graph has no speech/noise or pitch
+    /// decision to make. A continuous low-to-high tone must therefore cross
+    /// the actual callback sample for sample; a gate hidden in the default path
+    /// would turn a measurable part of this sweep into zero.
+    @Test("the unprocessed path passes a two-second pitch sweep bit-exactly")
+    func unprocessedPitchSweepIsExact() {
+        let frames = 512
+        let totalFrames = 96_000
+        let sampleRate = 48_000.0
+        let low = 80.0
+        let high = 8_000.0
+        let slope = (high - low) / (Double(totalFrames) / sampleRate)
+        let graph = graph(bufferFrames: frames)
+        defer { RTGraph.deallocate(graph) }
+        #expect(graph.pointee.voiceIsolation == nil)
+        #expect(graph.pointee.effectTransition == nil)
+        #expect(graph.pointee.duckEnabled == 0)
+        #expect(graph.pointee.outputLimiterEnabled == 0)
+
+        let input = GainIntegrationBus(channelCounts: [1], frames: frames)
+        let output = GainIntegrationBus(channelCounts: [1], frames: frames)
+        let cell = yun_rt_cell_create(UnsafeMutableRawPointer(graph))!
+        defer { yun_rt_cell_free(cell) }
+        var now = AudioTimeStamp()
+        var time = AudioTimeStamp()
+        var compared = 0
+        var mismatches = 0
+
+        while compared < totalFrames {
+            let count = min(frames, totalFrames - compared)
+            var expected = [Float](repeating: 0, count: frames)
+            for frame in 0..<frames {
+                let absolute = min(compared + frame, totalFrames - 1)
+                let seconds = Double(absolute) / sampleRate
+                let phase = 2 * Double.pi * (low * seconds + 0.5 * slope * seconds * seconds)
+                let sample = Float(0.25 * sin(phase))
+                expected[frame] = sample
+                input.set(0, channel: 0, frame: frame, to: sample)
+            }
+            now.mSampleTime = Double(compared)
+            time.mSampleTime = Double(compared)
+            _ = yunAudioIOProc(
+                0, &now, UnsafePointer(input.list.unsafeMutablePointer), &time,
+                output.list.unsafeMutablePointer, &time, UnsafeMutableRawPointer(cell))
+            let actual = output.samples(0, channel: 0)
+            for frame in 0..<count {
+                mismatches += actual[frame] == expected[frame] ? 0 : 1
+            }
+            compared += count
+        }
+
+        print("unprocessed 80–8,000 Hz sweep: \(compared) compared, \(mismatches) mismatches")
+        #expect(compared == totalFrames)
+        #expect(mismatches == 0)
     }
 
     @Test("a fresh graph starts on its stored gain and mute")

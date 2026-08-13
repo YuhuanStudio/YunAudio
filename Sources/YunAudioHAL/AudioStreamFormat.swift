@@ -98,6 +98,8 @@ public struct AudioStream: Sendable, Identifiable {
     /// First channel of the owning device that this stream carries. Needed to
     /// map a device-level channel pair onto the stream that actually holds it.
     public let startingChannel: Int
+    /// Format presented to an IOProc. This can differ from the wire encoding.
+    public let currentVirtualFormat: StreamFormat?
     public let currentPhysicalFormat: StreamFormat?
     public let availablePhysicalFormats: [StreamFormat]
 
@@ -106,6 +108,7 @@ public struct AudioStream: Sendable, Identifiable {
         // Direction is 1 for input, 0 for output.
         isInput = (id.optionalValue(of: .streamDirection) ?? 0) == 1
         startingChannel = Int(id.optionalValue(of: .startingChannel) ?? 1)
+        currentVirtualFormat = id.optionalValue(of: .virtualFormat).map(StreamFormat.init)
         currentPhysicalFormat = id.optionalValue(of: .physicalFormat).map(StreamFormat.init)
 
         let ranged =

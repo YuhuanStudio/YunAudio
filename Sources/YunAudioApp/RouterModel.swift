@@ -4569,23 +4569,32 @@ final class RouterModel {
     /// - Returns: False when this device has never been set by hand, so the
     ///   caller falls back to working the default out from its topology.
     private func restoreChannelChoice() -> Bool {
-        guard let uid = selectedSourceUID, let stored = sourceChannelChoices[uid] else {
-            return false
-        }
-        if stored == "stereo" {
-            channelMode = .stereo
-            return true
-        }
-        guard stored.hasPrefix("mono:"), let channel = Int(stored.dropFirst(5)) else {
-            return false
-        }
-        // Checked against the device as it is now: a profile somebody saved
-        // when the interface had eight inputs must not select channel six on a
-        // microphone that has one.
-        guard channel < (selectedSource?.inputChannels ?? 0) else { return false }
-        channelMode = .mono
-        monoChannel = channel
+        guard let uid = selectedSourceUID,
+            let choice = Self.storedChannelChoice(
+                sourceChannelChoices[uid],
+                inputChannels: selectedSource?.inputChannels ?? 0)
+        else { return false }
+        channelMode = choice.mode
+        monoChannel = choice.channel
         return true
+    }
+
+    /// Decodes one per-device choice only when the device can still present it.
+    ///
+    /// A one-channel microphone cannot restore stereo, just as an interface
+    /// which came back narrower cannot restore channel six. Keeping the parser
+    /// pure gives primary and additional sources the same validation boundary.
+    static func storedChannelChoice(
+        _ stored: String?, inputChannels: Int
+    ) -> (mode: SourceChannelMode, channel: Int)? {
+        guard inputChannels > 0, let stored else { return nil }
+        if stored == "stereo" {
+            return inputChannels >= 2 ? (.stereo, 0) : nil
+        }
+        guard stored.hasPrefix("mono:"), let channel = Int(stored.dropFirst(5)),
+            (0..<inputChannels).contains(channel)
+        else { return nil }
+        return (.mono, channel)
     }
 
     /// Registered with the system, not mirrored locally — the login item state
@@ -5854,10 +5863,9 @@ final class RouterModel {
 
     /// The microphone's own gain, if it publishes one.
     ///
-    /// Kept separate from the trim on purpose. This happens in the hardware
-    /// before the converter, so turning it up costs no headroom; the trim
-    /// happens afterwards and can only amplify what the converter already
-    /// decided, noise and all. The right order is this first.
+    /// Kept separate from the trim on purpose. This happens before the
+    /// converter, where enough gain improves signal-to-noise ratio and too much
+    /// clips before the software trim has any chance to reduce it.
     var hardwareGain: AudioDevice.HardwareGain? { hardwareGainReading }
 
     /// Read through a stored copy so the slider does not fight the device: a
@@ -8429,6 +8437,7 @@ final class RouterModel {
     }
 
     private var isRestoring = false
+    @ObservationIgnored private var persistsMigratedChannelDefaultAfterRestore = false
 
     convenience init() {
         self.init(
@@ -8749,7 +8758,13 @@ final class RouterModel {
         // does nothing.
         SingerPitch.usesLearnedHead = usesLearnedPitch
         isRestoring = true
-        defer { isRestoring = false }
+        defer {
+            isRestoring = false
+            if persistsMigratedChannelDefaultAfterRestore {
+                persistsMigratedChannelDefaultAfterRestore = false
+                persist()
+            }
+        }
 
         let saved = PreferencesStore.load()
         // The launch already decodes this blob here. MIDI used to load it a
@@ -9374,7 +9389,6 @@ final class RouterModel {
 
         let wasRestoring = isRestoring
         isRestoring = true
-        defer { isRestoring = wasRestoring }
 
         let inputs = Set(inputDevices.map(\.uid))
         let outputs = Set(outputDevices.map(\.uid))
@@ -9387,7 +9401,16 @@ final class RouterModel {
         selectedDestinationUID =
             intent.destination.flatMap { outputs.contains($0) ? $0 : nil }
         selectDefaults(defaultInputUID: defaultInputUID)
+        let migratedChannelDefault = migrateUnrecordedChannelDefault()
         pruneAdditionalDevices()
+        isRestoring = wasRestoring
+        if migratedChannelDefault {
+            if isRestoring {
+                persistsMigratedChannelDefaultAfterRestore = true
+            } else {
+                persist()
+            }
+        }
     }
 
     func selectDefaults() {
@@ -9494,6 +9517,37 @@ final class RouterModel {
         // side of every call.
         let stereo = inputChannels % 2 == 0 && inputChannels >= 2
         return (stereo ? .stereo : .mono, 0)
+    }
+
+    /// Moves only an inherited positional choice to a newly corrected device
+    /// default. A per-device choice is evidence that somebody deliberately
+    /// selected that tap and always wins, including channel zero.
+    static func unrecordedChannelDefaultMigration(
+        storedChoice: String?, currentMode: SourceChannelMode, currentChannel: Int,
+        inputChannels: Int, names: [DeviceChannelNames.Channel]?
+    ) -> (mode: SourceChannelMode, channel: Int)? {
+        guard storedChoice == nil else { return nil }
+        let preferred = defaultChannelChoice(inputChannels: inputChannels, names: names)
+        guard preferred.mode != currentMode || preferred.channel != currentChannel else {
+            return nil
+        }
+        return preferred
+    }
+
+    private func migrateUnrecordedChannelDefault() -> Bool {
+        guard let uid = selectedSourceUID,
+            let migration = Self.unrecordedChannelDefaultMigration(
+                storedChoice: sourceChannelChoices[uid],
+                currentMode: channelMode,
+                currentChannel: monoChannel,
+                inputChannels: selectedSource?.inputChannels ?? 0,
+                names: sourceChannelNames)
+        else { return false }
+        channelMode = migration.mode
+        monoChannel = migration.channel
+        sourceChannelChoices[uid] =
+            migration.mode == .stereo ? "stereo" : "mono:\(migration.channel)"
+        return true
     }
 
     /// True when routing stopped because hardware went away, rather than
@@ -9934,13 +9988,10 @@ final class RouterModel {
         if uid == selectedSourceUID {
             return (channelMode, min(monoChannel, max(0, inputChannels - 1)))
         }
-        if let stored = sourceChannelChoices[uid] {
-            if stored == "stereo" { return (.stereo, 0) }
-            if stored.hasPrefix("mono:"), let channel = Int(stored.dropFirst(5)),
-                channel < inputChannels
-            {
-                return (.mono, channel)
-            }
+        if let stored = Self.storedChannelChoice(
+            sourceChannelChoices[uid], inputChannels: inputChannels)
+        {
+            return stored
         }
         return Self.defaultChannelChoice(
             inputChannels: inputChannels, names: channelNames(ofDeviceUID: uid))

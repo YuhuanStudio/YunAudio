@@ -438,8 +438,9 @@ struct MainWindow: View {
                             fallbackNotice(waiting)
                         }
                         // Hardware gain first, because it is first in the
-                        // signal: it happens before the converter, so it is the
-                        // one that costs nothing.
+                        // signal. Software cannot restore converter headroom
+                        // after this stage has clipped, so it stays visually
+                        // separate from the reversible trim below.
                         if let gain = model.hardwareGain, gain.isSettable {
                             HStack(spacing: Yun.Space.sm) {
                                 Image(systemName: "dial.medium")
@@ -458,7 +459,7 @@ struct MainWindow: View {
                             }
                             .help(
                                 loc(
-                                    "The microphone's own gain, before its converter. Raise this before the trim below — it costs no headroom."
+                                    "The microphone's own gain, before its converter. Set loud speech around -12 to -6 dBFS. Too high clips before the trim below; too low raises noise."
                                 ))
                         }
 

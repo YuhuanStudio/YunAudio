@@ -1,7 +1,7 @@
 {
   "match": "seiren v2 x",
   "displayName": "Razer Seiren V2 X",
-  "note": "Publishes a settable input gain to macOS where the V3 Pro publishes none: -15 dB to +15 dB, measured on this machine. That gain happens in the hardware ahead of the converter, so it is the one to reach for before any trim here. The headphone jack publishes one too, -62 dB to -11 dB. One input channel at 44.1 or 48 kHz, 24-bit; the three-way capsule split is a V3 Pro feature and this microphone does not have it.",
+  "note": "Publishes settable input gain from -15 dB to +15 dB, measured on this machine. Set it for a healthy level before using software trim; too much can clip at the converter. The headphone jack publishes -62 dB to -11 dB. One input channel at 44.1 or 48 kHz, 24-bit; the three-way capsule split is a V3 Pro feature and this microphone does not have it.",
   "inputChannels": [
     {
       "name": "Microphone",

@@ -398,18 +398,18 @@ struct LiveOutgoingReadout: View {
         case .quiet:
             model.hardwareGain?.isSettable == true
                 ? loc(
-                    "Quiet. The other end will run its own automatic gain over this and amplify the room with it — raise the microphone's own gain first, then the input level."
+                    "Quiet. Adjust the microphone's own gain so loud speech peaks around -12 to -6 dBFS, then use the input level only for a small correction."
                 )
                 : loc(
-                    "Quiet. The other end will run its own automatic gain over this and amplify the room with it. This microphone exposes no gain to macOS, so turn the knob on the device itself, then raise the input level."
+                    "Quiet. Adjust the microphone or its physical gain so loud speech peaks around -12 to -6 dBFS, then use the input level only for a small correction."
                 )
         case .veryQuiet:
             model.hardwareGain?.isSettable == true
                 ? loc(
-                    "Far too quiet to send. Raise the microphone's own gain, then the input level."
+                    "Far too quiet to send. Check the selected input, then set the microphone's own gain for peaks around -12 to -6 dBFS."
                 )
                 : loc(
-                    "Far too quiet to send. Turn up the knob on the microphone itself — it exposes no gain to macOS — then raise the input level."
+                    "Far too quiet to send. Check the selected input, then set the microphone or its physical gain for peaks around -12 to -6 dBFS."
                 )
         case .silent: loc("Nothing is reaching the output.")
         }
