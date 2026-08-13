@@ -1589,7 +1589,9 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
 
     case kAudioDevicePropertySafetyOffset:
         YUN_GUARD(inDataSize >= sizeof(UInt32), kAudioHardwareBadPropertySizeError, done);
-        *(UInt32 *)outData = kDevice_SafetyOffsetFrames;
+        *(UInt32 *)outData = inAddress->mScope == kAudioObjectPropertyScopeInput
+            ? kDevice_InputSafetyOffsetFrames
+            : kDevice_OutputSafetyOffsetFrames;
         *outDataSize = sizeof(UInt32);
         break;
 

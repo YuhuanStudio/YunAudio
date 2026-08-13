@@ -1219,30 +1219,38 @@ static void ExpectOrderIndependentAtFrameCount(
 }
 
 static void TestCallbacksOnBothSidesOf512IgnoreOperationOrder(void) {
-    const UInt32 frameCounts[] = { 64, 257, kDevice_SafetyOffsetFrames };
+    const UInt32 frameCounts[] = { 64, 257, kDevice_LoopbackSeparationFrames };
     for (UInt32 index = 0; index < sizeof(frameCounts) / sizeof(frameCounts[0]); ++index) {
         ExpectOrderIndependentAtFrameCount(
-            frameCounts[index], kDevice_SafetyOffsetFrames, false);
+            frameCounts[index], kDevice_LoopbackSeparationFrames, false);
         ExpectOrderIndependentAtFrameCount(
-            frameCounts[index], kDevice_SafetyOffsetFrames, true);
+            frameCounts[index], kDevice_LoopbackSeparationFrames, true);
     }
 
-    // Drift compensation has produced 769-frame operations on the installed
-    // driver. The advertised safety offset, not a test-only wider gap, must
-    // keep those operations order-independent.
-    assert(kDevice_SafetyOffsetFrames >= 769);
+    // Drift compensation has produced 769- and 800-frame operations on the
+    // installed driver. The advertised input-plus-output separation, not a
+    // test-only wider gap, must keep those operations order-independent.
+    assert(kDevice_LoopbackSeparationFrames >= 800);
     ExpectOrderIndependentAtFrameCount(
-        513, kDevice_SafetyOffsetFrames, false);
+        513, kDevice_LoopbackSeparationFrames, false);
     ExpectOrderIndependentAtFrameCount(
-        513, kDevice_SafetyOffsetFrames, true);
+        513, kDevice_LoopbackSeparationFrames, true);
     ExpectOrderIndependentAtFrameCount(
-        769, kDevice_SafetyOffsetFrames, false);
+        769, kDevice_LoopbackSeparationFrames, false);
     ExpectOrderIndependentAtFrameCount(
-        769, kDevice_SafetyOffsetFrames, true);
+        769, kDevice_LoopbackSeparationFrames, true);
+    ExpectOrderIndependentAtFrameCount(
+        800, kDevice_LoopbackSeparationFrames, false);
+    ExpectOrderIndependentAtFrameCount(
+        800, kDevice_LoopbackSeparationFrames, true);
+    printf(
+        "driver variable IO: 513, 769 and 800 frames within a %u-frame "
+        "input/output separation, exact and 0 unsafe\n",
+        kDevice_LoopbackSeparationFrames);
 }
 
 static void ExpectPublishedOverlapAtFrameCount(UInt32 frames) {
-    UInt32 separation = kDevice_SafetyOffsetFrames;
+    UInt32 separation = kDevice_LoopbackSeparationFrames;
     assert(frames > separation);
     size_t sampleCount = (size_t)frames * kDevice_ChannelCount;
     Float32 *prior = calloc(sampleCount, sizeof(Float32));
@@ -1302,17 +1310,19 @@ static void ExpectPublishedOverlapAtFrameCount(UInt32 frames) {
     free(prior);
 }
 
-static void TestPublishedVariableCallbacksNeedNoDisjointSpanRule(void) {
-    ExpectPublishedOverlapAtFrameCount(kDevice_SafetyOffsetFrames + 1);
-    ExpectPublishedOverlapAtFrameCount(kDevice_SafetyOffsetFrames + 257);
+static void TestPublishedOverlappingCallbacksNeedNoDisjointSpanRule(void) {
+    ExpectPublishedOverlapAtFrameCount(kDevice_LoopbackSeparationFrames + 1);
+    ExpectPublishedOverlapAtFrameCount(kDevice_LoopbackSeparationFrames + 257);
     printf(
-        "driver variable IO: 513 and 769 frames within a %u-frame safety "
-        "window, exact and 0 unsafe\n",
-        kDevice_SafetyOffsetFrames);
+        "driver published overlap: %u and %u frames cross a %u-frame "
+        "separation, exact and 0 unsafe\n",
+        kDevice_LoopbackSeparationFrames + 1,
+        kDevice_LoopbackSeparationFrames + 257,
+        kDevice_LoopbackSeparationFrames);
 }
 
 static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
-    enum { frames = kDevice_SafetyOffsetFrames + 257 };
+    enum { frames = kDevice_LoopbackSeparationFrames + 257 };
     gDriver.ringBuffer = CreateRingBuffer();
     assert(gDriver.ringBuffer != NULL);
     atomic_store_explicit(
@@ -1331,24 +1341,24 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
     assert(written != NULL && received != NULL);
     FillSignal(written, frames, 0.625f);
     AudioServerPlugInIOCycleInfo writeCycle = CycleAt(
-        0, kDevice_SafetyOffsetFrames);
+        0, kDevice_LoopbackSeparationFrames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Output, 1,
         kAudioServerPlugInIOOperationWriteMix, frames,
         &writeCycle, written, NULL) == 0);
 
     AudioServerPlugInIOCycleInfo readCycle = CycleAt(
-        0, kDevice_SafetyOffsetFrames);
+        0, kDevice_LoopbackSeparationFrames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
         kAudioServerPlugInIOOperationReadInput, frames,
         &readCycle, received, NULL) == 0);
-    for (UInt32 frame = 0; frame < kDevice_SafetyOffsetFrames; ++frame) {
+    for (UInt32 frame = 0; frame < kDevice_LoopbackSeparationFrames; ++frame) {
         assert(received[frame * kDevice_ChannelCount] == 0);
         assert(received[frame * kDevice_ChannelCount + 1] == 0);
     }
-    for (UInt32 frame = kDevice_SafetyOffsetFrames; frame < frames; ++frame) {
-        UInt32 writtenFrame = frame - kDevice_SafetyOffsetFrames;
+    for (UInt32 frame = kDevice_LoopbackSeparationFrames; frame < frames; ++frame) {
+        UInt32 writtenFrame = frame - kDevice_LoopbackSeparationFrames;
         assert(received[frame * kDevice_ChannelCount]
                == written[writtenFrame * kDevice_ChannelCount]);
         assert(received[frame * kDevice_ChannelCount + 1]
@@ -1359,8 +1369,8 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
 
     Float32 missing[64 * kDevice_ChannelCount];
     AudioServerPlugInIOCycleInfo missingCycle = CycleAt(
-        kDevice_SafetyOffsetFrames + frames,
-        2 * kDevice_SafetyOffsetFrames + frames);
+        kDevice_LoopbackSeparationFrames + frames,
+        2 * kDevice_LoopbackSeparationFrames + frames);
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
         kAudioServerPlugInIOOperationReadInput, 64,
@@ -1373,7 +1383,7 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
     printf(
         "driver cold start: %u prehistory frames silent, published tail exact, "
         "later gap unsafe\n",
-        kDevice_SafetyOffsetFrames);
+        kDevice_LoopbackSeparationFrames);
 
     free(received);
     free(written);
@@ -1383,7 +1393,7 @@ static void TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation(void) {
 
 static void ExpectUnsafeCallbackFailsSilent(UInt32 frames, bool writeFirst) {
     UInt64 inputStart = kRingBufferFrames - 256;
-    UInt64 outputStart = inputStart + kDevice_SafetyOffsetFrames;
+    UInt64 outputStart = inputStart + kDevice_LoopbackSeparationFrames;
     gDriver.ringBuffer = CreateRingBuffer();
     assert(gDriver.ringBuffer != NULL);
     Float32 oldSamples[kDevice_ChannelCount] = { 0.375f, 0.375f };
@@ -1472,7 +1482,7 @@ static void TestUnsafeCallbacksFailSilentWithoutAnErrorStorm(void) {
     assert(gDriver.ringBuffer != NULL);
     Float32 oldSamples[kDevice_ChannelCount] = { 0.375f, 0.375f };
     PutSignalInRing(oldSamples, 1, 0);
-    AudioServerPlugInIOCycleInfo nonFinite = CycleAt(0, kDevice_SafetyOffsetFrames);
+    AudioServerPlugInIOCycleInfo nonFinite = CycleAt(0, kDevice_LoopbackSeparationFrames);
     nonFinite.mInputTime.mSampleTime = NAN;
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
@@ -1481,7 +1491,7 @@ static void TestUnsafeCallbacksFailSilentWithoutAnErrorStorm(void) {
     for (UInt32 index = 0; index < frames * kDevice_ChannelCount; ++index) {
         assert(readBuffer[index] == 0.0f);
     }
-    nonFinite = CycleAt(0, kDevice_SafetyOffsetFrames);
+    nonFinite = CycleAt(0, kDevice_LoopbackSeparationFrames);
     nonFinite.mOutputTime.mSampleTime = INFINITY;
     assert(Yun_DoIOOperation(
         TestDriver(), kObjectID_Device, kObjectID_Stream_Output, 1,
@@ -1492,7 +1502,7 @@ static void TestUnsafeCallbacksFailSilentWithoutAnErrorStorm(void) {
     gDriver.ringBuffer = NULL;
 }
 
-static void TestFixedBufferContractHasTwoPeriodsOfSafety(void) {
+static void TestFixedBufferContractPublishesDirectionalSafety(void) {
     AudioServerPlugInDriverRef driver = (AudioServerPlugInDriverRef)&gInterfacePtr;
     AudioObjectPropertyAddress bufferSize = {
         kAudioDevicePropertyBufferFrameSize,
@@ -1535,24 +1545,32 @@ static void TestFixedBufferContractHasTwoPeriodsOfSafety(void) {
         0, NULL, size, &size, &value) == 0);
     assert(value == 0);
 
-    AudioObjectPropertyScope scopes[] = {
-        kAudioObjectPropertyScopeInput,
-        kAudioObjectPropertyScopeOutput,
+    struct {
+        AudioObjectPropertyScope scope;
+        UInt32 expected;
+    } safetyCases[] = {
+        { kAudioObjectPropertyScopeInput, kDevice_InputSafetyOffsetFrames },
+        { kAudioObjectPropertyScopeOutput, kDevice_OutputSafetyOffsetFrames },
     };
     for (UInt32 index = 0; index < 2; ++index) {
         AudioObjectPropertyAddress safety = {
             kAudioDevicePropertySafetyOffset,
-            scopes[index],
+            safetyCases[index].scope,
             kAudioObjectPropertyElementMain,
         };
         value = 0;
         size = sizeof(value);
         assert(Yun_GetPropertyData(
             driver, kObjectID_Device, 1, &safety, 0, NULL, size, &size, &value) == 0);
-        assert(value == kDevice_SafetyOffsetFrames);
-        assert(value == 2 * kDevice_BufferFrameSize);
-        assert((double)value / kDevice_DefaultSampleRate * 1000.0 < 21.34);
+        assert(value == safetyCases[index].expected);
     }
+    assert(kDevice_InputSafetyOffsetFrames == 3 * kDevice_BufferFrameSize);
+    assert(kDevice_OutputSafetyOffsetFrames == 2 * kDevice_BufferFrameSize);
+    assert(kDevice_LoopbackSeparationFrames == 5 * kDevice_BufferFrameSize);
+    assert(
+        (double)kDevice_LoopbackSeparationFrames
+            / (2.0 * kDevice_DefaultSampleRate) * 1000.0
+        < 26.67);
 }
 
 static void TestUnsafeOperationCountsAreObservable(void) {
@@ -1633,7 +1651,7 @@ static void TestPropertyDictionaryHandlesEveryNumberAllocationFailure(void) {
 }
 
 static void TestSafetyWindowMakesClientOrderIrrelevant(void) {
-    enum { frames = kDevice_SafetyOffsetFrames };
+    enum { frames = kDevice_LoopbackSeparationFrames };
     Float32 first[frames * kDevice_ChannelCount];
     Float32 second[frames * kDevice_ChannelCount];
     Float32 third[frames * kDevice_ChannelCount];
@@ -1796,7 +1814,7 @@ static void *RunConcurrentIOClient(void *context) {
         Float32 buffer[kDevice_ChannelCount] = { magnitude, -magnitude };
         if (client->writes) {
             AudioServerPlugInIOCycleInfo cycle = CycleAt(
-                iteration + kDevice_SafetyOffsetFrames, iteration);
+                iteration + kDevice_LoopbackSeparationFrames, iteration);
             assert(Yun_DoIOOperation(
                 TestDriver(), kObjectID_Device, kObjectID_Stream_Output,
                 client->clientID, kAudioServerPlugInIOOperationWriteMix,
@@ -1807,7 +1825,7 @@ static void *RunConcurrentIOClient(void *context) {
         buffer[0] = NAN;
         buffer[1] = NAN;
         AudioServerPlugInIOCycleInfo cycle = CycleAt(
-            iteration, iteration + kDevice_SafetyOffsetFrames);
+            iteration, iteration + kDevice_LoopbackSeparationFrames);
         assert(Yun_DoIOOperation(
             TestDriver(), kObjectID_Device, kObjectID_Stream_Input,
             client->clientID, kAudioServerPlugInIOOperationReadInput,
@@ -2203,7 +2221,7 @@ static void *RunPublishedSpanClient(void *context) {
     PublishedSpanClient *client = (PublishedSpanClient *)context;
     assert(pthread_threadid_np(NULL, &client->threadID) == 0);
     AudioServerPlugInIOCycleInfo cycle = CycleAt(
-        0, kDevice_SafetyOffsetFrames);
+        0, kDevice_LoopbackSeparationFrames);
 
     for (UInt32 iteration = 0;
          iteration < kConcurrentCallbacksPerClient; ++iteration) {
@@ -2243,7 +2261,7 @@ static void TestPublishedFullMixStaysReadableAcrossDuplicateCallbacks(void) {
         &gDriver.unsafeWriteOperations, 0, memory_order_relaxed);
     Float32 signal[kDevice_ChannelCount] = { 0.375f, -0.375f };
     PutSignalInRing(signal, 1, 0);
-    PutSignalInRing(signal, 1, kDevice_SafetyOffsetFrames);
+    PutSignalInRing(signal, 1, kDevice_LoopbackSeparationFrames);
     assert(RingWriteSpanIsPublished(gDriver.ringBuffer, 0, 1));
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, 1)
            == kRingWriteCoalesced);
@@ -2347,7 +2365,7 @@ static void TestVariableAndDuplicateCallbackCPUTail(void) {
     for (UInt32 cycleIndex = 0; cycleIndex < totalCycles; ++cycleIndex) {
         UInt64 outputStart = (UInt64)cycleIndex * frames;
         AudioServerPlugInIOCycleInfo cycle = CycleAt(
-            (Float64)(outputStart + kDevice_SafetyOffsetFrames),
+            (Float64)(outputStart + kDevice_LoopbackSeparationFrames),
             (Float64)outputStart);
         UInt64 before = MonotonicTimeNanoseconds();
         assert(Yun_DoIOOperation(
@@ -2473,9 +2491,9 @@ int main(void) {
     TestConfigurationRequestNeverHoldsDriverLocksAcrossHostReentry();
     TestTranslateUIDRejectsMalformedQualifiers();
     TestPublishedClockRoundTripsEveryField();
-    TestFixedBufferContractHasTwoPeriodsOfSafety();
+    TestFixedBufferContractPublishesDirectionalSafety();
     TestCallbacksOnBothSidesOf512IgnoreOperationOrder();
-    TestPublishedVariableCallbacksNeedNoDisjointSpanRule();
+    TestPublishedOverlappingCallbacksNeedNoDisjointSpanRule();
     TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation();
     TestUnsafeCallbacksFailSilentWithoutAnErrorStorm();
     TestUnsafeOperationCountsAreObservable();

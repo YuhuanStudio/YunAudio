@@ -58,14 +58,17 @@
 /// having to infer a callback contract from the safety offset.
 #define kDevice_BufferFrameSize 512
 
-/// Gives CoreAudio enough notice to finish a loopback write before an
-/// independent input client reads the same sample time. Drift compensation has
-/// delivered 769-frame operations for this nominal 512-frame device; one period
-/// let a read overtake that write and produced one fail-silent callback in the
-/// release self-test. Two periods cover the measured maximum while adding only
-/// 5.33 ms at 96 kHz. Per-frame publication still decides whether a cycle is
-/// actually ready.
-#define kDevice_SafetyOffsetFrames (2 * kDevice_BufferFrameSize)
+/// Gives CoreAudio enough notice to finish a loopback write before independent
+/// input clients read the same sample time. Drift compensation has delivered
+/// 800-frame operations for this nominal 512-frame device. With 1,024 frames
+/// on both sides, five readers occasionally overtook one writer by one complete
+/// operation during startup. Moving only the input boundary back one further
+/// period adds 5.33 ms at 96 kHz; moving both boundaries would add twice that.
+/// Per-frame publication still decides whether a cycle is actually ready.
+#define kDevice_InputSafetyOffsetFrames (3 * kDevice_BufferFrameSize)
+#define kDevice_OutputSafetyOffsetFrames (2 * kDevice_BufferFrameSize)
+#define kDevice_LoopbackSeparationFrames \
+    (kDevice_InputSafetyOffsetFrames + kDevice_OutputSafetyOffsetFrames)
 
 #pragma mark - Object IDs
 
