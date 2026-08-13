@@ -2154,13 +2154,17 @@ static void PublishRingWrite(YunRingFrame *ring,
         atomic_store_explicit(
             &ring[slot].sampleFrame, absoluteFrame, memory_order_seq_cst);
     }
-    // Keep every slot owned until the complete callback block is immutable.
-    // Releasing frame-by-frame is safe: a competing writer which sees only a
-    // prefix released cannot claim the still-owned suffix and publishes none.
-    for (UInt32 frame = 0; frame < frames; ++frame) {
-        UInt64 slot = (startFrame + frame) & kRingBufferMask;
+    // Keep the first slot's transaction identity until every other owner is
+    // gone. An exact duplicate arriving during release then coalesces against
+    // that one record; once it disappears, the complete published span is
+    // already immutable and the duplicate takes the published fast path.
+    for (UInt32 frame = frames; frame > 1; --frame) {
+        UInt64 slot = (startFrame + frame - 1) & kRingBufferMask;
         atomic_store_explicit(&ring[slot].owner, 0, memory_order_seq_cst);
     }
+    UInt64 firstSlot = startFrame & kRingBufferMask;
+    atomic_store_explicit(
+        &ring[firstSlot].owner, 0, memory_order_seq_cst);
 }
 
 /// The two tag loads bracket the packed stereo load. All ring operations are

@@ -1965,6 +1965,35 @@ static void TestPartialWriterOverlapNeverCoalesces(void) {
     puts("driver partial overlap: 512/769 same-start and offset spans unsafe");
 }
 
+static void TestExactDuplicateCoalescesDuringPublicationRelease(void) {
+    enum { frames = kDevice_BufferFrameSize };
+    gDriver.ringBuffer = CreateRingBuffer();
+    assert(gDriver.ringBuffer != NULL);
+    Float32 signal[frames * kDevice_ChannelCount];
+    FillSignal(signal, frames, 0.375f);
+    PutSignalInRing(signal, frames, 0);
+
+    UInt64 identity = RingWriteIdentity(0, frames);
+    // This is the only intermediate state the publication release order now
+    // permits: all tail owners are gone and the transaction record remains.
+    atomic_store_explicit(
+        &gDriver.ringBuffer[0].owner, identity, memory_order_seq_cst);
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteCoalesced);
+    for (UInt32 frame = 1; frame < frames; ++frame) {
+        assert(atomic_load_explicit(
+            &gDriver.ringBuffer[frame].owner, memory_order_seq_cst) == 0);
+    }
+
+    atomic_store_explicit(
+        &gDriver.ringBuffer[0].owner, 0, memory_order_seq_cst);
+    assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
+           == kRingWriteCoalesced);
+
+    free(gDriver.ringBuffer);
+    gDriver.ringBuffer = NULL;
+}
+
 static void TestStaleWriterCannotOverwriteACompletedRingWrap(void) {
     enum { frames = 64 };
     gDriver.ringBuffer = CreateRingBuffer();
@@ -2373,15 +2402,16 @@ int main(void) {
     TestEightClientsCanOverlapWithoutTornAudio();
     TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished();
     TestPartialWriterOverlapNeverCoalesces();
+    TestExactDuplicateCoalescesDuringPublicationRelease();
     TestStaleWriterCannotOverwriteACompletedRingWrap();
     TestCompletedFullMixCallbacksCoalesceWithoutDropout();
     TestPublishedFullMixStaysReadableAcrossDuplicateCallbacks();
 #if defined(YUNAUDIO_DRIVER_PERFORMANCE_TESTS)
     TestVariableAndDuplicateCallbackCPUTail();
     TestAtomicRingCallbackCPUTail();
-    puts("driver core: 32 tests passed");
+    puts("driver core: 33 tests passed");
 #else
-    puts("driver core: 30 tests passed");
+    puts("driver core: 31 tests passed");
 #endif
     return 0;
 }
