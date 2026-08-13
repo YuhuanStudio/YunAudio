@@ -64,19 +64,34 @@ public struct AudioIncidentDriverHealth: Sendable, Equatable, Codable {
     public let readStatus: Int32
     public let unsafeReadOperations: UInt64
     public let unsafeWriteOperations: UInt64
+    public let unsafeReadStartFrame: UInt64?
+    public let unsafeReadFrameCount: UInt64?
+    public let unsafeReadUnavailableFrame: UInt64?
+    public let lastPublishedStartFrame: UInt64?
+    public let lastPublishedFrameCount: UInt64?
 
     public init(
         state: AudioIncidentDriverHealthState,
         wasRequired: Bool,
         readStatus: Int32,
         unsafeReadOperations: UInt64,
-        unsafeWriteOperations: UInt64
+        unsafeWriteOperations: UInt64,
+        unsafeReadStartFrame: UInt64? = nil,
+        unsafeReadFrameCount: UInt64? = nil,
+        unsafeReadUnavailableFrame: UInt64? = nil,
+        lastPublishedStartFrame: UInt64? = nil,
+        lastPublishedFrameCount: UInt64? = nil
     ) {
         self.state = state
         self.wasRequired = wasRequired
         self.readStatus = readStatus
         self.unsafeReadOperations = unsafeReadOperations
         self.unsafeWriteOperations = unsafeWriteOperations
+        self.unsafeReadStartFrame = unsafeReadStartFrame
+        self.unsafeReadFrameCount = unsafeReadFrameCount
+        self.unsafeReadUnavailableFrame = unsafeReadUnavailableFrame
+        self.lastPublishedStartFrame = lastPublishedStartFrame
+        self.lastPublishedFrameCount = lastPublishedFrameCount
     }
 
     var hasFault: Bool {
@@ -90,16 +105,39 @@ public struct AudioIncidentDriverHealth: Sendable, Equatable, Codable {
     var hasValidShape: Bool {
         switch state {
         case .available:
-            readStatus == 0
+            readStatus == 0 && hasValidUnsafeReadEvidence
         case .driverAbsent:
             !wasRequired && readStatus == 0 && unsafeReadOperations == 0
-                && unsafeWriteOperations == 0
+                && unsafeWriteOperations == 0 && hasNoUnsafeReadEvidence
         case .propertyUnavailable:
             readStatus == 0 && unsafeReadOperations == 0 && unsafeWriteOperations == 0
+                && hasNoUnsafeReadEvidence
         case .readFailed:
             readStatus != 0 && unsafeReadOperations == 0
-                && unsafeWriteOperations == 0
+                && unsafeWriteOperations == 0 && hasNoUnsafeReadEvidence
         }
+    }
+
+    private var hasNoUnsafeReadEvidence: Bool {
+        unsafeReadStartFrame == nil && unsafeReadFrameCount == nil
+            && unsafeReadUnavailableFrame == nil && lastPublishedStartFrame == nil
+            && lastPublishedFrameCount == nil
+    }
+
+    private var hasValidUnsafeReadEvidence: Bool {
+        if hasNoUnsafeReadEvidence { return true }
+        guard unsafeReadOperations > 0,
+            let start = unsafeReadStartFrame,
+            let count = unsafeReadFrameCount,
+            let unavailable = unsafeReadUnavailableFrame,
+            let publishedStart = lastPublishedStartFrame,
+            let publishedCount = lastPublishedFrameCount,
+            count > 0,
+            publishedCount > 0,
+            start <= UInt64.max - count,
+            publishedStart <= UInt64.max - publishedCount
+        else { return false }
+        return unavailable >= start && unavailable < start + count
     }
 
     /// Converts process-lifetime driver counters into one route's delta.
@@ -119,14 +157,25 @@ public struct AudioIncidentDriverHealth: Sendable, Equatable, Codable {
             guard final.unsafeReadOperations >= baseline.unsafeReadOperations,
                 final.unsafeWriteOperations >= baseline.unsafeWriteOperations
             else { return .unattributable(wasRequired: wasRequired) }
+            let unsafeReadDelta =
+                final.unsafeReadOperations - baseline.unsafeReadOperations
             return AudioIncidentDriverHealth(
                 state: .available,
                 wasRequired: wasRequired,
                 readStatus: 0,
-                unsafeReadOperations:
-                    final.unsafeReadOperations - baseline.unsafeReadOperations,
+                unsafeReadOperations: unsafeReadDelta,
                 unsafeWriteOperations:
-                    final.unsafeWriteOperations - baseline.unsafeWriteOperations)
+                    final.unsafeWriteOperations - baseline.unsafeWriteOperations,
+                unsafeReadStartFrame:
+                    unsafeReadDelta > 0 ? final.unsafeReadStartFrame : nil,
+                unsafeReadFrameCount:
+                    unsafeReadDelta > 0 ? final.unsafeReadFrameCount : nil,
+                unsafeReadUnavailableFrame:
+                    unsafeReadDelta > 0 ? final.unsafeReadUnavailableFrame : nil,
+                lastPublishedStartFrame:
+                    unsafeReadDelta > 0 ? final.lastPublishedStartFrame : nil,
+                lastPublishedFrameCount:
+                    unsafeReadDelta > 0 ? final.lastPublishedFrameCount : nil)
         case (.driverAbsent, .driverAbsent) where !wasRequired:
             return AudioIncidentDriverHealth(
                 state: .driverAbsent, wasRequired: false, readStatus: 0,

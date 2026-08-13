@@ -123,6 +123,10 @@ static YunRingFrame *CreateRingBuffer(void) {
     atomic_store_explicit(
         &gDriver.firstPublishedFrame, kRingFrameUnpublished,
         memory_order_seq_cst);
+    atomic_store_explicit(
+        &gDriver.unsafeReadEvidenceState, 0, memory_order_seq_cst);
+    atomic_store_explicit(
+        &gDriver.lastPublishedIdentity, 0, memory_order_seq_cst);
     return ring;
 }
 
@@ -140,6 +144,10 @@ static void ResetRingBuffer(YunRingFrame *ring) {
     atomic_store_explicit(
         &gDriver.firstPublishedFrame, kRingFrameUnpublished,
         memory_order_seq_cst);
+    atomic_store_explicit(
+        &gDriver.unsafeReadEvidenceState, 0, memory_order_seq_cst);
+    atomic_store_explicit(
+        &gDriver.lastPublishedIdentity, 0, memory_order_seq_cst);
 }
 
 static UInt64 Float64Bits(Float64 value) {
@@ -940,6 +948,16 @@ static CFMutableDictionaryRef CreateTwoNumberDictionary(
     return result;
 }
 
+static bool AddSInt64ToDictionary(
+    CFMutableDictionaryRef dictionary, CFStringRef key, SInt64 value
+) {
+    CFNumberRef number = CFNumberCreate(NULL, kCFNumberSInt64Type, &value);
+    if (number == NULL) return false;
+    CFDictionarySetValue(dictionary, key, number);
+    CFRelease(number);
+    return true;
+}
+
 static Boolean Yun_HasProperty(AudioServerPlugInDriverRef inDriver,
                                AudioObjectID inObjectID,
                                pid_t inClientProcessID,
@@ -1463,6 +1481,39 @@ static OSStatus Yun_GetPropertyData(AudioServerPlugInDriverRef inDriver,
         if (result == NULL) {
             status = kAudioHardwareUnspecifiedError;
             goto done;
+        }
+        if (atomic_load_explicit(
+                &gDriver.unsafeReadEvidenceState, memory_order_acquire) == 2) {
+            SInt64 readStart = (SInt64)atomic_load_explicit(
+                &gDriver.unsafeReadStartFrame, memory_order_relaxed);
+            SInt64 readFrames = (SInt64)atomic_load_explicit(
+                &gDriver.unsafeReadFrameCount, memory_order_relaxed);
+            SInt64 unavailable = (SInt64)atomic_load_explicit(
+                &gDriver.unsafeReadUnavailableFrame, memory_order_relaxed);
+            UInt64 publishedIdentity = atomic_load_explicit(
+                &gDriver.unsafeReadLastPublishedIdentity, memory_order_relaxed);
+            SInt64 publishedStart = -1;
+            SInt64 publishedFrames = 0;
+            if (publishedIdentity != 0) {
+                publishedStart = (SInt64)((publishedIdentity
+                    >> kRingTransactionFrameBits) - 1);
+                publishedFrames = (SInt64)((publishedIdentity
+                    & ((UINT64_C(1) << kRingTransactionFrameBits) - 1)) + 1);
+            }
+            if (!AddSInt64ToDictionary(
+                    result, CFSTR(kYunIOHealthKey_UnsafeReadStartFrame), readStart)
+                || !AddSInt64ToDictionary(
+                    result, CFSTR(kYunIOHealthKey_UnsafeReadFrameCount), readFrames)
+                || !AddSInt64ToDictionary(
+                    result, CFSTR(kYunIOHealthKey_UnsafeReadUnavailableFrame), unavailable)
+                || !AddSInt64ToDictionary(
+                    result, CFSTR(kYunIOHealthKey_LastPublishedStartFrame), publishedStart)
+                || !AddSInt64ToDictionary(
+                    result, CFSTR(kYunIOHealthKey_LastPublishedFrameCount), publishedFrames)) {
+                CFRelease(result);
+                status = kAudioHardwareUnspecifiedError;
+                goto done;
+            }
         }
         *(CFPropertyListRef *)outData = result;
         *outDataSize = sizeof(CFPropertyListRef);
@@ -2174,6 +2225,9 @@ static void PublishRingWrite(YunRingFrame *ring,
     UInt64 firstSlot = startFrame & kRingBufferMask;
     atomic_store_explicit(
         &ring[firstSlot].owner, 0, memory_order_seq_cst);
+    atomic_store_explicit(
+        &gDriver.lastPublishedIdentity,
+        RingWriteIdentity(startFrame, frames), memory_order_seq_cst);
 
     // Publish the boundary only after the complete first span is immutable.
     // A concurrent reader which arrives earlier sees an unpublished boundary
@@ -2204,7 +2258,11 @@ static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
                                       UInt64 startFrame,
                                       UInt32 frames,
                                       Float32 *buffer,
-                                      Float32 gain) {
+                                      Float32 gain,
+                                      UInt64 *outUnavailableFrame) {
+    if (outUnavailableFrame != NULL) {
+        *outUnavailableFrame = kRingFrameUnpublished;
+    }
     bool includedColdStart = false;
     for (UInt32 frame = 0; frame < frames; ++frame) {
         UInt64 absoluteFrame = startFrame + frame;
@@ -2212,7 +2270,10 @@ static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
         UInt64 ownerBefore = atomic_load_explicit(
             &ring[slot].owner, memory_order_seq_cst);
         if (ownerBefore != 0) {
-            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            if (!RingReadIsColdStart(absoluteFrame)) {
+                if (outUnavailableFrame != NULL) *outUnavailableFrame = absoluteFrame;
+                return kRingReadUnsafe;
+            }
             buffer[frame * kDevice_ChannelCount] = 0;
             buffer[frame * kDevice_ChannelCount + 1] = 0;
             includedColdStart = true;
@@ -2221,7 +2282,10 @@ static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
         UInt64 tagBefore = atomic_load_explicit(
             &ring[slot].sampleFrame, memory_order_seq_cst);
         if (tagBefore != absoluteFrame) {
-            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            if (!RingReadIsColdStart(absoluteFrame)) {
+                if (outUnavailableFrame != NULL) *outUnavailableFrame = absoluteFrame;
+                return kRingReadUnsafe;
+            }
             buffer[frame * kDevice_ChannelCount] = 0;
             buffer[frame * kDevice_ChannelCount + 1] = 0;
             includedColdStart = true;
@@ -2234,7 +2298,10 @@ static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
         UInt64 ownerAfter = atomic_load_explicit(
             &ring[slot].owner, memory_order_seq_cst);
         if (tagAfter != absoluteFrame || ownerAfter != 0) {
-            if (!RingReadIsColdStart(absoluteFrame)) return kRingReadUnsafe;
+            if (!RingReadIsColdStart(absoluteFrame)) {
+                if (outUnavailableFrame != NULL) *outUnavailableFrame = absoluteFrame;
+                return kRingReadUnsafe;
+            }
             buffer[frame * kDevice_ChannelCount] = 0;
             buffer[frame * kDevice_ChannelCount + 1] = 0;
             includedColdStart = true;
@@ -2255,6 +2322,31 @@ static YunRingReadResult ReadRingSpan(YunRingFrame *ring,
         }
     }
     return includedColdStart ? kRingReadColdStart : kRingReadExact;
+}
+
+static void RecordUnsafeReadEvidence(
+    UInt64 startFrame, UInt32 frames, UInt64 unavailableFrame
+) {
+    UInt64 empty = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &gDriver.unsafeReadEvidenceState, &empty, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        return;
+    }
+    atomic_store_explicit(
+        &gDriver.unsafeReadStartFrame, startFrame, memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeReadFrameCount, frames, memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeReadUnavailableFrame, unavailableFrame,
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeReadLastPublishedIdentity,
+        atomic_load_explicit(
+            &gDriver.lastPublishedIdentity, memory_order_seq_cst),
+        memory_order_relaxed);
+    atomic_store_explicit(
+        &gDriver.unsafeReadEvidenceState, 2, memory_order_release);
 }
 
 /// Converts a timing-contract violation into a deterministic silent cycle.
@@ -2324,9 +2416,13 @@ static OSStatus Yun_DoIOOperation(AudioServerPlugInDriverRef inDriver,
     if (isRead) {
         Float32 gain = Float32FromBits(
             atomic_load_explicit(&gDriver.inputGainBits, memory_order_acquire));
+        UInt64 unavailableFrame = kRingFrameUnpublished;
         YunRingReadResult result = ReadRingSpan(
-            ring, inputStart, inIOBufferFrameSize, buffer, gain);
+            ring, inputStart, inIOBufferFrameSize, buffer, gain,
+            &unavailableFrame);
         if (result == kRingReadUnsafe) {
+            RecordUnsafeReadEvidence(
+                inputStart, inIOBufferFrameSize, unavailableFrame);
             FailSilentIO(true, buffer, inIOBufferFrameSize);
         }
         YUN_DRIVER_IO_TEST_HOOK(false, inClientID, inOperationID);

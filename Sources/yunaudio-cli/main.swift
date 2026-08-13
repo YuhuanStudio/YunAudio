@@ -655,6 +655,17 @@ func runSelftest(sourceMatch: String, destinationMatch: String) throws {
         let unsafeWrites =
             driverHealthAfter.unsafeWriteOperations - driverHealthBefore.unsafeWriteOperations
         print("driver unsafe operations: \(unsafeReads) read, \(unsafeWrites) write")
+        if unsafeReads > 0,
+            let readStart = driverHealthAfter.unsafeReadStartFrame,
+            let readFrames = driverHealthAfter.unsafeReadFrameCount,
+            let unavailable = driverHealthAfter.unsafeReadUnavailableFrame,
+            let publishedStart = driverHealthAfter.lastPublishedStartFrame,
+            let publishedFrames = driverHealthAfter.lastPublishedFrameCount
+        {
+            print(
+                "first unsafe read: \(readStart)+\(readFrames), unavailable \(unavailable), "
+                    + "last write \(publishedStart)+\(publishedFrames)")
+        }
         driverHealthIsClean = unsafeReads == 0 && unsafeWrites == 0
     default:
         print("driver unsafe operations: unavailable")

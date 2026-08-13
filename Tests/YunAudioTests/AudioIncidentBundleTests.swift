@@ -127,10 +127,32 @@ struct AudioIncidentBundleTests {
                 state: .readFailed, wasRequired: false, readStatus: 0,
                 unsafeReadOperations: 0, unsafeWriteOperations: 0),
         ]
+        let malformedFaults = [
+            AudioIncidentDriverHealth(
+                state: .available, wasRequired: true, readStatus: 0,
+                unsafeReadOperations: 1, unsafeWriteOperations: 0,
+                unsafeReadStartFrame: 10_000,
+                unsafeReadFrameCount: 1_184),
+            AudioIncidentDriverHealth(
+                state: .available, wasRequired: true, readStatus: 0,
+                unsafeReadOperations: 1, unsafeWriteOperations: 0,
+                unsafeReadStartFrame: 10_000,
+                unsafeReadFrameCount: 1_184,
+                unsafeReadUnavailableFrame: 11_184,
+                lastPublishedStartFrame: 9_600,
+                lastPublishedFrameCount: 800),
+        ]
 
         for evidence in malformed {
             let bundle = fixture(driverHealth: evidence)
             #expect(bundle.healthVerdict == .indeterminate)
+            #expect(throws: AudioIncidentBundleCodec.Error.invalidSchema) {
+                try AudioIncidentBundleCodec.encode(bundle)
+            }
+        }
+        for evidence in malformedFaults {
+            let bundle = fixture(driverHealth: evidence)
+            #expect(bundle.healthVerdict == .faulted)
             #expect(throws: AudioIncidentBundleCodec.Error.invalidSchema) {
                 try AudioIncidentBundleCodec.encode(bundle)
             }
@@ -144,12 +166,22 @@ struct AudioIncidentBundleTests {
             unsafeReadOperations: 41, unsafeWriteOperations: 99)
         let final = AudioIncidentDriverHealth(
             state: .available, wasRequired: true, readStatus: 0,
-            unsafeReadOperations: 43, unsafeWriteOperations: 104)
+            unsafeReadOperations: 43, unsafeWriteOperations: 104,
+            unsafeReadStartFrame: 10_000,
+            unsafeReadFrameCount: 1_184,
+            unsafeReadUnavailableFrame: 10_769,
+            lastPublishedStartFrame: 9_600,
+            lastPublishedFrameCount: 800)
         #expect(
             AudioIncidentDriverHealth.routeDelta(from: baseline, to: final)
                 == AudioIncidentDriverHealth(
                     state: .available, wasRequired: true, readStatus: 0,
-                    unsafeReadOperations: 2, unsafeWriteOperations: 5))
+                    unsafeReadOperations: 2, unsafeWriteOperations: 5,
+                    unsafeReadStartFrame: 10_000,
+                    unsafeReadFrameCount: 1_184,
+                    unsafeReadUnavailableFrame: 10_769,
+                    lastPublishedStartFrame: 9_600,
+                    lastPublishedFrameCount: 800))
 
         let reset = AudioIncidentDriverHealth(
             state: .available, wasRequired: true, readStatus: 0,

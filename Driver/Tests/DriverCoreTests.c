@@ -1227,10 +1227,10 @@ static void TestCallbacksOnBothSidesOf512IgnoreOperationOrder(void) {
             frameCounts[index], kDevice_LoopbackSeparationFrames, true);
     }
 
-    // Drift compensation has produced 769- and 800-frame operations on the
+    // Drift compensation has produced 769-, 800- and 1,184-frame operations on the
     // installed driver. The advertised input-plus-output separation, not a
     // test-only wider gap, must keep those operations order-independent.
-    assert(kDevice_LoopbackSeparationFrames >= 800);
+    assert(kDevice_LoopbackSeparationFrames >= 1184);
     ExpectOrderIndependentAtFrameCount(
         513, kDevice_LoopbackSeparationFrames, false);
     ExpectOrderIndependentAtFrameCount(
@@ -1243,8 +1243,12 @@ static void TestCallbacksOnBothSidesOf512IgnoreOperationOrder(void) {
         800, kDevice_LoopbackSeparationFrames, false);
     ExpectOrderIndependentAtFrameCount(
         800, kDevice_LoopbackSeparationFrames, true);
+    ExpectOrderIndependentAtFrameCount(
+        1184, kDevice_LoopbackSeparationFrames, false);
+    ExpectOrderIndependentAtFrameCount(
+        1184, kDevice_LoopbackSeparationFrames, true);
     printf(
-        "driver variable IO: 513, 769 and 800 frames within a %u-frame "
+        "driver variable IO: 513, 769, 800 and 1184 frames within a %u-frame "
         "input/output separation, exact and 0 unsafe\n",
         kDevice_LoopbackSeparationFrames);
 }
@@ -1564,13 +1568,13 @@ static void TestFixedBufferContractPublishesDirectionalSafety(void) {
             driver, kObjectID_Device, 1, &safety, 0, NULL, size, &size, &value) == 0);
         assert(value == safetyCases[index].expected);
     }
-    assert(kDevice_InputSafetyOffsetFrames == 3 * kDevice_BufferFrameSize);
+    assert(kDevice_InputSafetyOffsetFrames == 4 * kDevice_BufferFrameSize);
     assert(kDevice_OutputSafetyOffsetFrames == 2 * kDevice_BufferFrameSize);
-    assert(kDevice_LoopbackSeparationFrames == 5 * kDevice_BufferFrameSize);
+    assert(kDevice_LoopbackSeparationFrames == 6 * kDevice_BufferFrameSize);
     assert(
         (double)kDevice_LoopbackSeparationFrames
             / (2.0 * kDevice_DefaultSampleRate) * 1000.0
-        < 26.67);
+        < 32.01);
 }
 
 static void TestUnsafeOperationCountsAreObservable(void) {
@@ -1612,6 +1616,71 @@ static void TestUnsafeOperationCountsAreObservable(void) {
     assert(size == sizeof(info));
     assert(info[0].mSelector == kYunCustomProperty_ClockAnchor);
     assert(info[1].mSelector == kYunCustomProperty_IOHealth);
+}
+
+static SInt64 DictionarySInt64(CFDictionaryRef dictionary, CFStringRef key) {
+    CFNumberRef number = (CFNumberRef)CFDictionaryGetValue(dictionary, key);
+    SInt64 value = 0;
+    assert(number != NULL);
+    assert(CFNumberGetValue(number, kCFNumberSInt64Type, &value));
+    return value;
+}
+
+static void TestFirstUnsafeReadPublishesOneCoherentTimeline(void) {
+    enum { writtenFrames = 64, readFrames = 128 };
+    gDriver.ringBuffer = CreateRingBuffer();
+    assert(gDriver.ringBuffer != NULL);
+    atomic_store_explicit(
+        &gDriver.unsafeReadOperations, 0, memory_order_relaxed);
+
+    Float32 written[writtenFrames * kDevice_ChannelCount];
+    Float32 received[readFrames * kDevice_ChannelCount];
+    FillSignal(written, writtenFrames, 0.625f);
+    AudioServerPlugInIOCycleInfo writeCycle = CycleAt(0, 100);
+    assert(Yun_DoIOOperation(
+        TestDriver(), kObjectID_Device, kObjectID_Stream_Output, 1,
+        kAudioServerPlugInIOOperationWriteMix, writtenFrames,
+        &writeCycle, written, NULL) == 0);
+
+    AudioServerPlugInIOCycleInfo readCycle = CycleAt(100, 200);
+    assert(Yun_DoIOOperation(
+        TestDriver(), kObjectID_Device, kObjectID_Stream_Input, 2,
+        kAudioServerPlugInIOOperationReadInput, readFrames,
+        &readCycle, received, NULL) == 0);
+    for (UInt32 index = 0; index < readFrames * kDevice_ChannelCount; ++index) {
+        assert(received[index] == 0);
+    }
+
+    AudioObjectPropertyAddress address = {
+        kYunCustomProperty_IOHealth,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
+    CFPropertyListRef value = NULL;
+    UInt32 size = sizeof(value);
+    assert(Yun_GetPropertyData(
+        TestDriver(), kObjectID_Device, 1, &address,
+        0, NULL, size, &size, &value) == 0);
+    assert(value != NULL && CFGetTypeID(value) == CFDictionaryGetTypeID());
+    CFDictionaryRef dictionary = (CFDictionaryRef)value;
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_UnsafeReadOperations)) == 1);
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_UnsafeReadStartFrame)) == 100);
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_UnsafeReadFrameCount)) == readFrames);
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_UnsafeReadUnavailableFrame))
+        == 100 + writtenFrames);
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_LastPublishedStartFrame)) == 100);
+    assert(DictionarySInt64(
+        dictionary, CFSTR(kYunIOHealthKey_LastPublishedFrameCount))
+        == writtenFrames);
+    CFRelease(value);
+
+    free(gDriver.ringBuffer);
+    gDriver.ringBuffer = NULL;
 }
 
 static UInt32 sNumberCreationCalls;
@@ -1968,7 +2037,7 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
 
     PublishRingWrite(gDriver.ringBuffer, 0, frames, first, 1.0f);
     assert(ReadRingSpan(
-        gDriver.ringBuffer, 0, frames, received, 1.0f)
+        gDriver.ringBuffer, 0, frames, received, 1.0f, NULL)
         == kRingReadExact);
     ExpectSignalEqual(received, first, frames);
     assert(ClaimRingWriteSpan(gDriver.ringBuffer, 0, frames)
@@ -1980,7 +2049,7 @@ static void TestAWriterKeepsOwnershipUntilItsWholeBlockIsPublished(void) {
     PublishRingWrite(
         gDriver.ringBuffer, kRingBufferFrames, frames, wrapped, 1.0f);
     assert(ReadRingSpan(
-        gDriver.ringBuffer, kRingBufferFrames, frames, received, 1.0f)
+        gDriver.ringBuffer, kRingBufferFrames, frames, received, 1.0f, NULL)
         == kRingReadExact);
     ExpectSignalEqual(received, wrapped, frames);
 
@@ -2055,7 +2124,7 @@ static void TestPartialWriterOverlapNeverCoalesces(void) {
     PublishRingWrite(
         gDriver.ringBuffer, 0, shortFrames, shortSignal, 1.0f);
     assert(ReadRingSpan(
-        gDriver.ringBuffer, 0, longFrames, received, 1.0f)
+        gDriver.ringBuffer, 0, longFrames, received, 1.0f, NULL)
         == kRingReadUnsafe);
 
     free(gDriver.ringBuffer);
@@ -2106,7 +2175,7 @@ static void TestStaleWriterCannotOverwriteACompletedRingWrap(void) {
            == kRingWriteUnsafe);
     assert(ReadRingSpan(
         gDriver.ringBuffer, kRingBufferFrames,
-        frames, received, 1.0f) == kRingReadExact);
+        frames, received, 1.0f, NULL) == kRingReadExact);
     ExpectSignalEqual(received, newer, frames);
 
     // A newer tag reached only later in a stale span must reject the stale
@@ -2128,7 +2197,7 @@ static void TestStaleWriterCannotOverwriteACompletedRingWrap(void) {
     }
     assert(ReadRingSpan(
         gDriver.ringBuffer, kRingBufferFrames + newerOffset,
-        frames - newerOffset, received, 1.0f) == kRingReadExact);
+        frames - newerOffset, received, 1.0f, NULL) == kRingReadExact);
     ExpectSignalEqual(
         received, &newer[newerOffset * kDevice_ChannelCount],
         frames - newerOffset);
@@ -2497,6 +2566,7 @@ int main(void) {
     TestColdStartPrehistoryIsSilentWithoutAnUnsafeOperation();
     TestUnsafeCallbacksFailSilentWithoutAnErrorStorm();
     TestUnsafeOperationCountsAreObservable();
+    TestFirstUnsafeReadPublishesOneCoherentTimeline();
     TestPropertyDictionaryHandlesEveryNumberAllocationFailure();
     TestSafetyWindowMakesClientOrderIrrelevant();
     TestEightClientsCanOverlapWithoutTornAudio();
@@ -2509,9 +2579,9 @@ int main(void) {
 #if defined(YUNAUDIO_DRIVER_PERFORMANCE_TESTS)
     TestVariableAndDuplicateCallbackCPUTail();
     TestAtomicRingCallbackCPUTail();
-    puts("driver core: 34 tests passed");
+    puts("driver core: 35 tests passed");
 #else
-    puts("driver core: 32 tests passed");
+    puts("driver core: 33 tests passed");
 #endif
     return 0;
 }

@@ -609,7 +609,17 @@ package enum AudioIncidentDriverHealthReader {
             wasRequired: wasRequired,
             readStatus: noErr,
             unsafeReadOperations: unsafeReads,
-            unsafeWriteOperations: unsafeWrites)
+            unsafeWriteOperations: unsafeWrites,
+            unsafeReadStartFrame: (dictionary["unsafeReadStartFrame"] as? NSNumber)?
+                .uint64Value,
+            unsafeReadFrameCount: (dictionary["unsafeReadFrameCount"] as? NSNumber)?
+                .uint64Value,
+            unsafeReadUnavailableFrame: (dictionary["unsafeReadUnavailableFrame"] as? NSNumber)?
+                .uint64Value,
+            lastPublishedStartFrame: (dictionary["lastPublishedStartFrame"] as? NSNumber)?
+                .uint64Value,
+            lastPublishedFrameCount: (dictionary["lastPublishedFrameCount"] as? NSNumber)?
+                .uint64Value)
     }
 
     private static func failure(

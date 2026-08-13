@@ -60,12 +60,12 @@
 
 /// Gives CoreAudio enough notice to finish a loopback write before independent
 /// input clients read the same sample time. Drift compensation has delivered
-/// 800-frame operations for this nominal 512-frame device. With 1,024 frames
-/// on both sides, five readers occasionally overtook one writer by one complete
-/// operation during startup. Moving only the input boundary back one further
+/// 1,184-frame operations for this nominal 512-frame device. Independent input
+/// clients have overtaken one startup write by one complete variable operation
+/// with only three input periods. Moving only the input boundary back one more
 /// period adds 5.33 ms at 96 kHz; moving both boundaries would add twice that.
 /// Per-frame publication still decides whether a cycle is actually ready.
-#define kDevice_InputSafetyOffsetFrames (3 * kDevice_BufferFrameSize)
+#define kDevice_InputSafetyOffsetFrames (4 * kDevice_BufferFrameSize)
 #define kDevice_OutputSafetyOffsetFrames (2 * kDevice_BufferFrameSize)
 #define kDevice_LoopbackSeparationFrames \
     (kDevice_InputSafetyOffsetFrames + kDevice_OutputSafetyOffsetFrames)
@@ -115,6 +115,11 @@ enum {
 #define kYunAnchorKey_SampleRate "sampleRate"
 #define kYunIOHealthKey_UnsafeReadOperations "unsafeReadOperations"
 #define kYunIOHealthKey_UnsafeWriteOperations "unsafeWriteOperations"
+#define kYunIOHealthKey_UnsafeReadStartFrame "unsafeReadStartFrame"
+#define kYunIOHealthKey_UnsafeReadFrameCount "unsafeReadFrameCount"
+#define kYunIOHealthKey_UnsafeReadUnavailableFrame "unsafeReadUnavailableFrame"
+#define kYunIOHealthKey_LastPublishedStartFrame "lastPublishedStartFrame"
+#define kYunIOHealthKey_LastPublishedFrameCount "lastPublishedFrameCount"
 
 /// An anchor is only trusted for this long. If the application stops publishing
 /// — it quit, or routing stopped — the device falls back to the host clock
@@ -212,6 +217,16 @@ typedef struct {
     /// exposed through the read-only `yioh` custom property.
     _Atomic UInt64 unsafeReadOperations;
     _Atomic UInt64 unsafeWriteOperations;
+    /// One coherent first-fault timeline for the current IO lifetime. State is
+    /// 0 while empty, 1 while the winning callback fills it and 2 when a
+    /// property reader may consume every field. A losing realtime callback
+    /// never waits for the winner.
+    _Atomic UInt64 unsafeReadEvidenceState;
+    _Atomic UInt64 unsafeReadStartFrame;
+    _Atomic UInt64 unsafeReadFrameCount;
+    _Atomic UInt64 unsafeReadUnavailableFrame;
+    _Atomic UInt64 unsafeReadLastPublishedIdentity;
+    _Atomic UInt64 lastPublishedIdentity;
     /// The first absolute frame completed by any WriteMix in this IO lifetime.
     /// Reads before it are startup prehistory and correctly return silence.
     _Atomic UInt64 firstPublishedFrame;
