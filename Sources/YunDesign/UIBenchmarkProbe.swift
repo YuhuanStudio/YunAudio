@@ -10,6 +10,7 @@ public enum YunUIBenchmarkVariant: String, CaseIterable, Sendable {
     case scrollFadesOff = "scroll-fades-off"
     case cardEffectsOff = "card-effects-off"
     case windowMaterialOff = "window-material-off"
+    case windowShadowOff = "window-shadow-off"
     case lyricFillStatic = "lyric-fill-static"
     case lyricFillLegacy = "lyric-fill-legacy"
 }

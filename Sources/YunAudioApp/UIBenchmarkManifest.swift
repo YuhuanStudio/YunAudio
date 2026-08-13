@@ -181,7 +181,7 @@ enum UIBenchmarkManifestAggregator {
                 let expectedPasses: Int
                 let plannedSeconds: Double
                 switch manifest.scenario {
-                case .appOpen, .panelClosed:
+                case .appOpen, .panelClosed, .windowMovement:
                     expectedPasses = 1
                     plannedSeconds = manifest.requestedSeconds
                 case .section69, .ktvStage:

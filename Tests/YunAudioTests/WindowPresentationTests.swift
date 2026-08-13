@@ -1,4 +1,5 @@
 import Testing
+import YunDesign
 
 @testable import YunAudioApp
 
@@ -22,6 +23,12 @@ struct WindowPresentationTests {
     func integratedChromeHasBreathingRoom() {
         #expect(WindowChrome.headerTopClearance == 12)
         #expect(WindowChrome.headerTopClearance > 4)
+    }
+
+    @Test("flat windows are opaque and glass windows retain transparency")
+    func windowBackingMatchesTheDrawingStyle() {
+        #expect(WindowChrome.requiresOpaqueBacking(style: .flat))
+        #expect(!WindowChrome.requiresOpaqueBacking(style: .glass))
     }
 
     @Test("the shared chrome contract actually removes AppKit's reserved row")

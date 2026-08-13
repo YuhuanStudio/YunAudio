@@ -26,10 +26,10 @@ if [[ -n "$NEWER_SOURCE" || Package.swift -nt "$APP" ]]; then
     exit 1
 fi
 case "$SCENARIO_TO_MEASURE" in
-all | standard | app-open | panel-closed | section-69 | ktv-stage) ;;
+all | standard | app-open | panel-closed | window-movement | section-69 | ktv-stage) ;;
 *)
     print -u2 \
-        'scenario must be all, standard, app-open, panel-closed, section-69, or ktv-stage'
+        'scenario must be all, standard, app-open, panel-closed, window-movement, section-69, or ktv-stage'
     exit 1
     ;;
 esac
@@ -107,7 +107,8 @@ run_scenario() {
         static_seconds=10
     fi
     local passes=4
-    if [[ "$scenario" == "app-open" || "$scenario" == "panel-closed" ]]; then
+    if [[ "$scenario" == "app-open" || "$scenario" == "panel-closed" \
+        || "$scenario" == "window-movement" ]]; then
         passes=1
         static_seconds=0
     fi

@@ -185,24 +185,15 @@ extension View {
         let benchmark = YunUIBenchmarkConfiguration.process
         switch YunTheme.shared.style {
         case .flat:
-            if benchmark.effectiveVariant == .cardEffectsOff {
-                self
-                    .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius)
-                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
-                    }
-            } else {
-                self
-                    .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: cornerRadius)
-                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
-                    }
-                    // shadow-xs from the source system. Small enough to read as a
-                    // lift rather than a drop, which is what keeps the surface calm.
-                    .shadow(color: .black.opacity(0.05), radius: 2, y: 1)
-            }
+            // The fill and hairline already separate cards from the window.
+            // A 5% two-point shadow looked almost identical but made the real
+            // 120 Hz window-movement maximum rise from 7.85 to 13.83 ms.
+            self
+                .background(Yun.Palette.card, in: .rect(cornerRadius: cornerRadius))
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius)
+                        .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+                }
         case .glass:
             if benchmark.effectiveVariant == .cardEffectsOff {
                 self

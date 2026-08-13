@@ -19,6 +19,10 @@ struct UIResourceBenchmarkTests {
             ]) == .panelClosed)
         #expect(
             UIResourceBenchmarkScenario.resolve(environment: [
+                "YUNAUDIO_UI_BENCHMARK_SCENARIO": "window-movement"
+            ]) == .windowMovement)
+        #expect(
+            UIResourceBenchmarkScenario.resolve(environment: [
                 "YUNAUDIO_UI_BENCHMARK_SCENARIO": "section-69"
             ]) == .section69)
         #expect(
@@ -29,7 +33,7 @@ struct UIResourceBenchmarkTests {
             UIResourceBenchmarkScenario.resolve(environment: [
                 "YUNAUDIO_UI_BENCHMARK_SCENARIO": "ktv-stage"
             ]) == .ktvStage)
-        #expect(UIResourceBenchmarkScenario.allCases.count == 5)
+        #expect(UIResourceBenchmarkScenario.allCases.count == 6)
     }
 
     @Test("section 69 rejects the measured storm but admits a healthy layout")
@@ -122,6 +126,48 @@ struct UIResourceBenchmarkTests {
                 MainActorLatencyDistribution(
                     samples: 1, p50Seconds: 0.0005, p99Seconds: 0.002,
                     maximumSeconds: 0.008_001)))
+    }
+
+    @Test("window movement uses exact ProMotion frame boundaries")
+    func windowMovementFrameBoundariesAreExact() {
+        let frame = UIResourceBenchmarkBudget.promotionFrameSeconds
+        let movement = MainActorLatencyDistribution(
+            samples: 480, p50Seconds: 0.0005, p99Seconds: frame,
+            maximumSeconds: frame)
+        let delivery = MainActorLatencyDistribution(
+            samples: 4_000, p50Seconds: 0.0005, p99Seconds: frame,
+            maximumSeconds: frame * 4)
+        let accepted = MainActorScenarioEvidence(
+            passCount: 1, expectedSamples: 4_000, deliveredSamples: 4_000,
+            producerMisses: 0, minimumSampleCoverage: 1,
+            producer: delivery, delivery: delivery)
+
+        #expect(UIResourceBenchmarkBudget.admitsWindowMovement(movement, mainActor: accepted))
+        #expect(
+            UIResourceBenchmarkBudget.admitsWindowMovement(
+                MainActorLatencyDistribution(
+                    samples: 480, p50Seconds: 0.0005, p99Seconds: frame,
+                    maximumSeconds: frame * 4),
+                mainActor: accepted))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsWindowMovement(
+                MainActorLatencyDistribution(
+                    samples: 480, p50Seconds: 0.0005, p99Seconds: frame,
+                    maximumSeconds: frame * 4 + 0.000_001),
+                mainActor: accepted))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsWindowMovement(
+                MainActorLatencyDistribution(
+                    samples: 480, p50Seconds: 0.0005, p99Seconds: frame + 0.000_001,
+                    maximumSeconds: frame + 0.000_001),
+                mainActor: accepted))
+        #expect(
+            !UIResourceBenchmarkBudget.admitsWindowMovement(
+                movement,
+                mainActor: MainActorScenarioEvidence(
+                    passCount: 1, expectedSamples: 4_000, deliveredSamples: 3_959,
+                    producerMisses: 41, minimumSampleCoverage: 0.98975,
+                    producer: delivery, delivery: delivery)))
     }
 
     @Test("sample coverage is numeric and producer misses cannot be hidden")
@@ -461,7 +507,7 @@ struct UIResourceBenchmarkTests {
                 "Sources/YunAudioApp/CompositedLyricFill.swift"),
             encoding: .utf8)
 
-        #expect(theme.ranges(of: ".cardEffectsOff").count == 2)
+        #expect(theme.ranges(of: ".cardEffectsOff").count == 1)
         #expect(theme.ranges(of: ".windowMaterialOff").count == 1)
         #expect(components.ranges(of: ".scrollFadesOff").count == 1)
         #expect(probe.ranges(of: "case lyricFillStatic").count == 1)
@@ -540,10 +586,12 @@ struct UIResourceBenchmarkTests {
         requestedSeconds: Double = 4,
         maximumDeliveryNanoseconds: UInt64 = 200_000
     ) -> UIBenchmarkScenarioManifest {
-        let passCount = scenario == .appOpen || scenario == .panelClosed ? 1 : 5
+        let passCount =
+            scenario == .appOpen || scenario == .panelClosed
+                || scenario == .windowMovement ? 1 : 5
         let plannedSeconds: Double
         switch scenario {
-        case .appOpen, .panelClosed:
+        case .appOpen, .panelClosed, .windowMovement:
             plannedSeconds = requestedSeconds
         case .section69:
             plannedSeconds = max(10, requestedSeconds) + requestedSeconds * 4

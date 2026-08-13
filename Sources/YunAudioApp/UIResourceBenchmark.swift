@@ -13,6 +13,7 @@ enum UIResourceBenchmarkScenario: String, CaseIterable, Codable, Hashable, Senda
     case standard
     case appOpen = "app-open"
     case panelClosed = "panel-closed"
+    case windowMovement = "window-movement"
     case section69 = "section-69"
     case ktvStage = "ktv-stage"
 
@@ -137,6 +138,7 @@ struct UIResourceBenchmarkBudget {
     static let maximumMainActorP99Latency = 0.002
     static let maximumMainActorLatency = 0.008
     static let maximumPassOverrun = 2.0
+    static let promotionFrameSeconds = 1.0 / 120.0
 
     static func admitsMainActor(_ distribution: MainActorLatencyDistribution) -> Bool {
         distribution.isValid
@@ -179,6 +181,23 @@ struct UIResourceBenchmarkBudget {
             && staticWallSeconds - plannedStaticSeconds <= maximumPassOverrun
             && movingWallSeconds - plannedMovingSeconds <= maximumPassOverrun
             && mainRunLoopDeliveryLatency <= maximumMainRunLoopDeliveryLatency
+    }
+
+    static func admitsWindowMovement(
+        _ movement: MainActorLatencyDistribution,
+        mainActor: MainActorScenarioEvidence
+    ) -> Bool {
+        movement.isValid
+            && movement.p99Seconds <= promotionFrameSeconds
+            // The 99th percentile measures sustained drag quality. The hard
+            // maximum separately refuses a perceptible long hitch while
+            // allowing one desktop-scheduler outlier in an eight-second run.
+            && movement.maximumSeconds <= promotionFrameSeconds * 4
+            && mainActor.passCount == 1
+            && mainActor.minimumSampleCoverage >= UIBenchmarkContract.minimumSampleCoverage
+            && mainActor.delivery.isValid
+            && mainActor.delivery.p99Seconds <= promotionFrameSeconds
+            && mainActor.delivery.maximumSeconds <= promotionFrameSeconds * 4
     }
 }
 
@@ -450,7 +469,7 @@ enum UIResourceBenchmark {
             switch style {
             case .flat:
                 materialEffects = 0
-                cardShadows = variant == .cardEffectsOff ? 0 : cards
+                cardShadows = 0
             case .glass:
                 let cardMaterials = variant == .cardEffectsOff ? 0 : cards
                 let windowMaterial = variant == .windowMaterialOff ? 0 : 1
@@ -538,7 +557,7 @@ enum UIResourceBenchmark {
                     + "choose \(choices)")
             return false
         }
-        guard scenario == .standard || variant == .full else {
+        guard scenario == .standard || scenario == .windowMovement || variant == .full else {
             report(
                 "UI benchmark refused: named scenarios require "
                     + "the production drawing variant")
@@ -583,6 +602,14 @@ enum UIResourceBenchmark {
         }
         if scenario == .panelClosed {
             return await measureClosedPanel(
+                model: model,
+                window: window,
+                seconds: movingSeconds,
+                environment: environment,
+                variant: variant)
+        }
+        if scenario == .windowMovement {
+            return await measureWindowMovement(
                 model: model,
                 window: window,
                 seconds: movingSeconds,
@@ -657,7 +684,7 @@ enum UIResourceBenchmark {
         switch scenario {
         case .standard:
             break
-        case .appOpen, .panelClosed:
+        case .appOpen, .panelClosed, .windowMovement:
             preconditionFailure("single-boundary scenarios return before lyric setup")
         case .section69:
             break
@@ -979,6 +1006,109 @@ enum UIResourceBenchmark {
         let passed = boundaryIsExact && admitsRequiredLatency(delivery.evidence)
         return recordManifest(
             scenario: .panelClosed,
+            seconds: seconds,
+            variant: variant,
+            mainActor: delivery.evidence,
+            resources: resources,
+            passed: passed,
+            environment: environment)
+    }
+
+    /// Moves the real main window at ProMotion cadence after launch has settled.
+    ///
+    /// A static view benchmark cannot see the compositor work paid only while
+    /// somebody drags a window. Moving the AppKit window itself preserves the
+    /// production SwiftUI tree and records both the independent 1 ms delivery
+    /// probe and whether the 120 Hz movement schedule falls behind.
+    private static func measureWindowMovement(
+        model: RouterModel,
+        window: NSWindow,
+        seconds: Double,
+        environment: [String: String],
+        variant: YunUIBenchmarkVariant
+    ) async -> Bool {
+        if variant == .windowShadowOff { window.hasShadow = false }
+        defer {
+            if variant == .windowShadowOff { window.hasShadow = true }
+        }
+        window.makeKeyAndOrderFront(nil)
+        await settle(for: 1)
+
+        let originalOrigin = window.frame.origin
+        let cadence = 1.0 / 120.0
+        let requestedMoves = max(1, Int((seconds * 120).rounded()))
+        let beganAt = DispatchTime.now().uptimeNanoseconds
+        let before = usage()
+        BodyCount.reset()
+        BodyCount.isCounting = true
+        let probe = UIResourceMainRunLoopProbe(origin: beganAt)
+        probe.start()
+        var movementLateness: [UInt64] = []
+        movementLateness.reserveCapacity(requestedMoves)
+        let clock = ContinuousClock()
+        let began = clock.now
+
+        for index in 0..<requestedMoves {
+            let target = began + .nanoseconds(Int64(Double(index) * cadence * 1e9))
+            try? await clock.sleep(until: target, tolerance: .zero)
+            let actual = clock.now
+            let late = target.duration(to: actual)
+            let lateSeconds = max(
+                0,
+                Double(late.components.seconds)
+                    + Double(late.components.attoseconds) / 1e18)
+            movementLateness.append(UInt64(lateSeconds * 1e9))
+            let phase = Double(index) / 120.0
+            window.setFrameOrigin(
+                NSPoint(
+                    x: originalOrigin.x + CGFloat(sin(phase * 2 * .pi) * 48),
+                    y: originalOrigin.y + CGFloat(cos(phase * 2 * .pi) * 32)))
+        }
+        window.setFrameOrigin(originalOrigin)
+
+        let delivery = await probe.finish()
+        let after = usage()
+        BodyCount.isCounting = false
+        let bodies = BodyCount.counts
+        let wallSeconds = Double(DispatchTime.now().uptimeNanoseconds - beganAt) / 1e9
+        let movement = MainActorLatencyDistribution(nanoseconds: movementLateness)
+        let boundaryIsExact =
+            window.isVisible
+            && !KTVWindow.isVisible
+            && !model.isKTVWindowOpen
+            && !model.isRunning
+            && movement.samples == requestedMoves
+        let resources = [
+            UIBenchmarkResourcePhase(
+                name: "window-movement",
+                processorSeconds: max(0, after.processorSeconds - before.processorSeconds),
+                wallSeconds: wallSeconds,
+                footprintBytes: after.footprintBytes,
+                bodyEvaluations: bodies)
+        ]
+        reportSingleBoundary(
+            "window-movement", evidence: delivery.evidence, resources: resources,
+            exact: boundaryIsExact)
+        report(
+            String(
+                format:
+                    "UI benchmark window movement %d/%d, lateness p50 %.3f ms, p99 %.3f ms, max %.3f ms",
+                movement.samples, requestedMoves,
+                movement.p50Seconds * 1_000,
+                movement.p99Seconds * 1_000,
+                movement.maximumSeconds * 1_000))
+        let movementMeetsBudget = UIResourceBenchmarkBudget.admitsWindowMovement(
+            movement, mainActor: delivery.evidence)
+        if !movementMeetsBudget {
+            report(
+                "UI benchmark failed: 120 Hz window movement exceeded one-frame p99 "
+                    + "or four-frame movement/MainActor containment")
+        }
+        let passed =
+            boundaryIsExact
+            && movementMeetsBudget
+        return recordManifest(
+            scenario: .windowMovement,
             seconds: seconds,
             variant: variant,
             mainActor: delivery.evidence,
