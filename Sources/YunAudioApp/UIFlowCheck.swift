@@ -1144,6 +1144,9 @@ enum UIFlowCheck {
         let clipSourceBefore = model.selectedSourceUID
         let clipModeBefore = model.channelMode
         let clipChannelBefore = model.monoChannel
+        let trimBeforeClip = model.inputDecibels
+        let masterBeforeClip = model.outputDecibels
+        let effectsBeforeClip = model.enabledEffects
         let clipToneDevice = model.outputDevices.first {
             $0.transport == .virtual && $0.inputChannels > 0 && $0.outputChannels > 0
                 && $0.uid != model.selectedDestinationUID
@@ -1153,9 +1156,24 @@ enum UIFlowCheck {
             note(
                 "feeding \(clipToneDevice.name) a \(Int(LoopbackTone.hertz)) Hz clipping fixture"
             )
+            // This is a measurement fixture, not a test of whichever preset
+            // the preceding section happened to leave behind. A gate or voice
+            // isolator is allowed to reject a steady sine, and gain from the
+            // person's settings would make half scale cease to mean half scale.
+            model.inputDecibels = 0
+            model.outputDecibels = 0
+            model.enabledEffects = []
+            await settle(model, timeout: 15)
             model.selectedSourceUID = clipToneDevice.uid
             await settle(model, timeout: 15)
-            await bringRoutingBack(model)
+            await waitUntil(
+                "the clipping fixture is the active source",
+                {
+                    model.isRunning && !model.isBusy
+                        && model.activeRoutes.contains {
+                            $0.source.deviceUID == clipToneDevice.uid
+                        }
+                }, timeout: 15)
             await pause(upTo: 3.0, until: { model.outputPeak > 0.1 })
             check("the clipping fixture reaches the output", model.outputPeak > 0.1)
             if !clipTone.isStillProducing() {
@@ -1194,10 +1212,6 @@ enum UIFlowCheck {
         // escalation is exercised on every run and the note underneath reports
         // how much headroom the room actually had. A ladder whose first rung
         // always succeeds is a ladder nobody has ever climbed.
-        let trimBeforeClip = model.inputDecibels
-        let masterBeforeClip = model.outputDecibels
-        let effectsBeforeClip = model.enabledEffects
-
         /// Pushes every stage until something clips, or the ladder runs out.
         ///
         /// - Returns: How far it had to push.
