@@ -6,7 +6,7 @@ import Testing
 
 @Suite("Compact singing actions fit the inspector")
 struct CompactSingingActionsTests {
-    /// 292-point inspector less the card's two 12-point insets.
+    /// The embedded compact inspector less the card's two 12-point insets.
     private let contentWidth: CGFloat = 268
 
     @Test("four Traditional Chinese actions form a balanced two-by-two row")

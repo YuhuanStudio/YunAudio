@@ -663,7 +663,10 @@ struct KTVStage: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .frame(height: band)
             .clipped()
-            nowPlayingStrip(track, tile: 44, showsProgress: false)
+            // No postage-stamp cover here. This arrangement exists precisely
+            // because there is not enough height for artwork worth looking at;
+            // the title and artist are the useful one-line identity.
+            nowPlayingStrip(track, tile: nil, showsProgress: false)
         }
         .padding(.horizontal, max(32, size.width * 0.055))
         .padding(.vertical, max(24, size.height * 0.05))
@@ -671,18 +674,20 @@ struct KTVStage: View {
 
     /// The song on one line: tile, title, artist, and optionally its progress.
     private func nowPlayingStrip(
-        _ track: NowPlaying.Track, tile: CGFloat, showsProgress: Bool
+        _ track: NowPlaying.Track, tile: CGFloat?, showsProgress: Bool
     ) -> some View {
         HStack(alignment: .center, spacing: Yun.Space.lg) {
-            SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fit)
-                .frame(width: tile, height: tile)
-                .background(.black.opacity(0.32))
-                .clipShape(.rect(cornerRadius: tile > 80 ? 12 : 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: tile > 80 ? 12 : 8)
-                        .stroke(Yun.Palette.OnStage.hairline, lineWidth: 1)
-                )
-                .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
+            if let tile {
+                SongArtwork(url: track.artworkURL, title: track.title, contentMode: .fit)
+                    .frame(width: tile, height: tile)
+                    .background(.black.opacity(0.32))
+                    .clipShape(.rect(cornerRadius: tile > 80 ? 12 : 8))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: tile > 80 ? 12 : 8)
+                            .stroke(Yun.Palette.OnStage.hairline, lineWidth: 1)
+                    )
+                    .shadow(color: .black.opacity(0.34), radius: 16, y: 8)
+            }
 
             VStack(alignment: .leading, spacing: showsProgress ? 6 : 2) {
                 // Truncating, and told so. `lineLimit(1)` alone still reports
@@ -690,13 +695,13 @@ struct KTVStage: View {
                 // 電視劇片頭曲)」 — made the column wider than the window and
                 // pushed the track's own duration off the right-hand edge.
                 Text(track.title)
-                    .font(.system(size: tile > 80 ? 20 : 15, weight: .semibold))
+                    .font(.system(size: (tile ?? 0) > 80 ? 20 : 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(track.artist)
-                    .font(.system(size: tile > 80 ? 15 : 12, weight: .medium))
+                    .font(.system(size: (tile ?? 0) > 80 ? 15 : 12, weight: .medium))
                     .foregroundStyle(Yun.Palette.OnStage.tertiary)
                     .lineLimit(1)
                     .truncationMode(.tail)
@@ -705,7 +710,7 @@ struct KTVStage: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: tile)
+        .frame(height: tile ?? 36)
     }
 
     /// Nudges the words against the music, and says where they are.

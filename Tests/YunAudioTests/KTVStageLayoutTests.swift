@@ -47,12 +47,13 @@ struct KTVStageLayoutTests {
         // Wide and short: the tile and its block cannot both fit however much
         // width there is, and shrinking the tile to a stamp keeps a layout
         // built around something no longer worth looking at.
-        // 420 now keeps the tile: with the metadata block measured at 162
-        // rather than estimated at 216, a 352-point stage has exactly the
-        // smallest useful tile left in it. Below that it does not.
+        // The 420-point live capture proved that satisfying the tile arithmetic
+        // was not enough: the controls below it squeezed the nominal 190-point
+        // cover into a dot. The whole side-by-side arrangement now has a
+        // measured height floor.
         #expect(
             KTVStageLayout.resolve(width: 1400, stageHeight: stageHeight(420))
-                == .sideBySide)
+                == .wordsOnly)
         #expect(
             KTVStageLayout.resolve(width: 1400, stageHeight: stageHeight(380))
                 == .wordsOnly)
@@ -95,7 +96,13 @@ struct KTVStageLayoutTests {
         // At the boundary the tile is exactly the smallest useful one, and one
         // point below it the arrangement gives up rather than shrinking it.
         let boundary = KTVStageLayout.metadataHeight + KTVStageLayout.smallestUsefulTile
-        #expect(KTVStageLayout.resolve(width: 1200, stageHeight: boundary) == .sideBySide)
-        #expect(KTVStageLayout.resolve(width: 1200, stageHeight: boundary - 1) != .sideBySide)
+        #expect(KTVStageLayout.resolve(width: 1200, stageHeight: boundary) != .sideBySide)
+        #expect(
+            KTVStageLayout.resolve(
+                width: 1200, stageHeight: KTVStageLayout.shortestSideBySide) == .sideBySide)
+        #expect(
+            KTVStageLayout.resolve(
+                width: 1200, stageHeight: KTVStageLayout.shortestSideBySide - 1)
+                != .sideBySide)
     }
 }

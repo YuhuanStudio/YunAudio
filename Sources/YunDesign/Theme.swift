@@ -209,6 +209,15 @@ extension View {
             } else {
                 self
                     .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
+                    // Material alone disappears over a quiet desktop, most
+                    // visibly in the light appearance: headings and controls
+                    // then float with no indication of which ones belong
+                    // together. The hairline preserves the glass while making
+                    // the card boundary survive every backdrop.
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+                    }
             }
         }
     }

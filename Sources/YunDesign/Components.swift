@@ -272,8 +272,8 @@ private struct PillSurface: ViewModifier {
 ///
 /// `HStack` cannot wrap and `LazyVGrid` would give every cell the same width,
 /// which is wrong for content ranging from "REC" to "128 f · 2.67 ms". The
-/// status pills have to wrap at the panel's 340 points and must not at the
-/// window's 980; one layout that is right at both widths is cheaper than two
+/// status pills have to wrap at the panel's 340 points and must not in the
+/// wide application window; one layout that is right at both widths is cheaper than two
 /// designs of the same row that can disagree.
 public struct YunWrap: Layout {
     private let spacing: CGFloat

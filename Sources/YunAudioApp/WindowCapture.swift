@@ -24,7 +24,7 @@ enum WindowCapture {
     /// is the one size an offscreen render will never be asked for, because
     /// offscreen renders are given whatever height makes them look complete.
     private static let sizes: [(name: String, size: CGSize)] = [
-        ("min", CGSize(width: 980, height: 600)),
+        ("min", MainWindowLayout.minimumSize),
         ("tall", CGSize(width: 1180, height: 900)),
     ]
 
@@ -135,7 +135,7 @@ enum WindowCapture {
                 wroteEverything =
                     photograph(
                         window,
-                        sizes: [("tab-\(tab.rawValue)", CGSize(width: 980, height: 600))],
+                        sizes: [("tab-\(tab.rawValue)", MainWindowLayout.minimumSize)],
                         into: directory, appearances: [.darkAqua]) && wroteEverything
                 // Timed per tab, because the whole capture went from thirty
                 // seconds to four minutes when these were added and "it got

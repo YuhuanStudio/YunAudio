@@ -4,6 +4,27 @@ import YunAudioEngine
 import YunAudioHAL
 import YunDesign
 
+/// The three-column budget the live window and its photograph share.
+///
+/// At 980 points the fixed source and inspector columns left only 340 points
+/// for the mixer, while the inspector itself had 268 points inside a card.
+/// Traditional Chinese recording and singing controls were consequently laid
+/// out as accidental fragments rather than deliberate rows. These numbers are
+/// one contract so a future capture cannot photograph a size the application
+/// itself should refuse.
+enum MainWindowLayout {
+    static let minimumSize = CGSize(width: 1_180, height: 720)
+    static let sourceWidth: CGFloat = 268
+    static let inspectorWidth: CGFloat = 360
+    static let columnSpacing = Yun.Space.lg
+    static let horizontalPadding = Yun.Space.xl
+
+    static func mixerWidth(at windowWidth: CGFloat) -> CGFloat {
+        windowWidth - sourceWidth - inspectorWidth - columnSpacing * 2
+            - horizontalPadding * 2
+    }
+}
+
 /// The application proper.
 ///
 /// The menu bar panel is for glancing at and toggling; this is where the work
@@ -103,21 +124,24 @@ struct MainWindow: View {
             // Columns separated by space rather than rules: the cards already
             // carry the boundaries, and a 1px line through the middle of a card
             // layout is what made this read as a wireframe.
-            HStack(alignment: .top, spacing: Yun.Space.lg) {
+            HStack(alignment: .top, spacing: MainWindowLayout.columnSpacing) {
                 sources
-                    .frame(width: 268)
+                    .frame(width: MainWindowLayout.sourceWidth)
                 mixer
                     .frame(maxWidth: .infinity)
                 inspector
-                    .frame(width: 292)
+                    .frame(width: MainWindowLayout.inspectorWidth)
             }
-            .padding(.horizontal, Yun.Space.xl)
+            .padding(.horizontal, MainWindowLayout.horizontalPadding)
             .padding(.bottom, Yun.Space.lg)
             .frame(maxHeight: .infinity, alignment: .top)
 
             StatusPills(model: model)
         }
-        .frame(minWidth: 980, minHeight: 600)
+        .frame(
+            minWidth: MainWindowLayout.minimumSize.width,
+            minHeight: MainWindowLayout.minimumSize.height
+        )
         // `fullSizeContentView` gives SwiftUI the title-bar row, but SwiftUI
         // still treats it as a safe-area inset unless the root accepts it.
         .ignoresSafeArea(.container, edges: .top)
@@ -1177,10 +1201,10 @@ struct MainWindow: View {
     }
 
     private var inspectorPicker: some View {
-        // Wrapping, because six of them do not fit across the ordinary
-        // inspector column at the window's minimum width. The expanded singing
-        // workspace uses the same control, so leaving the stage never depends
-        // on a hidden keyboard shortcut.
+        // Wrapping remains the deliberate compact behaviour. The main window
+        // now gives this control enough room for one row, while narrower
+        // embedded presentations still leave the stage without depending on a
+        // hidden keyboard shortcut.
         YunSegmented(
             selection: inspectorTab,
             options: Inspector.allCases.map { ($0, $0.title) },

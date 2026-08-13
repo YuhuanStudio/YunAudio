@@ -5,7 +5,7 @@ import Testing
 @testable import YunAudioApp
 @testable import YunDesign
 
-@Suite("Loudness figures fit the minimum window")
+@Suite("Loudness figures fit a compact presentation")
 @MainActor
 struct LoudnessLayoutTests {
     private var figures: [AnyView] {

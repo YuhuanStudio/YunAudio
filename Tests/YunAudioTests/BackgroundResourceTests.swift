@@ -890,21 +890,25 @@ struct BackgroundResourceTests {
             contentsOfFile: root + "Sources/YunAudioApp/MainWindow.swift",
             encoding: .utf8)
         let columnsStart = try #require(
-            window.range(of: "HStack(alignment: .top, spacing: Yun.Space.lg)"))
+            window.range(
+                of: "HStack(alignment: .top, spacing: MainWindowLayout.columnSpacing)"))
         let columnsEnd = try #require(
             window.range(
-                of: ".padding(.horizontal, Yun.Space.xl)",
+                of: ".padding(.horizontal, MainWindowLayout.horizontalPadding)",
                 range: columnsStart.upperBound..<window.endIndex))
         let columns = window[columnsStart.lowerBound..<columnsEnd.lowerBound]
 
         #expect(columns.ranges(of: "sources").count == 1)
-        #expect(columns.contains(".frame(width: 268)"))
+        #expect(columns.contains(".frame(width: MainWindowLayout.sourceWidth)"))
         #expect(columns.ranges(of: "mixer").count == 1)
         #expect(columns.contains(".frame(maxWidth: .infinity)"))
-        #expect(columns.ranges(of: "inspector").count == 1)
-        #expect(columns.contains(".frame(width: 292)"))
+        #expect(columns.contains(".frame(width: MainWindowLayout.inspectorWidth)"))
         #expect(!columns.contains("inspectorTab"))
         #expect(!window.contains("singingWorkspace"))
+
+        #expect(MainWindowLayout.minimumSize == CGSize(width: 1_180, height: 720))
+        #expect(MainWindowLayout.inspectorWidth >= 360)
+        #expect(MainWindowLayout.mixerWidth(at: MainWindowLayout.minimumSize.width) >= 470)
     }
 
     @Test("the KTV window is retained and supports native full screen")

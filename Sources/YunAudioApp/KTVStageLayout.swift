@@ -45,6 +45,13 @@ enum KTVStageLayout: String, Sendable, CaseIterable {
     /// padding leave 364, which wraps a Chinese lyric line into three.
     static let narrowestSideBySide: CGFloat = 760
 
+    /// A side-by-side stage must fit the controls under the tile as well as the
+    /// tile itself. At a 420-point live window the old arithmetic left exactly
+    /// 190 points for the cover, then SwiftUI squeezed that cover to a dot so
+    /// the title, warning, transport and word controls could survive. A cover
+    /// that exists in the tree but not on the screen is not a kept cover.
+    static let shortestSideBySide: CGFloat = 430
+
     /// A stacked stage spends 128 points on the strip and 24 on the gap beneath
     /// it. That is only worth doing while four lines of lyrics still fit under
     /// it — a stage line is about sixty points including its spacing. Below
@@ -57,7 +64,9 @@ enum KTVStageLayout: String, Sendable, CaseIterable {
     static let shortestStacked: CGFloat = 128 + 24 + 240
 
     static func resolve(width: CGFloat, stageHeight: CGFloat) -> KTVStageLayout {
-        let tileFits = stageHeight - metadataHeight >= smallestUsefulTile
+        let tileFits =
+            stageHeight >= shortestSideBySide
+            && stageHeight - metadataHeight >= smallestUsefulTile
         if tileFits, width >= narrowestSideBySide { return .sideBySide }
         if stageHeight >= shortestStacked { return .stacked }
         return .wordsOnly

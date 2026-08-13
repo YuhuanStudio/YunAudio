@@ -133,12 +133,11 @@ struct LoudnessFigures: View {
     let pitchHertz: Float
 
     var body: some View {
-        // The middle column has 316 points inside this card at the window's
-        // minimum width. These four figures need about 340 points in Traditional
-        // Chinese, so an HStack did not fit: SwiftUI split −18.6 and 147 over
-        // two lines to preserve the row. A balanced wrap makes that constrained
-        // state an intentional two-by-two readout while retaining one row in a
-        // wider window.
+        // A compact presentation has 316 points inside this card. These four
+        // figures need about 340 points in Traditional Chinese, so an HStack
+        // did not fit: SwiftUI split −18.6 and 147 over two lines to preserve
+        // the row. A balanced wrap makes that constrained state an intentional
+        // two-by-two readout while retaining one row in the main window.
         YunWrap(
             spacing: Self.horizontalSpacing, lineSpacing: Yun.Space.md,
             balanced: true, fills: true
@@ -153,7 +152,7 @@ struct LoudnessFigures: View {
         }
     }
 
-    /// The measured content width at the 980-point minimum window.
+    /// The measured content width of the compact presentation.
     static let compactContentWidth: CGFloat = 316
     static let horizontalSpacing = Yun.Space.lg
 }
