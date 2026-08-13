@@ -405,10 +405,15 @@ struct MIDIAndOBSMailboxTests {
         #expect(mailbox.statistics.revoked == 1)
         #expect(mailbox.statistics.pendingCount == 1)
         await application.releaseNext()
-        let newApplicationStarted = await wait {
+        let newApplicationScheduled = await wait {
             mailbox.statistics.startedApplications == 2
         }
-        #expect(newApplicationStarted)
+        #expect(newApplicationScheduled)
+        #expect(mailbox.statistics.startedApplications == 2)
+        let newApplicationEntered = await wait {
+            await application.appliedValues.count == 2
+        }
+        #expect(newApplicationEntered)
         let appliedValues = await application.appliedValues
         #expect(appliedValues == [10, 20])
         #expect(published.values.isEmpty)
