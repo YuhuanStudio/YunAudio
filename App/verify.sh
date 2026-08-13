@@ -51,7 +51,7 @@ verify.sh runs these, in this order. Each is a substring match for --only.
 
   build                          swift build                       ~1-30 s
   strict formatting             swift-format lint --strict           ~2 s
-  tests                          2016 of them                         ~80 s
+  tests                          2017 of them                         ~80 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build and isolated resource smoke   ~50 s
   settings entry                 opens a real settings window          ~2 s

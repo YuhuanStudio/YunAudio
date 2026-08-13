@@ -189,15 +189,26 @@ final class TranscriberLifecycleWorker: @unchecked Sendable {
         if decision.1 { startProcessing() }
         if decision.2 {
             deadlineQueue.asyncAfter(deadline: .now() + max(0, timeout)) { [self] in
-                let timedOut = decision.0.complete(.timedOut)
-                guard timedOut else { return }
                 // A Speech finaliser has no cancellation contract. Make the
                 // process-lifetime retention explicit instead of relying on an
-                // async task frame accidentally keeping the model alive.
+                // async task frame accidentally keeping the model alive. The
+                // quarantine must be visible before the timeout fence wakes an
+                // observer; the reverse order made a completed timeout briefly
+                // claim no retained owner in a fresh full-suite run.
                 let token = resourceQuarantine.retain(self)
                 lock.withLock {
                     state.shutdownTimeouts &+= 1
                     state.quarantineToken = token
+                }
+                guard decision.0.complete(.timedOut) else {
+                    let shouldRelease = lock.withLock {
+                        guard state.quarantineToken == token else { return false }
+                        state.shutdownTimeouts &-= 1
+                        state.quarantineToken = nil
+                        return true
+                    }
+                    if shouldRelease { resourceQuarantine.release(token) }
+                    return
                 }
             }
         }

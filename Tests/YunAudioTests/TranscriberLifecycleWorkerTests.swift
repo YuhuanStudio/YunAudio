@@ -301,6 +301,28 @@ struct TranscriberLifecycleWorkerTests {
     }
 
     @MainActor
+    @Test("a completed finaliser never leaves the timeout quarantine behind")
+    func completionBeatsTimeoutWithoutQuarantine() async {
+        let quarantine = ProcessLifetimeResourceQuarantine()
+        let worker = TranscriberLifecycleWorker(
+            factory: { source, _ in
+                TranscriberLifecycleWorker.Session(
+                    identity: source.identity, consume: { _, _ in }, start: { _ in },
+                    stop: {})
+            }, resourceQuarantine: quarantine, publish: { _ in })
+        let fence = worker.shutdown(
+            topologyGeneration: 1, transcriptGeneration: 1, timeout: 0.02)
+        let result = TranscriberLifecycleFenceResult()
+        fence.observe { result.resolve($0) }
+
+        #expect(await result.wait() == .complete)
+        try? await Task.sleep(for: .milliseconds(30))
+        #expect(fence.completionCount == 1)
+        #expect(quarantine.count == 0)
+        #expect(worker.statistics.shutdownTimeouts == 0)
+    }
+
+    @MainActor
     @Test("the last callback precedes the finalised stop publication exactly once")
     func finalLinePrecedesStop() async {
         let owner = TranscriberFinalLineOwner()
