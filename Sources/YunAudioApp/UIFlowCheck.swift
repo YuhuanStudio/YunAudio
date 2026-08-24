@@ -7408,6 +7408,14 @@ enum UIFlowCheck {
         guard let advanced = await sawCyclesAdvance(model, over: seconds) else {
             // Not the same failure, and fixing it is not the same work: this
             // says the counter could not be read, not that it stood still.
+            //
+            // And *why* it could not, because nil has two unrelated causes —
+            // a busy state lock and a route with no graph cell — and the fix
+            // for one is nothing like the fix for the other.
+            note(
+                "the count is unreadable because: \(model.whyCycleCountIsUnknown),"
+                    + " running \(model.isRunning), busy \(model.isBusy),"
+                    + " routes \(model.activeRoutes.count)")
             check("\(label) — the IO cycle counter could be read at all", false)
             return
         }

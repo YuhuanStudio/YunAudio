@@ -14780,6 +14780,10 @@ final class RouterModel {
     /// See `RoutingEngine.cycleCountIfKnown`.
     var cycleCountIfKnownForDiagnostics: UInt64? { engine.cycleCountIfKnown }
 
+    /// Which of the two reasons the count is unreadable, for the check that
+    /// reports it. See `RoutingEngine.CycleCountRefusal`.
+    var whyCycleCountIsUnknown: String { engine.whyCycleCountIsUnknown.rawValue }
+
     /// Loudest route, for the menu bar icon and the signal path graphic.
     var peakLevel: Float { levels.max() ?? 0 }
 }

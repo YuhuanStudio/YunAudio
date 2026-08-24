@@ -6648,6 +6648,27 @@ public final class RoutingEngine: @unchecked Sendable {
         return graphCell.map { yun_rt_cell_cycles($0) }
     }
 
+    /// Why the count could not be read, when it could not.
+    ///
+    /// `cycleCountIfKnown` answers nil for two unrelated reasons and the caller
+    /// cannot tell them apart: the state lock was busy, or there is no graph
+    /// cell to read. They are different faults with different fixes — one is
+    /// contention, the other is a route that is not running — and after a
+    /// patching edit the flow check sees nil on nearly every one of seventy-five
+    /// attempts across a second and a half, which neither explanation obviously
+    /// accounts for.
+    public enum CycleCountRefusal: String, Sendable {
+        case lockBusy
+        case noCell
+        case readable
+    }
+
+    public var whyCycleCountIsUnknown: CycleCountRefusal {
+        guard stateLock.try() else { return .lockBusy }
+        defer { stateLock.unlock() }
+        return graphCell == nil ? .noCell : .readable
+    }
+
     /// Number of IO cycles completed. A stalled counter means the device is not
     /// actually pulling audio.
     ///
