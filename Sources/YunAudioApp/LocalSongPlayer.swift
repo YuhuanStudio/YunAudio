@@ -264,19 +264,63 @@ final class LocalSongPlayer: @unchecked Sendable {
     ///
     /// - Returns: nil when it worked, or the reason when even this raised.
     private static func connectAtTheMixersOwnFormat(
-        engine: AVAudioEngine, node: AVAudioPlayerNode, transpose: AVAudioUnitTimePitch
+        engine: AVAudioEngine, node: AVAudioPlayerNode, transpose: AVAudioUnitTimePitch,
+        format: AVAudioFormat
     ) -> String? {
         let mixer = engine.mainMixerNode
-        let format = mixer.outputFormat(forBus: 0)
+        let mixerFormat = mixer.outputFormat(forBus: 0)
         // A mixer with no rate is an engine with no device behind it, and
         // connecting to it would raise for a third time.
-        guard format.sampleRate > 0 else {
+        guard mixerFormat.sampleRate > 0 else {
             return "the output device has no format"
         }
-        return catchingObjCException {
+        // **The player's own edge keeps the file's format. Only the edge above
+        // it falls back.**
+        //
+        // `scheduleSegment` requires the node's output format to be the file's
+        // processing format. The first version of this reconnected *both* edges
+        // at the mixer's — so a 44.1 kHz mono file was scheduled onto a node
+        // whose output was 48 kHz stereo, and the player produced silence while
+        // reporting that it was playing. The song clock then sat at zero, and
+        // everything riding on it — the words above all — sat there with it.
+        //
+        // Measured rather than reasoned. In a clean virtual machine, where the
+        // one audio device does not offer the fixture's rate so this fallback is
+        // always taken, the flow check read `position 0.00014 s after 600 ms of
+        // playing`. That is this function, not the engine refusing a format.
+        //
+        // `AVAudioEngine` converts across a connection whose two formats differ,
+        // so the rate change belongs on the edge into the mixer, where nothing
+        // is scheduled and nothing depends on it.
+        if let raised = catchingObjCException({
             engine.connect(node, to: transpose, format: format)
-            engine.connect(transpose, to: mixer, format: format)
+            engine.connect(transpose, to: mixer, format: mixerFormat)
+        }) {
+            _ = raised
+            // **Then the transpose is what cannot take this file, so the song
+            // plays without it.**
+            //
+            // `-10868` is `kAudioUnitErr_FormatNotSupported`, and it comes from
+            // the time-pitch unit rather than from the mixer: the two attempts
+            // above differ only in the edge *above* the unit, and both raise.
+            // Retrying the same edge with the same format was the mistake — the
+            // format was never the variable.
+            //
+            // Moving the key is a feature. Playing the song is the function.
+            // Refusing to open a file because it cannot also be transposed is
+            // the wrong trade, and it is the one that was being made: the flow
+            // check read `the song would not open — error -10868` and every
+            // check downstream of a playing song went with it.
+            engine.disconnectNodeOutput(node)
+            engine.disconnectNodeOutput(transpose)
+            if let last = catchingObjCException({
+                engine.connect(node, to: mixer, format: format)
+            }) {
+                return last
+            }
+            return nil
         }
+        return nil
     }
 
     /// Reads a file and makes it the song, without playing it.
@@ -336,7 +380,8 @@ final class LocalSongPlayer: @unchecked Sendable {
             output.engine.disconnectNodeOutput(output.node)
             output.engine.disconnectNodeOutput(output.transpose)
             if let again = Self.connectAtTheMixersOwnFormat(
-                engine: output.engine, node: output.node, transpose: output.transpose)
+                engine: output.engine, node: output.node, transpose: output.transpose,
+                format: format)
             {
                 openingError = again
                 self.file = nil

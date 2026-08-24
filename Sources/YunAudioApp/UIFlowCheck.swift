@@ -4807,7 +4807,12 @@ enum UIFlowCheck {
             model.isSingingVisible = false
         }
         guard model.openSong(at: audio) else {
-            note("the song would not open — skipped")
+            // Why, not just that. `openingError` holds the exception the engine
+            // raised, and without it this line sends whoever reads it to guess
+            // at a format mismatch they cannot see.
+            note(
+                "the song would not open — "
+                    + (model.songPlayer.openingError ?? "no reason recorded"))
             return
         }
         check("a file this application opened is the song", model.isPlayingOwnSong)
