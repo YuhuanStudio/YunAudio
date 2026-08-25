@@ -623,3 +623,64 @@ struct AudioUnitDisposerTests {
                 && router.contains("try requireAudioUnitGraphAdmission()"))
     }
 }
+
+/// The invariant the echo canceller's start classification rests on.
+///
+/// `EchoCancellationBridge.startFarEnd` treats `.blockedByRetainedTransaction`
+/// as an ordinary start refusal — the far-end unit was never touched — rather
+/// than as a terminal teardown verdict. That is only sound if a deferred command
+/// provably never runs its operation, so it is asserted here rather than
+/// reasoned about there.
+///
+/// Recording the deferral as a teardown verdict was the whole dropout defect:
+/// `stop()` returns `lastTeardownResult` before tearing anything down, so one
+/// instant of contention during a route build left every later Stop a no-op and
+/// the router quarantining a route whose graph was already freed.
+@Suite("Deferred lifecycle commands never run")
+struct DeferredLifecycleCommandTests {
+
+    private final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        func increment() { lock.withLock { value += 1 } }
+        var count: Int { lock.withLock { value } }
+    }
+
+    @Test("a command deferred behind graph construction never touches its unit")
+    func deferredCommandNeverRunsItsOperation() throws {
+        let quarantine = ProcessLifetimeAudioQuarantine()
+        let disposer = BoundedAudioUnitDisposer(
+            quarantine: quarantine,
+            asynchronousTimeout: 0.05,
+            label: "com.yuhuanstudio.yunaudio.tests.deferred.\(UUID().uuidString)")
+        let admission = try #require(disposer.acquireGraphAdmission())
+        let owner = NSObject()
+        let runs = Counter()
+        let command = BoundedAudioUnitLifecycleCommand(
+            retaining: owner, step: .start, quarantineOnError: true
+        ) {
+            runs.increment()
+            return noErr
+        }
+
+        // The deadline expires while the graph admission is still held, which is
+        // the contention a second route being built produces.
+        let result = disposer.dispose(
+            command, until: HALTeardownDeadline(timeout: 0.05))
+
+        #expect(result == .blockedByRetainedTransaction(retainedUnits: 1))
+        #expect(runs.count == 0)
+
+        // Promotion happens on release, and the cancelled bit was stored under
+        // the disposer's own lock before the enqueue — so the promoted command
+        // still must not start the unit.
+        admission.release()
+        let drained = disposer.dispose(
+            AudioUnitOwnerCapsule([]), until: HALTeardownDeadline(timeout: 1))
+        // The promoted command reports the step it never took, which is what
+        // the cancelled bit is for: the unit is untouched and says so.
+        #expect(drained == .timedOut(step: .start, disposedUnits: 0))
+        #expect(runs.count == 0)
+        #expect(command.completedStatus == nil)
+    }
+}

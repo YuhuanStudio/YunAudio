@@ -549,7 +549,26 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                 lastTeardownResult = .lifecycleTimedOut(step: step)
             }
             return nil
-        case .ownerRetained, .blockedByRetainedTransaction:
+        case .blockedByRetainedTransaction:
+            // The disposer cancels a deferred command under its own lock before
+            // it can be promoted, so `AudioDeviceStart` provably never ran and
+            // the far-end unit was never touched. That is the ordinary start
+            // refusal `start()` already tolerates — the canceller runs without a
+            // reference — and not a failed cleanup.
+            //
+            // Recording it as a terminal teardown verdict is what turned an
+            // instant of contention into a dead process: `stop()` returns
+            // `lastTeardownResult` before tearing anything down, so the very
+            // next Stop freed nothing, reported an incomplete teardown, and the
+            // router quarantined a route whose graph was already gone. Every
+            // subsequent Stop short-circuited on the same stale verdict, which
+            // is why the only cure anybody found was relaunching.
+            command.cancelBeforeStart()
+            return false
+        case .ownerRetained:
+            // Distinct from the above on purpose. This one means a transaction
+            // ran and retained its owner, so the start may have got far enough
+            // to change callback ownership; nothing here can prove it did not.
             command.cancelBeforeStart()
             lifecycleLock.withLock {
                 lastTeardownResult = .lifecycleTimedOut(step: nil)
