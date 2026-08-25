@@ -137,9 +137,20 @@ struct CompositedLyricSurface: View {
         ZStack(alignment: .leading) {
             Text(text)
                 .foregroundStyle(style.baseStyle)
-            Text(text)
-                .foregroundStyle(voice ?? style.fillStyle)
-                .textRenderer(SequentialTextFillRenderer(progress: progress))
+            // `textRenderer` is macOS 15. This is the benchmark control the
+            // compositor is measured against and never the production path, so
+            // where it is absent the control loses its sweep and keeps its
+            // shape — which is the right trade against holding the whole
+            // application to macOS 15 for a comparison surface.
+            if #available(macOS 15, *) {
+                Text(text)
+                    .foregroundStyle(voice ?? style.fillStyle)
+                    .textRenderer(SequentialTextFillRenderer(progress: progress))
+            } else {
+                Text(text)
+                    .foregroundStyle(voice ?? style.fillStyle)
+                    .opacity(progress)
+            }
         }
         .animation(
             reduceMotion || !animates ? nil : .linear(duration: 0.1),

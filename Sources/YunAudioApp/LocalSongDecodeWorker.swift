@@ -1,6 +1,6 @@
 import AVFoundation
 import Foundation
-import Synchronization
+import YunAudioRT
 
 /// A serial first/latest lane for work which must never form an unbounded queue.
 ///
@@ -307,9 +307,16 @@ final class LocalSongCentreDecodeBackend: @unchecked Sendable {
 /// A callback writes one packed integer. Allocation, locking, Objective-C and
 /// task creation all happen later on the decoder queue when the timer drains it.
 final class LocalSongCompletionMailbox: @unchecked Sendable {
-    private let latest = Atomic<UInt64>(0)
-    private let activeGeneration = Atomic<UInt32>(0)
-    private let stopped = Atomic<Bool>(false)
+    /// One lock-free cell in C rather than three Swift `Atomic`s.
+    ///
+    /// `Atomic` arrived in macOS 15, and these three were the only symbols in
+    /// the whole application that required it — one integer cell holding a
+    /// major release of Macs out for no capability at all. The C11 atomics the
+    /// realtime layer already uses for the clock and the meters give the same
+    /// guarantees with no floor, and the compare-and-swap that keeps only the
+    /// newest value now sits beside the memory ordering it depends on instead
+    /// of in the callback.
+    private let mailbox: OpaquePointer
     private let timer: DispatchSourceTimer
     private let consume: @Sendable (UInt32, UInt32) -> Void
 
@@ -318,6 +325,10 @@ final class LocalSongCompletionMailbox: @unchecked Sendable {
         consume: @escaping @Sendable (UInt32, UInt32) -> Void
     ) {
         self.consume = consume
+        guard let mailbox = yun_rt_completion_mailbox_create() else {
+            preconditionFailure("could not allocate the completion mailbox")
+        }
+        self.mailbox = mailbox
         timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(
             deadline: .now() + .milliseconds(100), repeating: .milliseconds(100),
@@ -328,43 +339,32 @@ final class LocalSongCompletionMailbox: @unchecked Sendable {
 
     /// Makes callbacks from every earlier player-node schedule ineligible.
     func activate(generation: UInt32) {
-        activeGeneration.store(generation, ordering: .releasing)
-        _ = latest.exchange(0, ordering: .acquiringAndReleasing)
+        yun_rt_completion_mailbox_activate(mailbox, generation)
     }
 
     /// Called from the audio completion context. Keep this body atomic-only.
     func completed(generation: UInt32, ordinal: UInt32) {
-        guard !stopped.load(ordering: .relaxed),
-            activeGeneration.load(ordering: .acquiring) == generation
-        else { return }
         let addition = ordinal.addingReportingOverflow(
             LocalSongCentreDecodeBackend.chunksInFlight)
         let through =
             addition.overflow ? UInt32.max - 1 : min(addition.partialValue, UInt32.max - 1)
         let encoded = UInt64(generation) << 32 | UInt64(through &+ 1)
-        var observed = latest.load(ordering: .relaxed)
-        while encoded > observed {
-            let result = latest.compareExchange(
-                expected: observed, desired: encoded,
-                ordering: .releasing)
-            if result.exchanged { return }
-            observed = result.original
-        }
+        _ = yun_rt_completion_mailbox_offer(mailbox, generation, encoded)
     }
 
     func shutdown() {
-        guard !stopped.exchange(true, ordering: .acquiringAndReleasing) else { return }
-        activeGeneration.store(0, ordering: .releasing)
-        _ = latest.exchange(0, ordering: .acquiringAndReleasing)
+        guard yun_rt_completion_mailbox_shutdown(mailbox) else { return }
         timer.cancel()
     }
 
+    deinit { yun_rt_completion_mailbox_free(mailbox) }
+
     private func drain() {
-        guard !stopped.load(ordering: .acquiring) else { return }
-        let encoded = latest.exchange(0, ordering: .acquiringAndReleasing)
+        guard !yun_rt_completion_mailbox_is_stopped(mailbox) else { return }
+        let encoded = yun_rt_completion_mailbox_take(mailbox)
         guard encoded != 0 else { return }
         let generation = UInt32(truncatingIfNeeded: encoded >> 32)
-        guard activeGeneration.load(ordering: .acquiring) == generation else { return }
+        guard yun_rt_completion_mailbox_generation(mailbox) == generation else { return }
         let through = UInt32(truncatingIfNeeded: encoded) &- 1
         consume(generation, through)
     }

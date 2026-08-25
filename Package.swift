@@ -42,7 +42,7 @@ let noDynamicActorIsolation: [SwiftSetting] = [
 let package = Package(
     name: "YunAudioKit",
     defaultLocalization: "en",
-    platforms: [.macOS("15.0")],
+    platforms: [.macOS("14.2")],
     products: [
         .library(name: "YunAudioHAL", targets: ["YunAudioHAL"]),
         .executable(name: "yunaudio-cli", targets: ["yunaudio-cli"]),

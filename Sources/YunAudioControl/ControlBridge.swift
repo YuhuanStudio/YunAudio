@@ -40,7 +40,22 @@ public enum ControlSocket {
     /// The command-line and MCP side must always regain control in under two
     /// seconds, even when something accepted the connection and then went
     /// silent.
-    public static let clientTransportTimeout: TimeInterval = 1.5
+    ///
+    /// `YUNAUDIO_CONTROL_TIMEOUT` raises it, for one caller only: a test that
+    /// spawns the real binary. `ControlListener` and `ControlClient.send` both
+    /// take an injected budget for exactly this reason, and injection does not
+    /// cross a process boundary — so the end-to-end test either got the
+    /// production one and failed on a loaded machine for the machine's reasons,
+    /// or the binary under test stopped being the binary that ships. Clamped,
+    /// and ignored when it is not a number, because an environment variable is
+    /// somebody else's input.
+    public static let clientTransportTimeout: TimeInterval = {
+        guard
+            let raw = ProcessInfo.processInfo.environment["YUNAUDIO_CONTROL_TIMEOUT"],
+            let seconds = TimeInterval(raw), seconds.isFinite
+        else { return 1.5 }
+        return min(max(seconds, 1.5), 120)
+    }()
 
     /// A silent inbound peer gets one second to produce its complete request.
     static let serverReadTimeout: TimeInterval = 1

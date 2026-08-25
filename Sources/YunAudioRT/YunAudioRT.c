@@ -769,6 +769,76 @@ float yun_rt_atomic_float_load(YunRTAtomicFloat *value) {
     return encoded.value;
 }
 
+#pragma mark - Completion mailbox
+
+struct YunRTCompletionMailbox {
+    /// Generation in the high half, "finished through" in the low half, so one
+    /// integer carries a value that would otherwise need two to stay coherent.
+    _Atomic uint64_t latest;
+    _Atomic uint32_t activeGeneration;
+    _Atomic bool stopped;
+};
+
+YunRTCompletionMailbox *yun_rt_completion_mailbox_create(void) {
+    YunRTCompletionMailbox *mailbox = malloc(sizeof(YunRTCompletionMailbox));
+    if (mailbox == NULL) return NULL;
+    atomic_init(&mailbox->latest, 0);
+    atomic_init(&mailbox->activeGeneration, 0);
+    atomic_init(&mailbox->stopped, false);
+    return mailbox;
+}
+
+void yun_rt_completion_mailbox_free(YunRTCompletionMailbox *mailbox) { free(mailbox); }
+
+void yun_rt_completion_mailbox_activate(
+    YunRTCompletionMailbox *mailbox, uint32_t generation) {
+    atomic_store_explicit(&mailbox->activeGeneration, generation, memory_order_release);
+    atomic_exchange_explicit(&mailbox->latest, 0, memory_order_acq_rel);
+}
+
+bool yun_rt_completion_mailbox_offer(
+    YunRTCompletionMailbox *mailbox, uint32_t generation, uint64_t encoded) {
+    if (atomic_load_explicit(&mailbox->stopped, memory_order_relaxed)) return false;
+    if (atomic_load_explicit(&mailbox->activeGeneration, memory_order_acquire)
+        != generation) {
+        return false;
+    }
+    uint64_t observed = atomic_load_explicit(&mailbox->latest, memory_order_relaxed);
+    while (encoded > observed) {
+        // Weak would be wrong here only in that it may fail spuriously; the
+        // loop handles that. Strong is used because the loop's own condition
+        // already re-reads, and a spurious failure would reload the same value
+        // and spin.
+        if (atomic_compare_exchange_strong_explicit(
+                &mailbox->latest, &observed, encoded, memory_order_release,
+                memory_order_relaxed)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+uint64_t yun_rt_completion_mailbox_take(YunRTCompletionMailbox *mailbox) {
+    return atomic_exchange_explicit(&mailbox->latest, 0, memory_order_acq_rel);
+}
+
+uint32_t yun_rt_completion_mailbox_generation(YunRTCompletionMailbox *mailbox) {
+    return atomic_load_explicit(&mailbox->activeGeneration, memory_order_acquire);
+}
+
+bool yun_rt_completion_mailbox_shutdown(YunRTCompletionMailbox *mailbox) {
+    if (atomic_exchange_explicit(&mailbox->stopped, true, memory_order_acq_rel)) {
+        return false;
+    }
+    atomic_store_explicit(&mailbox->activeGeneration, 0, memory_order_release);
+    atomic_exchange_explicit(&mailbox->latest, 0, memory_order_acq_rel);
+    return true;
+}
+
+bool yun_rt_completion_mailbox_is_stopped(YunRTCompletionMailbox *mailbox) {
+    return atomic_load_explicit(&mailbox->stopped, memory_order_acquire);
+}
+
 #pragma mark - Atomic clock publication
 
 struct YunRTClock {

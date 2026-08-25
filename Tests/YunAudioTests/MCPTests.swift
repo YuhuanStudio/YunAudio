@@ -1411,6 +1411,18 @@ struct MCPBinaryTests {
                         let process = Process()
                         process.executableURL = URL(fileURLWithPath: executable)
                         process.arguments = ["--socket", socket]
+                        // The budget this exchange is allowed, raised from the
+                        // product's 1.5 seconds for the same reason every other
+                        // deadline in these tests is: this one saturates the
+                        // machine with three hundred suites, and a bound tight
+                        // enough to be the product's is loose enough to report
+                        // the load as a protocol fault. What is under test here
+                        // is that the real binary speaks MCP over the real
+                        // socket, not how fast a busy laptop can do it.
+                        var environment = ProcessInfo.processInfo.environment
+                        environment["YUNAUDIO_CONTROL_TIMEOUT"] = String(
+                            TestGate.deadlockSeconds)
+                        process.environment = environment
                         let input = Pipe()
                         let output = Pipe()
                         process.standardInput = input

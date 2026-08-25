@@ -361,6 +361,55 @@ void yun_rt_atomic_float_free(YunRTAtomicFloat *_Nullable value);
 void yun_rt_atomic_float_store(YunRTAtomicFloat *_Nonnull value, float next);
 float yun_rt_atomic_float_load(YunRTAtomicFloat *_Nonnull value);
 
+/// A completion mailbox: the newest chunk finished, and nothing else.
+///
+/// Written from an `AVAudioPlayerNode` completion callback, which is an audio
+/// context: no allocation, no locking, no Objective-C, no task creation. Read
+/// from a timer on the decoder queue.
+///
+/// It is here in C rather than built from Swift's `Atomic` because `Atomic`
+/// arrived in macOS 15, and it was the single symbol keeping this application
+/// off macOS 14 — one lock-free integer cell, holding an entire major release
+/// of Macs out for no capability at all. The C11 atomics this file already uses
+/// for the clock and the meters have the same guarantees and no floor.
+///
+/// The compare-and-swap that keeps only the newest value lives inside `offer`
+/// on purpose: the loop belongs next to the memory ordering it depends on, and
+/// the callback should be one call.
+typedef struct YunRTCompletionMailbox YunRTCompletionMailbox;
+
+YunRTCompletionMailbox *_Nullable yun_rt_completion_mailbox_create(void);
+void yun_rt_completion_mailbox_free(YunRTCompletionMailbox *_Nullable mailbox);
+
+/// Makes every callback from an earlier schedule ineligible, and empties the
+/// box so a value left by the previous generation cannot be read as this one's.
+void yun_rt_completion_mailbox_activate(
+    YunRTCompletionMailbox *_Nonnull mailbox, uint32_t generation);
+
+/// Records `encoded` when it is newer than what is there.
+///
+/// Ignored once the mailbox is shut down, and ignored when `generation` is not
+/// the active one — a late callback from a schedule that has been replaced
+/// describes a position in a file nobody is playing.
+///
+/// Returns true when the value was taken.
+bool yun_rt_completion_mailbox_offer(
+    YunRTCompletionMailbox *_Nonnull mailbox, uint32_t generation, uint64_t encoded);
+
+/// Takes whatever is there and empties the box. Zero means nothing arrived.
+uint64_t yun_rt_completion_mailbox_take(YunRTCompletionMailbox *_Nonnull mailbox);
+
+/// The generation currently accepted, for a reader deciding whether a value it
+/// has just taken still belongs to the schedule it is draining for.
+uint32_t yun_rt_completion_mailbox_generation(
+    YunRTCompletionMailbox *_Nonnull mailbox);
+
+/// Stops accepting anything, for good. Returns true the first time only, so a
+/// caller can do the rest of its shutdown exactly once.
+bool yun_rt_completion_mailbox_shutdown(YunRTCompletionMailbox *_Nonnull mailbox);
+
+bool yun_rt_completion_mailbox_is_stopped(YunRTCompletionMailbox *_Nonnull mailbox);
+
 #pragma mark - Atomic clock publication (realtime -> control)
 
 /// One coherent `(sampleTime, hostTime)` pair guarded by a C11 atomic seqlock.

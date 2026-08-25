@@ -5,7 +5,7 @@
 **An audio router for macOS with its own virtual device, and a signal path that
 can be proved bit-exact.**
 
-[![macOS 15+](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](#requirements)
+[![macOS 14.2+](https://img.shields.io/badge/macOS-14.2%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
 [![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](#verification)
@@ -33,7 +33,7 @@ cover them.
 
 | | |
 |---|---|
-| **Platform** | macOS 15 or later |
+| **Platform** | macOS 14.2 or later |
 | **Dependencies** | None. `Package.swift` declares an empty `dependencies` array |
 | **Interfaces** | Window, menu bar panel, URL scheme, CLI, Unix socket, MCP, MIDI, resident JavaScript |
 | **Formats** | 44.1–192 kHz; WAV, FLAC and AAC, with per-source stems |
@@ -220,11 +220,13 @@ sample, reporting the condition of the path rather than a verdict.
 
 ## Requirements
 
-- **macOS 15 or later.** Some features need a newer system and say so rather
-  than being absent: live transcription needs macOS 26, as does keeping a
-  capture attached across the application quitting, and the Liquid Glass
-  appearance falls back to the material the system does have. Everything to do
-  with routing, capture, effects and karaoke works throughout.
+- **macOS 14.2 or later.** The floor is process taps, which is the one thing
+  here with no alternative — everything else that needs a newer system says so
+  rather than being absent. Voice isolation needs macOS 15; live transcription
+  needs macOS 26, as does keeping a capture attached across the application
+  quitting; and the Liquid Glass appearance falls back to the material the
+  system does have. Everything to do with routing, capture, effects and karaoke
+  works throughout.
 - **An Xcode carrying the macOS 27 SDK** to build, because live transcription
   uses `AnalyzerInputConverter`. The build scripts locate one; a hand-run
   `swift build` needs `source ./App/toolchain.sh` first, otherwise the error is
