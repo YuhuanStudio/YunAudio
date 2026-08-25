@@ -432,12 +432,12 @@ final class ScriptService: @unchecked Sendable {
     private var currentExecution: Execution?
     private var recentContextReferences: [WeakContextReference] = []
 
-    /// - Parameter executionTimeLimit: How long one entry may run before the
-    ///   service kills it. Injectable for the reason `ControlListener`'s total
-    ///   is: a test that holds a script at a barrier on purpose is spending
-    ///   this budget while it does, and on a loaded machine the script it is
-    ///   observing dies of the timeout — so the test reports the machine and
-    ///   not the barrier. Production uses the fixed public limit.
+    /// `executionTimeLimit` is how long one entry may run before the service
+    /// kills it, and it is injectable for the reason `ControlListener`'s total
+    /// is: a test that holds a script at a barrier on purpose is spending this
+    /// budget while it does, and on a loaded machine the script it is observing
+    /// dies of the timeout — so the test reports the machine and not the
+    /// barrier. Production uses the fixed public limit.
     init(
         label: String = "com.yuhuanstudio.yunaudio.javascript",
         executionTimeLimit: TimeInterval = ScriptService.executionTimeLimit,

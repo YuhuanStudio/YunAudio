@@ -17,8 +17,9 @@ struct EnabledButSilentTests {
             var line = String(format: "%-10@", kind.rawValue as NSString)
             for rate in [48_000.0, 96_000.0] {
                 let source = SignalFidelity.fixture(seconds: 1, sampleRate: rate)
-                guard let measured = SignalFidelity.cost(
-                    of: [kind], on: source, sampleRate: rate)
+                guard
+                    let measured = SignalFidelity.cost(
+                        of: [kind], on: source, sampleRate: rate)
                 else { continue }
                 line += String(
                     format: "  %5d fr %6.1f ms",

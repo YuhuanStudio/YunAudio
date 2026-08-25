@@ -53,7 +53,9 @@ struct LyricTimingTests {
         #expect(found.verdict == .uniformOffset, "\(found.summary)")
         // Positive means the words are early and belong later.
         #expect(abs(found.offsetSeconds - 1.5) < 0.3, "\(found.summary)")
-        #expect(abs(found.driftSecondsPerMinute) < LyricTiming.driftPerMinuteThreshold, "\(found.summary)")
+        #expect(
+            abs(found.driftSecondsPerMinute) < LyricTiming.driftPerMinuteThreshold,
+            "\(found.summary)")
         #expect(found.agreement > LyricTiming.confidentAgreement, "\(found.summary)")
     }
 
@@ -66,7 +68,9 @@ struct LyricTimingTests {
         let found = LyricTiming.diagnose(
             lyrics: lyrics, melody: melody, duration: duration)
         #expect(found.verdict == .drifting, "\(found.summary)")
-        #expect(abs(found.driftSecondsPerMinute) > LyricTiming.driftPerMinuteThreshold, "\(found.summary)")
+        #expect(
+            abs(found.driftSecondsPerMinute) > LyricTiming.driftPerMinuteThreshold,
+            "\(found.summary)")
     }
 
     /// Words for another recording line up at no offset at all, and saying

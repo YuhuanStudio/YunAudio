@@ -154,7 +154,7 @@ struct EchoCancellationLifecycleTests {
             #expect(quarantine.count == 2)
 
             release.signal()
-            #expect(returned.wait(timeout: .now() + 1) == .success)
+            #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
             #expect(disposer.transactionCount == 1)
             #expect(disposer.activeTransactionCount == 1)
             #expect(disposer.maximumTransactionCount == 1)
@@ -286,7 +286,7 @@ struct EchoCancellationLifecycleTests {
         #expect(!trace.values.contains("bridge.release-storage"))
 
         release.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(disposer.activeTransactionCount == 1)
         #expect(quarantine.count == 1)
         #expect(retainedBridge != nil)
@@ -433,7 +433,7 @@ struct EchoCancellationLifecycleTests {
             ])
 
         release.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(disposer.activeTransactionCount == 1)
         #expect(quarantine.count == 1)
         #expect(quarantined != nil)

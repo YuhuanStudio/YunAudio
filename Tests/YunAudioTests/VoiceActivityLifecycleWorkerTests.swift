@@ -117,7 +117,7 @@ struct VoiceActivityLifecycleWorkerTests {
                 latestPublished.signal()
             })
         let first = try #require(worker.requestAvailability(on: 1))
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         for device in 2...10_000 {
             latestToken.update {
@@ -126,7 +126,7 @@ struct VoiceActivityLifecycleWorkerTests {
         }
         releaseFirst.signal()
 
-        #expect(latestPublished.wait(timeout: .now() + 2) == .success)
+        #expect(latestPublished.wait(timeout: .now() + TestGate.deadlock) == .success)
         let telemetry = worker.telemetry
         #expect(first != latestToken.snapshot)
         #expect(state.availabilityCalls == 2)
@@ -155,17 +155,17 @@ struct VoiceActivityLifecycleWorkerTests {
             })
 
         #expect(worker.requestStart(on: 7, activation: .enableIfNeeded) != nil)
-        #expect(startEntered.wait(timeout: .now() + 1) == .success)
+        #expect(startEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         let fence = worker.requestStop()
 
         let routeTeardown = DispatchSemaphore(value: 0)
         DispatchQueue(label: "yunaudio.route-teardown.independent").async {
             routeTeardown.signal()
         }
-        #expect(routeTeardown.wait(timeout: .now() + 0.1) == .success)
+        #expect(routeTeardown.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         releaseStart.signal()
-        #expect(fence.wait(timeout: 1) == .complete)
+        #expect(fence.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(state.startCalls == 1)
         #expect(state.stopCalls == 1)
         #expect(fence.completionCount == 1)
@@ -196,16 +196,16 @@ struct VoiceActivityLifecycleWorkerTests {
                 if case .started = event { started.signal() }
             })
         #expect(worker.requestStart(on: 9, activation: .enableIfNeeded) != nil)
-        #expect(started.wait(timeout: .now() + 1) == .success)
+        #expect(started.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let first = worker.requestStop()
-        #expect(stopEntered.wait(timeout: .now() + 1) == .success)
+        #expect(stopEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         for _ in 1..<10_000 {
             #expect(worker.requestStop() === first)
         }
         releaseStop.signal()
 
-        #expect(first.wait(timeout: 1) == .complete)
+        #expect(first.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(first.completionCount == 1)
         #expect(state.stopCalls == 1)
         #expect(worker.telemetry.maximumPendingRequests == 1)
@@ -232,20 +232,24 @@ struct VoiceActivityLifecycleWorkerTests {
                 if case .started = event { started.signal() }
             })
         #expect(worker.requestStart(on: 11, activation: .enableIfNeeded) != nil)
-        #expect(started.wait(timeout: .now() + 1) == .success)
+        #expect(started.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let fence = worker.requestStop()
-        #expect(stopEntered.wait(timeout: .now() + 1) == .success)
+        #expect(stopEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         let routeFinished = DispatchSemaphore(value: 0)
         DispatchQueue(label: "yunaudio.route-stop.deadline-test").async {
             routeFinished.signal()
         }
 
         let began = DispatchTime.now().uptimeNanoseconds
+        // Deliberately short, and not a deadlock gate: the timeout is the thing
+        // under test — that an uncancellable stop gives the fence back rather
+        // than holding route teardown — and the assertions below bound how long
+        // it took. Raising it would turn the check into a wait.
         let result = fence.wait(timeout: 0.05)
         let elapsed = DispatchTime.now().uptimeNanoseconds - began
 
-        #expect(routeFinished.wait(timeout: .now() + 0.1) == .success)
+        #expect(routeFinished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(result == .timedOut)
         #expect(elapsed >= 40_000_000)
         #expect(elapsed < 250_000_000)
@@ -253,7 +257,7 @@ struct VoiceActivityLifecycleWorkerTests {
         #expect(worker.telemetry.timedOutOperations == 1)
 
         releaseStop.signal()
-        #expect(fence.wait(timeout: 1) == .complete)
+        #expect(fence.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(fence.completionCount == 1)
         #expect(quarantine.count == 0)
     }
@@ -271,10 +275,10 @@ struct VoiceActivityLifecycleWorkerTests {
                 if case .started = event { started.signal() }
             })
         #expect(worker.requestStart(on: 13, activation: .enableIfNeeded) != nil)
-        #expect(started.wait(timeout: .now() + 1) == .success)
+        #expect(started.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let fence = worker.requestStop()
-        #expect(fence.wait(timeout: 1) == .operationFailed)
+        #expect(fence.wait(timeout: TestGate.deadlockSeconds) == .operationFailed)
         #expect(fence.completionCount == 1)
         #expect(state.stopCalls == 1)
         #expect(quarantine.count == 1)
@@ -298,7 +302,7 @@ struct VoiceActivityLifecycleWorkerTests {
             })
 
         #expect(worker.requestAvailability(on: 17) != nil)
-        #expect(availability.wait(timeout: .now() + 1) == .success)
+        #expect(availability.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(worker.requestStart(on: 17, activation: .enableIfNeeded) == nil)
         #expect(state.availabilityCalls == 1)
         #expect(state.startCalls == 0)
@@ -327,15 +331,15 @@ struct VoiceActivityLifecycleWorkerTests {
             })
 
         #expect(worker.requestAvailability(on: 19) != nil)
-        #expect(entered.wait(timeout: .now() + 1) == .success)
-        #expect(timedOut.wait(timeout: .now() + 0.25) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
+        #expect(timedOut.wait(timeout: .now() + TestGate.deadlock) == .success)
         release.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         let settled = DispatchSemaphore(value: 0)
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.02) {
             settled.signal()
         }
-        _ = settled.wait(timeout: .now() + 0.25)
+        _ = settled.wait(timeout: .now() + TestGate.deadlock)
 
         #expect(
             state.events.allSatisfy {

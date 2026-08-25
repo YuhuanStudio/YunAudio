@@ -312,7 +312,7 @@ struct PreferenceWriterTests {
 
         writer?.submit(1)
         writer = nil
-        #expect(synchronised.wait(timeout: .now() + 1) == .success)
+        #expect(synchronised.wait(timeout: .now() + TestGate.deadlock) == .success)
         Thread.sleep(forTimeInterval: 0.03)
         #expect(attempts.current == 1)
     }
@@ -336,11 +336,11 @@ struct PreferenceWriterTests {
         weak let weakWriter = writer
 
         writer?.submit(8)
-        #expect(started.wait(timeout: .now() + 1) == .success)
+        #expect(started.wait(timeout: .now() + TestGate.deadlock) == .success)
         writer = nil
         #expect(weakWriter == nil)
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(writes.snapshot == [8])
     }
 

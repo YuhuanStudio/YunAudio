@@ -152,7 +152,7 @@ struct DeviceChangeWatcherTests {
             queueEntered.signal()
             _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
-        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+        #expect(queueEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let listener = ListenerHarness()
         let inventory = Inventory([1, 2])
@@ -187,14 +187,14 @@ struct DeviceChangeWatcherTests {
 
         #expect(suspensionNanoseconds < 8_000_000)
 
-        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(delivered.wait(timeout: .now() + .milliseconds(20)) == .timedOut)
         #expect(inventory.reads == 1)
         #expect(inventory.observations == [[1, 2]])
         #expect(listener.installations == 1)
 
         #expect(watcher.shutdown())
-        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(listener.removals == 1)
     }
 
@@ -218,7 +218,7 @@ struct DeviceChangeWatcherTests {
         for _ in 0..<10_000 { #expect(!watcher.shutdown()) }
 
         #expect(admissionNanoseconds < 8_000_000)
-        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(listener.removals == 1)
         #expect(listener.installations == 1)
         #expect(listener.removedOnMainThread == [false])
@@ -242,14 +242,14 @@ struct DeviceChangeWatcherTests {
         }
 
         listener.notify()
-        #expect(inventory.firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(inventory.firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         let began = DispatchTime.now().uptimeNanoseconds
         #expect(watcher.suspend())
         let suspensionNanoseconds = DispatchTime.now().uptimeNanoseconds - began
         #expect(watcher.resume())
         inventory.releaseEnteredRead()
 
-        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(delivered.wait(timeout: .now() + .milliseconds(20)) == .timedOut)
         #expect(inventory.snapshot.reads == 2)
         #expect(inventory.snapshot.maximumConcurrentReads == 1)
@@ -257,7 +257,7 @@ struct DeviceChangeWatcherTests {
         #expect(suspensionNanoseconds < 8_000_000)
 
         #expect(watcher.shutdown())
-        #expect(listener.removed.wait(timeout: .now() + 1) == .success)
+        #expect(listener.removed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(listener.removals == 1)
     }
 

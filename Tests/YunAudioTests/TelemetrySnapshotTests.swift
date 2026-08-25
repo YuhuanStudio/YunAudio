@@ -20,14 +20,14 @@ struct TelemetrySnapshotTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let started = DispatchTime.now().uptimeNanoseconds
         let levels = engine.calibrationLevels(sampleRate: 2)
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(levels.count == 1)
         #expect(abs(levels[0].decibels + 6.020_599_913) < 0.000_001)
         #expect(levels[0].seconds == 1)
@@ -59,7 +59,7 @@ struct TelemetrySnapshotTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let started = DispatchTime.now().uptimeNanoseconds
         let contended = engine.telemetrySnapshotIfAvailable
@@ -69,7 +69,7 @@ struct TelemetrySnapshotTests {
         #expect(contendedNanoseconds < 5_000_000)
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let recovered = engine.telemetrySnapshotIfAvailable
         print(
@@ -104,14 +104,14 @@ struct TelemetrySnapshotTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let unavailable = engine.readTelemetry(into: &peaks)
         #expect(unavailable == nil)
         #expect(peaks == expected.routePeaks)
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
     }
 }
 

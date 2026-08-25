@@ -606,14 +606,20 @@ struct ControlSocketTests {
         }
     }
 
-    /// - Parameter transportTimeout: Thirty seconds by default, not the
-    ///   product's 1.5.
+    /// Sends one request over the socket and waits for its reply.
     ///
-    ///   These tests are about what crosses the socket — one answer per
-    ///   request, coalescing, ownership — and not about the budget. Inheriting
-    ///   the production budget made them fail on a loaded machine and report a
-    ///   transport fault for it. The tests that *are* about the budget pass it
-    ///   explicitly, and one of them passes 0.2 to make it fire.
+    /// - Parameters:
+    ///   - client: The connected client to send through.
+    ///   - request: What to ask for.
+    ///   - transportTimeout: Thirty seconds by default, not the product's 1.5.
+    ///     These tests are about what crosses the socket — one answer per
+    ///     request, coalescing, ownership — and not about the budget.
+    ///     Inheriting the production budget made them fail on a loaded machine
+    ///     and report a transport fault for it. The tests that *are* about the
+    ///     budget pass it explicitly, and one of them passes 0.2 to make it
+    ///     fire.
+    /// - Returns: The reply the server sent.
+    /// - Throws: Whatever the transport threw, including its timeout.
     private func send(
         _ client: ControlClient, _ request: ControlRequest,
         transportTimeout: TimeInterval? = 30
@@ -634,7 +640,7 @@ struct ControlSocketTests {
         thread.start()
         // Longer than the client's own 1.5-second transport bound, so this is a
         // deadlock sentinel rather than the mechanism under test.
-        guard done.wait(timeout: .now() + 3) == .success else {
+        guard done.wait(timeout: .now() + TestGate.deadlock) == .success else {
             throw ControlError.transport("the bounded client did not return within 3 seconds")
         }
         return try #require(box.outcome).get()
@@ -905,7 +911,7 @@ struct ControlSocketTests {
             })
         let began = DispatchTime.now().uptimeNanoseconds
         #expect(listener.stop())
-        #expect(done.wait(timeout: .now() + 0.5) == .success)
+        #expect(done.wait(timeout: .now() + TestGate.deadlock) == .success)
         let elapsed = DispatchTime.now().uptimeNanoseconds - began
         #expect(elapsed < 500_000_000)
         #expect(throws: ControlError.self) { try #require(box.outcome).get() }

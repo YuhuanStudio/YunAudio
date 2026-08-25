@@ -1105,7 +1105,8 @@ struct TeardownAdviceTests {
         #expect(retryable.lastError?.contains("Stop again") == true)
 
         let terminal = RouterModel()
-        terminal.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
+        terminal.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
         #expect(!terminal.anotherStopCanClearTeardown)
         #expect(terminal.lastError?.contains("Quit and reopen") == true)
     }
@@ -1137,7 +1138,8 @@ struct TeardownAdviceTests {
     @Test("clearing the failure clears every derived answer with it")
     func derivedAnswersCannotDrift() {
         let model = RouterModel()
-        model.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
+        model.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
         #expect(model.teardownNeedsRetry)
         #expect(model.teardownFailureDetail != nil)
         #expect(!model.anotherStopCanClearTeardown)
@@ -1326,9 +1328,11 @@ struct TeardownDiagnosticsPaneTests {
         let source = try String(
             contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
             encoding: .utf8)
-        let start = try #require(source.range(of: "if let detail = model.teardownFailureDetail"))
+        let start = try #require(
+            source.range(of: "if let detail = model.teardownFailureDetail"))
         let end = try #require(
-            source.range(of: "heading(loc(\"Integrity check\"))",
+            source.range(
+                of: "heading(loc(\"Integrity check\"))",
                 range: start.upperBound..<source.endIndex))
         let block = source[start.upperBound..<end.lowerBound]
         for reading in [

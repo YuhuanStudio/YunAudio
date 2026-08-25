@@ -921,12 +921,12 @@ public final class ControlListener: @unchecked Sendable {
         }
     }
 
-    /// - Parameter totalTimeout: How long one admitted request may take before
-    ///   the listener stops waiting for its reply. Injectable for the same
-    ///   reason `ControlClient.send(_:transportTimeout:)` is, and for the same
-    ///   tests: a deadline test that can choose the client's budget and not the
-    ///   server's can only move the failure from one side to the other.
-    ///   Production uses the fixed public bound.
+    /// `totalTimeout` is how long one admitted request may take before the
+    /// listener stops waiting for its reply. Injectable for the same reason
+    /// `ControlClient.send(_:transportTimeout:)` is, and for the same tests: a
+    /// deadline test that can choose the client's budget and not the server's
+    /// can only move the failure from one side to the other. Production uses
+    /// the fixed public bound.
     init(
         path: String,
         totalTimeout: TimeInterval = ControlSocket.serverTotalTimeout,

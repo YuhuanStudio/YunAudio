@@ -162,7 +162,7 @@ struct AudioUnitDisposerTests {
         let result = DisposalResultBox()
 
         disposer.disposeAfterFence(first)
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         DispatchQueue.global(qos: .userInitiated).async {
             result.store(
                 disposer.dispose(
@@ -172,9 +172,9 @@ struct AudioUnitDisposerTests {
 
         // Freeze the waiter after its DispatchGroup timeout but before it marks
         // the old transaction cancelled or enqueues the deferred owner.
-        #expect(waitExpired.wait(timeout: .now() + 1) == .success)
+        #expect(waitExpired.wait(timeout: .now() + TestGate.deadlock) == .success)
         releaseFirst.signal()
-        #expect(first.teardownReturned.wait(timeout: .now() + 1) == .success)
+        #expect(first.teardownReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(
             waitUntil(timeout: 1) {
                 disposer.activeTransactionCount == 0
@@ -183,8 +183,8 @@ struct AudioUnitDisposerTests {
         // The old completion has already checked an empty pending queue. The
         // enqueue below must promote itself or no future event can wake it.
         allowTimeoutPath.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
-        #expect(deferred.teardownReturned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
+        #expect(deferred.teardownReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         let admission = try #require(
             disposer.acquireGraphAdmission(waitingUpTo: 1))
 
@@ -237,7 +237,8 @@ struct AudioUnitDisposerTests {
 
         release.signal()
         #expect(
-            try #require(retainedOwner).teardownReturned.wait(timeout: .now() + 1)
+            try #require(retainedOwner).teardownReturned.wait(
+                timeout: .now() + TestGate.deadlock)
                 == .success)
         #expect(try #require(retainedOwner).callCounts.uninitialise == 1)
         #expect(try #require(retainedOwner).callCounts.dispose == 0)
@@ -289,7 +290,7 @@ struct AudioUnitDisposerTests {
         let admissionReturned = DispatchSemaphore(value: 0)
 
         disposer.disposeAfterFence(owner)
-        #expect(reachedRelease.wait(timeout: .now() + 1) == .success)
+        #expect(reachedRelease.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(quarantine.count == 1)
         #expect(disposer.activeTransactionCount == 1)
 
@@ -300,7 +301,7 @@ struct AudioUnitDisposerTests {
         }
         #expect(admissionReturned.wait(timeout: .now() + 0.02) == .timedOut)
         allowRelease.signal()
-        #expect(admissionReturned.wait(timeout: .now() + 1) == .success)
+        #expect(admissionReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         let accepted = try #require(admission.value)
 
         #expect(quarantine.count == 0)
@@ -327,7 +328,7 @@ struct AudioUnitDisposerTests {
         let admissionReturned = DispatchSemaphore(value: 0)
 
         disposer.disposeAfterFence(first)
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         disposer.disposeAfterFence(second)
         #expect(disposer.activeTransactionCount == 1)
         #expect(disposer.pendingOwnerCount == 1)
@@ -339,7 +340,7 @@ struct AudioUnitDisposerTests {
         }
         #expect(admissionReturned.wait(timeout: .now() + 0.02) == .timedOut)
         releaseFirst.signal()
-        #expect(admissionReturned.wait(timeout: .now() + 1) == .success)
+        #expect(admissionReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         let accepted = try #require(admission.value)
 
         #expect(first.callCounts.uninitialise == 1)
@@ -370,7 +371,7 @@ struct AudioUnitDisposerTests {
         let admissionReturned = DispatchSemaphore(value: 0)
 
         disposer.disposeAfterFence(first)
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         disposer.disposeAfterFence(second)
         #expect(disposer.activeTransactionCount == 1)
         #expect(disposer.pendingOwnerCount == 1)
@@ -386,7 +387,7 @@ struct AudioUnitDisposerTests {
         #expect(disposer.maximumTransactionCount == 1)
 
         releaseFirst.signal()
-        #expect(admissionReturned.wait(timeout: .now() + 1) == .success)
+        #expect(admissionReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         let accepted = try #require(admission.value)
 
         #expect(first.callCounts.uninitialise == 1)
@@ -425,7 +426,7 @@ struct AudioUnitDisposerTests {
         #expect(quarantine.count == 2)
 
         release.signal()
-        #expect(first.teardownReturned.wait(timeout: .now() + 1) == .success)
+        #expect(first.teardownReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(disposer.activeTransactionCount == 1)
         #expect(disposer.transactionCount == 1)
         #expect(disposer.maximumTransactionCount == 1)
@@ -785,7 +786,7 @@ struct DeferredLifecycleCommandTests {
             let end =
                 source.range(
                     of: "case .ownerRetained", range: start.upperBound..<source.endIndex)?
-                    .lowerBound
+                .lowerBound
                 ?? source.index(start.upperBound, offsetBy: 900)
             let branch = source[start.upperBound..<end]
             #expect(

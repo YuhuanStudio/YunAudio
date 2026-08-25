@@ -34,7 +34,7 @@ struct OwnedResourceShutdownTests {
             })
         let owner = StubOwner()
         let first = worker.submit(owner)
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         for _ in 1..<10_000 {
             #expect(worker.submit(owner) === first)
@@ -49,7 +49,7 @@ struct OwnedResourceShutdownTests {
         #expect(quarantine.count == 1)
 
         release.signal()
-        #expect(first.wait(timeout: 1) == .complete)
+        #expect(first.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(first.completionCount == 1)
         let complete = worker.telemetry
         #expect(complete.startedOperations == 1)
@@ -68,7 +68,7 @@ struct OwnedResourceShutdownTests {
             queueEntered.signal()
             _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
-        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+        #expect(queueEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let operations = Counter()
         let resourceQuarantine = ProcessLifetimeResourceQuarantine()
@@ -98,7 +98,7 @@ struct OwnedResourceShutdownTests {
         let retry = worker.retryAfterTimeoutBeforeEntry()
         #expect(retry != nil)
         releaseQueue.signal()
-        #expect(retry?.wait(timeout: 0.5) == .complete)
+        #expect(retry?.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(retry?.completionCount == 1)
         #expect(operations.value == 1)
         #expect(worker.telemetry.startedOperations == 1)
@@ -132,7 +132,7 @@ struct OwnedResourceShutdownTests {
         let began = DispatchTime.now().uptimeNanoseconds
         let fence = worker.submit(owner!)
         owner = nil
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         #expect(fence.wait(timeout: 0.25) == .timedOut)
         let elapsed = DispatchTime.now().uptimeNanoseconds - began
@@ -148,7 +148,7 @@ struct OwnedResourceShutdownTests {
         #expect(worker.retryAfterTimeoutBeforeEntry() == nil)
 
         release.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         // A late successful return is not evidence that a timed-out callback
         // owner was clean at the deadline, and cannot release or republish it.
         #expect(fence.wait(timeout: 0) == .timedOut)
@@ -173,7 +173,7 @@ struct OwnedResourceShutdownTests {
             queueEntered.signal()
             _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
-        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+        #expect(queueEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let quarantine = ProcessLifetimeAudioQuarantine()
         let worker = LocalSongOperationWorker(
@@ -188,7 +188,7 @@ struct OwnedResourceShutdownTests {
         #expect(retry !== first)
         #expect(quarantine.count == 1)
         releaseQueue.signal()
-        #expect(retry.wait(timeout: 0.5) == .complete)
+        #expect(retry.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(retry.completionCount == 1)
         #expect(quarantine.count == 0)
         #expect(quarantine.refusalForNewAudioOwnership() == nil)
@@ -210,7 +210,7 @@ struct OwnedResourceShutdownTests {
         let fence = worker.submit(owner!)
         owner = nil
 
-        #expect(fence.wait(timeout: 1) == .operationFailed)
+        #expect(fence.wait(timeout: TestGate.deadlockSeconds) == .operationFailed)
         #expect(fence.completionCount == 1)
         #expect(retained != nil)
         #expect(resourceQuarantine.count == 1)
@@ -250,10 +250,10 @@ struct OwnedResourceShutdownTests {
                 return second ?? false
             })
         let fence = worker.submit(StubOwner())
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(fence.wait(timeout: 0.25) == .timedOut)
         releaseFirst.signal()
-        #expect(operationReturned.wait(timeout: .now() + 1) == .success)
+        #expect(operationReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(secondCalls.value == 0)
         #expect(fence.completionCount == 1)
         #expect(worker.telemetry.startedOperations == 1)

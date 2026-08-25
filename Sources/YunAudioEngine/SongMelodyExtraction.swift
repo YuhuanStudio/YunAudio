@@ -156,7 +156,8 @@ public enum SongMelody {
                 consumed += hop
                 filled = min(frameSize, filled + hop)
                 guard filled >= frameSize else { continue }
-                let time = Double(read - AVAudioFramePosition(pending.count - consumed))
+                let time =
+                    Double(read - AVAudioFramePosition(pending.count - consumed))
                     / rate
                 if let midi = estimate(
                     window: window, tracker: tracker, learned: learned)

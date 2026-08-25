@@ -226,7 +226,7 @@ struct LightingResourceTests {
         let retry = worker.retryAfterTimeoutBeforeEntry()
         #expect(retry != nil)
         releaseQueue.signal()
-        #expect(retry?.wait(timeout: 0.5) == .complete)
+        #expect(retry?.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(worker.telemetry.startedOperations == 1)
         #expect(worker.telemetry.retriedBeforeEntry == 1)
         #expect(resourceQuarantine.count == 0)

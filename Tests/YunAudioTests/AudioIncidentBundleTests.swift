@@ -957,7 +957,7 @@ struct IncidentCallbackTelemetryTests {
                 group.leave()
             }
         }
-        #expect(group.wait(timeout: .now() + 2) == .success)
+        #expect(group.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         var snapshot = YunRTIncidentCallbackSnapshot()
         yun_rt_incident_callback_snapshot(pointer, true, &snapshot)

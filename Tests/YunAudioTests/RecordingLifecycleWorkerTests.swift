@@ -201,18 +201,18 @@ struct RecorderFinalisationWorkerTests {
             writerTimeout: 1,
             label: "yunaudio.test.recorder-finalisation-independence")
         let fence = worker.submit(owner)
-        #expect(writerEntered.wait(timeout: .now() + 1) == .success)
+        #expect(writerEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let began = DispatchTime.now().uptimeNanoseconds
         DispatchQueue(label: "yunaudio.test.route-teardown-independent").async {
             routeReached.signal()
         }
-        #expect(routeReached.wait(timeout: .now() + 0.1) == .success)
+        #expect(routeReached.wait(timeout: .now() + TestGate.deadlock) == .success)
         let elapsed = DispatchTime.now().uptimeNanoseconds - began
         #expect(elapsed < 100_000_000)
 
         releaseWriter.signal()
-        #expect(fence.wait(timeout: 1) == .complete)
+        #expect(fence.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(fence.completionCount == 1)
         #expect(worker.telemetry.completedOwners == 1)
         #expect(worker.telemetry.retainedOwners == 0)

@@ -205,7 +205,10 @@ struct EffectCostTableTests {
                 let measured = SignalFidelity.cost(
                     of: [kind], on: source, sampleRate: rate)
             else {
-                print(String(format: "%-14s  refused to build at this rate", (kind.rawValue as NSString).utf8String!))
+                print(
+                    String(
+                        format: "%-14s  refused to build at this rate",
+                        (kind.rawValue as NSString).utf8String!))
                 continue
             }
             let worst =
@@ -233,14 +236,17 @@ struct EffectCostTableTests {
     /// candidate left for a default that costs fidelity — and it does not.
     @Test("a rate conversion round trip is inaudible")
     func resamplingIsNotTheCost() throws {
-        for (from, through) in [(44_100.0, 48_000.0), (48_000.0, 44_100.0), (96_000.0, 48_000.0)] {
+        for (from, through) in [
+            (44_100.0, 48_000.0), (48_000.0, 44_100.0), (96_000.0, 48_000.0),
+        ] {
             let material = SignalFidelity.bandLimitedFixture(seconds: 1, sampleRate: from)
             let measured = try #require(
                 SignalFidelity.costOfResampling(
                     from: from, through: through, on: material))
             #expect(
                 measured.residualDecibels < -55,
-                "\(Int(from)) → \(Int(through)) → \(Int(from)): \(measured.residualDecibels) dB")
+                "\(Int(from)) → \(Int(through)) → \(Int(from)): \(measured.residualDecibels) dB"
+            )
             #expect(measured.correlation > 0.9999)
         }
     }

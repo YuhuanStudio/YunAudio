@@ -73,13 +73,13 @@ struct AudioUnitIsolationLaneTests {
             }
             if case .timedOut = result { results.append("timed-out") }
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
         engineQueue.async {
             results.append("stop")
             stopReached.signal()
         }
 
-        #expect(stopReached.wait(timeout: .now() + 0.3) == .success)
+        #expect(stopReached.wait(timeout: .now() + TestGate.deadlock) == .success)
         let elapsed = ProcessInfo.processInfo.systemUptime - began
         #expect(elapsed >= 0.02)
         #expect(elapsed < 0.3)
@@ -141,7 +141,7 @@ struct AudioUnitIsolationLaneTests {
             Issue.record("the construction transaction escaped its deadline")
         }
         release.signal()
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(stages.snapshot == [1])
         #expect(try #require(contexts.snapshot.first).retainedOwnerCount == 1)
         #expect(quarantine.count == 1)
@@ -211,8 +211,8 @@ struct AudioUnitIsolationLaneTests {
             timedOutCompletion.signal()
         }
 
-        #expect(returnedBeforePublication.wait(timeout: .now() + 1) == .success)
-        #expect(timedOutCompletion.wait(timeout: .now() + 1) == .success)
+        #expect(returnedBeforePublication.wait(timeout: .now() + TestGate.deadlock) == .success)
+        #expect(timedOutCompletion.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(timedOutResults.snapshot == ["timed-out"])
         #expect(timedOutOperations.snapshot.count == 1)
         #expect(timedOutCleanups.snapshot.count == 0)
@@ -269,7 +269,7 @@ struct AudioUnitIsolationLaneTests {
             completedCompletion.signal()
         }
 
-        #expect(returnClaimed.wait(timeout: .now() + 1) == .success)
+        #expect(returnClaimed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(completedCompletion.wait(timeout: .now() + 0.08) == .timedOut)
         #expect(completedResults.snapshot.count == 0)
         #expect(completedCleanups.snapshot.count == 0)
@@ -279,7 +279,7 @@ struct AudioUnitIsolationLaneTests {
         #expect(completedLane.admitsConstruction)
 
         releaseCompletedPublication.signal()
-        #expect(completedCompletion.wait(timeout: .now() + 1) == .success)
+        #expect(completedCompletion.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(wait { completedLane.activeCount == 0 })
         #expect(completedResults.snapshot == [29])
         #expect(completedResults.snapshot.count == 1)
@@ -314,7 +314,7 @@ struct AudioUnitIsolationLaneTests {
             if case .completed(0) = result { outcomes.append("first") }
             firstDone.signal()
         }
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         DispatchQueue.global().async {
             let result: AudioUnitLaneResult<Int> = lane.perform(timeout: 1) { _ in 1 }
@@ -328,13 +328,13 @@ struct AudioUnitIsolationLaneTests {
             if case .completed(2) = result { outcomes.append("latest") }
             thirdDone.signal()
         }
-        #expect(secondDone.wait(timeout: .now() + 1) == .success)
+        #expect(secondDone.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(lane.activeCount == 1)
         #expect(lane.pendingCount == 1)
 
         releaseFirst.signal()
-        #expect(firstDone.wait(timeout: .now() + 1) == .success)
-        #expect(thirdDone.wait(timeout: .now() + 1) == .success)
+        #expect(firstDone.wait(timeout: .now() + TestGate.deadlock) == .success)
+        #expect(thirdDone.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(Set(outcomes.snapshot) == Set(["first", "superseded", "latest"]))
         #expect(lane.startedCount == 2)
         #expect(lane.maximumConcurrentCount == 1)
@@ -389,7 +389,7 @@ struct AudioUnitIsolationLaneTests {
                 firstEntered.signal()
                 releaseFirst.wait()
             })
-        #expect(firstEntered.wait(timeout: .now() + 1) == .success)
+        #expect(firstEntered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         for value in 1..<10_000 {
             let lease = try #require(owner.acquire())
@@ -404,7 +404,7 @@ struct AudioUnitIsolationLaneTests {
         #expect(lane.pendingCount == 1)
         #expect(owner.activeLeaseCount <= 2)
         releaseFirst.signal()
-        #expect(latestReturned.wait(timeout: .now() + 1) == .success)
+        #expect(latestReturned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(wait { lane.activeCount == 0 })
         #expect(executed.snapshot == [0, 9_999])
         #expect(lane.startedCount == 2)
@@ -434,7 +434,7 @@ struct AudioUnitIsolationLaneTests {
                     release.wait()
                 }
             })
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
         let began = ProcessInfo.processInfo.systemUptime
         #expect(!gate.closeForTeardown(waitingUpTo: 0.01))
         #expect(ProcessInfo.processInfo.systemUptime - began < 0.1)

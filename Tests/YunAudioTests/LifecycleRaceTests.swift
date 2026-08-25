@@ -238,7 +238,7 @@ struct LifecycleRaceTests {
             }
             finished.signal()
         }
-        #expect(started.wait(timeout: .now() + 1) == .success)
+        #expect(started.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         var torn = 0
         for _ in 0..<100_000 {
@@ -248,7 +248,7 @@ struct LifecycleRaceTests {
             if !isLockedPair && !isUnlockedPair { torn += 1 }
         }
 
-        #expect(finished.wait(timeout: .now() + 5) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         engine.installClockPublisherForTesting(nil)
         print("100,000 clock snapshots across 20,000 owner swaps: \(torn) torn pairs")
         #expect(torn == 0)
@@ -267,7 +267,7 @@ struct LifecycleRaceTests {
                 return nil
             })
         defer { release.signal() }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         DispatchQueue.global(qos: .userInitiated).asyncAfter(
             deadline: .now() + .milliseconds(30)
@@ -296,7 +296,7 @@ struct LifecycleRaceTests {
                 return nil
             })
         defer { release.signal() }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let began = DispatchTime.now().uptimeNanoseconds
         let first = publisher.stop(until: HALTeardownDeadline(timeout: 0.05))
@@ -330,7 +330,7 @@ struct LifecycleRaceTests {
             })
         engine.installClockPublisherForTesting(publisher)
         defer { release.signal() }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let first = engine.stop(timeout: 0.05)
         #expect(first == .clockPublisherTimedOut)
@@ -369,7 +369,7 @@ struct LifecycleRaceTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let began = DispatchTime.now().uptimeNanoseconds
         var invalid = 0
@@ -384,7 +384,7 @@ struct LifecycleRaceTests {
         let elapsed = DispatchTime.now().uptimeNanoseconds - began
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         engine.installRecorderForTesting(nil)
         print(
             "10,000 contended recording snapshots: \(elapsed) ns; "

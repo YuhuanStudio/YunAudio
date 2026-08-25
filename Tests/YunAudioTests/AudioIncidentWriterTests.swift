@@ -92,7 +92,7 @@ struct AudioIncidentWriterTests {
         #expect(writer.submit(fixture(2)))
         workerQueue.resume()
 
-        #expect(probe.began.wait(timeout: .now() + 1) == .success)
+        #expect(probe.began.wait(timeout: .now() + TestGate.deadlock) == .success)
         probe.release.signal()
         let result = IncidentWriterResultBox()
         let completed = DispatchSemaphore(value: 0)
@@ -100,7 +100,7 @@ struct AudioIncidentWriterTests {
             result.store($0)
             completed.signal()
         }
-        #expect(completed.wait(timeout: .now() + 2) == .success)
+        #expect(completed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(result.result == .complete)
         #expect(probe.values == [1, 2])
     }
@@ -124,7 +124,7 @@ struct AudioIncidentWriterTests {
             result.store($0)
             completed.signal()
         }
-        #expect(completed.wait(timeout: .now() + 2) == .success)
+        #expect(completed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(result.result == .complete)
         #expect(writer.statistics.writes == 1)
     }
@@ -161,7 +161,7 @@ struct AudioIncidentWriterTests {
             label: "yunaudio.test.incident.first-latest")
 
         #expect(writer.submit(fixture(1)))
-        #expect(probe.began.wait(timeout: .now() + 1) == .success)
+        #expect(probe.began.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(writer.submit(fixture(2)))
         #expect(writer.submit(fixture(3)))
         probe.release.signal()
@@ -172,7 +172,7 @@ struct AudioIncidentWriterTests {
             result.store($0)
             completed.signal()
         }
-        #expect(completed.wait(timeout: .now() + 2) == .success)
+        #expect(completed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(result.result == .complete)
         #expect(probe.values == [1, 3])
         #expect(writer.statistics.submissions == 3)
@@ -188,7 +188,7 @@ struct AudioIncidentWriterTests {
             operations: .init(write: probe.write),
             label: "yunaudio.test.incident.timeout")
         #expect(writer.submit(fixture(1)))
-        #expect(probe.began.wait(timeout: .now() + 1) == .success)
+        #expect(probe.began.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let result = IncidentWriterResultBox()
         let completed = DispatchSemaphore(value: 0)
@@ -196,7 +196,7 @@ struct AudioIncidentWriterTests {
             result.store($0)
             completed.signal()
         }
-        #expect(completed.wait(timeout: .now() + 1) == .success)
+        #expect(completed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(result.result == .timedOut)
         #expect(writer.statistics.writes == 0)
         #expect(writer.statistics.flushTimeouts == 1)
@@ -226,7 +226,7 @@ struct AudioIncidentWriterTests {
         let refused = writer.submitCritical(fixture(4))
         workerQueue.resume()
 
-        #expect(written.began.wait(timeout: .now() + 1) == .success)
+        #expect(written.began.wait(timeout: .now() + TestGate.deadlock) == .success)
         written.release.signal()
 
         #expect(refused.wait(timeout: .zero) == .refused)
@@ -254,7 +254,7 @@ struct AudioIncidentWriterTests {
             },
             label: "yunaudio.test.incident.critical-failure")
         let receipt = writer.submitCritical(fixture(21))
-        #expect(began.wait(timeout: .now() + 1) == .success)
+        #expect(began.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(writer.submit(fixture(22)))
         release.signal()
 
@@ -265,7 +265,7 @@ struct AudioIncidentWriterTests {
             flush.store($0)
             flushed.signal()
         }
-        #expect(flushed.wait(timeout: .now() + 2) == .success)
+        #expect(flushed.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         #expect(flush.result == .complete)
         #expect(written.values == [22])
@@ -284,7 +284,7 @@ struct AudioIncidentWriterTests {
             },
             label: "yunaudio.test.incident.critical-timeout")
         let receipt = writer.submitCritical(fixture(31))
-        #expect(began.wait(timeout: .now() + 1) == .success)
+        #expect(began.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(receipt.wait(timeout: .milliseconds(20)) == .timedOut)
 
         release.signal()
@@ -294,7 +294,7 @@ struct AudioIncidentWriterTests {
             flush.store($0)
             flushed.signal()
         }
-        #expect(flushed.wait(timeout: .now() + 2) == .success)
+        #expect(flushed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(flush.result == .complete)
         #expect(receipt.wait(timeout: .zero) == .timedOut)
         #expect(writer.statistics.writes == 1)
@@ -307,7 +307,7 @@ struct AudioIncidentWriterTests {
             operations: .init(write: probe.write),
             label: "yunaudio.test.incident.pending-critical-timeout")
         #expect(writer.submit(fixture(1, started: 10, ended: 11)))
-        #expect(probe.began.wait(timeout: .now() + 1) == .success)
+        #expect(probe.began.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let checkpoint = writer.submitCritical(
             fixture(2, teardownStatus: .notObserved, started: 20, ended: 21))
@@ -322,7 +322,7 @@ struct AudioIncidentWriterTests {
             flush.store($0)
             flushed.signal()
         }
-        #expect(flushed.wait(timeout: .now() + 2) == .success)
+        #expect(flushed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(flush.result == .complete)
         #expect(checkpoint.wait(timeout: .zero) == .timedOut)
         #expect(probe.values.map(\.runID.low) == [1, 2, 2])
@@ -385,7 +385,7 @@ struct AudioIncidentWriterTests {
             firstFlush.store($0)
             firstCompleted.signal()
         }
-        #expect(firstCompleted.wait(timeout: .now() + 2) == .success)
+        #expect(firstCompleted.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(firstFlush.result == .complete)
 
         let finalData = try Data(contentsOf: destination)
@@ -407,7 +407,7 @@ struct AudioIncidentWriterTests {
             label: "yunaudio.test.incident.phase-run-scope")
 
         #expect(writer.submit(fixture(61, started: 10, ended: 11)))
-        #expect(probe.began.wait(timeout: .now() + 1) == .success)
+        #expect(probe.began.wait(timeout: .now() + TestGate.deadlock) == .success)
         let nextRun = writer.submitCritical(
             fixture(
                 62, teardownStatus: .notObserved,
@@ -508,7 +508,7 @@ struct AudioIncidentWriterTests {
             flush.store($0)
             flushed.signal()
         }
-        #expect(flushed.wait(timeout: .now() + 2) == .success)
+        #expect(flushed.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(flush.result == .complete)
         #expect(writer.statistics.submissions == 1)
         #expect(writer.statistics.writes == 1)

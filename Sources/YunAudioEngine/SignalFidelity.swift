@@ -164,8 +164,9 @@ public enum SignalFidelity {
         // Room for the ratio plus the converter's own priming.
         let capacity = AVAudioFrameCount(
             Double(samples.count) * destinationRate / sourceRate + 4096)
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: output, frameCapacity: capacity)
+        guard
+            let outputBuffer = AVAudioPCMBuffer(
+                pcmFormat: output, frameCapacity: capacity)
         else { return nil }
         var supplied = false
         var conversionError: NSError?
@@ -232,7 +233,9 @@ public enum SignalFidelity {
     /// whole point of having a number.
     ///
     /// Not for rate conversions — see `bandLimitedFixture`.
-    public static func fixture(seconds: Double, sampleRate: Double, amplitude: Float = 0.3)
+    public static func fixture(
+        seconds: Double, sampleRate: Double, amplitude: Float = 0.3
+    )
         -> [Float]
     {
         let count = max(0, Int(seconds * sampleRate))
@@ -267,6 +270,7 @@ public enum SignalFidelity {
     ///   - reference: What went in.
     ///   - processed: What came out, at the same rate.
     ///   - sampleRate: Both, since a comparison across rates is not one.
+    /// - Returns: Delay, gain, residual and correlation between the two.
     public static func compare(
         reference: [Float], processed: [Float], sampleRate: Double
     ) -> Measurement {

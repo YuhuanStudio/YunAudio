@@ -83,7 +83,7 @@ struct TranscriptDrainTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let started = DispatchTime.now().uptimeNanoseconds
         let unavailable = engine.transcriptTapStatistics(at: 0)
@@ -94,7 +94,7 @@ struct TranscriptDrainTests {
         #expect(yun_rt_ring_dropped(ring) == 0)
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         let recovered = try #require(engine.transcriptTapStatistics(at: 0))
         #expect(recovered.available == 257)
         #expect(recovered.dropped == 0)
@@ -113,7 +113,7 @@ struct TranscriptDrainTests {
             lock.unlock()
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         var readWasCalled = false
         let contended = RoutingEngine.withStemSnapshotLock(lock) {
@@ -124,7 +124,7 @@ struct TranscriptDrainTests {
         #expect(!readWasCalled)
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(RoutingEngine.withStemSnapshotLock(lock) { 73 } == 73)
     }
 
@@ -152,7 +152,7 @@ struct TranscriptDrainTests {
             }
             finished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         var output = [Float](repeating: .nan, count: samples.count)
         let started = DispatchTime.now().uptimeNanoseconds
@@ -166,7 +166,7 @@ struct TranscriptDrainTests {
         #expect(Int(yun_rt_ring_available(ring)) == samples.count)
 
         release.signal()
-        #expect(finished.wait(timeout: .now() + 1) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let recoveredRead = output.withUnsafeMutableBufferPointer { buffer in
             engine.drainTranscript(0, into: buffer.baseAddress!, capacity: buffer.count)

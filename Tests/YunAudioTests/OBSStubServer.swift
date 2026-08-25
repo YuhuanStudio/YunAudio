@@ -84,7 +84,7 @@ final class StubOBSServer: @unchecked Sendable {
             self?.accept(connection)
         }
         listener.start(queue: queue)
-        guard ready.wait(timeout: .now() + 5) == .success, port != 0 else {
+        guard ready.wait(timeout: .now() + TestGate.deadlock) == .success, port != 0 else {
             listener.cancel()
             throw StubFailure.didNotStart
         }

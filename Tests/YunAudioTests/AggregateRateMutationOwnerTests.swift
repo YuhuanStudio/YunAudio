@@ -117,7 +117,7 @@ struct AggregateRateMutationOwnerTests {
         }
         #expect(cleaned.wait(timeout: .now() + 0.02) == .timedOut)
         release.signal()
-        #expect(cleaned.wait(timeout: .now() + 1) == .success)
+        #expect(cleaned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(trace.values == ["returned", "cleanup"])
         #expect(quarantine.count == 1)
     }

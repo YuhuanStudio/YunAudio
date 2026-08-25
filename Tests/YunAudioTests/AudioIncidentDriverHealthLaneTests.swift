@@ -31,7 +31,7 @@ struct AudioIncidentDriverHealthLaneTests {
         let first = DispatchQueue.global(qos: .utility).sync {
             lane.read(deviceID: 1, wasRequired: true, timeout: 0.01)
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(first.state == .readFailed)
 
         let refused = lane.read(deviceID: 1, wasRequired: true, timeout: 0.01)
@@ -56,7 +56,7 @@ struct AudioIncidentDriverHealthLaneTests {
         }
 
         let first = lane.read(deviceID: 1, wasRequired: false, timeout: 1)
-        #expect(returned.wait(timeout: .now() + 1) == .success)
+        #expect(returned.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(first.state == .available)
         let second = lane.read(deviceID: 1, wasRequired: false, timeout: 1)
         #expect(second.state == .available)
@@ -74,7 +74,7 @@ struct AudioIncidentDriverHealthLaneTests {
             occupied.signal()
             _ = release.wait(timeout: .now() + TestGate.deadlock)
         }
-        #expect(occupied.wait(timeout: .now() + 1) == .success)
+        #expect(occupied.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         let calls = Counter()
         let lane = BoundedAudioIncidentDriverHealthLane(
@@ -95,7 +95,7 @@ struct AudioIncidentDriverHealthLaneTests {
 
         worker.async { drained.signal() }
         release.signal()
-        #expect(drained.wait(timeout: .now() + 1) == .success)
+        #expect(drained.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(calls.value == 0)
         #expect(lane.statistics.reads == 1)
         #expect(lane.statistics.timedOut == 1)

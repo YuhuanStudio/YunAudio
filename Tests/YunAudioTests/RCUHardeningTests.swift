@@ -43,7 +43,7 @@ struct RCUHardeningTests {
             finished.signal()
         }
         reader.start()
-        #expect(loaded.wait(timeout: .now() + 2) == .success)
+        #expect(loaded.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         #expect(
             yun_rt_cell_publish(cell, UnsafeMutableRawPointer(second))
@@ -76,7 +76,7 @@ struct RCUHardeningTests {
         #expect(!yun_rt_cell_has_reached(cell, fence))
 
         resume.signal()
-        #expect(finished.wait(timeout: .now() + 2) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(yun_rt_cell_wait_until(cell, fence, 100))
         // The automatic poll may win this race; either it or this explicit
         // collection has to reclaim exactly the one queued generation.

@@ -381,7 +381,9 @@ struct CollectionPersistenceTests {
                     probe.record(sentAt: sentAt)
                     delivered.signal()
                 }
-                guard delivered.wait(timeout: .now() + 1) == .success else { return }
+                guard delivered.wait(timeout: .now() + TestGate.deadlock) == .success else {
+                    return
+                }
             }
         }
         return probe

@@ -297,7 +297,6 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     /// three preceding attempts wrong.
     public private(set) var teardownDecidedBy = "never"
 
-
     /// - Parameters:
     ///   - microphoneUID: The microphone to capture and cancel for.
     ///   - settings: Speaker and far-end reference.

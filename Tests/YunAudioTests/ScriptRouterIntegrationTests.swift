@@ -38,7 +38,7 @@ private final class ScriptRouterGate<Value: Sendable>: @unchecked Sendable {
         continuation?.resume(returning: value)
     }
 
-    func wait(timeout: TimeInterval = 2) async -> Value? {
+    func wait(timeout: TimeInterval = TestGate.deadlockSeconds) async -> Value? {
         await withCheckedContinuation { continuation in
             let completed: Value?? = lock.withLock {
                 switch state {

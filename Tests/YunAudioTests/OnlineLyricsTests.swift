@@ -686,7 +686,15 @@ struct OnlineLyricsTests {
             } else if url.host == "c.y.qq.com" {
                 body = #"{"lyric":"[00:01.00]first\n[00:04.00]second"}"#
             } else {
-                try await Task.sleep(for: .seconds(6))
+                // Long enough that only a failure to cancel can reach the
+                // tally below. Six seconds was a bet that the fast path
+                // answers within six, and under the full parallel suite it
+                // does not — the sleeper then finishes honestly, the count
+                // goes up, and the test reports the machine's load as a
+                // cancellation bug. A cancelled sleep throws immediately
+                // whatever its length, so this costs nothing when the code
+                // is right.
+                try await Task.sleep(for: .seconds(TestGate.deadlockSeconds))
                 // Reached only if the sleep was *not* cancelled, which is the
                 // regression this test exists for. Counting it is stronger than
                 // timing the whole lookup and immune to the scheduler: the old
@@ -811,7 +819,15 @@ struct OnlineLyricsTests {
             case "c.y.qq.com":
                 body = #"{"lyric":"[00:18.96]first\n[00:25.65]second"}"#
             default:
-                try await Task.sleep(for: .seconds(6))
+                // Long enough that only a failure to cancel can reach the
+                // tally below. Six seconds was a bet that the fast path
+                // answers within six, and under the full parallel suite it
+                // does not — the sleeper then finishes honestly, the count
+                // goes up, and the test reports the machine's load as a
+                // cancellation bug. A cancelled sleep throws immediately
+                // whatever its length, so this costs nothing when the code
+                // is right.
+                try await Task.sleep(for: .seconds(TestGate.deadlockSeconds))
                 // Reached only if the grace waited for a provider that never
                 // answers, which is the regression. Counting it says that
                 // directly; the wall clock only said it on an idle machine.

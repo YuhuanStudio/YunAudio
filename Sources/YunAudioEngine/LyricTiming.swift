@@ -84,6 +84,8 @@ public enum LyricTiming {
     ///   - lyrics: The lines as the file gives them, in order.
     ///   - melody: Sung pitch found in the recording, from `SongMelody.extract`.
     ///   - duration: The song's length, so a line's activity can be bounded.
+    /// - Returns: What is wrong with the timing, or that there is not enough
+    ///   sung material to say.
     public static func diagnose(
         lyrics: [Lyrics.Line], melody: [PitchSample], duration: Double
     ) -> Diagnosis {
@@ -120,9 +122,11 @@ public enum LyricTiming {
         var residuals: [Double] = []
         for onset in wordOnsets {
             let moved = onset + coarse
-            guard let nearest = sungOnsets.min(by: {
-                abs($0 - moved) < abs($1 - moved)
-            }) else { continue }
+            guard
+                let nearest = sungOnsets.min(by: {
+                    abs($0 - moved) < abs($1 - moved)
+                })
+            else { continue }
             let residual = nearest - onset
             // Beyond the search there is no pairing worth having, and keeping
             // one would drag the fit toward a coincidence.
@@ -317,7 +321,8 @@ public enum LyricTiming {
     /// Agreement is the overlap of the two, normalised so a signal that is
     /// mostly ones cannot score well by covering everything. Without that, a
     /// lyric file with no gaps would agree with any melody at every offset.
-    static func bestOffset(words: [Float], sung: [Float]) -> (offset: Double, agreement: Double) {
+    static func bestOffset(words: [Float], sung: [Float]) -> (offset: Double, agreement: Double)
+    {
         let count = min(words.count, sung.count)
         guard count > 8 else { return (0, 0) }
         let limit = min(Int(searchSeconds / step), count / 3)

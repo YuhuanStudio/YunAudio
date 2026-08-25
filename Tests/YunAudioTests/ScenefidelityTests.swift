@@ -115,7 +115,8 @@ struct SceneFidelityTests {
                 // more than it costs speech.
                 #expect(
                     musicWith.correlation < withIt.correlation,
-                    "\(scene.name): music \(musicWith.correlation), speech \(withIt.correlation)")
+                    "\(scene.name): music \(musicWith.correlation), speech \(withIt.correlation)"
+                )
             }
         }
         print("")

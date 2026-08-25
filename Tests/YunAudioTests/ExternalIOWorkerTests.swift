@@ -138,7 +138,7 @@ struct ExternalIOWorkerTests {
         }
 
         #expect(everyRequestShared)
-        #expect(first.wait(timeout: 1) == .complete)
+        #expect(first.wait(timeout: TestGate.deadlockSeconds) == .complete)
         #expect(first.completionCount == 1)
     }
 

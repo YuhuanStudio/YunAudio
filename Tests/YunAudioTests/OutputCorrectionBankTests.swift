@@ -370,7 +370,7 @@ struct OutputCorrectionBankTests {
             cycles += 1
             Thread.sleep(forTimeInterval: 0.000_1)
         }
-        #expect(publication.wait(timeout: .now() + 1) == .success)
+        #expect(publication.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         bus.fill { _, _, _ in 1 }
         bank.process(bus.list)

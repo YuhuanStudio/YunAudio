@@ -52,7 +52,7 @@ struct FormantCopyFastPathTests {
             }
         }
 
-        #expect(finished.wait(timeout: .now() + 2) == .success)
+        #expect(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(finiteSamples == frames * 1_000)
         #expect(handle.shifter.ratio == 1.25)
     }

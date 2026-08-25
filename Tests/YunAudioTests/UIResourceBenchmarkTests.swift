@@ -221,7 +221,7 @@ struct UIResourceBenchmarkTests {
             }
             enqueued.signal()
         }
-        #expect(enqueued.wait(timeout: .now() + 1) == .success)
+        #expect(enqueued.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         Thread.sleep(forTimeInterval: 0.009)
     }

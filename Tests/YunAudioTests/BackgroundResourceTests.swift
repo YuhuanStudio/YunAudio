@@ -54,14 +54,14 @@ struct BackgroundResourceTests {
         // Put every signal into the fixed window before its deadline. Without
         // the coalescer this barrier would leave 100 expensive refreshes queued.
         queue.sync {}
-        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + TestGate.deadlock) == .success)
         queue.sync {}
         #expect(count.current == 1)
 
         // Coalescing is per burst, not a once-only gate.
         coalescer.signal()
         queue.sync {}
-        #expect(delivered.wait(timeout: .now() + 1) == .success)
+        #expect(delivered.wait(timeout: .now() + TestGate.deadlock) == .success)
         queue.sync {}
         #expect(count.current == 2)
     }

@@ -138,7 +138,9 @@ private final class ScriptServiceHeldScheduler: @unchecked Sendable {
         if passesThrough { MainRunLoopDelivery.perform(operation) }
     }
 
-    func waitForFirstHeld() async -> Bool { await firstHeld.wait(timeout: 1) == true }
+    func waitForFirstHeld() async -> Bool {
+        await firstHeld.wait(timeout: TestGate.deadlockSeconds) == true
+    }
 
     var scheduledCount: Int { lock.withLock { scheduledOperations } }
 
@@ -345,7 +347,8 @@ struct ScriptServiceTests {
                 service.reload(
                     "yun.on('muted', function () { yun.mute(true); });"
                 ) { initialLoad.resolve($0) }))
-        #expect(try #require(await initialLoad.wait(timeout: 1)).isSuccess)
+        #expect(
+            try #require(await initialLoad.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(service.listens(for: .muted))
         let publicationsBefore = service.statistics.resultPublications
 
@@ -358,7 +361,7 @@ struct ScriptServiceTests {
             scriptSubmissionWasAccepted(
                 service.reload("yun.on('muted', function () {});")))
         await MainActor.run { scheduler.releaseAllAndPassThrough() }
-        #expect(await secondReloadBegan.wait(timeout: 1) == true)
+        #expect(await secondReloadBegan.wait(timeout: TestGate.deadlockSeconds) == true)
         // Waited for rather than slept through. Thirty milliseconds was a bet
         // that the revocation lands in that window, and under a full parallel
         // run it does not — after which every count below describes work that
@@ -402,13 +405,13 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.reload(source) { loaded.resolve($0) }))
-        #expect(try #require(await loaded.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await loaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(service.listens(for: .muted))
         #expect(
             scriptSubmissionWasAccepted(
                 service.submit(.muted) { fired.resolve($0) }))
 
-        let result = try #require(await fired.wait(timeout: 1))
+        let result = try #require(await fired.wait(timeout: TestGate.deadlockSeconds))
         #expect(result.isSuccess, "\(result.error ?? "")")
         #expect(result.log == ["was muted", "unmuted"])
         #expect(requests.values == [.status, .perform(.mute(false))])
@@ -447,7 +450,7 @@ struct ScriptServiceTests {
                 service.submitManual("yun.status().running") {
                     completion.resolve($0)
                 }))
-        let result = try #require(await completion.wait(timeout: 1))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(result.value == "true")
         let statistics = service.statistics
         #expect(statistics.rpcApplications == 1)
@@ -483,7 +486,7 @@ struct ScriptServiceTests {
         }
         await MainActor.run { scheduler.releaseAllAndPassThrough() }
 
-        let result = try #require(await completion.wait(timeout: 1))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(!result.isSuccess)
         #expect(sideEffects.value == 0)
         let statistics = service.statistics
@@ -511,8 +514,8 @@ struct ScriptServiceTests {
                 service.submitManual("yun.status().running", deadline: deadline) {
                     completion.resolve($0)
                 }))
-        #expect(await handlerFinished.wait(timeout: 1) == true)
-        let result = try #require(await completion.wait(timeout: 1))
+        #expect(await handlerFinished.wait(timeout: TestGate.deadlockSeconds) == true)
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(!result.isSuccess)
         let statistics = service.statistics
         #expect(statistics.rpcApplications == 1)
@@ -537,7 +540,7 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.reload(source) { firstLoad.resolve($0) }))
-        #expect(try #require(await firstLoad.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await firstLoad.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(service.statistics.residentOwners == 1)
         #expect(service.listens(for: .muted))
 
@@ -552,12 +555,13 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.reload(source) { secondLoad.resolve($0) }))
-        #expect(try #require(await secondLoad.wait(timeout: 1)).isSuccess)
+        #expect(
+            try #require(await secondLoad.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(service.statistics.residentOwners == 1)
         #expect(
             scriptSubmissionWasAccepted(
                 service.unload { unloaded.resolve($0) }))
-        #expect(try #require(await unloaded.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await unloaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(service.statistics.residentOwners == 0)
         #expect(service.statistics.liveJavaScriptContexts == 0)
         #expect(!service.listens(for: .muted))
@@ -599,9 +603,9 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.reload(source) { loaded.resolve($0) }))
-        #expect(try #require(await loaded.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await loaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(scriptSubmissionWasAccepted(service.submit(.muted)))
-        #expect(await exhausted.wait(timeout: 2) == true)
+        #expect(await exhausted.wait(timeout: TestGate.deadlockSeconds) == true)
         #expect(await waitUntil { service.statistics.activeEntries == 0 })
 
         let statistics = service.statistics
@@ -624,7 +628,9 @@ struct ScriptServiceTests {
             #expect(
                 scriptSubmissionWasAccepted(
                     service.reload(source) { completion.resolve($0) }))
-            #expect(try #require(await completion.wait(timeout: 1)).isSuccess)
+            #expect(
+                try #require(await completion.wait(timeout: TestGate.deadlockSeconds)).isSuccess
+            )
         }
 
         let statistics = service.statistics
@@ -657,10 +663,10 @@ struct ScriptServiceTests {
                 service.reload(
                     "yun.on('tick', function (e) { yun.log('' + e.value); });"
                 ) { loaded.resolve($0) }))
-        #expect(try #require(await loaded.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await loaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(scheduler.scheduledCount == 1)
         #expect(scriptSubmissionWasAccepted(service.submit(.tick, payload: valuePayload(0))))
-        #expect(await blocker.entered.wait(timeout: 1) == true)
+        #expect(await blocker.entered.wait(timeout: TestGate.deadlockSeconds) == true)
 
         for value in 1..<9_999 {
             #expect(
@@ -683,7 +689,7 @@ struct ScriptServiceTests {
         #expect(scheduler.scheduledCount == 1)
         blocker.release.signal()
 
-        let result = try #require(await final.wait(timeout: 1))
+        let result = try #require(await final.wait(timeout: TestGate.deadlockSeconds))
         #expect(result.log == ["9999"])
         statistics = service.statistics
         #expect(statistics.tickApplications == 2)
@@ -710,7 +716,7 @@ struct ScriptServiceTests {
         }
 
         #expect(scriptSubmissionWasAccepted(service.submitManual("0")))
-        #expect(await blocker.entered.wait(timeout: 1) == true)
+        #expect(await blocker.entered.wait(timeout: TestGate.deadlockSeconds) == true)
         let applicationsBefore = service.statistics.entryApplications
         #expect(
             scriptSubmissionWasAccepted(
@@ -726,7 +732,7 @@ struct ScriptServiceTests {
         try await Task.sleep(for: .milliseconds(300))
         blocker.release.signal()
 
-        let result = try #require(await completion.wait(timeout: 1))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(!result.isSuccess)
         #expect(result.error?.contains("250") == true)
         try? await Task.sleep(for: .milliseconds(30))
@@ -759,7 +765,7 @@ struct ScriptServiceTests {
         }
 
         #expect(scriptSubmissionWasAccepted(service.submitManual("0")))
-        #expect(await blocker.entered.wait(timeout: 1) == true)
+        #expect(await blocker.entered.wait(timeout: TestGate.deadlockSeconds) == true)
         let applicationsBefore = service.statistics.entryApplications
         let contextsBefore = service.statistics.createdJavaScriptContexts
         let external = ScriptService.Deadline(
@@ -772,7 +778,7 @@ struct ScriptServiceTests {
 
         try await Task.sleep(for: .milliseconds(80))
         blocker.release.signal()
-        let result = try #require(await completion.wait(timeout: 1))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(!result.isSuccess)
         #expect(result.error != nil)
         let statistics = service.statistics
@@ -797,7 +803,7 @@ struct ScriptServiceTests {
             manual.stop()
         }
         #expect(scriptSubmissionWasAccepted(manual.submitManual("0")))
-        #expect(await manualBlocker.entered.wait(timeout: 1) == true)
+        #expect(await manualBlocker.entered.wait(timeout: TestGate.deadlockSeconds) == true)
         for _ in 0..<ScriptService.maximumQueuedManualEntries {
             #expect(scriptSubmissionWasAccepted(manual.submitManual("0")))
         }
@@ -818,9 +824,9 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 edge.reload("yun.on('muted', function () {});") { loaded.resolve($0) }))
-        #expect(try #require(await loaded.wait(timeout: 1)).isSuccess)
+        #expect(try #require(await loaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(scriptSubmissionWasAccepted(edge.submitManual("0")))
-        #expect(await edgeBlocker.entered.wait(timeout: 1) == true)
+        #expect(await edgeBlocker.entered.wait(timeout: TestGate.deadlockSeconds) == true)
         for _ in 0..<ScriptService.maximumQueuedResidentEdges {
             #expect(scriptSubmissionWasAccepted(edge.submit(.muted)))
         }
@@ -846,7 +852,7 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.submitManual(source) { completion.resolve($0) }))
-        let result = try #require(await completion.wait(timeout: 2))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(!result.isSuccess)
         #expect(result.error?.contains("too many") == true)
         #expect(actions.value == 128)
@@ -890,7 +896,7 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.reload(handlerSource) { loaded.resolve($0) }))
-        let handlerResult = try #require(await loaded.wait(timeout: 1))
+        let handlerResult = try #require(await loaded.wait(timeout: TestGate.deadlockSeconds))
         #expect(!handlerResult.isSuccess)
         #expect(!service.listens(for: .tick))
         #expect((handlerResult.error ?? "").utf8.count <= ScriptService.maximumErrorBytes)
@@ -926,7 +932,7 @@ struct ScriptServiceTests {
                 service.submitManual(
                     "yun.routing(true); yun.mute(false); yun.record(); yun.transcribe();"
                 ) { command.resolve($0) }))
-        #expect(try #require(await command.wait(timeout: 2)).isSuccess)
+        #expect(try #require(await command.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         #expect(
             performed.values == [
                 .routing(true), .mute(false), .record(nil), .transcribe(nil),
@@ -941,7 +947,7 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.submitManual(readingSource) { reading.resolve($0) }))
-        let read = try #require(await reading.wait(timeout: 2))
+        let read = try #require(await reading.wait(timeout: TestGate.deadlockSeconds))
         #expect(read.isSuccess)
         #expect(read.log == ["true", "Voice chat,Recording|Streaming"])
 
@@ -951,7 +957,7 @@ struct ScriptServiceTests {
                 service.submitManual("yun.preset('Gone'); yun.routing(false);") {
                     failed.resolve($0)
                 }))
-        let failure = try #require(await failed.wait(timeout: 2))
+        let failure = try #require(await failed.wait(timeout: TestGate.deadlockSeconds))
         #expect(!failure.isSuccess)
         #expect(failure.error?.contains("Gone") == true)
         #expect(performed.values.last == .preset("Gone"))
@@ -993,7 +999,7 @@ struct ScriptServiceTests {
             """
         #expect(
             scriptSubmissionWasAccepted(service.reload(source) { loaded.resolve($0) }))
-        #expect(try #require(await loaded.wait(timeout: 2)).isSuccess)
+        #expect(try #require(await loaded.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
 
         for (index, peak) in [0.25, 0.5].enumerated() {
             let event = ScriptServiceAsyncGate<ScriptService.Result>()
@@ -1002,7 +1008,7 @@ struct ScriptServiceTests {
                     service.submit(.tick, payload: .object(["peak": .double(peak)])) {
                         event.resolve($0)
                     }))
-            let result = try #require(await event.wait(timeout: 2))
+            let result = try #require(await event.wait(timeout: TestGate.deadlockSeconds))
             #expect(result.log == ["\(index + 1):\(peak)", "still here"])
             #expect(result.error?.contains("bad") == true)
         }
@@ -1011,7 +1017,7 @@ struct ScriptServiceTests {
         #expect(
             scriptSubmissionWasAccepted(
                 service.submit(.speakingWhileMuted) { action.resolve($0) }))
-        _ = try #require(await action.wait(timeout: 2))
+        _ = try #require(await action.wait(timeout: TestGate.deadlockSeconds))
         #expect(performed.values == [.mute(false)])
 
         let replacement = ScriptServiceAsyncGate<ScriptService.Result>()
@@ -1020,12 +1026,16 @@ struct ScriptServiceTests {
                 service.reload(
                     "yun.on('tick', function () { yun.log('replacement'); });"
                 ) { replacement.resolve($0) }))
-        #expect(try #require(await replacement.wait(timeout: 2)).isSuccess)
+        #expect(
+            try #require(await replacement.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         let replaced = ScriptServiceAsyncGate<ScriptService.Result>()
         #expect(
             scriptSubmissionWasAccepted(
                 service.submit(.tick) { replaced.resolve($0) }))
-        #expect(try #require(await replaced.wait(timeout: 2)).log == ["replacement"])
+        #expect(
+            try #require(await replaced.wait(timeout: TestGate.deadlockSeconds)).log == [
+                "replacement"
+            ])
 
         let failedLoad = ScriptServiceAsyncGate<ScriptService.Result>()
         #expect(
@@ -1033,7 +1043,8 @@ struct ScriptServiceTests {
                 service.reload(
                     "yun.on('muted', function () {}); throw new Error('nope');"
                 ) { failedLoad.resolve($0) }))
-        #expect(!(try #require(await failedLoad.wait(timeout: 2))).isSuccess)
+        #expect(
+            !(try #require(await failedLoad.wait(timeout: TestGate.deadlockSeconds))).isSuccess)
         #expect(!service.listens(for: .muted))
 
         let unknown = ScriptServiceAsyncGate<ScriptService.Result>()
@@ -1042,7 +1053,7 @@ struct ScriptServiceTests {
                 service.reload("yun.on('started', function () {});") {
                     unknown.resolve($0)
                 }))
-        let unknownResult = try #require(await unknown.wait(timeout: 2))
+        let unknownResult = try #require(await unknown.wait(timeout: TestGate.deadlockSeconds))
         #expect(!unknownResult.isSuccess)
         #expect(unknownResult.error?.contains("started") == true)
 
@@ -1052,12 +1063,14 @@ struct ScriptServiceTests {
                 service.reload("yun.on('tick', function () { while (true) {} });") {
                     runawayLoad.resolve($0)
                 }))
-        #expect(try #require(await runawayLoad.wait(timeout: 2)).isSuccess)
+        #expect(
+            try #require(await runawayLoad.wait(timeout: TestGate.deadlockSeconds)).isSuccess)
         let runaway = ScriptServiceAsyncGate<ScriptService.Result>()
         #expect(
             scriptSubmissionWasAccepted(
                 service.submit(.tick) { runaway.resolve($0) }))
-        #expect(!(try #require(await runaway.wait(timeout: 2))).isSuccess)
+        #expect(
+            !(try #require(await runaway.wait(timeout: TestGate.deadlockSeconds))).isSuccess)
     }
 
     private func run(
@@ -1068,7 +1081,7 @@ struct ScriptServiceTests {
             scriptSubmissionWasAccepted(
                 service.submitManual(source) { completion.resolve($0) })
         else { return nil }
-        return await completion.wait(timeout: 2)
+        return await completion.wait(timeout: TestGate.deadlockSeconds)
     }
 
     private func valuePayload(_ value: Int) -> JSONValue {

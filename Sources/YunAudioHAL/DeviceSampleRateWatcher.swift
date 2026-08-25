@@ -37,10 +37,12 @@ public final class DeviceSampleRateWatcher: @unchecked Sendable {
     }
 
     private let queue: DispatchQueue
-    private let install: @Sendable (AudioObjectID, @escaping AudioObjectPropertyListenerBlock)
-        -> Bool
-    private let remove: @Sendable (AudioObjectID, @escaping AudioObjectPropertyListenerBlock)
-        -> Void
+    private let install:
+        @Sendable (AudioObjectID, @escaping AudioObjectPropertyListenerBlock)
+            -> Bool
+    private let remove:
+        @Sendable (AudioObjectID, @escaping AudioObjectPropertyListenerBlock)
+            -> Void
     private let readRate: @Sendable (AudioObjectID) -> Double?
     private let onDrift: @Sendable (AudioObjectID, Double) -> Void
 
@@ -73,12 +75,14 @@ public final class DeviceSampleRateWatcher: @unchecked Sendable {
 
     init(
         queue: DispatchQueue,
-        install: @escaping @Sendable (
-            AudioObjectID, @escaping AudioObjectPropertyListenerBlock
-        ) -> Bool,
-        remove: @escaping @Sendable (
-            AudioObjectID, @escaping AudioObjectPropertyListenerBlock
-        ) -> Void,
+        install:
+            @escaping @Sendable (
+                AudioObjectID, @escaping AudioObjectPropertyListenerBlock
+            ) -> Bool,
+        remove:
+            @escaping @Sendable (
+                AudioObjectID, @escaping AudioObjectPropertyListenerBlock
+            ) -> Void,
         readRate: @escaping @Sendable (AudioObjectID) -> Double?,
         onDrift: @escaping @Sendable (AudioObjectID, Double) -> Void
     ) {

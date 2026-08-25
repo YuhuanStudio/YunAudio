@@ -354,7 +354,7 @@ struct EchoCancellationCallbackContextTests {
                 _ = finished.wait(timeout: .now() + TestGate.deadlock)
             }
         }
-        try #require(state.entered.wait(timeout: .now() + 2) == .success)
+        try #require(state.entered.wait(timeout: .now() + TestGate.deadlock) == .success)
 
         var refused: [Float] = [1, 1, 1, 1, 77]
         let refusedStatus = refused.withUnsafeMutableBufferPointer { samples in
@@ -372,7 +372,7 @@ struct EchoCancellationCallbackContextTests {
         }
 
         state.resume.signal()
-        try #require(finished.wait(timeout: .now() + 2) == .success)
+        try #require(finished.wait(timeout: .now() + TestGate.deadlock) == .success)
         firstFinished = true
 
         #expect(refusedStatus == noErr)
