@@ -829,6 +829,7 @@
 "Scoring the singing." = "正在为歌声评分。";
 "Scoring stopped." = "已停止评分。";
 "YunAudio could not release the audio route completely. Stop again before starting another route." = "YunAudio 无法完整释放音频路由。请再次停止，再启动其他路由。";
+"An audio device kept changing its sample rate, so YunAudio stopped following it. Stop and start the route once its format has settled." = "有音频设备不断变更采样率，YunAudio 已停止跟随。等它的格式稳定后，再停止并启动一次路由。";
 "YunAudio could not release the audio route completely, and stopping again will not clear it. Quit and reopen YunAudio to route audio again." = "YunAudio 无法完整释放音频路由，再次停止也清不掉。请退出并重新打开 YunAudio，才能再次路由音频。";
 "The song output did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "歌曲输出未能在时限内确认关闭。YunAudio 将通过退出应用来隔离它。";
 "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "灯环未能在时限内确认关闭。YunAudio 将通过退出应用来隔离它。";

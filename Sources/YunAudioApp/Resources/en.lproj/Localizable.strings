@@ -830,6 +830,7 @@
 "Scoring the singing." = "Scoring the singing.";
 "Scoring stopped." = "Scoring stopped.";
 "YunAudio could not release the audio route completely. Stop again before starting another route." = "YunAudio could not release the audio route completely. Stop again before starting another route.";
+"An audio device kept changing its sample rate, so YunAudio stopped following it. Stop and start the route once its format has settled." = "An audio device kept changing its sample rate, so YunAudio stopped following it. Stop and start the route once its format has settled.";
 "YunAudio could not release the audio route completely, and stopping again will not clear it. Quit and reopen YunAudio to route audio again." = "YunAudio could not release the audio route completely, and stopping again will not clear it. Quit and reopen YunAudio to route audio again.";
 "The song output did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "The song output did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting.";
 "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting.";

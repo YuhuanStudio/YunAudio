@@ -832,6 +832,33 @@ public final class RoutingEngine: @unchecked Sendable {
     public private(set) var sampleRateMismatch = false
     /// Sample rates as they were before routing touched them.
     private var originalSampleRates: [String: Double] = [:]
+
+    /// The members this route aligned to its common rate.
+    ///
+    /// Only the aligned ones: a device that could not present the target is
+    /// running at its own rate by design, and comparing it against the target
+    /// would report drift the instant the route came up.
+    private var alignedMemberIDs: [AudioObjectID] = []
+
+    /// Watches those members for a rate changed from outside the route.
+    ///
+    /// A Bluetooth headset is two Core Audio devices, and another application
+    /// opening the input one negotiates hands-free mode, which takes the output
+    /// down with it. The device list does not change, so `DeviceChangeWatcher`
+    /// never fires, and the route keeps running against a destination whose
+    /// format is no longer the one it was built for.
+    private lazy var memberRateWatcher = DeviceSampleRateWatcher {
+        [weak self] device, rate in
+        self?.onRouteMemberRateChanged?(device, rate)
+    }
+
+    /// Called when a member's rate moves away from the route's common rate.
+    ///
+    /// The route has to be rebuilt: its central assumption has been revoked
+    /// from outside, and a rebuild recomputes a rate every member can still
+    /// present — 16 kHz while hands-free mode holds, and back up when it lets
+    /// go.
+    public var onRouteMemberRateChanged: (@Sendable (AudioObjectID, Double) -> Void)?
     /// Every argument the route was last brought up with.
     ///
     /// A whole snapshot rather than a few named fields, because the clock-lock
@@ -2828,12 +2855,14 @@ public final class RoutingEngine: @unchecked Sendable {
         // Only devices that can actually present it. Asking a 44.1 kHz headset
         // for 48 throws, and the throw would be the whole route rather than the
         // one device that could not oblige.
+        let membersAtTargetRate = alignedDevices.filter {
+            $0.availableSampleRates.contains(targetRate)
+        }
+        alignedMemberIDs = membersAtTargetRate.map(\.id)
         _ = try timed("align sample rates") {
             try AggregateDevice.alignSampleRate(
                 targetRate,
-                across: alignedDevices.filter {
-                    $0.availableSampleRates.contains(targetRate)
-                },
+                across: membersAtTargetRate,
                 recordOriginal: { uid, previous in
                     if self.originalSampleRates[uid] == nil {
                         self.originalSampleRates[uid] = previous
@@ -3438,6 +3467,10 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         recordEngineGraphPublicationLocked()
 
+        // Armed only now: two completed cycles are the first proof the route
+        // exists, and a watch armed earlier could rebuild one that never did.
+        memberRateWatcher.watch(alignedMemberIDs, expecting: graphSampleRate)
+
         // When the destination is our own driver, hand it the master's clock so
         // it can lock to the microphone. Any other destination — BlackHole, a
         // physical device — has no such channel, and the path stays honestly
@@ -3642,6 +3675,11 @@ public final class RoutingEngine: @unchecked Sendable {
         }
         isRunning = false
         routeLifetimeGeneration &+= 1
+        // Before any of it. Teardown restores the members' original rates, so a
+        // watch left armed would report our own restoration as drift and ask
+        // for a rebuild of the route being torn down.
+        memberRateWatcher.stop()
+        alignedMemberIDs = []
 
         // Before the graph is freed, since the graph holds this object's ring.
         // Stopping the unit first also puts the microphone and the speaker back

@@ -8625,6 +8625,9 @@ final class RouterModel {
         deviceWatcher = DeviceChangeWatcher { [weak self] in
             Task { @MainActor in self?.requestDeviceChangeRefresh() }
         }
+        engine.onRouteMemberRateChanged = { [weak self] device, rate in
+            Task { @MainActor in self?.rebuildAfterMemberRateChange(device, rate) }
+        }
 
         if deviceInventoryIsReady {
             // Verification constructs synchronously, but restored Bluetooth
@@ -12503,6 +12506,54 @@ final class RouterModel {
         }
         startFailed = false
         start()
+    }
+
+    /// Rebuilds the route after a member's rate was changed from outside it.
+    ///
+    /// A Bluetooth headset is two Core Audio devices, and another application
+    /// opening the input one negotiates hands-free mode, which takes the output
+    /// down to 16 kHz with it. The device list does not change, so nothing else
+    /// here notices; the route simply keeps running against a destination whose
+    /// format is no longer the one it was built for.
+    ///
+    /// The rebuild recomputes a rate every member can still present — 16 kHz
+    /// while hands-free mode holds it there, and back up when it lets go.
+    private func rebuildAfterMemberRateChange(_ device: AudioObjectID, _ rate: Double) {
+        guard isRunning, !terminationIsPending else { return }
+        guard admitMemberRateRebuild() else {
+            // A device that keeps changing its mind would otherwise restart the
+            // route for ever, and an endless restart is worse than a route at
+            // the wrong rate: at least the wrong rate makes a sound.
+            lastError = loc(
+                "An audio device kept changing its sample rate, so YunAudio stopped following it. Stop and start the route once its format has settled."
+            )
+            return
+        }
+        memberRateChangeCount += 1
+        restartIfRunning()
+    }
+
+    /// Rebuilds allowed in one window, so a device that oscillates cannot hold
+    /// the route in a restart loop.
+    static let memberRateRebuildLimit = 3
+    static let memberRateRebuildWindow: TimeInterval = 10
+
+    /// How many times a member's rate moved under a live route. Reported in the
+    /// diagnostics rather than only counted, because a headset doing this often
+    /// is a fact about somebody's setup and not a transient.
+    private(set) var memberRateChangeCount = 0
+    @ObservationIgnored private var memberRateRebuilds: [Date] = []
+
+    /// Internal so the budget can be asserted without a headset that
+    /// oscillates, like `retainFailedTeardown` beside it.
+    func admitMemberRateRebuild() -> Bool {
+        let now = Date()
+        memberRateRebuilds = memberRateRebuilds.filter {
+            now.timeIntervalSince($0) < Self.memberRateRebuildWindow
+        }
+        guard memberRateRebuilds.count < Self.memberRateRebuildLimit else { return false }
+        memberRateRebuilds.append(now)
+        return true
     }
 
     private func restartIfRunning() {
