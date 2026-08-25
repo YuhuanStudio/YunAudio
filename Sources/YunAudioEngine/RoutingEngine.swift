@@ -2370,7 +2370,24 @@ public final class RoutingEngine: @unchecked Sendable {
         adoptTapsForTeardownLocked(taps)
     }
 
+    /// Process taps this engine has been handed, and how many of them the HAL
+    /// only produced on a second ask.
+    ///
+    /// `AudioHardwareCreateProcessTap` returns `noErr` with an empty object ID
+    /// intermittently, for the same process in the same run. `ProcessTap`
+    /// already answers that with one guarded retry, and already counted the
+    /// attempts it took into a property nothing read — a number computed and
+    /// thrown away, which is the one thing this project does not allow. Kept
+    /// here because whether the retry rescues those is the open half of that
+    /// report, and it cannot be answered without counting.
+    public private(set) var tapsCreated = 0
+    public private(set) var tapsNeedingASecondAttempt = 0
+
     private func adoptTapsForTeardownLocked(_ taps: [ProcessTap]) {
+        for tap in taps where !pendingTeardownTaps.contains(where: { $0 === tap }) {
+            tapsCreated += 1
+            if tap.creationAttempts > 1 { tapsNeedingASecondAttempt += 1 }
+        }
         let ownership = ProcessTapRetryOwnership(pending: pendingTeardownTaps)
         pendingTeardownTaps = ownership.adopting(taps).pending
         guard let incidentRecorder else { return }

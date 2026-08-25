@@ -8042,6 +8042,14 @@ final class RouterModel {
     /// Which branch of the echo canceller stored its teardown verdict.
     var echoTeardownDecidedBy: String { engine.echoTeardownDecidedBy }
 
+    /// Process taps opened this session, and how many needed a second attempt.
+    ///
+    /// `AudioHardwareCreateProcessTap` returns `noErr` with an empty object ID
+    /// intermittently. The retry that answers it is bounded and guarded; these
+    /// say how often it is reached and therefore whether it is working.
+    var tapsCreated: Int { engine.tapsCreated }
+    var tapsNeedingASecondAttempt: Int { engine.tapsNeedingASecondAttempt }
+
     /// Whether the sole audio-unit disposer would admit a new route right now,
     /// and how many owners it is still holding.
     var disposerAdmitsNewGraph: Bool { engine.audioUnitDisposerAdmitsNewGraph }
@@ -11403,6 +11411,8 @@ final class RouterModel {
             "effects": .array(enabledEffects.map(\.rawValue).sorted().map(JSONValue.string)),
             "routes": .int(activeRoutes.count),
             "teardownNeedsRetry": .bool(teardownNeedsRetry),
+            "tapsCreated": .int(tapsCreated),
+            "tapsNeedingASecondAttempt": .int(tapsNeedingASecondAttempt),
         ]
         if let teardownFailureDetail {
             status["teardownFailure"] = .string(teardownFailureDetail)

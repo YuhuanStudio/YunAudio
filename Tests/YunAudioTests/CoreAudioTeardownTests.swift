@@ -1249,3 +1249,23 @@ struct DeferredCleanupIsSilentTests {
         #expect(model.lastError?.contains("Quit and reopen") == true)
     }
 }
+
+@MainActor
+@Suite("Process tap retry is counted")
+struct ProcessTapRetryCountingTests {
+
+    /// `ProcessTap.creationAttempts` existed and nothing read it.
+    ///
+    /// `AudioHardwareCreateProcessTap` returns `noErr` with an empty object ID
+    /// intermittently, and the guarded retry that answers it has been in place
+    /// without anybody able to say whether it ever rescues one. It is reported
+    /// now, so the next occurrence carries its own evidence.
+    @Test("the diagnostics carry both tap counts")
+    func tapCountsAreReported() {
+        let model = RouterModel()
+        #expect(model.scriptStatus["tapsCreated"] == .int(0))
+        #expect(model.scriptStatus["tapsNeedingASecondAttempt"] == .int(0))
+        #expect(model.tapsCreated == 0)
+        #expect(model.tapsNeedingASecondAttempt == 0)
+    }
+}
