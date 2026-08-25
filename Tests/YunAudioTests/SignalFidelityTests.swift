@@ -310,3 +310,43 @@ struct EffectCostTableTests {
         }
     }
 }
+
+/// A compressor narrows the dynamic range. It does not lower the level.
+@Suite("The compressor gives back what it takes")
+struct CompressorMakeupTests {
+
+    private let rate: Double = 48_000
+
+    private func gain(atAmplitude amplitude: Float) -> Double? {
+        let source = SignalFidelity.fixture(
+            seconds: 1, sampleRate: rate, amplitude: amplitude)
+        return SignalFidelity.cost(of: [.compressor], on: source, sampleRate: rate)?
+            .gainDecibels
+    }
+
+    /// The number the makeup was chosen from, and the one it has to keep.
+    ///
+    /// A voice into a conferencing path sits around −15 dBFS RMS, and the
+    /// compressor took 3.87 dB there with no makeup at all — so what the far
+    /// end heard was quieter than what the microphone sent, which is the
+    /// "volume is wrong" report in one line.
+    @Test("a voice at its working level comes out at the level it went in")
+    func neutralAtSpeakingLevel() throws {
+        // 0.3 is −15.2 dBFS RMS for this fixture.
+        let measured = try #require(gain(atAmplitude: 0.3))
+        #expect(abs(measured) < 0.75, "read \(measured) dB")
+    }
+
+    /// And the two directions that make it a compressor rather than a fader.
+    @Test("quiet is lifted and loud is still held down")
+    func evensOutRatherThanShifts() throws {
+        let quiet = try #require(gain(atAmplitude: 0.05))
+        let loud = try #require(gain(atAmplitude: 0.6))
+        // Under the threshold nothing was reduced, so the makeup arrives whole:
+        // that is what evening out a voice means.
+        #expect(abs(quiet - EffectChain.compressorMakeupDecibels) < 0.5, "read \(quiet) dB")
+        // And a shout is still brought down, makeup and all.
+        #expect(loud < -2, "read \(loud) dB")
+        #expect(quiet > loud + 6, "quiet \(quiet), loud \(loud)")
+    }
+}

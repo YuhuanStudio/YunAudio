@@ -112,6 +112,14 @@ public enum EffectGroup: String, CaseIterable, Sendable, Identifiable {
 }
 
 /// One stage of the processing chain.
+extension EffectChain {
+    /// What the compressor puts back, in decibels.
+    ///
+    /// Derived from a measurement of the unit rather than from a formula: see
+    /// the table beside where it is applied.
+    static let compressorMakeupDecibels: Double = 4
+}
+
 public enum EffectKind: String, CaseIterable, Codable, Sendable, Identifiable {
     case voiceIsolation
     /// A noise gate, built from the dynamics processor's expander.
@@ -1313,6 +1321,35 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 setParameter(unit, kDynamicsProcessorParam_HeadRoom, 5)
                 setParameter(unit, kDynamicsProcessorParam_AttackTime, 0.01)
                 setParameter(unit, kDynamicsProcessorParam_ReleaseTime, 0.15)
+                // And put back what it took.
+                //
+                // This was never set, so the unit's own default stood and the
+                // compressor gave back a quieter signal than it received — a
+                // compressor's job is to narrow the dynamic range, not to lower
+                // the level, and handing the far end something quieter and
+                // hoping their dynamics find it is not the same thing.
+                //
+                // Measured rather than chosen. Deterministic noise through this
+                // exact unit at four levels:
+                //
+                //     RMS −30.8 dBFS   +0.00 dB   (under the threshold)
+                //     RMS −21.3 dBFS   −0.10 dB
+                //     RMS −15.2 dBFS   −3.87 dB
+                //     RMS  −9.2 dBFS   −9.35 dB
+                //
+                // Four decibels restores the level at −15 dBFS, which is where
+                // a voice into a conferencing path sits. Quieter material was
+                // never reduced and is lifted by the same four, which is what
+                // "even out a voice" means and what the comment above already
+                // claimed this stage was for.
+                //
+                // Safe against the obvious objection: every scene that carries
+                // the compressor carries the limiter after it, and the limiter
+                // measured bit-transparent below its threshold — so the
+                // headroom this spends is headroom the limiter owns.
+                setParameter(
+                    unit, kDynamicsProcessorParam_OverallGain,
+                    Float(Self.compressorMakeupDecibels))
             case .pitch:
                 // Unshifted by default. Switching the stage on has to be
                 // inaudible until somebody moves the control — a voice changer
