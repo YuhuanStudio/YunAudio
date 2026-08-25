@@ -1062,6 +1062,37 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
         if !inputs.isEmpty { print("     in:  \(inNames)") }
         if !outputs.isEmpty { print("     out: \(outNames)") }
     }
+
+    // Aggregates, and whether anybody is holding them.
+    //
+    // This is the one unexplained observation left in the report that
+    // coreaudiod degrades until the machine needs a reboot: an
+    // `AVVCAggregateDevice` — the one Core Audio's voice processing builds —
+    // standing with no client. Nothing could read that state without a
+    // debugger, so "is it accumulating?" could only be answered by rebooting
+    // and seeing whether the symptom went away.
+    //
+    // An aggregate nobody holds is not proof of a leak on its own: an
+    // application can leave one configured on purpose, and this application's
+    // own aggregates exist for as long as a route does. It is the number that
+    // has to be watched over a session, and the point is that it can be.
+    let aggregates = devices.filter { $0.transport == .aggregate }
+    print("\naggregate devices: \(aggregates.count)")
+    var heldIDs = Set<AudioObjectID>()
+    for process in (try? AudioProcesses.all(includingSilent: true)) ?? [] {
+        heldIDs.formUnion(process.devices(scope: kAudioObjectPropertyScopeInput))
+        heldIDs.formUnion(process.devices(scope: kAudioObjectPropertyScopeOutput))
+    }
+    for aggregate in aggregates {
+        let held = heldIDs.contains(aggregate.id)
+        print("  \(aggregate.name)  [\(aggregate.uid)] — \(held ? "held" : "NO CLIENT")")
+    }
+    let orphans = aggregates.filter { !heldIDs.contains($0.id) }
+    if !orphans.isEmpty {
+        print(
+            "  \(orphans.count) aggregate(s) with no client. Worth watching across a "
+                + "session: growth here is the shape of the reported degradation.")
+    }
     exit(0)
 }
 

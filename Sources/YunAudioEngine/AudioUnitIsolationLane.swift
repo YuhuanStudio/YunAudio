@@ -397,6 +397,34 @@ private final class AudioUnitTransaction<Value: Sendable>: @unchecked Sendable,
 final class BoundedAudioUnitConstructionLane: @unchecked Sendable {
     static let shared = BoundedAudioUnitConstructionLane()
 
+    /// A second lane, used only for the echo canceller's construction.
+    ///
+    /// A quarantine is for the life of the process — correctly, because a
+    /// synchronous vendor call that has not returned may still be holding
+    /// memory nobody can account for. That makes *which* lane gets quarantined
+    /// the whole question, and on 2026-08-25 the answer cost the application
+    /// everything it does.
+    ///
+    /// Constructing the voice-processing unit reached
+    /// `AudioDeviceCreateIOProcID` inside `AudioComponentInstanceNew`, sent a
+    /// mach message to coreaudiod, and never came back. The three-second budget
+    /// expired, the shared lane quarantined itself, and from that moment the
+    /// process could not build *any* graph — a plain microphone into a pair of
+    /// headphones included. The application went on accepting Start and
+    /// reporting success, with `running` never becoming true.
+    ///
+    /// Its own lane does not stop the wedge and cannot: nothing here can cancel
+    /// that call. What it changes is the blast radius. "Echo cancellation is
+    /// unavailable until YunAudio is relaunched" is a lost feature; "no route
+    /// can be built" is a dead application.
+    ///
+    /// Serialisation is not weakened. The echo canceller is constructed and
+    /// finished before graph construction begins, so the two lanes are never
+    /// running a constructor at the same time — the separation is about which
+    /// quarantine a failure lands in, not about concurrency.
+    static let echoCancellation = BoundedAudioUnitConstructionLane(
+        label: "com.yuhuanstudio.yunaudio.audio-unit-construction.echo")
+
     private let lock = NSLock()
     private let worker: DispatchQueue
     private let deadlineQueue: DispatchQueue

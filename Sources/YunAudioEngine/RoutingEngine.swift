@@ -3020,7 +3020,10 @@ public final class RoutingEngine: @unchecked Sendable {
             if let graphAdmission = BoundedAudioUnitDisposer.shared
                 .acquireGraphAdmissionAfterDraining(waitingUpTo: 2.25)
             {
-                construction = BoundedAudioUnitConstructionLane.shared.perform(
+                // Its own lane, so a wedge here costs the echo canceller and
+                // not every route this process will ever build. See
+                // `BoundedAudioUnitConstructionLane.echoCancellation`.
+                construction = BoundedAudioUnitConstructionLane.echoCancellation.perform(
                     timeout: AudioUnitConstructionBudget.echoCancellation,
                     observing: { resource in
                         incident.recordConstructionResource(resource)
@@ -3069,6 +3072,15 @@ public final class RoutingEngine: @unchecked Sendable {
             // A failed `AudioComponentInstanceNew` is allowed to leave a
             // non-null out instance. Its bounded cleanup must finish before
             // this fallback route creates any other Core Audio owner.
+            //
+            // The echo canceller's own lane is deliberately *not* consulted
+            // here. That is the point of it: a construction wedged inside the
+            // voice-processing unit quarantines that lane for the life of the
+            // process, and treating it as a reason to refuse the route would
+            // put the failure straight back where it was — a dead application
+            // instead of a lost feature. What the route still will not proceed
+            // past is the shared lane and the disposer, which are the two that
+            // speak for the graph it is about to build.
             if !BoundedAudioUnitConstructionLane.shared.admitsConstruction
                 || !BoundedAudioUnitDisposer.shared.admitsNewGraph
             {

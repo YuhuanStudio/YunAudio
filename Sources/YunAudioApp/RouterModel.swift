@@ -11072,6 +11072,7 @@ final class RouterModel {
         monitorRouteIndices = [:]
         isBusy = true
         isStarting = true
+        armStartWatchdog()
         let intent = RouteStartIntent()
         currentStartIntent = intent
         let engine = engine
@@ -11486,6 +11487,7 @@ final class RouterModel {
         }
         isBusy = false
         isStarting = false
+        disarmStartWatchdog()
         isRunning = false
         runningDecidedBy = "teardownComplete"
         teardownFailure = nil
@@ -11548,6 +11550,7 @@ final class RouterModel {
             report.didStart || teardownWasIncomplete ? report.monitorRouteIndices : [:]
         isBusy = false
         isStarting = false
+        disarmStartWatchdog()
 
         if let teardown = report.teardown, !teardown.isComplete {
             retainFailedTeardown(teardown, snapshot: report.snapshot)
@@ -11770,6 +11773,7 @@ final class RouterModel {
         currentStartIntent = nil
         isBusy = false
         isStarting = false
+        disarmStartWatchdog()
         // Running means audio is flowing, and that is the engine's graph to
         // answer for — not a blanket `true`.
         //
@@ -13125,6 +13129,56 @@ final class RouterModel {
 
     /// True while a start is in flight, as opposed to a stop.
     @ObservationIgnored private var isStarting = false
+
+    /// How long a start may take before the system itself is the suspect.
+    ///
+    /// A start is under two seconds on this machine and a few on a Bluetooth
+    /// route. Twelve seconds is not a slow start; it is a call that is not
+    /// coming back.
+    static let startIsOverdueAfter: Double = 12
+
+    /// Set when a start has been outstanding past that.
+    private(set) var startIsOverdue = false
+    @ObservationIgnored private var startWatchdog: Task<Void, Never>?
+
+    /// What to say when Start has been pressed and nothing has come back.
+    ///
+    /// This exists because of a fault reproduced on 2026-08-25: the voice
+    /// processing unit's construction reached `AudioDeviceCreateIOProcID`,
+    /// which sent a mach message to coreaudiod and never returned. Everything
+    /// after that is consequence — the process could no longer build a graph,
+    /// a fresh launch wedged in the same call, and so did an unrelated
+    /// command-line tool. coreaudiod was stuck for the whole machine.
+    ///
+    /// The application cannot make that call return, and it cannot cancel it.
+    /// What it can do is stop showing a spinner for ever: name the system as
+    /// the suspect, and give the one command that recovers it. Before this, the
+    /// interface said "…" indefinitely and the person had nothing to act on.
+    var startOverdueWarning: String? {
+        guard startIsOverdue, isBusy else { return nil }
+        return loc(
+            "Core Audio has not answered for several seconds. This is the system's audio server, not YunAudio: other applications will be affected too, and no setting here can clear it. Recovering it needs one command in Terminal — sudo killall coreaudiod — after which audio returns on its own."
+        )
+    }
+
+    private func armStartWatchdog() {
+        startWatchdog?.cancel()
+        startIsOverdue = false
+        startWatchdog = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.startIsOverdueAfter))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.isBusy, self.isStarting else { return }
+                self.startIsOverdue = true
+            }
+        }
+    }
+
+    private func disarmStartWatchdog() {
+        startWatchdog?.cancel()
+        startWatchdog = nil
+        if startIsOverdue { startIsOverdue = false }
+    }
 
     /// The particular start moving from capture discovery to route ownership.
     @ObservationIgnored private var currentStartIntent: RouteStartIntent?

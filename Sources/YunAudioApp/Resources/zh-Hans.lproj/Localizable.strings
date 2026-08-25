@@ -905,3 +905,4 @@
 "Use a %d-frame buffer here" = "这个输出改用 %d 帧的缓冲";
 "Restarts the route once, and is remembered for this output only." = "会重新建立一次路由,而且只对这个输出记住。";
 "%d frames, raised from %d for this output" = "%d 帧,为这个输出从 %d 提高";
+"Core Audio has not answered for several seconds. This is the system's audio server, not YunAudio: other applications will be affected too, and no setting here can clear it. Recovering it needs one command in Terminal — sudo killall coreaudiod — after which audio returns on its own." = "Core Audio 已经好几秒没有回应。坏的是系统的音频服务器,不是 YunAudio:其他 app 也会受影响,而且这里没有任何设置能解决。要救回来需要在终端执行一行命令 —— sudo killall coreaudiod —— 之后音频会自己恢复。";

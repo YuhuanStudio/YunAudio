@@ -1051,6 +1051,19 @@ struct MainWindow: View {
                 // dropout therefore left no trace at all: the only record was
                 // somebody's memory of a break in the sound, and what they
                 // concluded from it was that the application sounds bad.
+                // Start pressed, and nothing coming back.
+                //
+                // Placed above the dropout notice because it outranks it: when
+                // Core Audio has stopped answering, every other reading here is
+                // about a route that does not exist.
+                if let notice = model.startOverdueWarning {
+                    Text(notice)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.danger)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("StartOverdueNotice")
+                }
                 if let notice = model.dropoutWarning {
                     VStack(alignment: .leading, spacing: Yun.Space.sm) {
                         Text(notice)
