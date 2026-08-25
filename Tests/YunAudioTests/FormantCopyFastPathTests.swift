@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import YunAudioEngine
+@testable import YunAudioHAL
 
 /// Removing a copy is only an optimisation if the samples stay the same.
 ///
@@ -173,10 +174,20 @@ struct FormantCopyFastPathTests {
         kinds: [EffectKind], source: [Float], sampleRate: Double,
         callbackFrames: Int
     ) throws -> ChainResult {
+        // Named, because "Expectation failed: EffectChain(...)" is a sentence
+        // with nothing in it. These three failed exactly that way while
+        // coreaudiod was wedged, and nothing in the output said so.
+        // The full initialiser, for its deadline. The convenience one waits two
+        // seconds for graph admission, which is a product bound and the right
+        // one — and under a full parallel run this test loses that wait to
+        // whichever suite holds the disposer, then reports a staging-path fault
+        // that never happened. What is under test here is the copy path.
+        let built = EffectChain(
+            kinds: kinds, plugins: [], sampleRate: sampleRate,
+            maximumFrames: callbackFrames,
+            teardownDeadline: HALTeardownDeadline(timeout: TestGate.deadlockSeconds))
         let chain = try #require(
-            EffectChain(
-                kinds: kinds, sampleRate: sampleRate,
-                maximumFrames: callbackFrames))
+            built, "\(EffectChain.lastConstructionFailure ?? "no reason recorded")")
         chain.set("shift", of: .formant, to: 25)
         var output = [Float](repeating: 0, count: source.count)
         var offset = 0

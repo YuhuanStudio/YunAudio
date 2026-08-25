@@ -690,6 +690,30 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
         return graphAdmission.reacquire(waitingUpTo: deadline.remainingTimeInterval)
     }
 
+    /// Why the last construction in this process gave up.
+    ///
+    /// `init?` has fifteen ways to return nil and used to distinguish none of
+    /// them, so a failure read as `Expectation failed: EffectChain(...)` — a
+    /// sentence with no information in it at all. That cost real time on
+    /// 2026-08-25, when three tests failed this way and the cause turned out to
+    /// be a wedged coreaudiod that no test mentioned.
+    ///
+    /// Process-wide and last-one-wins, deliberately: this is for a person
+    /// reading a failure, not for control flow, and threading a reason out of a
+    /// failable initialiser would change every call site to buy nothing the
+    /// caller uses.
+    public private(set) static var lastConstructionFailure: String? {
+        get { constructionFailureLock.withLock { storedConstructionFailure } }
+        set { constructionFailureLock.withLock { storedConstructionFailure = newValue } }
+    }
+
+    private static let constructionFailureLock = NSLock()
+    nonisolated(unsafe) private static var storedConstructionFailure: String?
+
+    static func recordConstructionFailure(_ reason: String) {
+        lastConstructionFailure = reason
+    }
+
     convenience init?(kinds: [EffectKind], sampleRate: Double, maximumFrames: Int) {
         self.init(
             kinds: kinds, plugins: [], sampleRate: sampleRate,
@@ -703,17 +727,27 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
         constructionContext: AudioUnitConstructionContext? = nil,
         suppliedGraphAdmission: AudioUnitGraphAdmissionBox? = nil
     ) {
-        guard !kinds.isEmpty || !requested.isEmpty else { return nil }
+        guard !kinds.isEmpty || !requested.isEmpty else {
+            Self.recordConstructionFailure("nothing was asked for")
+            return nil
+        }
         let ownsGraphAdmission = suppliedGraphAdmission == nil
         guard
             let graphAdmission = suppliedGraphAdmission
                 ?? AudioUnitGraphAdmissionBox(
                     waitingUpTo: teardownDeadline.remainingTimeInterval)
-        else { return nil }
+        else {
+            Self.recordConstructionFailure("the graph admission was refused or timed out")
+            return nil
+        }
         defer { if ownsGraphAdmission { graphAdmission.release() } }
         guard
             let maximumByteCount = AudioUnitPullSourceContext.byteCount(for: maximumFrames)
-        else { return nil }
+        else {
+            Self.recordConstructionFailure(
+                "the callback size is not a representable byte count")
+            return nil
+        }
         self.maximumFrames = maximumFrames
         let requestedStages = kinds.sorted { $0.chainOrder < $1.chainOrder }
         plugins = requested
@@ -728,6 +762,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
         else {
             inputBuffer.deallocate()
             outputBuffer.deallocate()
+            Self.recordConstructionFailure("the pull source could not be allocated")
             return nil
         }
         inputPullContext = pullContext
@@ -756,6 +791,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 native = FormantShifter(sampleRate: sampleRate)
                 guard native != nil else {
                     scheduleDetachedTeardown()
+                    Self.recordConstructionFailure("the native formant stage would not build")
                     return nil
                 }
                 stages.append(kind)
@@ -768,11 +804,15 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 componentFlags: 0, componentFlagsMask: 0)
             guard teardownDeadline.hasTimeRemaining else {
                 scheduleDetachedTeardown()
+                Self.recordConstructionFailure(
+                    "the deadline expired before a unit was looked up")
                 return nil
             }
             guard let component = AudioComponentFindNext(nil, &description) else { continue }
             guard teardownDeadline.hasTimeRemaining else {
                 scheduleDetachedTeardown()
+                Self.recordConstructionFailure(
+                    "the deadline expired after the component was found")
                 return nil
             }
             // Apple requires `AudioComponentInstantiate` for this flag. This
@@ -788,6 +828,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 })
             else {
                 scheduleDetachedTeardown()
+                Self.recordConstructionFailure("an effect unit would not instantiate")
                 return nil
             }
             let ownership = AudioComponentCreationOwnership(
@@ -799,6 +840,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                         until: teardownDeadline)
                 {
                     scheduleDetachedTeardown()
+                    Self.recordConstructionFailure("an effect unit would not accept its format")
                     return nil
                 }
                 continue
@@ -820,6 +862,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 }) == noErr
             else {
                 scheduleDetachedTeardown()
+                Self.recordConstructionFailure("an effect unit refused its maximum frame count")
                 return nil
             }
             var frames = UInt32(maximumFrames)
@@ -832,6 +875,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 }) == noErr
             else {
                 scheduleDetachedTeardown()
+                Self.recordConstructionFailure("an effect unit would not initialise")
                 return nil
             }
             stages.append(kind)
@@ -849,6 +893,8 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
             for plugin in plugins {
                 guard teardownDeadline.hasTimeRemaining else {
                     scheduleDetachedTeardown()
+                    Self.recordConstructionFailure(
+                        "the deadline expired before a plug-in was built")
                     return nil
                 }
                 var description = plugin.componentDescription
@@ -859,6 +905,8 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 }
                 guard teardownDeadline.hasTimeRemaining else {
                     scheduleDetachedTeardown()
+                    Self.recordConstructionFailure(
+                        "the deadline expired while building a plug-in")
                     return nil
                 }
                 guard !AudioUnitPlugins.requiresAsyncInstantiation(component) else {
@@ -875,6 +923,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                     })
                 else {
                     scheduleDetachedTeardown()
+                    Self.recordConstructionFailure("a plug-in would not instantiate")
                     return nil
                 }
                 let ownership = AudioComponentCreationOwnership(
@@ -889,6 +938,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                             until: teardownDeadline)
                     {
                         scheduleDetachedTeardown()
+                        Self.recordConstructionFailure("a plug-in would not accept its format")
                         return nil
                     }
                     continue

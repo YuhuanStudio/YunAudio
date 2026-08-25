@@ -2,6 +2,7 @@ import Foundation
 import Testing
 
 @testable import YunAudioEngine
+@testable import YunAudioHAL
 
 /// The blast radius of a construction that never returns.
 ///
@@ -29,9 +30,19 @@ struct EchoLaneContainmentTests {
     /// for ever, and the other one does not notice.
     @Test("quarantining one lane leaves the other admitting")
     func quarantineDoesNotSpread() {
+        // Their own quarantine, not the process-wide one.
+        //
+        // The lane's default is `ProcessLifetimeAudioQuarantine.shared`, and
+        // this test deliberately wedges a constructor — so with the default it
+        // would leave a retained entry behind, and every `EffectChain` built
+        // anywhere in the process afterwards would be refused admission. It
+        // did: three unrelated formant tests started failing four runs in five,
+        // reporting a staging-path fault that had never happened.
         let echo = BoundedAudioUnitConstructionLane(
+            quarantine: ProcessLifetimeAudioQuarantine(),
             label: "yunaudio.test.echo-containment.echo")
         let graph = BoundedAudioUnitConstructionLane(
+            quarantine: ProcessLifetimeAudioQuarantine(),
             label: "yunaudio.test.echo-containment.graph")
         let released = DispatchSemaphore(value: 0)
         let entered = DispatchSemaphore(value: 0)
