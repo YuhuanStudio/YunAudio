@@ -51,13 +51,36 @@ BUNDLE="${YUNAUDIO_APP_BUNDLE:-build/YunAudio.app}"
 #
 # Refused rather than warned about, because the failure lands minutes later in
 # somebody else's session and reads as a defect in the code being written.
-if [[ -z "${YUNAUDIO_ALLOW_OVERWRITE_RUNNING:-}" ]] && pgrep -qx YunAudioApp; then
-	cat >&2 <<'RUNNING'
-YunAudio is running, and rebuilding the bundle would overwrite the executable
-underneath it. That does not fail cleanly — the running copy segfaults somewhere
-unrelated a minute or two later.
+#
+# The comparison is the executable's path, not the process's name. Running a
+# copy from /Applications while building into build/ is the ordinary way to use
+# the application and change it at the same time, and a name match refused it —
+# which taught people to set the override, and the override does not check
+# anything at all. Resolution failing counts as a match: the crash is worse
+# than a refused build.
+running_copy_would_be_overwritten() {
+	local target
+	target="$(cd "$(dirname "$BUNDLE")" 2>/dev/null && pwd)/$(basename "$BUNDLE")/Contents/MacOS/YunAudioApp"
+	local pid
+	for pid in $(pgrep -x YunAudioApp); do
+		local running
+		running="$(ps -o comm= -p "$pid" 2>/dev/null)"
+		[[ -z "$running" || "$running" == "$target" ]] && return 0
+	done
+	return 1
+}
 
-Quit it and build again. To build anyway (a copy running from elsewhere, say):
+if [[ -z "${YUNAUDIO_ALLOW_OVERWRITE_RUNNING:-}" ]] && running_copy_would_be_overwritten; then
+	cat >&2 <<RUNNING
+A YunAudio running from this very bundle would have its executable overwritten.
+That does not fail cleanly — the running copy segfaults somewhere unrelated a
+minute or two later.
+
+Quit it and build again, or run a copy from somewhere else:
+
+  ditto $BUNDLE /Applications/YunAudio.app
+
+To build anyway:
 
   YUNAUDIO_ALLOW_OVERWRITE_RUNNING=1 ./App/build-app.sh
 RUNNING
