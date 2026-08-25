@@ -903,3 +903,6 @@
 "Waveform match" = "Waveform match";
 "Tone" = "Tone";
 "%.0f Hz, %+.2f dB against 1 kHz" = "%.0f Hz, %+.2f dB against 1 kHz";
+"Use a %d-frame buffer here" = "Use a %d-frame buffer here";
+"Restarts the route once, and is remembered for this output only." = "Restarts the route once, and is remembered for this output only.";
+"%d frames, raised from %d for this output" = "%d frames, raised from %d for this output";

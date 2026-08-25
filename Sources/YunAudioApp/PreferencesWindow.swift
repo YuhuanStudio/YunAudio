@@ -1208,6 +1208,20 @@ struct PreferencesWindow: View {
                                     model.lastDropoutDevice ?? loc("the route itself")),
                             tone: model.dropoutCount == 0 ? .success : .warning)
                     }
+                    // Why the cycle is longer than the picker says.
+                    //
+                    // A floor is invisible otherwise: somebody sets 128, the
+                    // route runs at 256 because this output earned it, and the
+                    // latency reading goes up with nothing anywhere to explain
+                    // it. Shown only where there is one.
+                    if model.effectiveBufferFrames != model.bufferFrames {
+                        YunDetailRow(
+                            loc("Buffer"),
+                            value: String(
+                                format: loc("%d frames, raised from %d for this output"),
+                                Int(model.effectiveBufferFrames), Int(model.bufferFrames)),
+                            tone: .neutral)
+                    }
                     if let detail = model.teardownFailureDetail {
                         YunDetailRow(
                             loc("Audio lifecycle"), value: detail, tone: .danger)

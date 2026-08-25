@@ -5035,6 +5035,92 @@ final class RouterModel {
     /// processing stage; above 512 the latency stops being worth the safety.
     static let bufferSizes: [UInt32] = [64, 128, 256, 512]
 
+    /// The smallest buffer each destination has shown it can keep up with.
+    ///
+    /// Raised only by somebody accepting the offer below, never on its own. Per
+    /// destination, because the answer belongs to the endpoint: a headset that
+    /// cannot hold a 128-frame cycle says nothing about the wired interface
+    /// beside it, and spending that latency on the wired one would be a penalty
+    /// for a fault it does not have.
+    private(set) var bufferFloors: [String: UInt32] = [:]
+
+    /// The buffer a route to this destination actually starts with.
+    ///
+    /// Never smaller than what was asked for — a floor raises, it does not
+    /// lower — so somebody who chooses 512 by hand still gets 512.
+    var effectiveBufferFrames: UInt32 {
+        guard let uid = selectedDestinationUID, let floor = bufferFloors[uid] else {
+            return bufferFrames
+        }
+        return max(bufferFrames, floor)
+    }
+
+    /// How many misses in how long before the audio counts as breaking up.
+    ///
+    /// One missed deadline is a click and happens on a healthy machine —
+    /// measured here: one in the first 1541 cycles of a cold route, and none in
+    /// three runs after it. Three inside ten seconds is not a click; it is a
+    /// route that cannot hold its cycle.
+    static let dropoutsThatMeanTrouble = 3
+    static let dropoutTroubleWindow: Double = 10
+
+    /// Times of the recent overloads, on the watcher's monotonic clock.
+    @ObservationIgnored private var recentDropoutTimes: [Double] = []
+
+    /// The buffer to offer when the audio is breaking up, or nil.
+    ///
+    /// Nil unless the misses have clustered, and nil at the top of the range:
+    /// past 512 frames the latency costs more than the safety buys, and
+    /// offering a fix that does not fix it is worse than saying nothing.
+    var suggestedBufferFrames: UInt32? {
+        guard isRunning, dropoutsHaveClustered else { return nil }
+        let current = effectiveBufferFrames
+        return Self.bufferSizes.first { $0 > current }
+    }
+
+    @ObservationIgnored private var dropoutsHaveClustered = false
+
+    /// The recent times still inside the window ending at `now`.
+    ///
+    /// Separated out so the rule can be asserted. The model's own count comes
+    /// from the engine and only moves when a real overload arrives, which is
+    /// right — one source of truth, and the two can never disagree — and it
+    /// leaves no way to exercise this from a test through the model.
+    static func dropoutsInsideTheWindow(_ times: [Double], at now: Double) -> [Double] {
+        times.filter { now - $0 <= dropoutTroubleWindow }
+    }
+
+    /// Whether that many misses that close together is a route failing rather
+    /// than a machine having a bad moment.
+    static func isBreakingUp(_ timesInsideTheWindow: [Double]) -> Bool {
+        timesInsideTheWindow.count >= dropoutsThatMeanTrouble
+    }
+
+    /// Takes the offer: remembers the larger buffer for this destination and
+    /// rebuilds the route with it.
+    ///
+    /// Offered rather than applied by itself, deliberately. A rebuild is a gap
+    /// in the audio, and taking one on the application's own initiative would
+    /// turn a run of clicks into a silence somebody did not ask for — while
+    /// somebody who has just been told what is happening can decide that a
+    /// second of nothing is worth not hearing the next twenty clicks.
+    func acceptLargerBuffer() {
+        guard let uid = selectedDestinationUID, let wanted = suggestedBufferFrames
+        else { return }
+        bufferFloors[uid] = wanted
+        recentDropoutTimes = []
+        dropoutsHaveClustered = false
+        persist()
+        restartIfRunning()
+    }
+
+    /// Forgets what was learned about this destination, so the next route goes
+    /// back to the buffer that was asked for.
+    func clearBufferFloor(forDestination uid: String) {
+        guard bufferFloors.removeValue(forKey: uid) != nil else { return }
+        persist()
+    }
+
     /// Sample rate a preset asked for. Applied when both devices support it.
     var preferredSampleRate: Double = 48000 {
         didSet { if oldValue != preferredSampleRate { persist(); restartIfRunning() } }
@@ -5917,6 +6003,13 @@ final class RouterModel {
         // more use than an object identifier, because it says whose fault the
         // miss was.
         lastDropoutDevice = known?.name ?? loc("the route itself")
+
+        // A cluster, not a count. The tally deliberately survives restarts so
+        // an old fault stays visible, which makes it the wrong thing to decide
+        // "it is breaking up right now" from.
+        recentDropoutTimes.append(event.at)
+        recentDropoutTimes = Self.dropoutsInsideTheWindow(recentDropoutTimes, at: event.at)
+        if Self.isBreakingUp(recentDropoutTimes) { dropoutsHaveClustered = true }
     }
 
     /// What to tell somebody whose audio broke up, when it did.
@@ -9359,6 +9452,7 @@ final class RouterModel {
         sourceChannelChoices = saved.sourceChannelChoices ?? [:]
         outputTrims = saved.outputTrims ?? [:]
         sourceLevels = saved.sourceLevels ?? [:]
+        bufferFloors = saved.bufferFloors ?? [:]
         preferredSampleRate = saved.preferredSampleRate
         bufferFrames =
             Self.bufferSizes.contains(saved.bufferFrames) ? saved.bufferFrames : 128
@@ -9481,6 +9575,7 @@ final class RouterModel {
                         ?? additionalSourceUIDs,
                     additionalDestinationUIDs: additionalDestinationUIDs,
                     outputTrims: outputTrims,
+                    bufferFloors: bufferFloors.isEmpty ? nil : bufferFloors,
                     sourceLevels: sourceLevels,
                     obsHost: obsLink.host,
                     obsPort: obsLink.port,
@@ -10948,7 +11043,8 @@ final class RouterModel {
             enabledEffects.contains(.voiceIsolation)
             ? VoiceIsolationSettings(mixPercent: voiceIsolationMix) : nil
         let rate = preferredSampleRate
-        let buffer = bufferFrames
+        // The floor this destination has earned, where it has one.
+        let buffer = effectiveBufferFrames
         let extraSources = additionalSourceUIDs
         let extraDestinations = additionalDestinationUIDs
         let trim = outputLatencyFrames

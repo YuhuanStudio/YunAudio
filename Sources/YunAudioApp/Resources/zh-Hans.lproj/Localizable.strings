@@ -902,3 +902,6 @@
 "Waveform match" = "波形吻合度";
 "Tone" = "音色";
 "%.0f Hz, %+.2f dB against 1 kHz" = "%.0f Hz,相对 1 kHz %+.2f dB";
+"Use a %d-frame buffer here" = "这个输出改用 %d 帧的缓冲";
+"Restarts the route once, and is remembered for this output only." = "会重新建立一次路由,而且只对这个输出记住。";
+"%d frames, raised from %d for this output" = "%d 帧,为这个输出从 %d 提高";

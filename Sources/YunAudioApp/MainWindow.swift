@@ -1052,11 +1052,42 @@ struct MainWindow: View {
                 // somebody's memory of a break in the sound, and what they
                 // concluded from it was that the application sounds bad.
                 if let notice = model.dropoutWarning {
-                    Text(notice)
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.warning)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("DropoutNotice")
+                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                        Text(notice)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("DropoutNotice")
+                        // The fix, offered rather than taken.
+                        //
+                        // A bigger cycle is what cures a missed deadline, and
+                        // applying it means rebuilding the route — a gap in the
+                        // audio. Doing that unasked would turn a run of clicks
+                        // into a silence nobody chose; somebody who has just
+                        // read what is happening can decide that a second of
+                        // nothing beats the next twenty clicks.
+                        if let wanted = model.suggestedBufferFrames {
+                            HStack(spacing: Yun.Space.sm) {
+                                Button(
+                                    String(
+                                        format: loc("Use a %d-frame buffer here"),
+                                        Int(wanted))
+                                ) {
+                                    model.acceptLargerBuffer()
+                                }
+                                .buttonStyle(YunButtonStyle(.secondary, small: true))
+                                .accessibilityIdentifier("AcceptLargerBuffer")
+                                Text(
+                                    loc(
+                                        "Restarts the route once, and is remembered for this output only."
+                                    )
+                                )
+                                .font(Yun.Text.caption)
+                                .foregroundStyle(Yun.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
                 }
 
                 sectionHeading(loc("Analysis"))

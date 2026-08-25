@@ -155,6 +155,15 @@ struct Preferences: Codable, Equatable, Sendable {
     /// somebody opens by hand ambiguous about which is which.
     var outputTrims: [String: Float]?
 
+    /// The smallest buffer a destination has shown it can keep up with.
+    ///
+    /// Per destination rather than one global number, because the answer is a
+    /// property of the endpoint: a Bluetooth headset that cannot hold a 128
+    /// frame cycle says nothing about the wired interface beside it, and
+    /// carrying its penalty over to that interface would spend latency on a
+    /// device that never needed it.
+    var bufferFloors: [String: UInt32]?
+
     /// Each source's fader position, in decibels, by source UID.
     ///
     /// A fader used to exist only as the gain of a route the engine had built,
@@ -248,6 +257,7 @@ struct Preferences: Codable, Equatable, Sendable {
         additionalSourceUIDs: [],
         additionalDestinationUIDs: [],
         outputTrims: [:],
+        bufferFloors: [:],
         sourceLevels: [:],
         obsHost: "127.0.0.1",
         obsPort: 4455,
