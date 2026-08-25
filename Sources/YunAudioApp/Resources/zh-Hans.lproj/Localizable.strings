@@ -909,3 +909,4 @@
 "This copy of YunAudio can no longer start audio: a Core Audio call did not return, and nothing can be built after that. Quit and open it again. (%@)" = "这一份 YunAudio 已经无法再开始音频:有一个 Core Audio 调用没有返回,在那之后什么都建不起来。请结束程序再重新打开。(%@)";
 "This copy of YunAudio can no longer start audio. A Core Audio call did not return, and nothing can be built after that — quit and open it again." = "这一份 YunAudio 已经无法再开始音频。有一个 Core Audio 调用没有返回,在那之后什么都建不起来 —— 请结束程序再重新打开。";
 "Echo cancellation is unavailable until YunAudio is restarted: building it did not come back from Core Audio. Everything else still works, and the route runs without it." = "回音消除要重新启动 YunAudio 才能再用:构建它的调用没有从 Core Audio 返回。其他功能都正常,路由会在没有它的情况下运作。";
+"Relaunch YunAudio" = "重新启动 YunAudio";

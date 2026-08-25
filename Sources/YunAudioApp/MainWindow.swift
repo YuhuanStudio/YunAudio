@@ -1061,11 +1061,24 @@ struct MainWindow: View {
                 // every other reading here is about a route that will never
                 // exist.
                 if let notice = model.relaunchWarning {
-                    Text(notice)
-                        .font(Yun.Text.caption)
-                        .foregroundStyle(Yun.Palette.danger)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("RelaunchNotice")
+                    VStack(alignment: .leading, spacing: Yun.Space.sm) {
+                        Text(notice)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.danger)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("RelaunchNotice")
+                        // The instruction, as a button.
+                        //
+                        // Telling somebody to quit and reopen an application is
+                        // asking them to do by hand a thing the application can
+                        // do — and the one case where it matters is the one
+                        // where every other control in the window is inert.
+                        if model.mustBeRelaunched {
+                            Button(loc("Relaunch YunAudio")) { RelaunchApplication.now() }
+                                .buttonStyle(YunButtonStyle(.primary, small: true))
+                                .accessibilityIdentifier("RelaunchButton")
+                        }
+                    }
                 }
                 if let notice = model.startOverdueWarning {
                     Text(notice)

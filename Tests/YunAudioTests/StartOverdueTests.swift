@@ -65,3 +65,48 @@ struct StartOverdueTests {
         #expect(model.relaunchWarning == nil)
     }
 }
+
+@MainActor
+@Suite("Relaunching itself")
+struct RelaunchApplicationTests {
+
+    private final class Calls {
+        var quits = 0
+    }
+
+    /// The replacement is started first and the quit only follows a success.
+    ///
+    /// A copy that failed to relaunch and then quit anyway leaves somebody with
+    /// nothing, which is worse than the broken copy they had — that one at
+    /// least still shows the notice explaining itself.
+    @Test("a failed open does not quit")
+    func failedOpenDoesNotQuit() {
+        let calls = Calls()
+        RelaunchApplication.now(
+            bundleURL: URL(fileURLWithPath: "/nowhere"),
+            open: { _, completion in completion(false) },
+            quit: { calls.quits += 1 })
+        #expect(calls.quits == 0)
+    }
+
+    @Test("a successful open quits exactly once")
+    func successfulOpenQuitsOnce() {
+        let calls = Calls()
+        RelaunchApplication.now(
+            bundleURL: URL(fileURLWithPath: "/nowhere"),
+            open: { _, completion in completion(true) },
+            quit: { calls.quits += 1 })
+        #expect(calls.quits == 1)
+    }
+
+    /// Without a new instance being asked for, this is a no-op: the copy asking
+    /// is still running, and `NSWorkspace` would activate it rather than start
+    /// another.
+    @Test("a new instance is asked for explicitly")
+    func asksForANewInstance() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RelaunchApplication.swift", encoding: .utf8)
+        #expect(source.contains("createsNewApplicationInstance = true"))
+    }
+}

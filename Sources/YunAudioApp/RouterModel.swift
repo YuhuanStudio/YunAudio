@@ -11943,6 +11943,15 @@ final class RouterModel {
         if let teardownFailureDetail {
             status["teardownFailure"] = .string(teardownFailureDetail)
         }
+        // Only when true, because these are the two states where every other
+        // key above is describing a route that can no longer be built. A script
+        // that keeps calling `routing on` against a quarantined copy would
+        // otherwise get "accepted" for ever and never a reason.
+        if mustBeRelaunched { status["mustBeRelaunched"] = .bool(true) }
+        if echoCancellationNeedsRelaunch {
+            status["echoCancellationNeedsRelaunch"] = .bool(true)
+        }
+        if startIsOverdue { status["startIsOverdue"] = .bool(true) }
         if let source = selectedSource {
             status["source"] = .string(source.name)
             status["sourceUID"] = .string(source.uid)
