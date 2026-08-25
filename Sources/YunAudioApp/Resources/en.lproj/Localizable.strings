@@ -894,3 +894,5 @@
 "Echo cancellation off; the route is restarting." = "Echo cancellation off; the route is restarting.";
 "Cancelling echo." = "Cancelling echo.";
 "Echo cancellation off." = "Echo cancellation off.";
+"Missed deadlines" = "Missed deadlines";
+"%d, last from %@" = "%d, last from %@";

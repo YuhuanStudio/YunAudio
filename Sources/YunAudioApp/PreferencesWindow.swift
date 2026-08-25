@@ -1191,6 +1191,23 @@ struct PreferencesWindow: View {
                             : model.voiceActivityAvailability == false
                                 ? .warning
                                 : model.isDetectingVoiceActivity ? .success : .neutral)
+                    // Whether the audio has broken up, said as a number.
+                    //
+                    // Core Audio posts an overload when a callback missed its
+                    // deadline, which is the click somebody hears. One row
+                    // rather than seven, and shown while a route is up as well
+                    // as after a break, because "it has not broken up" is
+                    // precisely what somebody who came here to check is asking.
+                    if model.isRunning || model.dropoutCount > 0 {
+                        YunDetailRow(
+                            loc("Missed deadlines"),
+                            value: model.dropoutCount == 0
+                                ? loc("none")
+                                : String(
+                                    format: loc("%d, last from %@"), model.dropoutCount,
+                                    model.lastDropoutDevice ?? loc("the route itself")),
+                            tone: model.dropoutCount == 0 ? .success : .warning)
+                    }
                     if let detail = model.teardownFailureDetail {
                         YunDetailRow(
                             loc("Audio lifecycle"), value: detail, tone: .danger)
