@@ -1067,10 +1067,33 @@ enum UIFlowCheck {
         // dropping — which would silently bias the integrated figure towards
         // whatever the interface happened to catch.
         let measuredBefore = model.analysis.duration
+        let telemetryBefore = model.analysisWorkerTelemetry
         await pause(2.0)
         let advanced = model.analysis.duration - measuredBefore
+        let telemetry = model.analysisWorkerTelemetry
         note(String(format: "%.2fs measured over 2.0s of wall clock", advanced))
+        // What a shortfall means, rather than only that there is one.
+        //
+        // This has been reading 1.14s on a virtual machine, and the note said
+        // nothing else — so nobody could tell the ring overflowing from a drain
+        // that was never asked for, or from a meter not counting what it was
+        // given. The same measurement without a device keeps up exactly
+        // (`AnalyserKeepsUpTests`), which rules out the worker and leaves these
+        // three numbers to separate the rest: samples dropped means the ring
+        // overflowed, samples left waiting with none dropped means the drain
+        // did not run often enough, and neither with a shortfall means the loss
+        // is downstream of the drain.
+        note(
+            String(
+                format: "  ring: %llu dropped, %u waiting, %llu drains (+%llu), %llu coalesced",
+                telemetry.ringDroppedSamples, telemetry.ringAvailableSamples,
+                telemetry.drainSteps, telemetry.drainSteps - telemetryBefore.drainSteps,
+                telemetry.coalescedDrainRequests
+                    - telemetryBefore.coalescedDrainRequests))
         check("the analyser is not dropping audio", advanced > 1.8)
+        check(
+            "and nothing was dropped on the floor to achieve it",
+            telemetry.ringDroppedSamples == telemetryBefore.ringDroppedSamples)
 
         // The master is applied before the fold, so turning it down has to move
         // the reading. This is what catches the tap being taken from the wrong
