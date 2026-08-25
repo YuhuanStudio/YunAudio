@@ -518,7 +518,19 @@ struct AudioUnitIsolationLaneTests {
         #expect(isolation.contains("AudioUnitPlugins.requiresAsyncInstantiation(component)"))
     }
 
-    @Test("the complete echo bridge uses the sole bounded construction lane")
+    /// The echo bridge is built on a bounded lane, once, and on the lane that
+    /// is *not* the one every route needs.
+    ///
+    /// Reproduced on 2026-08-25: the voice-processing unit's construction
+    /// reached `AudioDeviceCreateIOProcID`, sent a mach message to coreaudiod
+    /// and never returned. The lane kept the wedged worker and quarantined
+    /// itself for the life of the process — correctly — and because it was the
+    /// shared lane, the application could no longer build any graph at all
+    /// while still accepting Start and reporting success.
+    ///
+    /// So "which lane" is the whole claim, and putting it back on the shared
+    /// one is a single-word edit that would look harmless.
+    @Test("the echo bridge is built on its own bounded lane, exactly once")
     func echoBridgeConstructionCannotPinTheEngineLockForever() throws {
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
@@ -531,15 +543,23 @@ struct AudioUnitIsolationLaneTests {
                 range: start.upperBound..<source.endIndex))
         let body = source[start.lowerBound..<end.lowerBound]
         let lane = try #require(
-            body.range(of: "BoundedAudioUnitConstructionLane.shared.perform"))
+            body.range(of: "BoundedAudioUnitConstructionLane.echoCancellation.perform"))
         let constructor = try #require(body.range(of: "try EchoCancellationBridge("))
+        // The residue check still follows the constructor, and still asks the
+        // shared lane — the one that speaks for the graph about to be built.
         let quarantine = try #require(
             body.range(of: "!BoundedAudioUnitConstructionLane.shared.admitsConstruction"))
 
         #expect(lane.lowerBound < constructor.lowerBound)
         #expect(constructor.lowerBound < quarantine.lowerBound)
         #expect(body.ranges(of: "EchoCancellationBridge(").count == 1)
-        #expect(body.ranges(of: "BoundedAudioUnitConstructionLane.shared.perform").count == 1)
+        #expect(
+            body.ranges(of: "BoundedAudioUnitConstructionLane.echoCancellation.perform")
+                .count == 1)
+        // And never on the shared lane, which is the regression this guards.
+        #expect(
+            body.ranges(of: "BoundedAudioUnitConstructionLane.shared.perform").isEmpty,
+            "the echo canceller is back on the lane every route needs")
         #expect(body.contains("constructionContext: context"))
     }
 

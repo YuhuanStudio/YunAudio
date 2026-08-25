@@ -11564,7 +11564,18 @@ final class RouterModel {
             runningDecidedBy = "startReportFailed"
             teardownFailure = nil
             routeUpdatesAreAccepted = false
-            lastError = failure
+            // A quarantined construction lane is permanent for this process,
+            // and the engine's own wording for it — "new audio ownership
+            // refused while N cleanup owner(s) remain" — tells somebody
+            // nothing they can act on. Say what it means instead, and keep the
+            // engine's sentence after it for a report.
+            lastError =
+                engine.audioUnitConstructionIsQuarantined
+                ? String(
+                    format: loc(
+                        "This copy of YunAudio can no longer start audio: a Core Audio call did not return, and nothing can be built after that. Quit and open it again. (%@)"
+                    ), failure)
+                : failure
             startFailed = true
             let stayDown = stopIsPending
             stopIsPending = false
@@ -13140,6 +13151,33 @@ final class RouterModel {
     /// Set when a start has been outstanding past that.
     private(set) var startIsOverdue = false
     @ObservationIgnored private var startWatchdog: Task<Void, Never>?
+
+    /// True once this process can no longer build any audio graph.
+    var mustBeRelaunched: Bool { engine.audioUnitConstructionIsQuarantined }
+
+    /// True once the echo canceller specifically is out for this process.
+    ///
+    /// Deliberately a different reading from `mustBeRelaunched`: its own lane
+    /// is what keeps a wedged canceller from costing every route, so the two
+    /// have to be sayable apart.
+    var echoCancellationNeedsRelaunch: Bool {
+        engine.echoCancellationConstructionIsQuarantined
+    }
+
+    /// What to say about either, when either is true.
+    var relaunchWarning: String? {
+        if mustBeRelaunched {
+            return loc(
+                "This copy of YunAudio can no longer start audio. A Core Audio call did not return, and nothing can be built after that — quit and open it again."
+            )
+        }
+        if echoCancellationNeedsRelaunch, cancelsEcho {
+            return loc(
+                "Echo cancellation is unavailable until YunAudio is restarted: building it did not come back from Core Audio. Everything else still works, and the route runs without it."
+            )
+        }
+        return nil
+    }
 
     /// What to say when Start has been pressed and nothing has come back.
     ///

@@ -907,3 +907,6 @@
 "Restarts the route once, and is remembered for this output only." = "會重新建立一次路由,而且只對這個輸出記住。";
 "%d frames, raised from %d for this output" = "%d 幀,為這個輸出從 %d 提高";
 "Core Audio has not answered for several seconds. This is the system's audio server, not YunAudio: other applications will be affected too, and no setting here can clear it. Recovering it needs one command in Terminal — sudo killall coreaudiod — after which audio returns on its own." = "Core Audio 已經好幾秒沒有回應。壞的是系統的音訊伺服器,不是 YunAudio:其他 app 也會受影響,而且這裡沒有任何設定能解決。要救回來需要在終端機執行一行指令 —— sudo killall coreaudiod —— 之後音訊會自己恢復。";
+"This copy of YunAudio can no longer start audio: a Core Audio call did not return, and nothing can be built after that. Quit and open it again. (%@)" = "這一份 YunAudio 已經無法再開始音訊:有一個 Core Audio 呼叫沒有回來,在那之後什麼都建不起來。請結束程式再重新打開。(%@)";
+"This copy of YunAudio can no longer start audio. A Core Audio call did not return, and nothing can be built after that — quit and open it again." = "這一份 YunAudio 已經無法再開始音訊。有一個 Core Audio 呼叫沒有回來,在那之後什麼都建不起來 —— 請結束程式再重新打開。";
+"Echo cancellation is unavailable until YunAudio is restarted: building it did not come back from Core Audio. Everything else still works, and the route runs without it." = "回音消除要重新啟動 YunAudio 才能再用:建構它的呼叫沒有從 Core Audio 回來。其他功能都正常,路由會在沒有它的情況下運作。";

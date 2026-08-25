@@ -1056,6 +1056,17 @@ struct MainWindow: View {
                 // Placed above the dropout notice because it outranks it: when
                 // Core Audio has stopped answering, every other reading here is
                 // about a route that does not exist.
+                // Above everything, including the overdue notice: a process
+                // that cannot build a graph is not going to start one, and
+                // every other reading here is about a route that will never
+                // exist.
+                if let notice = model.relaunchWarning {
+                    Text(notice)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.danger)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("RelaunchNotice")
+                }
                 if let notice = model.startOverdueWarning {
                     Text(notice)
                         .font(Yun.Text.caption)

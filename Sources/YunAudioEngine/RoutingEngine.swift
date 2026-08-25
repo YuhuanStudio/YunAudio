@@ -6872,6 +6872,30 @@ public final class RoutingEngine: @unchecked Sendable {
         BoundedAudioUnitDisposer.shared.pendingOwnerCount
     }
 
+    /// Whether this process can still build an Audio Unit graph at all.
+    ///
+    /// False for the life of the process once a constructor has failed to
+    /// return: the lane keeps the wedged worker, because a synchronous vendor
+    /// call still in flight may be holding memory nobody can account for.
+    ///
+    /// Exposed because the alternative is what happened on 2026-08-25 — the
+    /// application went on accepting Start and reporting success while being
+    /// unable to build anything, and the only reading anywhere said "new audio
+    /// ownership refused while N cleanup owner(s) remain". Nobody can act on
+    /// that. "This copy has to be relaunched" they can.
+    public var audioUnitConstructionIsQuarantined: Bool {
+        !BoundedAudioUnitConstructionLane.shared.admitsConstruction
+    }
+
+    /// The same for the echo canceller's own lane.
+    ///
+    /// Separate because the consequences are different by design: this one
+    /// costs echo cancellation until the application is relaunched, and the one
+    /// above costs every route.
+    public var echoCancellationConstructionIsQuarantined: Bool {
+        !BoundedAudioUnitConstructionLane.echoCancellation.admitsConstruction
+    }
+
     /// Where the running chain's latency comes from, by stage.
     ///
     /// Summed, this is what the router already reported; broken down, it says
