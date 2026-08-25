@@ -7093,6 +7093,29 @@ final class RouterModel {
     /// Whether a Stop is still owed before another route may start.
     var teardownNeedsRetry: Bool { teardownFailure != nil }
 
+    /// How many automatic Stops are left for a teardown that was only queued.
+    ///
+    /// A deferred disposal completes on the disposer's own worker moments
+    /// later, and `performStopLocked` already resumes from a stored
+    /// `audioUnitOwner` result once the disposer admits a new graph. So the
+    /// Stop the interface asks somebody for is one the application can press
+    /// itself, and asking is only right once it has tried and failed.
+    @ObservationIgnored private var teardownRetriesLeft = 0
+
+    /// Exposed so the budget can be asserted without provoking a real device
+    /// failure, like `retainFailedTeardown` itself.
+    var teardownRetriesLeftForTests: Int { teardownRetriesLeft }
+
+    /// Two, because the deferral is over as soon as the transaction it waits
+    /// behind finishes. A third attempt is not waiting on the same thing.
+    static let teardownRetries = 2
+
+    /// How long to wait before the automatic Stop.
+    ///
+    /// Long enough for a graph admission to finish and the disposer to promote
+    /// the queued owner; short enough that nobody sees the route hesitate.
+    static let teardownRetryDelay: TimeInterval = 0.2
+
     /// Whether the Stop this asks for can actually clear anything.
     ///
     /// False means the route is quarantined for the life of the process, so
@@ -11112,6 +11135,10 @@ final class RouterModel {
         then completion: (@MainActor () -> Void)? = nil,
         preservingIntegrityDiagnostic: Bool = false
     ) {
+        // A Stop that is not itself clearing a failed one gets a fresh budget,
+        // so the automatic retries below belong to this request rather than
+        // accumulating across the session.
+        if teardownFailure == nil { teardownRetriesLeft = Self.teardownRetries }
         requestedStartAwaitsDeviceHydration = nil
         automaticStartAwaitsDeviceHydration = false
         if !preservingIntegrityDiagnostic { invalidateIntegrityDiagnostic() }
@@ -11183,6 +11210,7 @@ final class RouterModel {
     /// Admits only another Stop after Core Audio refused to prove that all of
     /// its callbacks and objects are gone.
     ///
+    ///
     /// Whether the route is still *running* is a separate question and the
     /// engine answers it: a failed teardown moves the abandoned generation into
     /// a quarantine capsule, which leaves `graphCell` nil precisely because
@@ -11229,6 +11257,18 @@ final class RouterModel {
         restartIsPending = false
         stopIsPending = false
         lighting.setSignalActive(false)
+        // Press it ourselves before asking. The failure state above is already
+        // correct and visible; if the retry succeeds, `finishStop` clears it
+        // and nobody was asked to do anything.
+        if result.anotherStopCanClearIt, teardownRetriesLeft > 0 {
+            teardownRetriesLeft -= 1
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.teardownRetryDelay * 1_000_000_000))
+                guard let self, self.teardownNeedsRetry, !self.isBusy else { return }
+                self.stop()
+            }
+        }
         let message = teardownMessage
         lastError = message
         if isInstallingDriver {

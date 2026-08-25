@@ -1147,3 +1147,55 @@ struct TeardownAdviceTests {
         #expect(model.teardownFailureDetail?.contains("ioProcTimedOut") == true)
     }
 }
+
+@MainActor
+@Suite("Automatic teardown retry")
+struct AutomaticTeardownRetryTests {
+
+    /// The Stop the interface asks for is one the application presses itself.
+    ///
+    /// A deferred disposal completes on the disposer's own worker moments
+    /// later, and `performStopLocked` resumes from a stored `audioUnitOwner`
+    /// result once the disposer admits a new graph — so asking somebody to
+    /// press Stop again is asking them to do what the retry already did.
+    @Test("a retryable teardown spends its budget before anybody is asked")
+    func retryableTeardownRetriesItself() async {
+        let model = RouterModel()
+        model.stop()
+        #expect(model.teardownRetriesLeftForTests == RouterModel.teardownRetries)
+
+        model.retainFailedTeardown(
+            .audioUnitOwner(.blockedByRetainedTransaction(retainedUnits: 3)))
+        #expect(model.anotherStopCanClearTeardown)
+        #expect(model.teardownRetriesLeftForTests == RouterModel.teardownRetries - 1)
+    }
+
+    /// A verdict no Stop can clear must not be retried at all: the bridge
+    /// returns the stored result without touching anything, so every retry is
+    /// the same answer and the delay is time somebody waits for nothing.
+    @Test("a terminal verdict spends nothing")
+    func terminalVerdictDoesNotRetry() {
+        let model = RouterModel()
+        model.stop()
+        model.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
+        #expect(!model.anotherStopCanClearTeardown)
+        #expect(model.teardownRetriesLeftForTests == RouterModel.teardownRetries)
+    }
+
+    /// The budget belongs to one Stop request, not to the session.
+    @Test("retries do not accumulate across a session")
+    func budgetIsPerRequest() {
+        let model = RouterModel()
+        model.stop()
+        for _ in 0..<RouterModel.teardownRetries {
+            model.retainFailedTeardown(
+                .audioUnitOwner(.blockedByRetainedTransaction(retainedUnits: 1)))
+        }
+        #expect(model.teardownRetriesLeftForTests == 0)
+
+        // Still failed, so this Stop is clearing the old one and must not refill.
+        model.stop()
+        #expect(model.teardownRetriesLeftForTests == 0)
+    }
+}
