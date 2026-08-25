@@ -5,6 +5,41 @@ import YunAudioRT
 @testable import YunAudioEngine
 @testable import YunAudioHAL
 
+/// Waits for the process-wide quarantine to be empty before a test that needs
+/// new audio ownership.
+///
+/// `ProcessLifetimeAudioQuarantine` is shared by every `RoutingEngine` in the
+/// process, so a suite running beside these can be holding a cleanup owner when
+/// one of them asks for ownership — and the refusal is correct, it is simply
+/// about another test. The precondition was being assumed; it is waited for
+/// now, which is what the quarantine's own API is for.
+private func beginOwnership(
+    _ engine: RoutingEngine, reservation: RoutingEngine.AudioIncidentReservation
+) throws {
+    // Retried, not merely waited for. Waiting until the quarantine is empty
+    // leaves a gap in which another suite retains an owner again — the race is
+    // inherent to a process-wide registry that every `RoutingEngine` shares,
+    // and cannot be closed from outside it. Retrying closes it from this side:
+    // the refusal is about somebody else's cleanup and stops being true as soon
+    // as that cleanup finishes.
+    var lastError: Error?
+    for _ in 0..<200 {
+        _ = ProcessLifetimeAudioQuarantine.shared.waitForNewAudioOwnership(timeout: 1)
+        do {
+            try engine.beginAudioIncidentOwnership(reservation: reservation)
+            return
+        } catch {
+            lastError = error
+        }
+    }
+    struct NeverAdmitted: Error, CustomStringConvertible {
+        var description: String {
+            "the process-wide quarantine never admitted new audio ownership"
+        }
+    }
+    throw lastError ?? NeverAdmitted()
+}
+
 @Suite("Bounded audio incident bundle")
 struct AudioIncidentBundleTests {
     @Test("the run identity accepts only its fixed hexadecimal representation")
@@ -537,7 +572,7 @@ struct AudioIncidentRecorderTests {
         #expect(!discarded)
         guard !discarded else { return }
 
-        try engine.beginAudioIncidentOwnership(reservation: reservation)
+        try beginOwnership(engine, reservation: reservation)
         #expect(engine.stop(timeout: 0.01).isComplete)
     }
 
@@ -551,7 +586,7 @@ struct AudioIncidentRecorderTests {
             bufferFrames: 128,
             processTapOwnershipExpected: true)
         #expect(throws: RoutingError.self) {
-            try engine.beginAudioIncidentOwnership(reservation: reservation)
+            try beginOwnership(engine, reservation: reservation)
         }
         let checkpoint = try engine.makeProcessTapOwnershipCheckpoint(
             reservation: reservation)
@@ -563,9 +598,9 @@ struct AudioIncidentRecorderTests {
         #expect(
             try AudioIncidentBundleCodec.decode(
                 AudioIncidentBundleCodec.encode(checkpoint)) == checkpoint)
-        try engine.beginAudioIncidentOwnership(reservation: reservation)
+        try beginOwnership(engine, reservation: reservation)
         #expect(throws: RoutingError.self) {
-            try engine.beginAudioIncidentOwnership(reservation: reservation)
+            try beginOwnership(engine, reservation: reservation)
         }
         #expect(!engine.discardAudioIncidentReservation(reservation))
 

@@ -155,11 +155,20 @@ struct RTGraphBuildPerformanceTests {
         #expect(combinedStatus == noErr)
         #expect(cycles == Self.expectedCycles)
         #expect(callbackTail.samples == UInt64(Self.expectedCycles + 32))
-        #expect(callbackTail.allocationViolations == allocations)
+        // A relationship that survives sampling, rather than an equality that
+        // does not. The tail cannot record more violations than there were
+        // allocations; whether it records every one depends on when its window
+        // closed, and in a debug build — where the allocations come from
+        // Swift's own checking machinery rather than from this graph — a loaded
+        // machine routinely closes it between the two counts.
+        //
+        // In release both are zero and the exact claim is made below.
+        #expect(callbackTail.allocationViolations <= allocations)
         #expect(!callbackTail.isCoherent)
         #expect(checksum.isFinite && abs(checksum) > 1)
         #if !DEBUG
             #expect(allocations == 0)
+            #expect(callbackTail.allocationViolations == 0)
             #expect(realtimeCPUPercent < 5)
         #endif
     }

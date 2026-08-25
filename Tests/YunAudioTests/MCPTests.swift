@@ -684,8 +684,12 @@ struct ControlSocketTests {
         let path = Self.temporaryPath()
         let scheduler = HeldMainActorScheduler()
         let observedRemaining = LockedValue<UInt64>()
+        // Both budgets, not one. Injecting the client's alone moved the
+        // failure to the server, which gave up on its own 1.5 seconds and
+        // closed the connection — the same load, one layer along.
         let listener = ControlListener(
-            path: path, scheduleOnMainActor: { scheduler.schedule($0) })
+            path: path, totalTimeout: 30,
+            scheduleOnMainActor: { scheduler.schedule($0) })
         try listener.start { _, deadline, reply in
             observedRemaining.store(deadline.remainingNanoseconds)
             reply(.message("within the original deadline"))
@@ -695,7 +699,17 @@ struct ControlSocketTests {
         let box = Box()
         let done = DispatchSemaphore(value: 0)
         let thread = Thread {
-            box.outcome = Result { try ControlClient(path: path).send(.status) }
+            // The injectable transport bound, which exists for exactly this:
+            // "the same path as the public client with an injectable total
+            // bound for deterministic deadline tests". The public 1.5 seconds
+            // is the product's number, and this whole sequence has to fit
+            // inside whatever it is — under a full parallel run it does not fit
+            // inside 1.5, and the test then reported the machine's load as the
+            // transport failing. What is being tested is the *callback's*
+            // deadline, asserted below, and it is unaffected.
+            box.outcome = Result {
+                try ControlClient(path: path).send(.status, transportTimeout: 30)
+            }
             done.signal()
         }
         thread.name = "yunaudio.test.control-deadline"
@@ -705,13 +719,6 @@ struct ControlSocketTests {
             waitUntil(timeout: 0.5) {
                 listener.pendingReplyCount == 1 && scheduler.count == 1
             })
-        // A hundred milliseconds, not three hundred.
-        //
-        // The whole sequence has to fit inside the client's own 1.5-second
-        // transport budget — that is the product's number and not something a
-        // test may move — and with three hundred suites running in parallel the
-        // scheduling around a deliberate 300 ms wait pushed it past. The test
-        // then reported the machine's load as the transport failing.
         try await Task.sleep(for: .milliseconds(100))
         await MainActor.run { scheduler.releaseAll() }
         try #require(waitUntil(timeout: TestGate.deadlockSeconds) { box.outcome != nil })
@@ -721,9 +728,12 @@ struct ControlSocketTests {
         // The claim is unchanged and is the whole point: the callback was given
         // what was left of the caller's deadline, not a fresh one. A fresh
         // budget would read the full 1.5 s.
+        // Against the budget actually in force: a fresh one would read the
+        // whole 30 s, and what this test exists to prove is that the callback
+        // got what was left of the caller's instead.
         let remaining = try #require(observedRemaining.value)
         #expect(remaining > 0)
-        #expect(remaining < 1_450_000_000)
+        #expect(remaining < 29_900_000_000)
         #expect(listener.acceptedReplyCount == 1)
         #expect(listener.rejectedReplyCount == 0)
     }

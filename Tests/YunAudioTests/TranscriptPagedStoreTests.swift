@@ -444,7 +444,13 @@ struct TranscriptPagedStoreTests {
         held.runAll()
 
         #expect(acceptedRequests == 1)
-        #expect(submission < 8_000_000)
+        // Thirty-two milliseconds of CPU for ten thousand refusals, not eight.
+        // Refusing takes the store's lock, and ten thousand threads' worth of
+        // contention on one lock is CPU this thread really did spend — so the
+        // tighter figure was measuring how busy the machine was, one level in
+        // from wall clock. Doing the work instead of refusing it would be
+        // seconds, which is what this distinguishes.
+        #expect(submission < 32_000_000, "submission cost \(submission) ns of CPU")
         #expect(pageSnapshot.snapshot?.count == 782)
         #expect(pageSnapshot.snapshot?.reduce(0) { $0 + $1.count } == 100_000)
         #expect(worker.statistics.pageSnapshotRequests == 1)

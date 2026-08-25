@@ -564,10 +564,23 @@ public struct ControlClient: Sendable {
         }
         let line: String
         do {
+            // The injected bound, not the fixed one.
+            //
+            // This overload exists so a deadline test can choose the budget,
+            // and it was only choosing half of it: `total` was injected while
+            // the per-read timeout stayed at the public constant, so a caller
+            // asking for thirty seconds still gave up at one and a half. The
+            // seam was there and did not work.
             line = try UnixSocket.readLine(
-                descriptor, timeout: ControlSocket.clientTransportTimeout, total: total)
+                descriptor, timeout: transportTimeout, total: total)
         } catch UnixSocket.IOError.timedOut {
-            throw ControlError.transport("the application did not answer within 1.5 seconds")
+            // And the number in the sentence is the number that was used.
+            // Hard-coding 1.5 made the message a lie for every caller that
+            // chose otherwise — including the one this overload is for.
+            throw ControlError.transport(
+                String(
+                    format: "the application did not answer within %g seconds",
+                    transportTimeout))
         } catch UnixSocket.IOError.frameTooLarge(let limit) {
             throw ControlError.transport(
                 "the application answered with more than \(limit) bytes")
@@ -829,6 +842,7 @@ public final class ControlListener: @unchecked Sendable {
     private let lock = NSLock()
     private let scheduleOnMainActor:
         @Sendable (@escaping @MainActor @Sendable () -> Void) -> Void
+    private let totalTimeout: TimeInterval
     private var generation: ControlListenerGeneration?
     private var nextEpoch: UInt64 = 0
     private var clientDescriptors: [Int32: UInt64] = [:]
@@ -907,14 +921,22 @@ public final class ControlListener: @unchecked Sendable {
         }
     }
 
+    /// - Parameter totalTimeout: How long one admitted request may take before
+    ///   the listener stops waiting for its reply. Injectable for the same
+    ///   reason `ControlClient.send(_:transportTimeout:)` is, and for the same
+    ///   tests: a deadline test that can choose the client's budget and not the
+    ///   server's can only move the failure from one side to the other.
+    ///   Production uses the fixed public bound.
     init(
         path: String,
+        totalTimeout: TimeInterval = ControlSocket.serverTotalTimeout,
         scheduleOnMainActor:
             @escaping @Sendable (
                 @escaping @MainActor @Sendable () -> Void
             ) -> Void
     ) {
         self.path = path
+        self.totalTimeout = totalTimeout
         self.scheduleOnMainActor = scheduleOnMainActor
     }
 
@@ -1140,7 +1162,7 @@ public final class ControlListener: @unchecked Sendable {
         clientDescriptors[client] = admittedGeneration.epoch
         lock.unlock()
         return ControlAdmission(
-            deadline: UnixSocket.Deadline(after: ControlSocket.serverTotalTimeout)
+            deadline: UnixSocket.Deadline(after: totalTimeout)
         ) { [weak self] in self?.finishAdmission() }
     }
 

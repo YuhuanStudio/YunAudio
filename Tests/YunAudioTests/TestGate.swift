@@ -21,4 +21,18 @@ enum TestGate {
     static let deadlock = DispatchTimeInterval.seconds(30)
     /// The same number where a `TimeInterval` is what the API takes.
     static let deadlockSeconds: Double = 30
+
+    /// Iterations of a millisecond-sleep polling loop that is waiting for
+    /// something to finish.
+    ///
+    /// Three thousand, so the loop gives up only on a deadlock. Two hundred was
+    /// a two-second bet on ten thousand callbacks landing, and under a full
+    /// parallel run they do not — after which every assertion below the loop
+    /// describes a job that had not finished rather than one that finished
+    /// wrongly.
+    ///
+    /// Not for a loop that is asserting something does *not* happen: those want
+    /// a short, deliberate window, and raising one would turn a check into a
+    /// wait.
+    static let polls = 3_000
 }

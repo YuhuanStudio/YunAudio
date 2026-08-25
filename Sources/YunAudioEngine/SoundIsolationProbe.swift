@@ -11,6 +11,15 @@ import YunAudioHAL
 /// have to come from the machine.
 public struct SoundIsolationReport: Sendable {
     public let isAvailable: Bool
+    /// Whether the probe was refused because another graph was being built,
+    /// rather than because this system has no such unit.
+    ///
+    /// The two were one field, and the field's name is a static claim about the
+    /// machine while the value was a statement about that instant. So a probe
+    /// run while a route was coming up reported "AUSoundIsolation could not be
+    /// instantiated" — which is false, and is the kind of answer somebody acts
+    /// on by looking for a missing component that is right there.
+    public var wasBusy = false
     public let sampleRate: Double
     public let blockFrames: Int
     /// Latency the unit reports, in seconds.
@@ -32,7 +41,11 @@ public struct SoundIsolationReport: Sendable {
     public var fitsInline: Bool { worstDeadlineUse < 0.25 }
 
     public var summary: String {
-        guard isAvailable else { return "AUSoundIsolation could not be instantiated" }
+        guard isAvailable else {
+            return wasBusy
+                ? "another graph was under construction, so nothing was measured"
+                : "AUSoundIsolation could not be instantiated"
+        }
         return String(
             format: """
                 AUSoundIsolation @ %d Hz, %d-frame blocks
@@ -76,8 +89,8 @@ public enum SoundIsolation {
         var graphAdmission = BoundedAudioUnitDisposer.shared.acquireGraphAdmission()
         guard graphAdmission != nil else {
             return .init(
-                isAvailable: false, sampleRate: sampleRate, blockFrames: blockFrames,
-                latencySeconds: 0, tailSeconds: 0,
+                isAvailable: false, wasBusy: true, sampleRate: sampleRate,
+                blockFrames: blockFrames, latencySeconds: 0, tailSeconds: 0,
                 medianRenderSeconds: 0, worstRenderSeconds: 0)
         }
         defer { graphAdmission?.release() }

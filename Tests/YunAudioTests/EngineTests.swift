@@ -390,7 +390,11 @@ struct CommandQueueTests {
 
         ready.wait()
         #expect(depths.map { yun_rt_counter_load($0.raw) } == [1, 1])
-        #expect(yun_rt_tripwire_marked_thread_count() == markedBefore + 2)
+        // At least, not exactly. The marked-thread count is process-wide, and
+        // another suite marking one of its own between the snapshot and here
+        // is not this test's business — it was asserting that nothing else in
+        // the process was doing anything, which is not what it is for.
+        #expect(yun_rt_tripwire_marked_thread_count() >= markedBefore + 2)
         release.signal()
         release.signal()
         finished.wait()
@@ -3440,7 +3444,17 @@ struct EffectStageTests {
     /// twentieth of a second out of time with nobody able to say when it began.
     @Test("the chain carries the isolation latency the unit reports")
     func isolationLatencyReachesTheChain() throws {
-        let report = SoundIsolation.probe(sampleRate: 48000, blockFrames: 512, iterations: 40)
+        // Retried while the answer is "another graph was being built", which is
+        // about this instant rather than about this machine — and with the
+        // whole suite running in parallel there is nearly always one.
+        var report = SoundIsolation.probe(
+            sampleRate: 48000, blockFrames: 512, iterations: 40)
+        for _ in 0..<20 where report.wasBusy {
+            Thread.sleep(forTimeInterval: 0.05)
+            report = SoundIsolation.probe(
+                sampleRate: 48000, blockFrames: 512, iterations: 40)
+        }
+        try #require(!report.wasBusy, "the disposer never admitted a graph")
         try #require(report.isAvailable, "AUSoundIsolation is not on this machine")
         let chain = try #require(
             EffectChain(kinds: [.voiceIsolation], sampleRate: 48000, maximumFrames: 512))

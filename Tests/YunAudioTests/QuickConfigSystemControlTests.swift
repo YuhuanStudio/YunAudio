@@ -151,14 +151,14 @@ struct QuickConfigSystemControlTests {
         }
 
         submit(0)
-        for _ in 0..<100 where firstStarted.snapshot.isEmpty {
+        for _ in 0..<TestGate.polls where firstStarted.snapshot.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(firstStarted.snapshot == [0])
         for value in 1..<10_000 { submit(value) }
         releaseFirst.signal()
 
-        for _ in 0..<200 where callbackCounts.count != 10_000 {
+        for _ in 0..<TestGate.polls where callbackCounts.count != 10_000 {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(executed.snapshot == [0, 9_999])
@@ -357,14 +357,14 @@ struct QuickConfigSystemControlTests {
         weak let retainedControl = control
 
         control?.readDefaults { deliveries.append($0) }
-        for _ in 0..<100 where started.snapshot.isEmpty {
+        for _ in 0..<TestGate.polls where started.snapshot.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
         control = nil
         #expect(retainedControl == nil)
         release.signal()
 
-        for _ in 0..<100 where deliveries.isEmpty {
+        for _ in 0..<TestGate.polls where deliveries.isEmpty {
             try await Task.sleep(for: .milliseconds(10))
         }
         #expect(deliveries.count == 1)
