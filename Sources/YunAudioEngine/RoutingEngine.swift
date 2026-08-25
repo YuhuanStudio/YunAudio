@@ -1018,10 +1018,33 @@ public final class RoutingEngine: @unchecked Sendable {
     /// common rate exists, the source remains the clock master and another
     /// member must be converted whatever rate it chooses. In that case using
     /// the source's highest advertised rate is not extra fidelity: a 48/96 kHz
-    /// microphone feeding a 44.1 kHz Bluetooth output still ends at 44.1 kHz,
-    /// while 96 kHz doubles every per-frame DSP cost. Honour the preferred
-    /// source rate, then preserve its current rate, before falling back to the
-    /// highest value only when neither is usable.
+    /// microphone feeding a 44.1 kHz Bluetooth output still ends at 44.1 kHz.
+    /// Honour the preferred source rate, then preserve its current rate, before
+    /// falling back to the highest value only when neither is usable.
+    ///
+    /// ## And the same argument applies where a common rate *does* exist
+    ///
+    /// That branch used to take `shared.max()`, so a 48/96 kHz microphone into
+    /// a 48/96 kHz destination landed on 96 whenever nobody had asked for 48 —
+    /// twice the rate for content a capsule does not produce.
+    ///
+    /// The reason given here for avoiding it was wrong, though, and it is worth
+    /// replacing rather than repeating. Measured on the voice scene, two
+    /// seconds of audio through equaliser, gate, compressor and limiter:
+    ///
+    ///     48 kHz  33.8 ms CPU   10.67 ms per 512-frame cycle
+    ///     96 kHz  36.0 ms CPU    5.33 ms per 512-frame cycle
+    ///
+    /// Seven per cent more work, not double: these units are dominated by
+    /// per-buffer overhead rather than per-sample arithmetic. What actually
+    /// doubles is the pressure. A buffer is counted in frames, so at twice the
+    /// rate the same buffer is half the wall clock — the work per cycle barely
+    /// moves and the deadline it must fit inside halves, which is where crackle
+    /// comes from.
+    ///
+    /// So: the shared rate nearest what was asked for, measured in octaves
+    /// because rates are ratios. With nothing asked for that is 48 kHz, which
+    /// is what this application prefers everywhere else.
     static func sampleRatePlan(
         sourceRates: [Double],
         destinationRates: [Double],
@@ -1040,8 +1063,16 @@ public final class RoutingEngine: @unchecked Sendable {
         {
             return SampleRatePlan(targetRate: preferredRate, hasMismatch: false)
         }
-        if let highest = shared.max() {
-            return SampleRatePlan(targetRate: highest, hasMismatch: false)
+        if !shared.isEmpty {
+            let wanted = preferredRate.flatMap {
+                AudioProcessingContract.supports(sampleRate: $0) ? $0 : nil
+            } ?? 48_000
+            let nearest = shared.min {
+                abs(log2($0 / wanted)) < abs(log2($1 / wanted))
+            }
+            if let nearest {
+                return SampleRatePlan(targetRate: nearest, hasMismatch: false)
+            }
         }
         if let preferredRate, AudioProcessingContract.supports(sampleRate: preferredRate),
             source.contains(preferredRate)
