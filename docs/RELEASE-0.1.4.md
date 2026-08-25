@@ -7,6 +7,35 @@ at the end.
 
 ---
 
+## The one that mattered
+
+**Echo cancellation and any single effect could not run together**, and what
+happened when somebody tried was worse than a refusal: the route failed, the
+teardown timed out on top of it, and repeating it left the machine unable to
+open an aggregate device *at all* — for every application, not just this one,
+until the audio server was restarted. That is the report that said this
+application degraded a machine until it needed a reboot.
+
+It was ours. The route took a graph admission to publish the effect chain and
+released it with a `defer` at the end of the whole start, so it was still
+outstanding when the canceller was asked to start — and starting the canceller
+goes through the sole disposer, which refuses while any graph admission is. Two
+seconds of waiting on our own bound, then failure.
+
+Either half alone was always fine, which is why it looked like Core Audio's
+fault. Measured on a freshly booted machine, before and after:
+
+| | before | after |
+|---|---|---|
+| effects, no echo | 1310 cycles | 1243 cycles |
+| echo, no effects | 1214 cycles | 1225 cycles |
+| **echo + one effect** | **failed** | **1187 cycles, no missed deadlines** |
+
+The start path went from 2002 ms and never reaching the IOProc, to 56 ms with
+the IOProc created in 1 ms and started in 6.
+
+---
+
 YunAudio 0.1.4 is a diagnosis release. Six faults that had been reported as
 "it cuts out", "it sounds wrong" or "it stops working" are now things the
 application measures, names and — where it can — fixes.
@@ -82,8 +111,14 @@ README ever stop naming the same version.
   before this and now runs clean.
 - `yunaudio-cli` gains `health` (is the audio server opening devices — three
   seconds, where establishing it by hand took a sampler on a hung process),
-  `fidelity`, `cycles`, and `echo`; `diagnose` reports process identifiers and
-  aggregates without clients.
+  `fidelity`, `cycles`, `echo`, and the `aec-instantiate` / `aec-layers` probes
+  that peel a cancelling start apart a layer at a time; `route` takes `--echo`
+  and `--effects`; `diagnose` reports process identifiers and aggregates
+  without clients.
+- `YUNAUDIO_TIMING` announces each start stage *before* it runs. It only
+  printed after, so a stage that never returned never appeared and the trace of
+  a hung start ended at the last stage that worked. That one change is what
+  found the fault above.
 
 ## Release evidence
 
