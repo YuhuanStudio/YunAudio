@@ -213,18 +213,34 @@ struct ControlListenerLifecycleOwnerTests {
         let stopResult = ControlLifecycleGate<Bool>()
         let owner = ControlListenerLifecycleOwner(makeBackend: { backend })
 
+        // What main-runloop delivery costs in this run with the owner idle.
+        //
+        // The claim is that a 200 ms start does not hold the main actor, and an
+        // absolute budget cannot make it: swift-testing runs suites in
+        // parallel, so the other suites' own main-actor work lands in the same
+        // measurement. This asserted 8 ms flat and consequently failed in every
+        // full run and passed alone — a test that reports the machine's load as
+        // a defect in the code teaches everybody to ignore it.
+        //
+        // The floor stays, so a quiet machine still holds the tight budget.
+        let baseline = startControlLifecycleProbe(samples: 60)
+        #expect(await baseline.wait())
+        let ceiling = max(8_000_000, baseline.maximumNanoseconds * 2)
+
         let startAdmission = DispatchTime.now().uptimeNanoseconds
         owner.start(handler: { _, _, reply in reply(.message("unused")) }) { result in
             starts.increment()
             startResult.resolve(result)
         }
         let startAdmissionCost = DispatchTime.now().uptimeNanoseconds - startAdmission
-        #expect(startAdmissionCost < 8_000_000)
+        #expect(startAdmissionCost < ceiling)
         try #require(await backend.startEntered.wait() == true)
         let startProbe = startControlLifecycleProbe(samples: 120)
         #expect(await startProbe.wait())
         #expect(startProbe.count == 120)
-        #expect(startProbe.maximumNanoseconds < 8_000_000)
+        #expect(
+            startProbe.maximumNanoseconds < ceiling,
+            "start held the main actor for \(startProbe.maximumNanoseconds) ns, idle baseline \(baseline.maximumNanoseconds) ns")
         #expect(await startResult.wait() == .started)
         #expect(starts.value == 1)
         #expect(owner.statistics.openClients == 3)
@@ -235,12 +251,14 @@ struct ControlListenerLifecycleOwnerTests {
             stopResult.resolve(acknowledged)
         }
         let stopAdmissionCost = DispatchTime.now().uptimeNanoseconds - stopAdmission
-        #expect(stopAdmissionCost < 8_000_000)
+        #expect(stopAdmissionCost < ceiling)
         try #require(await backend.stopEntered.wait() == true)
         let stopProbe = startControlLifecycleProbe(samples: 160)
         #expect(await stopProbe.wait())
         #expect(stopProbe.count == 160)
-        #expect(stopProbe.maximumNanoseconds < 8_000_000)
+        #expect(
+            stopProbe.maximumNanoseconds < ceiling,
+            "stop held the main actor for \(stopProbe.maximumNanoseconds) ns, idle baseline \(baseline.maximumNanoseconds) ns")
         #expect(await stopResult.wait() == true)
         #expect(stops.value == 1)
 
