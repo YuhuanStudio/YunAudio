@@ -130,18 +130,22 @@ struct KTVWordsSourcing: View {
             // all. Saying which saves somebody nudging a file that was never
             // going to line up.
             if let message = model.lyricTimingMessage {
-                HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
-                    Text(message)
-                        .font(scale.caption)
-                        .foregroundStyle(scale.quiet)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if model.lyricTimingIsCorrectable {
+                // The message on its own line and the button under it, not
+                // beside it: in the inspector's column a sentence and a button
+                // sharing a row is the clipping this file's rows are laid out
+                // to avoid, and the structural check that caught it is right.
+                Text(message)
+                    .font(scale.caption)
+                    .foregroundStyle(scale.quiet)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(identifier("LyricTiming"))
+                if model.lyricTimingIsCorrectable {
+                    YunWrap(spacing: Yun.Space.sm, lineSpacing: 6, balanced: true) {
                         Button(loc("Line them up")) { model.applyMeasuredLyricOffset() }
                             .buttonStyle(YunButtonStyle(.primary, small: true))
                             .accessibilityIdentifier(identifier("ApplyMeasuredOffset"))
                     }
                 }
-                .accessibilityIdentifier(identifier("LyricTiming"))
             }
 
             if isExpanded { search }

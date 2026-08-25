@@ -42,7 +42,10 @@ struct CompactSingingActionsTests {
                 range: start.upperBound..<source.endIndex))
         let actionRows = source[start.lowerBound..<lookup.lowerBound]
 
-        #expect(actionRows.ranges(of: "YunWrap(").count == 2)
+        // At least the two, because a third row joined them — the timing
+        // diagnosis and its correction. The claim was never "there are exactly
+        // two rows", it is "no row here clips", which is the `HStack` line.
+        #expect(actionRows.ranges(of: "YunWrap(").count >= 2)
         #expect(actionRows.ranges(of: "HStack(").isEmpty)
     }
 
