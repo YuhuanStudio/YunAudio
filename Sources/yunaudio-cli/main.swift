@@ -1003,7 +1003,15 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
         guard !inputs.isEmpty || !outputs.isEmpty else { continue }
         let inNames = inputs.map { byID[$0] ?? "object \($0)" }.joined(separator: ", ")
         let outNames = outputs.map { byID[$0] ?? "object \($0)" }.joined(separator: ", ")
-        print("  \(process.name)")
+        // With the process identifier, because a name is not an identity.
+        //
+        // Two copies of the same application are one line here otherwise, and
+        // that cost real time: the verification harness runs its own build of
+        // this application under the same name, so a diagnostic taken while the
+        // gate was running attributed the harness's devices to the copy
+        // somebody was using — and produced an hour of hunting an idle leak
+        // that was a second instance doing its job.
+        print("  \(process.name)  [pid \(process.pid)]")
         if !inputs.isEmpty { print("     in:  \(inNames)") }
         if !outputs.isEmpty { print("     out: \(outNames)") }
     }
