@@ -6803,6 +6803,18 @@ public final class RoutingEngine: @unchecked Sendable {
         BoundedAudioUnitDisposer.shared.pendingOwnerCount
     }
 
+    /// Where the running chain's latency comes from, by stage.
+    ///
+    /// Summed, this is what the router already reported; broken down, it says
+    /// which switch is buying it. A pitch shifter set to no shift is
+    /// bit-transparent and still reports 4096 frames, and nothing above here
+    /// could see that.
+    public var effectLatencyByStage: [EffectKind: Int] {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return effectChain?.latencyByStage ?? [:]
+    }
+
     public var whyCycleCountIsUnknown: CycleCountRefusal {
         guard stateLock.try() else { return .lockBusy }
         defer { stateLock.unlock() }

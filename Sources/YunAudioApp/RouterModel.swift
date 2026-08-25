@@ -8158,6 +8158,51 @@ final class RouterModel {
     /// chain wearing the same name.
     var effectValues: [String: Float] = [:]
 
+    /// Effects that are switched on and, at their current settings, doing
+    /// nothing at all.
+    ///
+    /// Only the two that can be transparent *by construction* rather than on
+    /// some particular signal: a pitch shifter set to no shift and a formant
+    /// shifter set to no shift pass their samples through unchanged, which is
+    /// measured — bit for bit, correlation 1.000000. A gate at its default is
+    /// transparent on quiet material and is not the same claim.
+    ///
+    /// This is the "switch that is on, does nothing, and costs something"
+    /// arrangement, and it is the worst of the three: nobody turns off a
+    /// control that appears to be doing what they asked.
+    var effectsEnabledButNeutral: [EffectKind] {
+        var neutral: [EffectKind] = []
+        for kind in [EffectKind.pitch, .formant] where enabledEffects.contains(kind) {
+            if kind.parameters.allSatisfy({ value(of: $0, in: kind) == $0.defaultValue }) {
+                neutral.append(kind)
+            }
+        }
+        return neutral
+    }
+
+    /// What those cost, in milliseconds, from the running chain's own report.
+    var neutralEffectLatencyMilliseconds: Double {
+        let rate = pathQuality?.sampleRate ?? Double(preferredSampleRate)
+        guard rate > 0 else { return 0 }
+        let byStage = engine.effectLatencyByStage
+        let frames = effectsEnabledButNeutral.reduce(0) { $0 + (byStage[$1] ?? 0) }
+        return Double(frames) / rate * 1000
+    }
+
+    /// Said when it is worth saying: on, doing nothing, and costing enough to
+    /// notice.
+    var neutralEffectWarning: String? {
+        let neutral = effectsEnabledButNeutral
+        guard !neutral.isEmpty, isRunning else { return nil }
+        let milliseconds = neutralEffectLatencyMilliseconds
+        guard milliseconds >= 5 else { return nil }
+        let names = neutral.map { $0.title }.joined(separator: ", ")
+        return String(
+            format: loc(
+                "%@ is switched on at a setting that changes nothing, and costs %.0f ms of delay. Turning it off is free."
+            ), names, milliseconds)
+    }
+
     func value(of parameter: EffectParameter, in kind: EffectKind) -> Float {
         effectValues["\(kind.rawValue).\(parameter.id)"] ?? parameter.defaultValue
     }

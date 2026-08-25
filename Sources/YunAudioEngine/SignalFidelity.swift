@@ -79,9 +79,22 @@ public enum SignalFidelity {
         of kinds: [EffectKind], on source: [Float], sampleRate: Double,
         callbackFrames: Int = 512
     ) -> Measurement? {
-        guard let chain = EffectChain(
-            kinds: kinds, sampleRate: sampleRate, maximumFrames: callbackFrames)
-        else { return nil }
+        // Retried, because "the chain would not build" and "another graph was
+        // being built at that instant" are different answers and only one of
+        // them is about the chain.
+        //
+        // The same conflation `SoundIsolationReport.isAvailable` carried: a
+        // refusal from the sole disposer is a statement about the moment, and
+        // returning nil for it makes a measurement of the machine's contention
+        // look like a fact about the effect.
+        var built: EffectChain?
+        for attempt in 0..<20 {
+            built = EffectChain(
+                kinds: kinds, sampleRate: sampleRate, maximumFrames: callbackFrames)
+            if built != nil { break }
+            if attempt < 19 { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        guard let chain = built else { return nil }
         var processed = [Float](repeating: 0, count: source.count)
         var offset = 0
         while offset < source.count {
@@ -241,7 +254,12 @@ public enum SignalFidelity {
 
     /// How far apart the two may be before the search gives up. Anything past
     /// this is not a filter's group delay, it is a different signal.
-    public static let maximumDelayFrames = 8192
+    ///
+    /// Thirty-two thousand, not eight. The pitch shifter alone reports 8192
+    /// frames at 96 kHz, so a chain carrying it and anything else ran past the
+    /// old limit — and the ruler then reported the best alignment it could
+    /// find inside its window, which is a measurement of the window.
+    public static let maximumDelayFrames = 32_768
 
     /// Compares a processed signal with the reference it came from.
     ///

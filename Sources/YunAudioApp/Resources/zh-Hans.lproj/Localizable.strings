@@ -242,6 +242,7 @@
 "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate." = "请再说几秒。素材不足时，整体响度没有意义。";
 "Monitor" = "监听";
 "Hear yourself, %@ ms behind." = "听见自己，延迟 %@ 毫秒。";
+"%@ is switched on at a setting that changes nothing, and costs %.0f ms of delay. Turning it off is free." = "%@ 开着，但目前的设置不会改变任何东西，而它要花你 %.0f 毫秒的延迟。关掉它不会失去什么。";
 "You hear yourself %.0f ms late here, which is far enough behind to sing against. A smaller buffer helps a little; a wired headset helps more." = "你会在 %.0f 毫秒后才听到自己，这个延迟已经足以跟你的演唱打架。缩小缓冲有一点帮助，换有线耳机帮助更大。";
 "You hear yourself %.0f ms late here, which is too far behind to sing to. A wired or 2.4 GHz headset is the fix; no setting can shorten this one." = "你会在 %.0f 毫秒后才听到自己，这已经没办法跟着唱了。换有线或 2.4 GHz 耳机才有用；没有任何设置能缩短这一段。";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "该输出看起来不是耳机。用外放监听会把声音送回麦克风正在收音的房间。";

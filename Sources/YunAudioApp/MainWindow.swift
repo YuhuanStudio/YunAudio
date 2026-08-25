@@ -1282,6 +1282,21 @@ struct MainWindow: View {
                     voice
                     YunDivider()
                     effectStack(.voice)
+                    // On, doing nothing, and costing something.
+                    //
+                    // A pitch shifter set to no shift and a formant shifter set
+                    // to no shift are bit-transparent — measured — and still
+                    // report their latency: 8192 and 2048 frames at 96 kHz,
+                    // which is 107 ms of delay bought for no change in sound.
+                    // Nobody turns off a control that looks like it is doing
+                    // what they asked, so it has to be said.
+                    if let notice = model.neutralEffectWarning {
+                        Text(notice)
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("NeutralEffectNotice")
+                    }
                 }
             }
 

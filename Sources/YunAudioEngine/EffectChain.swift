@@ -596,6 +596,14 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
     private struct HostedUnit {
         let owner: UnitOwner
         let instance: AudioComponentInstance
+        /// Which stage this unit is, so its latency can be attributed to it.
+        ///
+        /// The chain has always summed the units' reported latency and thrown
+        /// the breakdown away — and the breakdown is the interesting part. A
+        /// pitch shifter set to no shift is bit-transparent and still reports
+        /// 4096 frames, so a switch that is on, does nothing, and costs 85 ms
+        /// was invisible to everything above here.
+        let kind: EffectKind?
         var teardownState = AudioUnitTeardownState()
     }
 
@@ -629,6 +637,9 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
 
     /// Total latency the chain adds, in frames.
     private(set) var latencyFrames = 0
+
+    /// The same total, broken down by the stage that reported it.
+    private(set) var latencyByStage: [EffectKind: Int] = [:]
 
     /// Third-party units in the chain, in the order given.
     private(set) var plugins: [AudioUnitPlugin] = []
@@ -795,7 +806,7 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
             // Ownership moves before the first vendor property call. If that
             // call overruns its deadline the construction transaction retains
             // the unit and the detached teardown can still name it.
-            units.append(HostedUnit(owner: .stage(kind), instance: unit))
+            units.append(HostedUnit(owner: .stage(kind), instance: unit, kind: kind))
             guard
                 teardownDeadline.perform({
                     AudioUnitSetProperty(
@@ -950,7 +961,8 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 // array would let failable-init destroy the array without ever
                 // handing those instances to the bounded disposer.
                 units.insert(
-                    HostedUnit(owner: .plugin(plugin.id), instance: unit), at: insertAt)
+                    HostedUnit(owner: .plugin(plugin.id), instance: unit, kind: nil),
+                    at: insertAt)
                 // The native stage's position is an index into `units`, so
                 // inserting ahead of it moves it.
                 if let native = nativeIndex, native >= insertAt {
@@ -1078,6 +1090,9 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
         }
 
         var measuredLatencyFrames = native?.latencyFrames ?? 0
+        if let native, let nativeKind = stages.first(where: { $0.isNative }) {
+            latencyByStage[nativeKind] = native.latencyFrames
+        }
         for unit in units {
             var latency: Float64 = 0
             var size = UInt32(MemoryLayout<Float64>.size)
@@ -1101,6 +1116,9 @@ final class EffectChain: AudioUnitTeardownOwner, @unchecked Sendable {
                 return nil
             }
             measuredLatencyFrames = total
+            if let kind = unit.kind {
+                latencyByStage[kind, default: 0] += frames
+            }
         }
         latencyFrames = measuredLatencyFrames
 

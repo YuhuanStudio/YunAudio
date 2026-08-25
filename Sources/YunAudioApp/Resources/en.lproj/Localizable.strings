@@ -242,6 +242,7 @@
 "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate." = "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate.";
 "Monitor" = "Monitor";
 "Hear yourself, %@ ms behind." = "Hear yourself, %@ ms behind.";
+"%@ is switched on at a setting that changes nothing, and costs %.0f ms of delay. Turning it off is free." = "%@ is switched on at a setting that changes nothing, and costs %.0f ms of delay. Turning it off is free.";
 "You hear yourself %.0f ms late here, which is far enough behind to sing against. A smaller buffer helps a little; a wired headset helps more." = "You hear yourself %.0f ms late here, which is far enough behind to sing against. A smaller buffer helps a little; a wired headset helps more.";
 "You hear yourself %.0f ms late here, which is too far behind to sing to. A wired or 2.4 GHz headset is the fix; no setting can shorten this one." = "You hear yourself %.0f ms late here, which is too far behind to sing to. A wired or 2.4 GHz headset is the fix; no setting can shorten this one.";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "This output does not look like headphones. Monitoring on speakers feeds the microphone back into the room.";
