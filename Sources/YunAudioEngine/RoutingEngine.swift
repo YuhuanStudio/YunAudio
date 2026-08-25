@@ -2531,6 +2531,15 @@ public final class RoutingEngine: @unchecked Sendable {
 
     private func timed<T>(_ label: String, _ work: () throws -> T) rethrows -> T {
         guard Self.reportsTiming else { return try work() }
+        // Announced before it runs, not only after it finishes.
+        //
+        // A stage that never returns never printed, so the trace of a hung
+        // start ended at the last stage that *worked* — which reads as if the
+        // one after it had not been reached, when in fact it is the one still
+        // running. That cost real time on 2026-08-26: the fault being chased
+        // was a start that hangs, and this was the tool least able to say
+        // where.
+        FileHandle.standardError.write(Data("      ····  \(label)…\n".utf8))
         let began = Date()
         let result = try work()
         FileHandle.standardError.write(
@@ -3031,6 +3040,17 @@ public final class RoutingEngine: @unchecked Sendable {
             // Only what is already known: no probe is run from here. Asking
             // costs three seconds and leaks a thread of its own when the answer
             // is bad, and a route is not the place to spend that.
+            // Traced like the other stages. It was the only expensive thing
+            // in the start path with no stage of its own, which is why a hung
+            // start's trace ended before it with nothing to say.
+            FileHandle.standardError.write(
+                Self.reportsTiming
+                    ? Data("      ····  build the echo canceller…\n".utf8) : Data())
+            defer {
+                FileHandle.standardError.write(
+                    Self.reportsTiming
+                        ? Data("      ····  echo canceller stage returned\n".utf8) : Data())
+            }
             if AudioServerHealth.lastVerdict == .notOpeningDevices {
                 construction = .refused
             } else if let graphAdmission = BoundedAudioUnitDisposer.shared

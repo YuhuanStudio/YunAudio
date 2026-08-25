@@ -36,7 +36,8 @@ public enum EchoCancellationDiagnostics {
     }
 
     public enum Outcome: Sendable, Equatable {
-        case built
+        /// Built, and taken down again — with what the teardown said.
+        case built(String)
         case refused(String)
         /// The construction did not return inside the budget. This is the
         /// fault: a synchronous call that never comes back, leaving a thread
@@ -89,8 +90,17 @@ public enum EchoCancellationDiagnostics {
                         constructionContext: layers.contains(.constructionContext)
                             ? context : nil,
                         graphAdmission: admission)
-                    _ = bridge
-                    return .built
+                    // Taken down here rather than left to a deinitialiser.
+                    //
+                    // The first version of this discarded the bridge and probed
+                    // the server, and read "wedged" — but a live canceller
+                    // holding the microphone is a reason for a new aggregate to
+                    // be refused that has nothing to do with the fault. The
+                    // question is whether the server is still wrong *after*
+                    // this thing has gone, and that needs the teardown to have
+                    // happened and been waited for.
+                    let teardown = bridge.stop()
+                    return .built(String(describing: teardown))
                 } catch {
                     return .refused(String(describing: error))
                 }
@@ -118,6 +128,138 @@ public enum EchoCancellationDiagnostics {
         thread.start()
         guard done.wait(timeout: .now() + budget) == .success else { return .didNotReturn }
         return box.outcome
+    }
+
+    /// Whether a route's aggregate can be created while the canceller is live.
+    ///
+    /// This is the ordering `startAttempt` uses: the bridge is constructed
+    /// first, and the aggregate the route runs on is built after it, with the
+    /// canceller already holding the microphone. Six combinations of the
+    /// route's wrappings all built and tore down with the server left healthy,
+    /// so the construction is not the fault — but a probe taken while the
+    /// bridge was still alive read "wedged", and that is this question.
+    ///
+    /// Returns what happened at each step, in order, for printing.
+    public static func aggregateWhileCancelling(
+        microphoneUID: String,
+        speakerUID: String,
+        sampleRate: Double = 48_000,
+        sliceFrames: Int = 128,
+        destinationOnly: Bool = false,
+        budget: TimeInterval = 15
+    ) -> [String] {
+        var lines: [String] = []
+        let settings = EchoCancellationSettings(speakerUID: speakerUID)
+        let bridge: EchoCancellationBridge
+        do {
+            bridge = try EchoCancellationBridge(
+                microphoneUID: microphoneUID, settings: settings,
+                routerSampleRate: sampleRate, maximumFrames: sliceFrames)
+            lines.append("canceller built and kept alive")
+        } catch {
+            return ["canceller refused: \(String(describing: error))"]
+        }
+        defer { _ = bridge.stop() }
+
+        // The same shape a route builds: an input and an output, drift
+        // corrected between them.
+        let devices = (try? AudioDevices.all()) ?? []
+        // The shape a route builds *with cancellation on* is not a pair.
+        //
+        // `members = cancelsEcho ? [destination] + extras : [source, destination]`
+        // — the microphone leaves the aggregate, because the canceller has it.
+        // So the route's aggregate is the destination alone, and on this
+        // project's own setup that destination is the virtual driver. The
+        // stage trace puts the hang after "create the aggregate" (8 ms) and
+        // before `AudioDeviceStart`, which leaves exactly one call: opening an
+        // IOProc on that one-member aggregate.
+        if destinationOnly {
+            guard
+                let destination = devices.first(where: {
+                    $0.uid == ClockAnchorPublisher.driverDeviceUID
+                }) ?? devices.first(where: { $0.transport.isVirtual && $0.hasOutput })
+            else {
+                lines.append("no virtual destination to build a one-member aggregate from")
+                return lines
+            }
+            let done = DispatchSemaphore(value: 0)
+            let box = OutcomeBox()
+            let thread = Thread {
+                do {
+                    let aggregate = try AggregateDevice(
+                        name: "YunAudio ordering probe",
+                        subDevices: [
+                            AggregateDevice.SubDevice(
+                                uid: destination.uid, driftCompensation: false)
+                        ],
+                        clockMasterUID: destination.uid)
+                    lines.append("aggregate of \(destination.name) alone: created")
+                    let opened = AudioServerHealth.openAndClose(aggregate.id)
+                    _ = aggregate.destroy()
+                    box.record(opened ? .built("opened") : .refused("would not open"))
+                } catch {
+                    box.record(.refused(String(describing: error)))
+                }
+                done.signal()
+            }
+            thread.name = "com.yuhuanstudio.yunaudio.ordering-probe"
+            thread.start()
+            if done.wait(timeout: .now() + budget) == .success {
+                switch box.outcome {
+                case .built(let how): lines.append("IOProc on it: \(how)")
+                case .refused(let why): lines.append("IOProc on it: \(why)")
+                case .didNotReturn: lines.append("IOProc on it: DID NOT RETURN")
+                }
+            } else {
+                lines.append("IOProc on it: DID NOT RETURN — this is the wedge")
+            }
+            return lines
+        }
+
+        // Two *different* devices. On a machine whose only endpoint carries
+        // both directions — a virtual machine's, for one — asking for the same
+        // UID twice is refused by the aggregate's own validation, and the probe
+        // then reports its own mistake as a finding.
+        guard let input = devices.first(where: \.hasInput),
+            let output = devices.first(where: {
+                $0.hasOutput && $0.uid != input.uid && !$0.transport.isVirtual
+            }) ?? devices.first(where: { $0.hasOutput && $0.uid != input.uid })
+        else {
+            lines.append("no pair of distinct devices to build an aggregate from")
+            return lines
+        }
+
+        let done = DispatchSemaphore(value: 0)
+        let box = OutcomeBox()
+        let thread = Thread {
+            do {
+                let aggregate = try AggregateDevice(
+                    name: "YunAudio ordering probe",
+                    subDevices: [
+                        AggregateDevice.SubDevice(uid: input.uid, driftCompensation: false),
+                        AggregateDevice.SubDevice(uid: output.uid, driftCompensation: true),
+                    ],
+                    clockMasterUID: input.uid)
+                let opened = AudioServerHealth.openAndClose(aggregate.id)
+                _ = aggregate.destroy()
+                box.record(opened ? .built("opened") : .refused("would not open"))
+            } catch {
+                box.record(.refused(String(describing: error)))
+            }
+            done.signal()
+        }
+        thread.name = "com.yuhuanstudio.yunaudio.ordering-probe"
+        thread.start()
+        if done.wait(timeout: .now() + budget) == .success {
+            switch box.outcome {
+            case .built(let how): lines.append("aggregate while cancelling: \(how)")
+            case .refused(let why): lines.append("aggregate while cancelling: \(why)")
+            case .didNotReturn: lines.append("aggregate while cancelling: DID NOT RETURN")
+            }
+        } else {
+            lines.append("aggregate while cancelling: DID NOT RETURN — this is the wedge")
+        }
+        return lines
     }
 
     private final class OutcomeBox: @unchecked Sendable {

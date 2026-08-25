@@ -1254,6 +1254,22 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-layers" {
         ("lane + admission", [.lane, .graphAdmission]),
         ("everything, as the route does it", [.lane, .graphAdmission, .constructionContext]),
     ]
+    // The ordering question, which the six rows below cannot ask: they build a
+    // canceller and take it down again, and a route keeps it and then builds
+    // its aggregate underneath.
+    if CommandLine.arguments.contains("--ordering") {
+        print(
+            "server before: \(AudioServerHealth.probeAggregate() == .healthy ? "clean" : "already wedged")\n"
+        )
+        for line in EchoCancellationDiagnostics.aggregateWhileCancelling(
+            microphoneUID: microphone.uid, speakerUID: speaker.uid,
+            destinationOnly: CommandLine.arguments.contains("--destination-only"))
+        {
+            print("  \(line)")
+        }
+        exit(0)
+    }
+
     let wanted = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
     print("mic \(microphone.name) · speaker \(speaker.name)\n")
     for (name, layers) in combinations {
@@ -1270,7 +1286,7 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-layers" {
         let after = AudioServerHealth.probeAggregate()
         let verdict: String
         switch outcome {
-        case .built: verdict = "built"
+        case .built(let teardown): verdict = "built, torn down: \(teardown)"
         case .refused(let why): verdict = "refused (\(why))"
         case .didNotReturn: verdict = "DID NOT RETURN"
         }
