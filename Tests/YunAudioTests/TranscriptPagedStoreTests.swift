@@ -312,10 +312,16 @@ struct TranscriptPagedStoreTests {
         }
         #expect(mailbox.statistics.pending == 1_024)
 
-        let started = DispatchTime.now().uptimeNanoseconds
+        // Thread CPU time, not wall clock. The claim is that submitting does
+        // no work — it hands off and returns. Wall clock also counts the
+        // calling thread being descheduled, which with forty suites running in
+        // parallel it routinely is, so this failed under a full run and passed
+        // alone: the machine's load reported as a defect in the code. The batch
+        // assertion in this same file already measures CPU for that reason.
+        let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         let completion = TranscriptMailboxFlushCompletion()
         mailbox.flush(generation: 7) { completion.resolve() }
-        let submission = DispatchTime.now().uptimeNanoseconds - started
+        let submission = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started
         releaseLane.signal()
         await completion.wait()
 
@@ -412,7 +418,13 @@ struct TranscriptPagedStoreTests {
         #expect((batchDurations.1.max() ?? .max) < 8_000_000)
 
         var acceptedRequests = 0
-        let started = DispatchTime.now().uptimeNanoseconds
+        // Thread CPU time, not wall clock. The claim is that submitting does
+        // no work — it hands off and returns. Wall clock also counts the
+        // calling thread being descheduled, which with forty suites running in
+        // parallel it routinely is, so this failed under a full run and passed
+        // alone: the machine's load reported as a defect in the code. The batch
+        // assertion in this same file already measures CPU for that reason.
+        let started = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         for _ in 0..<10_000 {
             if worker.requestPages(
                 generation: 9,
@@ -423,7 +435,7 @@ struct TranscriptPagedStoreTests {
                 acceptedRequests += 1
             }
         }
-        let submission = DispatchTime.now().uptimeNanoseconds - started
+        let submission = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - started
         for _ in 0..<2_000 where held.count < 2 {
             try? await Task.sleep(for: .milliseconds(1))
         }

@@ -23,6 +23,17 @@ private final class LightingAccessCounter: @unchecked Sendable {
 
 @Suite("Lighting background resource use")
 struct LightingResourceTests {
+
+    /// How long to wait on a semaphore before calling it a deadlock.
+    ///
+    /// These are ordering tests: the waits synchronise, they do not assert
+    /// latency. A one-second budget asserted that a `.utility` thread gets
+    /// scheduled within a second, which is a property of the machine — and
+    /// with forty suites running in parallel it is routinely false. Six
+    /// failures in one run, none of them about the code, all of them passing
+    /// alone. A genuine hang still fails, just later.
+    static let aHang = DispatchTimeInterval.seconds(30)
+
     @Test("a cached frame cannot satisfy any later HID read fence")
     func frameReadEvidenceRequiresTheExactCompletion() {
         var evidence = LightingFrameReadEvidence()
@@ -108,7 +119,7 @@ struct LightingResourceTests {
             }
             requestFinished.signal()
         }
-        #expect(beganWaiting.wait(timeout: .now() + 1) == .success)
+        #expect(beganWaiting.wait(timeout: .now() + Self.aHang) == .success)
 
         access.revoke()
         DispatchQueue.global(qos: .utility).async {
@@ -117,8 +128,8 @@ struct LightingResourceTests {
         }
         deviceLock.unlock()
 
-        #expect(requestFinished.wait(timeout: .now() + 1) == .success)
-        #expect(teardownFinished.wait(timeout: .now() + 1) == .success)
+        #expect(requestFinished.wait(timeout: .now() + Self.aHang) == .success)
+        #expect(teardownFinished.wait(timeout: .now() + Self.aHang) == .success)
         #expect(normalOperations.value == 0)
         #expect(teardownOperations.value == 1)
     }
@@ -138,12 +149,12 @@ struct LightingResourceTests {
             _ = access.perform(token, deviceLock: deviceLock) {
                 recorder.record("normal-entered")
                 entered.signal()
-                _ = release.wait(timeout: .now() + 1)
+                _ = release.wait(timeout: .now() + Self.aHang)
                 recorder.record("normal-returned")
             }
             normalFinished.signal()
         }
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + Self.aHang) == .success)
 
         access.revoke()
         DispatchQueue.global(qos: .utility).async {
@@ -152,8 +163,8 @@ struct LightingResourceTests {
         }
         release.signal()
 
-        #expect(normalFinished.wait(timeout: .now() + 1) == .success)
-        #expect(teardownFinished.wait(timeout: .now() + 1) == .success)
+        #expect(normalFinished.wait(timeout: .now() + Self.aHang) == .success)
+        #expect(teardownFinished.wait(timeout: .now() + Self.aHang) == .success)
         #expect(recorder.snapshot == ["normal-entered", "normal-returned", "darkened"])
     }
 
@@ -176,7 +187,7 @@ struct LightingResourceTests {
         let fence = worker.submit(
             LightingTerminationOwner(
                 device: nil, deviceLock: deviceLock, renderThread: nil))
-        #expect(entered.wait(timeout: .now() + 1) == .success)
+        #expect(entered.wait(timeout: .now() + Self.aHang) == .success)
         #expect(fence.wait(timeout: 0.25) == .timedOut)
         #expect(worker.telemetry.timedOutAfterEntry == 1)
         #expect(resourceQuarantine.count == 1)
@@ -195,9 +206,9 @@ struct LightingResourceTests {
         let releaseQueue = DispatchSemaphore(value: 0)
         workerQueue.async {
             queueEntered.signal()
-            _ = releaseQueue.wait(timeout: .now() + 1)
+            _ = releaseQueue.wait(timeout: .now() + Self.aHang)
         }
-        #expect(queueEntered.wait(timeout: .now() + 1) == .success)
+        #expect(queueEntered.wait(timeout: .now() + Self.aHang) == .success)
 
         let resourceQuarantine = ProcessLifetimeResourceQuarantine()
         let worker = BoundedOwnerShutdownWorker<LightingTerminationOwner>(
