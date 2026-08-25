@@ -3017,7 +3017,23 @@ public final class RoutingEngine: @unchecked Sendable {
             let incidentSink = onAudioIncidentBundle
             let construction:
                 AudioUnitLaneResult<Result<EchoCancellationBridge, EchoCancellationSetupError>>
-            if let graphAdmission = BoundedAudioUnitDisposer.shared
+            // Do not add another wedged thread to a machine already in that
+            // state.
+            //
+            // Constructing the voice-processing unit is what reaches
+            // `AudioDeviceCreateIOProcID`, and on a machine where that call no
+            // longer returns it will not return here either — leaving a thread
+            // inside it for the life of the process and a quarantine entry that
+            // refuses every graph after it. If this process has already
+            // established that the server will not open a device, the answer is
+            // known and trying again buys nothing.
+            //
+            // Only what is already known: no probe is run from here. Asking
+            // costs three seconds and leaks a thread of its own when the answer
+            // is bad, and a route is not the place to spend that.
+            if AudioServerHealth.lastVerdict == .notOpeningDevices {
+                construction = .refused
+            } else if let graphAdmission = BoundedAudioUnitDisposer.shared
                 .acquireGraphAdmissionAfterDraining(waitingUpTo: 2.25)
             {
                 // Its own lane, so a wedge here costs the echo canceller and

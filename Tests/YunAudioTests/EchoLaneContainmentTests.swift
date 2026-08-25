@@ -92,3 +92,39 @@ struct EchoLaneContainmentTests {
         #expect(!body.contains("echoCancellation.admitsConstruction"))
     }
 }
+
+/// Not adding a second wedged thread to a machine already in that state.
+@Suite("A known-bad server is not asked again")
+struct EchoSkipsAKnownBadServerTests {
+
+    /// The check is a *read* of what this process already established, not a
+    /// probe. Probing costs three seconds and leaks a thread of its own when
+    /// the answer is bad, and the middle of a route is not the place for that.
+    @Test("the route reads the last verdict rather than taking a new one")
+    func readsRatherThanProbes() throws {
+        let source = try String(
+            contentsOfFile: GraphLockDisciplineTests.enginePath, encoding: .utf8)
+        let start = try #require(source.range(of: "var bridge: EchoCancellationBridge?"))
+        let end = try #require(
+            source.range(
+                of: "let cancelsEcho = bridge != nil",
+                range: start.upperBound..<source.endIndex))
+        let body = source[start.lowerBound..<end.lowerBound]
+        #expect(body.contains("AudioServerHealth.lastVerdict == .notOpeningDevices"))
+        #expect(!body.contains("AudioServerHealth.check("))
+        #expect(!body.contains("AudioServerHealth.probe"))
+    }
+
+    /// And the skip has to come before the construction, which is the only
+    /// position in which it prevents anything.
+    @Test("the skip precedes the constructor")
+    func skipPrecedesTheConstructor() throws {
+        let source = try String(
+            contentsOfFile: GraphLockDisciplineTests.enginePath, encoding: .utf8)
+        let start = try #require(source.range(of: "var bridge: EchoCancellationBridge?"))
+        let body = source[start.upperBound...].prefix(4000)
+        let skip = try #require(body.range(of: "AudioServerHealth.lastVerdict"))
+        let build = try #require(body.range(of: "try EchoCancellationBridge("))
+        #expect(skip.lowerBound < build.lowerBound)
+    }
+}
