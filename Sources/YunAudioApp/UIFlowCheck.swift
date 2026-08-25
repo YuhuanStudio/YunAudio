@@ -1399,6 +1399,24 @@ enum UIFlowCheck {
                 group.routes.allSatisfy { model.routeMutes[$0] })
             model.setMuted(false, for: group)
             check("unmuting restores every channel", !model.isMuted(group))
+
+            // OBS's middle monitoring state. Off and monitor-and-output were
+            // both reachable here and this one was not, because muting cut the
+            // route and the route feeds both mixes at once.
+            if model.canBeMonitorOnly(group) {
+                model.setMonitorOnly(true, for: group)
+                check("monitor only can be asked for", model.isMonitorOnly(group))
+                check(
+                    "and it is not the same as muted",
+                    !model.isMuted(group) && !model.isSilenced(group))
+                model.setMonitorOnly(false, for: group)
+                check("and it goes back to both mixes", !model.isMonitorOnly(group))
+                check(
+                    "leaving nothing muted behind",
+                    group.routes.allSatisfy { !model.routeMutes[$0] })
+            } else {
+                note("no monitor device routed, so monitor-only cannot be exercised")
+            }
         } else {
             note("no multi-channel source to exercise grouping against")
         }

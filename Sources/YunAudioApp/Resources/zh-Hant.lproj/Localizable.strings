@@ -175,6 +175,8 @@
 "none captured" = "未擷取任何程式";
 "%d captured" = "已擷取 %d 個";
 "Solo" = "獨奏";
+"Send to the mix as well" = "同時送進主混音";
+"Monitor only" = "只在監聽中聽見";
 "CLIP" = "削波";
 "The signal reached full scale. Click to reset." = "訊號曾達到滿刻度。點擊以重設。";
 "Start routing (⌘↩)" = "開始路由（⌘↩）";

@@ -7572,6 +7572,59 @@ final class RouterModel {
         for index in group.routes { setMuted(muted, forRouteAt: index) }
     }
 
+    /// The routes of this group that feed the main mix, and those that feed the
+    /// monitor.
+    ///
+    /// The split already existed — `setSourceLevel` uses it so one fader cannot
+    /// move both mixes — it simply had no name.
+    private func split(_ group: SourceGroup) -> (mainMix: [Int], monitor: [Int]) {
+        let monitored = Set(monitorRouteIndices[group.uid] ?? [])
+        return (
+            group.routes.filter { !monitored.contains($0) },
+            group.routes.filter { monitored.contains($0) }
+        )
+    }
+
+    /// Whether this source reaches the monitor but not the main mix.
+    ///
+    /// OBS's middle state, which this could not express: "off" and "monitor and
+    /// output" were both reachable and monitor-only was not, because muting cut
+    /// the route and the route feeds both mixes at once.
+    func isMonitorOnly(_ group: SourceGroup) -> Bool {
+        let parts = split(group)
+        guard !parts.mainMix.isEmpty, !parts.monitor.isEmpty else { return false }
+        let muted = { (index: Int) in index < self.routeMutes.count && self.routeMutes[index] }
+        return parts.mainMix.allSatisfy(muted) && !parts.monitor.allSatisfy(muted)
+    }
+
+    /// Whether the state can be expressed at all for this source.
+    ///
+    /// It needs a monitor device with routes of its own. Offering the control
+    /// without one would be a switch that does nothing, which is the kind of
+    /// control that teaches people the application is broken.
+    func canBeMonitorOnly(_ group: SourceGroup) -> Bool {
+        let parts = split(group)
+        return !parts.mainMix.isEmpty && !parts.monitor.isEmpty
+    }
+
+    /// Sends this source to the monitor only, or back to both mixes.
+    ///
+    /// Only the main-mix routes move. The monitor's own send is a separate
+    /// level and stays exactly where somebody put it, so turning this off and
+    /// on again does not quietly reset it.
+    func setMonitorOnly(_ on: Bool, for group: SourceGroup) {
+        let parts = split(group)
+        guard !parts.mainMix.isEmpty, !parts.monitor.isEmpty else { return }
+        for index in parts.mainMix { setMuted(on, forRouteAt: index) }
+        if on {
+            // Coming from fully muted, the monitor side has to be let back
+            // through or "monitor only" would be silence in both places.
+            for index in parts.monitor where index < routeMutes.count && routeMutes[index] {
+                setMuted(false, forRouteAt: index)
+            }
+        }
+    }
+
     var soloedGroup: String? {
         guard let soloedRoute, soloedRoute < activeRoutes.count else { return nil }
         return activeRoutes[soloedRoute].source.deviceUID

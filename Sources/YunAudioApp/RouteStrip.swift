@@ -44,6 +44,31 @@ struct RouteStrip: View {
                     model.setMuted(!muted, for: group)
                 }
 
+                // OBS's middle monitoring state, which this could not express:
+                // off and monitor-and-output were both reachable and
+                // monitor-only was not, because muting cut the route and the
+                // route feeds both mixes at once.
+                //
+                // Only offered when it means something. Without a monitor
+                // device there are no monitor routes to keep, and a switch that
+                // does nothing is the kind of control that teaches people the
+                // application is broken.
+                if model.canBeMonitorOnly(group) {
+                    let monitorOnly = model.isMonitorOnly(group)
+                    iconButton(
+                        symbol: monitorOnly ? "ear.fill" : "ear",
+                        tone: monitorOnly
+                            ? Yun.Palette.accentForeground : Yun.Palette.textSecondary,
+                        background: monitorOnly ? Yun.Palette.accent : Yun.Palette.elevated,
+                        label: monitorOnly
+                            ? loc("Send to the mix as well")
+                            : loc("Monitor only")
+                    ) {
+                        model.setMonitorOnly(!monitorOnly, for: group)
+                    }
+                    .accessibilityIdentifier("MonitorOnly")
+                }
+
                 // Solo is a view of the mix, not a setting: it silences
                 // everything else without touching what each route's own mute
                 // says, so releasing it puts the mix back as it was.
