@@ -68,6 +68,18 @@ resampled or processed, with measured round-trip latency and the state of the
 clock lock. Enabling voice isolation withdraws the bit-exactness claim, because
 processing the signal contradicts it.
 
+Where the path is not bit-exact it says by how much, in the terms it is heard
+in: level change, residual, waveform correlation and the octave bands. A path
+6 dB quieter and otherwise identical used to read exactly like one carrying a
+different recording — both were "resampled" with a mean error nobody has a feel
+for.
+
+`yunaudio-cli health` answers a different question in three seconds: whether the
+system's audio server will still open a device. It builds a private aggregate,
+opens it and takes it down again, because that is what a route does — asking
+anything simpler gets an answer to a question nobody asked, and three simpler
+probes all reported a healthy machine on which nothing worked.
+
 Method, and the limits of what it proves: **[MEASUREMENT.md](MEASUREMENT.md)**.
 
 ### Metering and analysis

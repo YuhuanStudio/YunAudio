@@ -237,6 +237,16 @@ final class LocalSongPlayer: @unchecked Sendable {
         // whether or not the pitch is being moved, and a stage set to the
         // original key must not be corrected for work nobody asked for.
         guard let transpose = output?.transpose else { return 0 }
+        // Measured to be zero, and that is the unit's answer rather than a
+        // missing reading.
+        //
+        // `AVAudioUnitTimePitch` reports 0 through `AVAudioNode.latency` and
+        // through `kAudioUnitProperty_Latency` alike — both with a status of
+        // noErr, at +200 cents, in a running engine — and an impulse rendered
+        // through it offline emerges at frame 0 at unity and at +200 cents
+        // both. It introduces no delay at the head of the stream, so there is
+        // nothing to hold out of the reported position. See
+        // `TransposeLatencyTests`.
         return transpose.pitch == 0 ? 0 : transpose.latency
     }
 

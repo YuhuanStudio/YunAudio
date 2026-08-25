@@ -4973,12 +4973,27 @@ enum UIFlowCheck {
         // held out of the reported position, so the words do not run ahead of
         // the music the moment somebody changes key — which would read as the
         // lyric file being wrong and be corrected in the wrong place.
-        let latency = model.songPlayer.transposeLatency
-        note("transpose latency \(latency * 1000) ms at +2 semitones")
-        check("the transpose reports what it is holding", latency > 0)
         model.runWords(from: 1)
         try? await Task.sleep(for: .milliseconds(400))
         model.refreshNowPlaying()
+        // What the transpose costs, which is nothing — measured, not assumed.
+        //
+        // This check used to require a latency above zero and had been failing
+        // the gate. Two explanations were tried and both were wrong: that the
+        // reading was taken with the song stopped (moving it here changed
+        // nothing), and that the wrong property was being asked
+        // (`kAudioUnitProperty_Latency` answers 0 as well, with noErr). An
+        // impulse rendered through the unit offline emerges at frame 0 at
+        // unity and at +200 cents alike, so the unit introduces no delay at the
+        // head of the stream and there is nothing to hold out of the reported
+        // position. `TransposeLatencyTests` keeps that evidence.
+        //
+        // Asserted as zero rather than deleted, because the words *are*
+        // corrected by this number and a future unit that does hold a window
+        // has to be noticed rather than silently ignored.
+        let latency = model.songPlayer.transposeLatency
+        note("transpose latency \(latency * 1000) ms at +2 semitones, playing")
+        check("the transpose holds nothing, as measured", latency == 0)
         note("position \(model.songPosition) s, 400 ms after starting at 1 s, key +2")
         check(
             "and the words still follow the music through it",

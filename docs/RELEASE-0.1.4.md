@@ -120,6 +120,21 @@ README ever stop naming the same version.
   a hung start ended at the last stage that worked. That one change is what
   found the fault above.
 
+## Upgrading
+
+Nothing to do beyond replacing the application. The virtual device is unchanged
+and does not need reinstalling.
+
+If a machine has been left in the state the fault above produced — routes that
+will not start, and `yunaudio-cli health` reporting that an aggregate device was
+built and would not open — restarting the audio server clears it, and needs an
+administrator:
+
+    sudo killall coreaudiod
+
+Audio returns on its own a second or two later. This should be the last time it
+is needed for this reason.
+
 ## Release evidence
 
 _To be filled in from `./App/verify.sh` on the shipping commit._
