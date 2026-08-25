@@ -52,7 +52,7 @@ struct ExternalIOWorkerTests {
                 applied.update { $0.append(value) }
                 if value == 0 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return value
             },
@@ -99,7 +99,7 @@ struct ExternalIOWorkerTests {
             apply: { value in
                 if value == 1 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return value
             },
@@ -454,7 +454,7 @@ struct ExternalIOWorkerTests {
                 readFile: { url, _, _ in
                     if url == first {
                         began.update { $0 = true }
-                        _ = release.wait(timeout: .now() + 2)
+                        _ = release.wait(timeout: .now() + TestGate.deadlock)
                     }
                     return url.pathExtension == "lrc" ? .data(data) : .unavailable
                 }),
@@ -570,7 +570,7 @@ struct ExternalIOWorkerTests {
                 applied.update { $0.append(generation) }
                 if generation == 0 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return .complete
             },
@@ -641,7 +641,7 @@ struct ExternalIOWorkerTests {
                 scans.update { $0 += 1 }
                 if scan == 0 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return []
             },

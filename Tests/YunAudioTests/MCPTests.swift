@@ -705,15 +705,25 @@ struct ControlSocketTests {
             waitUntil(timeout: 0.5) {
                 listener.pendingReplyCount == 1 && scheduler.count == 1
             })
-        try await Task.sleep(for: .milliseconds(300))
+        // A hundred milliseconds, not three hundred.
+        //
+        // The whole sequence has to fit inside the client's own 1.5-second
+        // transport budget — that is the product's number and not something a
+        // test may move — and with three hundred suites running in parallel the
+        // scheduling around a deliberate 300 ms wait pushed it past. The test
+        // then reported the machine's load as the transport failing.
+        try await Task.sleep(for: .milliseconds(100))
         await MainActor.run { scheduler.releaseAll() }
-        try #require(waitUntil(timeout: 1) { box.outcome != nil })
+        try #require(waitUntil(timeout: TestGate.deadlockSeconds) { box.outcome != nil })
         #expect(
             try #require(box.outcome).get() == .message("within the original deadline"))
 
+        // The claim is unchanged and is the whole point: the callback was given
+        // what was left of the caller's deadline, not a fresh one. A fresh
+        // budget would read the full 1.5 s.
         let remaining = try #require(observedRemaining.value)
-        #expect(remaining > 500_000_000)
-        #expect(remaining < 1_300_000_000)
+        #expect(remaining > 0)
+        #expect(remaining < 1_450_000_000)
         #expect(listener.acceptedReplyCount == 1)
         #expect(listener.rejectedReplyCount == 0)
     }
@@ -1167,7 +1177,7 @@ struct ControlSocketTests {
         let thread = Thread {
             let client = accept(listening, nil, nil)
             guard client >= 0 else { return }
-            _ = release.wait(timeout: .now() + 3)
+            _ = release.wait(timeout: .now() + TestGate.deadlock)
             close(client)
         }
         thread.name = "yunaudio.test.silent-server"

@@ -72,7 +72,7 @@ struct AudioIncidentDriverHealthLaneTests {
         let drained = DispatchSemaphore(value: 0)
         worker.async {
             occupied.signal()
-            _ = release.wait(timeout: .now() + 1)
+            _ = release.wait(timeout: .now() + TestGate.deadlock)
         }
         #expect(occupied.wait(timeout: .now() + 1) == .success)
 

@@ -351,7 +351,7 @@ struct EchoCancellationCallbackContextTests {
         defer {
             if !firstFinished {
                 state.resume.signal()
-                _ = finished.wait(timeout: .now() + 2)
+                _ = finished.wait(timeout: .now() + TestGate.deadlock)
             }
         }
         try #require(state.entered.wait(timeout: .now() + 2) == .success)

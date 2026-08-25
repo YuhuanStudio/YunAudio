@@ -106,7 +106,7 @@ struct VoiceActivityLifecycleWorkerTests {
                 }
                 if current == 1 {
                     firstEntered.signal()
-                    _ = releaseFirst.wait(timeout: .now() + 2)
+                    _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return true
             },
@@ -150,7 +150,7 @@ struct VoiceActivityLifecycleWorkerTests {
             start: { _, onChange, _ in
                 onChange(true)
                 startEntered.signal()
-                _ = releaseStart.wait(timeout: .now() + 2)
+                _ = releaseStart.wait(timeout: .now() + TestGate.deadlock)
                 return FakeOwner()
             })
 
@@ -189,7 +189,7 @@ struct VoiceActivityLifecycleWorkerTests {
             timeout: 2,
             stop: { _ in
                 stopEntered.signal()
-                _ = releaseStop.wait(timeout: .now() + 2)
+                _ = releaseStop.wait(timeout: .now() + TestGate.deadlock)
                 return true
             },
             onEvent: { event in
@@ -225,7 +225,7 @@ struct VoiceActivityLifecycleWorkerTests {
             timeout: 0.02,
             stop: { _ in
                 stopEntered.signal()
-                _ = releaseStop.wait(timeout: .now() + 2)
+                _ = releaseStop.wait(timeout: .now() + TestGate.deadlock)
                 return true
             },
             onEvent: { event in
@@ -318,7 +318,7 @@ struct VoiceActivityLifecycleWorkerTests {
             timeout: 0.02,
             isAvailable: { _ in
                 entered.signal()
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 returned.signal()
                 return true
             },

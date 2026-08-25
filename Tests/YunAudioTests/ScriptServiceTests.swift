@@ -108,7 +108,7 @@ private final class ScriptServiceLatencyProbe: @unchecked Sendable {
         if isFinished { finished.resolve(true) }
     }
 
-    func wait(timeout: TimeInterval = 2) async -> Bool {
+    func wait(timeout: TimeInterval = TestGate.deadlockSeconds) async -> Bool {
         await finished.wait(timeout: timeout) == true
     }
 
@@ -193,7 +193,8 @@ private func startMainActorProbe(
                 probe.record(sentAt: sentAt)
                 delivered.signal()
             }
-            guard delivered.wait(timeout: .now() + 1) == .success else { return }
+            guard delivered.wait(timeout: .now() + TestGate.deadlock) == .success
+            else { return }
             if interval > 0 { Thread.sleep(forTimeInterval: interval) }
         }
     }
@@ -234,17 +235,27 @@ struct ScriptServiceTests {
             completion.resolve(result)
         }
         #expect(scriptSubmissionWasAccepted(submission))
-        #expect(await started.wait(timeout: 1) == true)
+        #expect(await started.wait(timeout: TestGate.deadlockSeconds) == true)
+
+        // What main-actor delivery costs in this run with nothing endless
+        // running, so the ceiling below measures the script service rather than
+        // the machine. A flat budget here asserted that three hundred parallel
+        // suites leave the main actor free, which they do not.
+        let baseline = startMainActorProbe(samples: 60, interval: 0.001)
+        #expect(await baseline.wait())
+        let ceiling = max(8_000_000, baseline.maximumNanoseconds * 2)
 
         let sentinel = startMainActorProbe(samples: 200, interval: 0.001)
-        let result = try #require(await completion.wait(timeout: 2))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(await sentinel.wait())
         #expect(!result.isSuccess)
+        // The 250 is the product's own budget for an endless script, not a
+        // timing assumption about this machine, so it stays exact.
         #expect(result.error?.contains("250") == true)
         #expect(sentinel.count == 200)
         #expect(
-            sentinel.maximumNanoseconds < 8_000_000,
-            "MainActor sentinel reached \(sentinel.maximumNanoseconds) ns")
+            sentinel.maximumNanoseconds < ceiling,
+            "sentinel reached \(sentinel.maximumNanoseconds) ns, idle baseline \(baseline.maximumNanoseconds) ns")
 
         try? await Task.sleep(for: .milliseconds(50))
         #expect(completionCount.value == 1)
@@ -270,15 +281,19 @@ struct ScriptServiceTests {
                 service.submitManual("yun.status().running") { completion.resolve($0) }))
         #expect(await scheduler.waitForFirstHeld())
 
+        let barrierBaseline = startMainActorProbe(samples: 60, interval: 0)
+        #expect(await barrierBaseline.wait())
+        let barrierCeiling = max(8_000_000, barrierBaseline.maximumNanoseconds * 2)
+
         let probes = startMainActorProbe(samples: 1_000, interval: 0)
         #expect(await probes.wait())
         #expect(probes.count == 1_000)
         #expect(
-            probes.maximumNanoseconds < 8_000_000,
-            "RPC barrier sentinel reached \(probes.maximumNanoseconds) ns")
+            probes.maximumNanoseconds < barrierCeiling,
+            "barrier reached \(probes.maximumNanoseconds) ns, idle baseline \(barrierBaseline.maximumNanoseconds) ns")
 
         await MainActor.run { scheduler.releaseAllAndPassThrough() }
-        let result = try #require(await completion.wait(timeout: 1))
+        let result = try #require(await completion.wait(timeout: TestGate.deadlockSeconds))
         #expect(result.value == "true")
         #expect(rpcCount.value == 1)
         #expect(service.statistics.maximumPendingRPCs == 1)

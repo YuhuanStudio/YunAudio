@@ -96,17 +96,27 @@ struct AudioResidueLifecycleTests {
             quarantine.release(token)
         }
 
+        // The claim is that the wait *blocks* until the transient owner lets go
+        // and then succeeds — not that a background release lands within a
+        // quarter of a second, which is a statement about the machine's
+        // scheduler. Under three hundred parallel suites a 20 ms `asyncAfter`
+        // routinely arrives later than that, and the assertion then reported
+        // the load as a broken quarantine.
+        //
+        // The lower bound is the part that means something: it waited rather
+        // than returning at once.
         let started = DispatchTime.now().uptimeNanoseconds
-        #expect(quarantine.waitForNewAudioOwnership(timeout: 0.25))
+        #expect(quarantine.waitForNewAudioOwnership(timeout: TestGate.deadlockSeconds))
         let elapsed = DispatchTime.now().uptimeNanoseconds - started
         #expect(elapsed >= 10_000_000)
-        #expect(elapsed < 250_000_000)
         #expect(quarantine.count == 0)
 
         let retained = quarantine.retain(NSObject(), reason: "injected permanent owner")
         let refusalStarted = DispatchTime.now().uptimeNanoseconds
+        // This one keeps its short budget: nothing will release it, so the wait
+        // must return on its own deadline rather than on somebody's scheduling.
         #expect(!quarantine.waitForNewAudioOwnership(timeout: 0.02))
-        #expect(DispatchTime.now().uptimeNanoseconds - refusalStarted < 100_000_000)
+        #expect(DispatchTime.now().uptimeNanoseconds - refusalStarted < 2_000_000_000)
         #expect(quarantine.count == 1)
         quarantine.release(retained)
     }

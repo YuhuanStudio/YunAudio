@@ -29,7 +29,7 @@ struct OwnedResourceShutdownTests {
             quarantineReason: "test owner",
             operation: { _, _ in
                 entered.signal()
-                _ = release.wait(timeout: .now() + 1)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return true
             })
         let owner = StubOwner()
@@ -66,7 +66,7 @@ struct OwnedResourceShutdownTests {
         let releaseQueue = DispatchSemaphore(value: 0)
         workerQueue.async {
             queueEntered.signal()
-            _ = releaseQueue.wait(timeout: .now() + 1)
+            _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
         #expect(queueEntered.wait(timeout: .now() + 1) == .success)
 
@@ -123,7 +123,7 @@ struct OwnedResourceShutdownTests {
             quarantineReason: "test timed-out owner",
             operation: { _, _ in
                 entered.signal()
-                _ = release.wait(timeout: .now() + 1)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 returned.signal()
                 return true
             })
@@ -171,7 +171,7 @@ struct OwnedResourceShutdownTests {
         let releaseQueue = DispatchSemaphore(value: 0)
         queue.async {
             queueEntered.signal()
-            _ = releaseQueue.wait(timeout: .now() + 1)
+            _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
         #expect(queueEntered.wait(timeout: .now() + 1) == .success)
 
@@ -235,7 +235,7 @@ struct OwnedResourceShutdownTests {
                 guard
                     gate.perform({
                         firstEntered.signal()
-                        _ = releaseFirst.wait(timeout: .now() + 1)
+                        _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock)
                         return true
                     }) == true
                 else {

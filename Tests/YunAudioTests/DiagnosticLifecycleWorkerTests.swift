@@ -49,7 +49,7 @@ struct DiagnosticLifecycleWorkerTests {
                 applied.update { $0.append(snapshot.generation) }
                 if snapshot.generation == 0 {
                     entered.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return snapshot.capture
             },
@@ -97,7 +97,7 @@ struct DiagnosticLifecycleWorkerTests {
         let worker = DiagnosticLifecycleWorker<Int, Int>(
             evaluate: { snapshot in
                 beganAt.update { $0 = DispatchTime.now().uptimeNanoseconds }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return snapshot.capture
             },
             publish: { published.append($0) })
@@ -179,7 +179,7 @@ struct DiagnosticLifecycleWorkerTests {
             apply: { intent, permit in
                 if intent.desiredState == .active, beganAt.read() == nil {
                     beganAt.update { $0 = DispatchTime.now().uptimeNanoseconds }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 // Production checks this after taking RoutingEngine.stateLock.
                 guard permit.mayMutateEngine else { return false }

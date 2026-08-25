@@ -598,7 +598,7 @@ struct RealtimeCellTests {
         }
         retiring.start()
         #expect(yun_rt_cell_wait_for_swap(cell, 500))
-        _ = finished.wait(timeout: .now() + 2)
+        _ = finished.wait(timeout: .now() + TestGate.deadlock)
         yun_rt_cell_free(cell)
     }
 

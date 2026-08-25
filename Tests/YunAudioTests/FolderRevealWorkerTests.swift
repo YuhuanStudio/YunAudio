@@ -145,7 +145,7 @@ struct FolderRevealWorkerTests {
                 }
                 if application == 1 {
                     entered.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
             },
             reveal: {
@@ -219,7 +219,7 @@ struct FolderRevealWorkerTests {
             queue: DispatchQueue(label: "yunaudio.test.folder-reveal-shutdown"),
             createDirectory: { _ in
                 entered.update { $0 = true }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
             },
             reveal: { _ in
                 reveals += 1

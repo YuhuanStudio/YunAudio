@@ -31,7 +31,7 @@ struct LocalSongDecodeWorkerTests {
                 applications.update { $0.append((value, Thread.isMainThread)) }
                 if value == 0 {
                     beganFirst.update { $0 = true }
-                    _ = releaseFirst.wait(timeout: .now() + 2)
+                    _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return value
             },
@@ -43,15 +43,20 @@ struct LocalSongDecodeWorkerTests {
         }
         #expect(beganFirst.read())
 
-        let beganBurst = DispatchTime.now().uptimeNanoseconds
+        // Thread CPU time, not wall clock.
+        //
+        // The claim is that submitting does no work — a version which queues a
+        // decode per seek could not finish this loop at all while the first
+        // decode is held at the semaphore. Wall clock also counts this thread
+        // being descheduled, which with three hundred suites in parallel it
+        // routinely is, and the ceiling then measures the machine's load and
+        // blames the lane.
+        let beganBurst = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         var allAccepted = true
         for value in 1..<10_000 { allAccepted = lane.submit(value) && allAccepted }
         let burstMilliseconds =
-            Double(DispatchTime.now().uptimeNanoseconds - beganBurst) / 1_000_000
-        // This is deliberately a broad responsiveness ceiling, not a machine
-        // benchmark. A version which queues a decode per seek cannot finish
-        // this loop while the first decode is held at the semaphore at all.
-        #expect(burstMilliseconds < 500)
+            Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - beganBurst) / 1_000_000
+        #expect(burstMilliseconds < 500, "burst cost \(burstMilliseconds) ms of CPU")
         #expect(allAccepted)
 
         let held = lane.statistics
@@ -85,7 +90,7 @@ struct LocalSongDecodeWorkerTests {
             queue: DispatchQueue(label: "studio.yuhuan.YunAudio.tests.local-song-stop"),
             apply: { value in
                 began.update { $0 = true }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 finished.update { $0 = true }
                 return value
             },
@@ -120,15 +125,19 @@ struct LocalSongDecodeWorkerTests {
         }
         mailbox.activate(generation: 42)
 
-        let began = DispatchTime.now().uptimeNanoseconds
+        // CPU time, for the reason above: ten thousand completions into one
+        // pending slot is a bounded amount of work, and how long the thread
+        // waited to be run is not part of it.
+        let began = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)
         // A completion from the schedule retired by a seek must not replace
         // the new generation's start request in the one pending slot.
         mailbox.completed(generation: 41, ordinal: 50_000)
         for ordinal in 0..<UInt32(10_000) {
             mailbox.completed(generation: 42, ordinal: ordinal)
         }
-        let milliseconds = Double(DispatchTime.now().uptimeNanoseconds - began) / 1_000_000
-        #expect(milliseconds < 100)
+        let milliseconds =
+            Double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - began) / 1_000_000
+        #expect(milliseconds < 100, "cost \(milliseconds) ms of CPU")
         queue.resume()
 
         for _ in 0..<2_000 where consumed.read().isEmpty {

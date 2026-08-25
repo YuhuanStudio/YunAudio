@@ -49,7 +49,7 @@ struct RecordingLifecycleWorkerTests {
                 start: { _ in
                     applied.update { $0.append(true) }
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     running.update { $0 = true }
                     return (mix, [])
                 },
@@ -117,7 +117,7 @@ struct RecordingLifecycleWorkerTests {
                 start: { _ in
                     starts.update { $0 += 1 }
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     running.update { $0 = true }
                     return (mix, [stem])
                 },
@@ -160,7 +160,7 @@ struct RecordingLifecycleWorkerTests {
                 },
                 start: { request in
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     return (request.directory.appendingPathComponent("late.wav"), [])
                 },
                 stop: {

@@ -365,7 +365,7 @@ struct LifecycleRaceTests {
         DispatchQueue.global(qos: .userInitiated).async {
             engine.withStateLockForTesting {
                 entered.signal()
-                _ = release.wait(timeout: .now() + 1)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
             }
             finished.signal()
         }

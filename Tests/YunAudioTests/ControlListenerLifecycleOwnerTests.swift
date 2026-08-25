@@ -30,7 +30,7 @@ private final class ControlLifecycleGate<Value: Sendable>: @unchecked Sendable {
         continuation?.resume(returning: value)
     }
 
-    func wait(timeout: TimeInterval = 2) async -> Value? {
+    func wait(timeout: TimeInterval = TestGate.deadlockSeconds) async -> Value? {
         await withCheckedContinuation { continuation in
             let completed: Value?? = lock.withLock {
                 switch state {
@@ -112,7 +112,8 @@ private func startControlLifecycleProbe(samples: Int) -> ControlLifecycleProbe {
                     probe.record(sentAt: sentAt)
                     delivered.signal()
                 }
-                guard delivered.wait(timeout: .now() + 1) == .success else { return }
+                guard delivered.wait(timeout: .now() + TestGate.deadlock) == .success
+                else { return }
                 Thread.sleep(forTimeInterval: 0.001)
             }
         }

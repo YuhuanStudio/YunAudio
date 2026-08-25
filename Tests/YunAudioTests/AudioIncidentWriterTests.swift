@@ -14,7 +14,7 @@ private final class IncidentWriterProbe: @unchecked Sendable {
         lock.withLock { written.append(bundle.runID.low) }
         if bundle.runID.low == 1 {
             began.signal()
-            _ = release.wait(timeout: .now() + 2)
+            _ = release.wait(timeout: .now() + TestGate.deadlock)
         }
         return true
     }
@@ -46,7 +46,7 @@ private final class IncidentPhaseProbe: @unchecked Sendable {
         lock.withLock { written.append(bundle) }
         if bundle.runID.low == blockedRun {
             began.signal()
-            _ = release.wait(timeout: .now() + 2)
+            _ = release.wait(timeout: .now() + TestGate.deadlock)
         }
         return true
     }
@@ -247,7 +247,7 @@ struct AudioIncidentWriterTests {
             operations: .init { bundle in
                 if bundle.runID.low == 21 {
                     began.signal()
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     return false
                 }
                 return written.write(bundle)
@@ -279,7 +279,7 @@ struct AudioIncidentWriterTests {
         let writer = LatestAudioIncidentWriter(
             operations: .init { _ in
                 began.signal()
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return true
             },
             label: "yunaudio.test.incident.critical-timeout")

@@ -36,7 +36,7 @@ struct RCUHardeningTests {
         let reader = Thread {
             _ = yun_rt_cell_load(handle.pointer)
             loaded.signal()
-            _ = resume.wait(timeout: .now() + 2)
+            _ = resume.wait(timeout: .now() + TestGate.deadlock)
             yun_rt_cell_retire(handle.pointer)
             _ = yun_rt_cell_load(handle.pointer)
             yun_rt_cell_retire(handle.pointer)

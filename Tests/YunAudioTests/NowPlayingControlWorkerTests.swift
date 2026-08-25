@@ -72,7 +72,7 @@ struct NowPlayingControlWorkerTests {
                     $0.append(application)
                     return $0.count
                 }
-                if call == 1 { _ = releaseFirst.wait(timeout: .now() + 2) }
+                if call == 1 { _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock) }
                 return true
             },
             publish: { publications.append($0) })
@@ -131,7 +131,7 @@ struct NowPlayingControlWorkerTests {
                     return $0.count
                 }
                 applications.update { $0.append(application) }
-                if call == 1 { _ = releaseFirst.wait(timeout: .now() + 2) }
+                if call == 1 { _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock) }
                 return true
             },
             publish: { _ in })
@@ -163,7 +163,7 @@ struct NowPlayingControlWorkerTests {
                     $0.append(application)
                     return $0.count
                 }
-                if call == 1 { _ = releaseSeek.wait(timeout: .now() + 2) }
+                if call == 1 { _ = releaseSeek.wait(timeout: .now() + TestGate.deadlock) }
                 return true
             },
             publish: { _ in })
@@ -210,7 +210,7 @@ struct NowPlayingControlWorkerTests {
                     $0.append(application)
                     return $0.count
                 }
-                if call == 1 { _ = releaseFirst.wait(timeout: .now() + 2) }
+                if call == 1 { _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock) }
                 return true
             },
             publish: { publications.append($0) })
@@ -279,7 +279,7 @@ struct NowPlayingControlWorkerTests {
         var publications = 0
         let worker = NowPlayingControlWorker(
             apply: { _ in
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return true
             },
             publish: { _ in publications += 1 })

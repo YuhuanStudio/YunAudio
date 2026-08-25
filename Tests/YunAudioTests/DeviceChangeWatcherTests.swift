@@ -74,7 +74,7 @@ struct DeviceChangeWatcherTests {
             }
             if ordinal == 1 {
                 firstEntered.signal()
-                _ = releaseFirst.wait(timeout: .now() + 2)
+                _ = releaseFirst.wait(timeout: .now() + TestGate.deadlock)
             }
             lock.withLock { concurrentReads -= 1 }
             return ordinal == 1 ? [1, 2] : [1, 3]
@@ -150,7 +150,7 @@ struct DeviceChangeWatcherTests {
         let releaseQueue = DispatchSemaphore(value: 0)
         queue.async {
             queueEntered.signal()
-            _ = releaseQueue.wait(timeout: .now() + 2)
+            _ = releaseQueue.wait(timeout: .now() + TestGate.deadlock)
         }
         #expect(queueEntered.wait(timeout: .now() + 1) == .success)
 

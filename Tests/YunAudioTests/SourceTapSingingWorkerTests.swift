@@ -55,7 +55,7 @@ struct SourceTapLifecycleWorkerTests {
                     applications.update { $0.append(routes.count) }
                     if routes.count == 1 {
                         entered.update { $0 = true }
-                        _ = release.wait(timeout: .now() + 2)
+                        _ = release.wait(timeout: .now() + TestGate.deadlock)
                     }
                     return routes.count
                 },
@@ -95,7 +95,7 @@ struct SourceTapLifecycleWorkerTests {
             operations: .init(
                 start: { routes in
                     entered.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     return routes.count
                 }, stop: { true }),
             publish: { published.append($0) })
@@ -413,7 +413,7 @@ struct SingingAnalysisWorkerTests {
                     applied.update { $0.append(UInt64($0.count)) }
                     if applied.read().count == 1 {
                         entered.update { $0 = true }
-                        _ = release.wait(timeout: .now() + 2)
+                        _ = release.wait(timeout: .now() + TestGate.deadlock)
                     }
                 }
                 return 0
@@ -455,7 +455,7 @@ struct SingingAnalysisWorkerTests {
         let worker = SingingAnalysisWorker(
             operations: .init(drain: { _, _, _ in
                 entered.update { $0 = true }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return 0
             }), publish: { published.append($0) })
 
@@ -614,7 +614,7 @@ struct SingingAnalysisWorkerTests {
         let worker = SingingAnalysisWorker(
             operations: .init(drain: { _, _, _ in
                 entered.update { $0 = true }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 return 0
             }), publish: { _ in })
         #expect(worker.submit(Self.request(generation: 0, count: 1)))
@@ -665,7 +665,7 @@ struct SingingAnalysisWorkerTests {
             analysisOperations: .init(drain: { _, _, _ in
                 order.update { $0.append("drain-enter") }
                 drainEntered.update { $0 = true }
-                _ = releaseDrain.wait(timeout: .now() + 2)
+                _ = releaseDrain.wait(timeout: .now() + TestGate.deadlock)
                 order.update { $0.append("drain-exit") }
                 return 0
             }),

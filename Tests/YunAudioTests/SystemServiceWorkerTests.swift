@@ -64,7 +64,7 @@ struct SystemServiceWorkerTests {
                 applied.update { $0.append(value) }
                 if value == 0 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return value
             },
@@ -102,7 +102,7 @@ struct SystemServiceWorkerTests {
             apply: { value, _ in
                 if value == 1 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return value
             },
@@ -136,7 +136,7 @@ struct SystemServiceWorkerTests {
             apply: { value, _ in
                 if value == 1 {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                     return Result(value: value, timedOut: true)
                 }
                 return Result(value: value, timedOut: false)
@@ -173,7 +173,7 @@ struct SystemServiceWorkerTests {
             apply: { value, _ in
                 events.update { $0.append("apply-start") }
                 began.update { $0 = true }
-                _ = release.wait(timeout: .now() + 2)
+                _ = release.wait(timeout: .now() + TestGate.deadlock)
                 events.update { $0.append("apply-end") }
                 return value
             },
@@ -250,7 +250,7 @@ struct AppIconWorkerTests {
                 loaded.update { $0.append(path) }
                 if path == "old" {
                     began.update { $0 = true }
-                    _ = release.wait(timeout: .now() + 2)
+                    _ = release.wait(timeout: .now() + TestGate.deadlock)
                 }
                 return NSImage(size: NSSize(width: 1, height: 1))
             },
