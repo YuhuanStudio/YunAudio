@@ -1692,6 +1692,92 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "driver-receive"
 // leak of a few kilobytes a minute, a cycle rate that drifts, a clock lock that
 // quietly gives up an hour in. None of those are visible in an eight-second
 // run, and all of them ruin the thing this is for.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "cycles" {
+    // Start and stop a real route over and over, and count what the HAL is
+    // still holding afterwards.
+    //
+    // This is the shape of #9: using the application leaves Core Audio worse
+    // than it found it, until the machine needs a reboot. A route that fails to
+    // tear down leaves an aggregate and its taps behind, and every cycle after
+    // that adds another — so the census either stays flat or it does not, and
+    // one number a cycle says which.
+    let count = CommandLine.arguments.count > 2
+        ? Int(CommandLine.arguments[2]) ?? 20 : 20
+    let all = (try? AudioDevices.all()) ?? []
+    guard
+        let source = automaticPhysicalInput(in: all),
+        let destination = all.first(where: {
+            $0.uid == ClockAnchorPublisher.driverDeviceUID
+        }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
+    else {
+        print("need a real input and a virtual output")
+        exit(1)
+    }
+
+    func census() -> (devices: Int, taps: Int, aggregates: Int) {
+        // Through the public enumeration rather than the HAL's own array
+        // bounds, which are internal to the package that owns them.
+        let devices = (try? AudioDevices.all()) ?? []
+        let aggregates = devices.filter { $0.transport == .aggregate }
+        let taps =
+            (try? AudioObjectID.system.array(of: .tapList, maximumCount: 4_096)) ?? []
+        return (devices.count, taps.count, aggregates.count)
+    }
+
+    let routes = (0..<min(2, destination.outputChannels)).map { channel in
+        Route(
+            source: ChannelRef(deviceUID: source.uid, channel: 0),
+            destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+    }
+    let before = census()
+    print("source       \(source.name)")
+    print("destination  \(destination.name)")
+    print("cycles       \(count)")
+    print(
+        "before       \(before.devices) devices, \(before.aggregates) aggregate(s), "
+            + "\(before.taps) tap(s)\n")
+
+    var failures = 0
+    for cycle in 1...count {
+        let engine = RoutingEngine()
+        do {
+            try engine.start(
+                sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid,
+                routes: routes, preferredSampleRate: 48000)
+        } catch {
+            print("\(cycle): could not start — \(error)")
+            failures += 1
+            continue
+        }
+        let teardown = engine.stop(timeout: 2)
+        let now = census()
+        let drifted =
+            now.aggregates != before.aggregates || now.taps != before.taps
+        if !teardown.isComplete || drifted {
+            failures += 1
+            print(
+                "\(cycle): teardown \(teardown), "
+                    + "\(now.aggregates) aggregate(s), \(now.taps) tap(s)")
+        } else if cycle % 5 == 0 || cycle == count {
+            print(
+                "\(cycle): clean — \(now.devices) devices, "
+                    + "\(now.aggregates) aggregate(s), \(now.taps) tap(s)")
+        }
+    }
+
+    let after = census()
+    print("")
+    print(
+        "after        \(after.devices) devices, \(after.aggregates) aggregate(s), "
+            + "\(after.taps) tap(s)")
+    print(
+        after.aggregates == before.aggregates && after.taps == before.taps
+            ? "the census is where it started: nothing was left behind."
+            : "SOMETHING WAS LEFT BEHIND — this is the shape of the reboot bug.")
+    print("\(failures) of \(count) cycles had something to report")
+    exit(failures == 0 ? 0 : 1)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "soak" {
     let minutes = CommandLine.arguments.count > 2 ? Double(CommandLine.arguments[2]) ?? 5 : 5
     let all = (try? AudioDevices.all()) ?? []
