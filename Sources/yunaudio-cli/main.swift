@@ -1031,6 +1031,89 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
     exit(0)
 }
 
+// Whether the system's audio server is still opening devices.
+//
+// There is a state this machine reached on 2026-08-25 that nothing could name:
+// `AudioDeviceCreateIOProcID` sent a mach message to coreaudiod and never came
+// back, in three unrelated processes, while read-only property calls answered
+// instantly the whole time. Every reading in every interface was correct and
+// nothing could be opened, and the only way to establish that was to attach a
+// sampler to a hung process.
+//
+// This asks the question in three seconds instead.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "health" {
+    // Per device, because the first version of this asked only about the
+    // default output, said "opening devices normally", and was wrong: the
+    // route that could not start was to a different endpoint. A wedge can
+    // belong to one device rather than to the server, and those are opposite
+    // diagnoses — one is `sudo killall coreaudiod`, the other is a driver.
+    if CommandLine.arguments.contains("--each") {
+        let all = (try? AudioDevices.all()) ?? []
+        print("opening each device in turn (up to \(Int(AudioServerHealth.budget))s each)\n")
+        var wedged: [String] = []
+        for device in all where device.hasOutput || device.hasInput {
+            let id = device.id
+            let verdict = AudioServerHealth.probeOne(device: id)
+            let mark: String
+            switch verdict {
+            case .healthy: mark = "opens"
+            case .notOpeningDevices:
+                mark = "WEDGED — did not return"; wedged.append(device.name)
+            case .notAnswering, .cannotTell: mark = "refused"
+            }
+            print("  \(device.name.padding(toLength: 34, withPad: " ", startingAt: 0)) \(mark)")
+        }
+        print("")
+        if wedged.isEmpty {
+            print("every device opened. The server is not the problem.")
+            exit(0)
+        }
+        print("\(wedged.count) device(s) did not return: \(wedged.joined(separator: ", "))")
+        print("A wedge on one device is that device's driver; a wedge on all of")
+        print("them is the server, and that one needs:")
+        print("")
+        print("    sudo killall coreaudiod")
+        exit(2)
+    }
+    print("asking Core Audio to open a device (up to \(Int(AudioServerHealth.budget))s)…\n")
+    switch AudioServerHealth.check() {
+    case .healthy:
+        print("Core Audio is opening devices normally.")
+        exit(0)
+    case .notOpeningDevices:
+        print("Core Audio answers property reads and will not open a device.")
+        print("")
+        print("Something is holding the path that opens devices, and no amount")
+        print("of waiting clears it — every process on this machine is affected,")
+        print("whether or not it has noticed yet.")
+        print("")
+        print("Look for a stuck client first. In the one reproduction there is,")
+        print("a thread inside an application's echo-canceller construction was")
+        print("holding it, and quitting that application cleared it without the")
+        print("server being restarted at all — `yunaudio-cli diagnose` names the")
+        print("processes holding devices.")
+        print("")
+        print("If nothing is holding it, or quitting does not help, restarting")
+        print("the server does, and needs an administrator:")
+        print("")
+        print("    sudo killall coreaudiod")
+        print("")
+        print("Audio comes back on its own a second or two later.")
+        exit(2)
+    case .notAnswering:
+        print("Core Audio did not answer a property read either.")
+        print("A machine this far gone cannot be told apart from one that is")
+        print("merely overwhelmed, so this says so rather than guessing. If it")
+        print("stays this way, the same command applies:")
+        print("")
+        print("    sudo killall coreaudiod")
+        exit(2)
+    case .cannotTell:
+        print("nothing to probe with — no device carrying an output.")
+        exit(1)
+    }
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
     let taps = AudioProcesses.liveTaps()
     print("live process taps: \(taps.count)")

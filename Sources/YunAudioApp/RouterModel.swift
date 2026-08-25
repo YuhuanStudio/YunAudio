@@ -13199,12 +13199,20 @@ final class RouterModel {
     ///
     /// The application cannot make that call return, and it cannot cancel it.
     /// What it can do is stop showing a spinner for ever: name the system as
-    /// the suspect, and give the one command that recovers it. Before this, the
-    /// interface said "…" indefinitely and the person had nothing to act on.
+    /// the suspect, and say what actually clears it. Before this, the interface
+    /// said "…" indefinitely and the person had nothing to act on.
+    ///
+    /// The wording was corrected once already. It first said the recovery was
+    /// `sudo killall coreaudiod`, on the strength of a check that had no delay
+    /// in its loop and therefore never measured anything. Quitting the stuck
+    /// process is what cleared it in the one reproduction there is: the server
+    /// had not been restarted, and three real routes started in under a second
+    /// each immediately afterwards. Restarting the server is named second,
+    /// where it belongs — as the thing to try when quitting did not help.
     var startOverdueWarning: String? {
         guard startIsOverdue, isBusy else { return nil }
         return loc(
-            "Core Audio has not answered for several seconds. This is the system's audio server, not YunAudio: other applications will be affected too, and no setting here can clear it. Recovering it needs one command in Terminal — sudo killall coreaudiod — after which audio returns on its own."
+            "Core Audio is answering questions but not opening devices, and has not for several seconds. A call inside the system's audio support did not return, which affects every application on this machine — no setting here can clear it. Quitting YunAudio releases it; if audio is still wrong afterwards, restarting the audio server does (sudo killall coreaudiod in Terminal)."
         )
     }
 
