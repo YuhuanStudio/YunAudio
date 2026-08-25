@@ -1089,3 +1089,39 @@ struct HALDestructionOwnershipTests {
         #expect(body.ranges(of: "stopClockPublisherLocked(until: deadline)").count == 3)
     }
 }
+
+@MainActor
+@Suite("Teardown advice")
+struct TeardownAdviceTests {
+
+    /// Telling somebody to press a Stop that provably cannot clear anything
+    /// costs them the session on top of the route, so the two cases say
+    /// different things.
+    @Test("a terminal echo-cancellation verdict asks for a relaunch, not another Stop")
+    func terminalVerdictAsksForARelaunch() {
+        let retryable = RouterModel()
+        retryable.retainFailedTeardown(.ioProcDestroyFailed(-73_001))
+        #expect(retryable.anotherStopCanClearTeardown)
+        #expect(retryable.lastError?.contains("Stop again") == true)
+
+        let terminal = RouterModel()
+        terminal.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil)))
+        #expect(!terminal.anotherStopCanClearTeardown)
+        #expect(terminal.lastError?.contains("Quit and reopen") == true)
+    }
+
+    /// The three fields that used to be assigned beside each other are one
+    /// field now, so no reset site can move part of the state.
+    @Test("clearing the failure clears every derived answer with it")
+    func derivedAnswersCannotDrift() {
+        let model = RouterModel()
+        model.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil)))
+        #expect(model.teardownNeedsRetry)
+        #expect(model.teardownFailureDetail != nil)
+        #expect(!model.anotherStopCanClearTeardown)
+
+        model.retainFailedTeardown(.ioProcTimedOut(step: .stop))
+        #expect(model.anotherStopCanClearTeardown)
+        #expect(model.teardownFailureDetail?.contains("ioProcTimedOut") == true)
+    }
+}

@@ -7081,11 +7081,44 @@ final class RouterModel {
     /// new Start is refused. Treating a failed destroy request as though the
     /// route were gone is how one abandoned tap or aggregate becomes a second,
     /// then eventually makes the system Sound menu wait behind our leftovers.
-    private(set) var teardownNeedsRetry = false
+    /// The teardown that did not complete, or nil when there is nothing left.
+    ///
+    /// One field rather than the three that used to be assigned beside each
+    /// other. Keeping a flag, its explanatory string and its retry advice in
+    /// step by hand lasted exactly as long as it took to add the third: one of
+    /// the five reset sites was indented differently and was missed, which
+    /// would have told somebody to press a Stop that could never clear.
+    private(set) var teardownFailure: RoutingTeardownResult?
+
+    /// Whether a Stop is still owed before another route may start.
+    var teardownNeedsRetry: Bool { teardownFailure != nil }
+
+    /// Whether the Stop this asks for can actually clear anything.
+    ///
+    /// False means the route is quarantined for the life of the process, so
+    /// the honest instruction is to relaunch. Saying "Stop again" there sends
+    /// somebody round a loop that cannot terminate.
+    var anotherStopCanClearTeardown: Bool {
+        teardownFailure?.anotherStopCanClearIt ?? true
+    }
+
+    /// What to tell somebody after a teardown that did not complete.
+    var teardownMessage: String {
+        anotherStopCanClearTeardown
+            ? loc(
+                "YunAudio could not release the audio route completely. Stop again before starting another route."
+            )
+            : loc(
+                "YunAudio could not release the audio route completely, and stopping again will not clear it. Quit and reopen YunAudio to route audio again."
+            )
+    }
 
     /// The exact lifecycle boundary for diagnostics; `lastError` carries the
     /// localised action somebody can take rather than an opaque OSStatus.
-    private(set) var teardownFailureDetail: String?
+    /// The failure in words, for the diagnostics pane and the flow check.
+    var teardownFailureDetail: String? {
+        teardownFailure.map { String(describing: $0) }
+    }
 
     private var desiredTopologyRoutes: [Route] {
         applyingLatestRouteControls(to: pendingTopologyRoutes ?? activeRoutes)
@@ -10347,9 +10380,7 @@ final class RouterModel {
         guard !terminationIsPending else { return }
         guard !teardownNeedsRetry else {
             startFailed = true
-            lastError = loc(
-                "YunAudio could not release the audio route completely. Stop again before starting another route."
-            )
+            lastError = teardownMessage
             return
         }
         guard !isBusy else { return }
@@ -10892,8 +10923,7 @@ final class RouterModel {
         isStarting = false
         isRunning = false
         runningDecidedBy = "teardownComplete"
-        teardownNeedsRetry = false
-        teardownFailureDetail = nil
+        teardownFailure = nil
         routeUpdatesAreAccepted = false
         if honourPendingStop() { return }
         if restartIsPending {
@@ -10964,8 +10994,7 @@ final class RouterModel {
             pendingRoutingScriptTarget = nil
             isRunning = false
             runningDecidedBy = "startReportFailed"
-            teardownNeedsRetry = false
-            teardownFailureDetail = nil
+            teardownFailure = nil
             routeUpdatesAreAccepted = false
             lastError = failure
             startFailed = true
@@ -10987,8 +11016,7 @@ final class RouterModel {
         audioIncidentCheckpointCadence.reset()
         isRunning = true
         runningDecidedBy = "startReportSucceeded"
-        teardownNeedsRetry = false
-        teardownFailureDetail = nil
+        teardownFailure = nil
         lighting.setSignalActive(true)
         routeUpdatesAreAccepted = true
         lastError =
@@ -11193,15 +11221,12 @@ final class RouterModel {
         isRunning = engine.hasLiveGraph
         runningDecidedBy = "retainFailedTeardown"
         startFailed = true
-        teardownNeedsRetry = true
-        teardownFailureDetail = String(describing: result)
+        teardownFailure = result
         routeUpdatesAreAccepted = false
         restartIsPending = false
         stopIsPending = false
         lighting.setSignalActive(false)
-        let message = loc(
-            "YunAudio could not release the audio route completely. Stop again before starting another route."
-        )
+        let message = teardownMessage
         lastError = message
         if isInstallingDriver {
             isInstallingDriver = false
@@ -11227,8 +11252,7 @@ final class RouterModel {
         runningDecidedBy = "stopSucceeded"
         recordingIntentTarget = false
         audioIncidentCheckpointCadence.reset()
-        teardownNeedsRetry = false
-        teardownFailureDetail = nil
+        teardownFailure = nil
         fire(.routingStopped, causality: pendingRoutingScriptCausality)
         if pendingRoutingScriptTarget == false {
             pendingRoutingScriptCausality = nil
@@ -11672,10 +11696,7 @@ final class RouterModel {
             let target = wanted ?? !isRunning
             if target, teardownNeedsRetry {
                 return .failure(
-                    lastError
-                        ?? loc(
-                            "YunAudio could not release the audio route completely. Stop again before starting another route."
-                        ))
+                    lastError ?? teardownMessage)
             }
             if let causality {
                 pendingRoutingScriptCausality = causality
@@ -11936,9 +11957,7 @@ final class RouterModel {
                 // device-global listener/property owner.
                 self.terminationIsPending = false
                 self.finishStop(snapshot: routingSnapshot)
-                self.lastError = loc(
-                    "YunAudio could not release the audio route completely. Stop again before starting another route."
-                )
+                self.lastError = self.teardownMessage
             case .transcription:
                 // Speech is process-local. Its final result gets the bounded
                 // deadline, while route release remains independently joined.

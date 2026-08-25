@@ -147,6 +147,20 @@ public enum RoutingTeardownResult: Sendable, Equatable {
 
     public var isComplete: Bool { self == .complete }
 
+    /// Whether pressing Stop again can clear this, or only relaunching can.
+    ///
+    /// `EchoCancellationBridge.stop` stores its first non-complete verdict and
+    /// returns it before tearing anything down; only `start()` clears the
+    /// field, and its own `isRunning` guard makes that unreachable while the
+    /// verdict stands. A second Stop therefore provably does nothing, and
+    /// telling somebody to press it again costs them the session on top of the
+    /// route. Every other case here is retryable where its owning subsystem
+    /// permits, which is what this type's own contract already says.
+    public var anotherStopCanClearIt: Bool {
+        if case .echoCancellation = self { return false }
+        return true
+    }
+
     var requiresOwnerQuarantine: Bool {
         switch self {
         case .complete, .sampleRatesNotRestored, .audioUnitOwner:
