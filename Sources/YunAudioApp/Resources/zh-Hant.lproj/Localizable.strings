@@ -242,6 +242,8 @@
 "Keep talking for a few seconds — the integrated figure is not meaningful until there is material to gate." = "請再講幾秒——在有足夠素材可供閘控之前，整體響度沒有意義。";
 "Monitor" = "監聽";
 "Hear yourself, %@ ms behind." = "聽見自己，延遲 %@ 毫秒。";
+"You hear yourself %.0f ms late here, which is far enough behind to sing against. A smaller buffer helps a little; a wired headset helps more." = "你會在 %.0f 毫秒後才聽到自己,這個延遲已經足以跟你的演唱打架。縮小緩衝有一點幫助,換有線耳機幫助更大。";
+"You hear yourself %.0f ms late here, which is too far behind to sing to. A wired or 2.4 GHz headset is the fix; no setting can shorten this one." = "你會在 %.0f 毫秒後才聽到自己,這已經沒辦法跟著唱了。換有線或 2.4 GHz 耳機才有用;沒有任何設定能縮短這一段。";
 "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to." = "這個輸出看起來不是耳機。用喇叭監聽會把聲音送回麥克風正在收音的房間。";
 "Monitoring %@ is unavailable; your main mix is unaffected." = "無法監聽%@；主要混音仍正常運作。";
 "The selected output" = "所選的輸出";

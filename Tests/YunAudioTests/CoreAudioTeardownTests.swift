@@ -1269,3 +1269,25 @@ struct ProcessTapRetryCountingTests {
         #expect(model.tapsNeedingASecondAttempt == 0)
     }
 }
+
+@MainActor
+@Suite("Hearing yourself late enough to matter")
+struct MonitorLatencyWarningTests {
+
+    /// The thresholds, stated where they cannot drift from the flow check's.
+    @Test("the thresholds are the ones the flow check already draws")
+    func thresholdsAgree() {
+        // The flow check asserts a healthy monitor stays under 30 ms; the
+        // warning starts exactly there rather than at some second opinion.
+        #expect(RouterModel.monitorIsHardToSingToAbove == 30)
+        #expect(RouterModel.monitorCannotBeSungToAbove > RouterModel.monitorIsHardToSingToAbove)
+    }
+
+    /// With no route and no monitor there is nothing to warn about, and a
+    /// warning shown then would be the kind nobody reads afterwards.
+    @Test("nothing is said when nothing is monitoring")
+    func silentWhenIdle() {
+        let model = RouterModel()
+        #expect(model.monitorLatencyWarning == nil)
+    }
+}

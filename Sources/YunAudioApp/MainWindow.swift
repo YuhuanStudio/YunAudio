@@ -1019,13 +1019,18 @@ struct MainWindow: View {
                     ? loc(
                         "This output does not look like headphones. Monitoring on speakers puts the microphone back into the room it is listening to."
                     )
-                    : String(
-                        format: loc("Hear yourself, %@ ms behind."),
-                        String(format: "%.1f", model.monitorLatencyMilliseconds))
+                    // What the number means, when it means something. A
+                    // reading of "285.0 ms" is not a warning to somebody who
+                    // has no scale for it, and what they conclude instead is
+                    // that the application sounds bad.
+                    : model.monitorLatencyWarning
+                        ?? String(
+                            format: loc("Hear yourself, %@ ms behind."),
+                            String(format: "%.1f", model.monitorLatencyMilliseconds))
             )
             .font(Yun.Text.caption)
             .foregroundStyle(
-                model.monitorMayFeedBack
+                model.monitorMayFeedBack || model.monitorLatencyWarning != nil
                     ? Yun.Palette.warning : Yun.Palette.textTertiary
             )
             .fixedSize(horizontal: false, vertical: true)

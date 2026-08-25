@@ -5840,6 +5840,47 @@ final class RouterModel {
         return !headphoneWords.contains { name.contains($0) }
     }
 
+    /// Above this, hearing yourself is a hindrance rather than a help.
+    ///
+    /// Thirty milliseconds is where the flow check already draws the line, and
+    /// it is the figure performers give: below about ten nobody notices, by
+    /// twenty-five it is audible, and past thirty a singer starts fighting
+    /// their own voice rather than following the track. It is not a fidelity
+    /// threshold — the sound is unchanged — which is precisely why it gets
+    /// mistaken for one.
+    static let monitorIsHardToSingToAbove: Double = 30
+
+    /// And past this it is not a hindrance, it is impossible.
+    ///
+    /// A Bluetooth headset on this machine reports 12048 frames of output
+    /// latency — 273 ms at 44.1 kHz — and singing to a monitor a quarter of a
+    /// second behind cannot be done at all. That number is why "the audio
+    /// sounds wrong on Bluetooth" is so often about latency rather than about
+    /// the codec everybody suspects.
+    static let monitorCannotBeSungToAbove: Double = 100
+
+    /// What is wrong with hearing yourself here, when something is.
+    ///
+    /// The number has always been shown — "Hear yourself, 285.0 ms behind" —
+    /// and a number on its own is not a warning. Somebody reading 285 has no
+    /// way to know it is fatal rather than merely large, and what they conclude
+    /// instead is that the application sounds bad.
+    var monitorLatencyWarning: String? {
+        guard isRunning, monitorDeviceUID != nil else { return nil }
+        let milliseconds = monitorLatencyMilliseconds
+        guard milliseconds > Self.monitorIsHardToSingToAbove else { return nil }
+        if milliseconds > Self.monitorCannotBeSungToAbove {
+            return String(
+                format: loc(
+                    "You hear yourself %.0f ms late here, which is too far behind to sing to. A wired or 2.4 GHz headset is the fix; no setting can shorten this one."
+                ), milliseconds)
+        }
+        return String(
+            format: loc(
+                "You hear yourself %.0f ms late here, which is far enough behind to sing against. A smaller buffer helps a little; a wired headset helps more."
+            ), milliseconds)
+    }
+
     /// Which routes carry each source into the monitor, so a send can be moved
     /// without rebuilding anything.
     @ObservationIgnored private var monitorRouteIndices: [String: [Int]] = [:]
