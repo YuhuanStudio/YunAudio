@@ -7417,7 +7417,8 @@ enum UIFlowCheck {
                     + " running \(model.isRunning) (set by \(model.runningDecidedBy)),"
                     + " busy \(model.isBusy), routes \(model.activeRoutes.count),"
                     + " teardown said \(model.teardownFailureDetail ?? "nothing"),"
-            + " decided by \(model.echoTeardownDecidedBy)")
+            + " decided by \(model.echoTeardownDecidedBy),"
+            + " retries \(model.teardownRetriesRun)/\(model.teardownRetriesScheduled)")
             check("\(label) — the IO cycle counter could be read at all", false)
             return
         }

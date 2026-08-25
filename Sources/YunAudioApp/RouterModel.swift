@@ -7106,9 +7106,21 @@ final class RouterModel {
     /// failure, like `retainFailedTeardown` itself.
     var teardownRetriesLeftForTests: Int { teardownRetriesLeft }
 
-    /// Two, because the deferral is over as soon as the transaction it waits
-    /// behind finishes. A third attempt is not waiting on the same thing.
-    static let teardownRetries = 2
+    /// How many automatic Stops were scheduled, and how many actually ran.
+    ///
+    /// Two numbers rather than one because the gap between them is the whole
+    /// question: a retry that is scheduled and never runs looks exactly like a
+    /// retry that ran and did not help.
+    private(set) var teardownRetriesScheduled = 0
+    private(set) var teardownRetriesRun = 0
+
+    /// Enough attempts to outlast a route construction.
+    ///
+    /// The owners queue behind a graph admission, and the disposer's own
+    /// budgets are two seconds — so a retry that gives up sooner gives up
+    /// while the thing it waits for is still allowed to be running. Measured
+    /// at two attempts: `retries 2/2`, and the disposal still outstanding.
+    static let teardownRetries = 10
 
     /// How long to wait before the automatic Stop.
     ///
@@ -11251,24 +11263,39 @@ final class RouterModel {
         // that was worth keeping.
         isRunning = engine.hasLiveGraph
         runningDecidedBy = "retainFailedTeardown"
-        startFailed = true
         teardownFailure = result
         routeUpdatesAreAccepted = false
         restartIsPending = false
         stopIsPending = false
         lighting.setSignalActive(false)
-        // Press it ourselves before asking. The failure state above is already
-        // correct and visible; if the retry succeeds, `finishStop` clears it
-        // and nobody was asked to do anything.
+
+        // Cleanup still in progress is not a failure, and must not be reported
+        // as one.
+        //
+        // `.blockedByRetainedTransaction` means the disposer queued the route's
+        // owners behind a graph admission and will dispose them when it
+        // finishes. The route itself is already down — measured in a clean
+        // virtual machine as `routes 0` with no graph cell. Nothing has gone
+        // wrong; the last of the cleanup has not happened yet.
+        //
+        // Announcing it cost somebody an error message and a route they were
+        // told to Stop again, for work that completes on its own. So while a
+        // retry is still owed, the state is kept and nothing is said: press it
+        // ourselves, and only speak if the budget runs out.
         if result.anotherStopCanClearIt, teardownRetriesLeft > 0 {
             teardownRetriesLeft -= 1
+            teardownRetriesScheduled += 1
             Task { @MainActor [weak self] in
                 try? await Task.sleep(
                     nanoseconds: UInt64(Self.teardownRetryDelay * 1_000_000_000))
                 guard let self, self.teardownNeedsRetry, !self.isBusy else { return }
+                self.teardownRetriesRun += 1
                 self.stop()
             }
+            return
         }
+
+        startFailed = true
         let message = teardownMessage
         lastError = message
         if isInstallingDriver {

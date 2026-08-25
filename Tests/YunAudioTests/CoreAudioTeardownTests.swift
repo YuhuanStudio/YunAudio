@@ -1199,3 +1199,53 @@ struct AutomaticTeardownRetryTests {
         #expect(model.teardownRetriesLeftForTests == 0)
     }
 }
+
+@MainActor
+@Suite("Cleanup in progress is not a failure")
+struct DeferredCleanupIsSilentTests {
+
+    /// Nothing is said while a retry is still owed.
+    ///
+    /// `.blockedByRetainedTransaction` means the disposer queued the route's
+    /// owners behind a graph admission and will dispose them when it finishes.
+    /// The route is already down — measured as `routes 0` with no graph cell —
+    /// so an error message costs somebody a route they were told to Stop again
+    /// for work that completes on its own.
+    @Test("a deferred disposal reports nothing until the retries run out")
+    func deferredDisposalIsSilentWhileRetrying() {
+        let model = RouterModel()
+        model.stop()
+        model.retainFailedTeardown(
+            .audioUnitOwner(.blockedByRetainedTransaction(retainedUnits: 3)))
+
+        #expect(model.lastError == nil)
+        // The state is still true, and Start is still refused.
+        #expect(model.teardownNeedsRetry)
+        #expect(model.canStopRoute)
+    }
+
+    /// And it does speak once it has tried and failed.
+    @Test("the message appears when the budget runs out")
+    func exhaustedBudgetSpeaks() {
+        let model = RouterModel()
+        model.stop()
+        for _ in 0...RouterModel.teardownRetries {
+            model.retainFailedTeardown(
+                .audioUnitOwner(.blockedByRetainedTransaction(retainedUnits: 3)))
+        }
+        #expect(model.teardownRetriesLeftForTests == 0)
+        #expect(model.lastError?.contains("Stop again") == true)
+    }
+
+    /// A verdict no Stop can clear is said at once: retrying it returns the
+    /// same stored answer without touching anything, so silence would only be
+    /// somebody waiting for a route that is not coming back.
+    @Test("a terminal verdict is reported immediately")
+    func terminalVerdictSpeaksAtOnce() {
+        let model = RouterModel()
+        model.stop()
+        model.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
+        #expect(model.lastError?.contains("Quit and reopen") == true)
+    }
+}
