@@ -96,6 +96,20 @@ struct KTVScoringControls: View {
                     Spacer(minLength: 0)
                 }
             }
+            // What the number is actually comparing against.
+            //
+            // The model has published this all along and nothing showed it —
+            // the string for it was still in the localisations with no code
+            // left to use it. A score whose reference is unnamed is a score
+            // nobody can judge: "82" against an exact melody and "82" against
+            // the detected key are not the same claim, and only one of them is
+            // worth anything.
+            Text(reference)
+                .font(scale.caption)
+                .foregroundStyle(scale.quiet)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier(identifier("ScoringReference"))
+
             if let error = model.singingError {
                 Text(error)
                     .font(scale.caption)
@@ -103,6 +117,29 @@ struct KTVScoringControls: View {
                     .yunBoundedMessage(error)
             }
             key
+        }
+    }
+
+    /// What the score is being compared against, in the singer's words.
+    private var reference: String {
+        if model.isReadingSongMelody {
+            return loc("Reading the tune out of this song…")
+        }
+        if let refusal = model.songMelodyRefusal, model.songMelody.isEmpty {
+            return refusal
+        }
+        switch model.scoringReferenceMode {
+        case .midi:
+            return loc("Scoring against the exact tune from the matching .mid file.")
+        case .songFile:
+            return loc("Scoring against the tune read out of this song.")
+        case .capturedPlayer:
+            return loc("Scoring against the tune of the song being captured.")
+        case .key:
+            return loc(
+                "No tune to compare with, so this is the key and your timing only.")
+        case .waiting:
+            return loc("Waiting for something to compare you with.")
         }
     }
 

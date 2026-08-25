@@ -599,6 +599,14 @@
 "as written" = "照檔案寫的";
 "Start again" = "重新開始";
 "Score the singing" = "幫唱的打分數";
+"Could not read a melody from this song." = "無法從這首歌讀出旋律。";
+"No sung melody in this recording, so scoring falls back to the key." = "這個錄音裡沒有演唱旋律,評分改用調性。";
+"Waiting for something to compare you with." = "還沒有可以對照的東西。";
+"No tune to compare with, so this is the key and your timing only." = "沒有旋律可對照,只評調性與演唱時間。";
+"Scoring against the tune of the song being captured." = "正以擷取到的播放音訊旋律評分。";
+"Scoring against the tune read out of this song." = "正以從這首歌讀出的旋律評分。";
+"Scoring against the exact tune from the matching .mid file." = "正以同名 .mid 的精確旋律評分。";
+"Reading the tune out of this song…" = "正在從這首歌裡讀出旋律…";
 "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "每支麥克風分開評分。旋律取自與 .lrc 同名、放在旁邊的 .mid。";
 "No tune for this one, so there is nothing to score against — the note below is still live." = "這首沒有旋律檔，沒有東西可以對照評分。下方的音高仍是即時的。";
 "Listens to each microphone on its own. A matching .mid gives an exact tune score; otherwise YunAudio scores timing and intonation in the detected key." = "每支麥克風各自評分；同名 .mid 會提供精確旋律，沒有時則依歌曲調性、音準與演唱時間評分。";

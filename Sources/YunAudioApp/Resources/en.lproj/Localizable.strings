@@ -599,6 +599,14 @@
 "as written" = "as written";
 "Start again" = "Start again";
 "Score the singing" = "Score the singing";
+"Could not read a melody from this song." = "Could not read a melody from this song.";
+"No sung melody in this recording, so scoring falls back to the key." = "No sung melody in this recording, so scoring falls back to the key.";
+"Waiting for something to compare you with." = "Waiting for something to compare you with.";
+"No tune to compare with, so this is the key and your timing only." = "No tune to compare with, so this is the key and your timing only.";
+"Scoring against the tune of the song being captured." = "Scoring against the tune of the song being captured.";
+"Scoring against the tune read out of this song." = "Scoring against the tune read out of this song.";
+"Scoring against the exact tune from the matching .mid file." = "Scoring against the exact tune from the matching .mid file.";
+"Reading the tune out of this song…" = "Reading the tune out of this song…";
 "Listens to each microphone on its own, so two people singing is two scores rather than one. The tune comes from a .mid beside the .lrc, under the same name." = "Each microphone is scored separately. The tune comes from a .mid beside the .lrc, under the same name.";
 "No tune for this one, so there is nothing to score against — the note below is still live." = "No tune for this one, so there is nothing to score against. The note below is still live.";
 "Listens to each microphone on its own. A matching .mid gives an exact tune score; otherwise YunAudio scores timing and intonation in the detected key." = "Listens to each microphone on its own. A matching .mid gives an exact tune score; otherwise YunAudio scores timing and intonation in the detected key.";

@@ -1843,6 +1843,78 @@ final class RouterModel {
     /// The tune for what is playing, when a `.mid` was found beside the `.lrc`.
     private(set) var melody: MidiMelody?
 
+    /// The tune read out of the song file, when there is no `.mid` for it.
+    ///
+    /// A song opened here is not a captured application — `LocalSongPlayer`
+    /// runs its own engine and its samples never reach the source-tap analysis
+    /// — so without this the reference fell to the detected key, which is
+    /// nearly no comparison at all. The file is in our hands; this reads it.
+    private(set) var songMelody: [PitchSample] = []
+
+    /// Whether that read is still going, so the interface can say so rather
+    /// than showing a key score that is about to be replaced.
+    private(set) var isReadingSongMelody = false
+
+    /// Why the last read produced nothing, when it produced nothing.
+    private(set) var songMelodyRefusal: String?
+
+    @ObservationIgnored private var songMelodyReader: Task<Void, Never>?
+
+    /// Reads the tune out of a song we opened ourselves.
+    ///
+    /// Off the main actor and off any realtime path: it is one pass over the
+    /// file at open time, and the cost is paid once before anybody sings rather
+    /// than every frame while they do. Superseded rather than queued — opening
+    /// a second song makes the first read irrelevant, and the singer is waiting
+    /// on the second.
+    private func readSongMelody(at url: URL) {
+        songMelodyReader?.cancel()
+        songMelody = []
+        songMelodyRefusal = nil
+        // Read even when a `.mid` may be coming. The melody file is resolved
+        // after this, from the lyrics lookup, so skipping on the strength of
+        // `melody` being nil here would skip every time — and when one does
+        // arrive it wins anyway, at the cost of one pass at utility priority
+        // that nobody waited on.
+        isReadingSongMelody = true
+        let generation = singingResetToken
+        songMelodyReader = Task.detached(priority: .utility) { [weak self] in
+            let outcome: Result<SongMelody.Result, Error>
+            do {
+                outcome = .success(
+                    try SongMelody.extract(from: url, isCancelled: { Task.isCancelled }))
+            } catch {
+                outcome = .failure(error)
+            }
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                self?.adoptSongMelody(outcome, from: generation)
+            }
+        }
+    }
+
+    private func adoptSongMelody(
+        _ outcome: Result<SongMelody.Result, Error>, from generation: UInt64
+    ) {
+        guard generation == singingResetToken else { return }
+        isReadingSongMelody = false
+        switch outcome {
+        case .success(let result) where result.isUsable:
+            songMelody = result.samples
+            songMelodyRefusal = nil
+        case .success:
+            // An instrumental. Saying so beats scoring somebody against stray
+            // harmonics, which is the failure this was built to end.
+            songMelody = []
+            songMelodyRefusal = loc(
+                "No sung melody in this recording, so scoring falls back to the key.")
+        case .failure:
+            songMelody = []
+            songMelodyRefusal = loc("Could not read a melody from this song.")
+        }
+        rebuildScoringReference()
+    }
+
     /// One singer, their own microphone, their own score.
     struct Singer: Identifiable, Equatable {
         /// The device the voice came in on, which is what makes two of these
@@ -2095,6 +2167,8 @@ final class RouterModel {
         case waiting
         case midi
         case capturedPlayer
+        /// The tune read out of the song file before it played.
+        case songFile
         case key
     }
 
@@ -2908,6 +2982,11 @@ final class RouterModel {
 
     private func beginOpeningSong(at url: URL) {
         cancelLyricsLookup()
+        // Here rather than at either caller: this is the one funnel every open
+        // goes through, and a melody belonging to the song before it is the
+        // kind of state that survives by being cleared in four places out of
+        // five.
+        readSongMelody(at: url)
         invalidateHandWordsResourceRequest()
         localWordsError = nil
         isHandRun = true
@@ -13780,6 +13859,7 @@ final class RouterModel {
             isScoringSinging
             ? SingingScoreRequest(
                 through: songPosition, lyrics: lyrics, melody: melody,
+                songMelody: songMelody,
                 referenceVersion: singingReferenceVersion, key: songKey,
                 refresh: refreshesScore)
             : nil
@@ -13819,6 +13899,7 @@ final class RouterModel {
             case .waiting: .waiting
             case .exact: .midi
             case .capturedBacking: .capturedPlayer
+            case .extractedSong: .songFile
             case .key: .key
             }
         publish(referenceMode, to: \.scoringReferenceMode)

@@ -591,7 +591,7 @@ struct SingingAnalysisWorkerTests {
             anchorSeconds: 0, advancesTimeline: true, usesLearnedHead: false,
             sources: [source],
             score: SingingScoreRequest(
-                through: 2, lyrics: lyrics, melody: melody,
+                through: 2, lyrics: lyrics, melody: melody, songMelody: [],
                 referenceVersion: 1, key: nil, refresh: true))
 
         #expect(worker.submit(request))

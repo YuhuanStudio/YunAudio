@@ -623,6 +623,13 @@ struct SingingScoreRequest: Sendable, Equatable {
     let through: Double
     let lyrics: Lyrics?
     let melody: MidiMelody?
+    /// The tune read out of the song file itself, when there is no `.mid`.
+    ///
+    /// Already sampled at `KaraokeScore.referenceInterval`, so it drops into
+    /// the same slot the MIDI melody is sampled into and the scorer cannot tell
+    /// them apart. Empty when the song is an instrumental, when extraction has
+    /// not finished, or when the song is not ours to read.
+    let songMelody: [PitchSample]
     /// Changes only when either immutable reference changes.
     let referenceVersion: UInt64
     let key: KeyDetector.Key?
@@ -664,6 +671,8 @@ enum SingingScoringReferenceMode: Sendable, Equatable {
     case waiting
     case exact
     case capturedBacking
+    /// The tune read out of the song file before it played.
+    case extractedSong
     case key
 }
 
@@ -945,6 +954,9 @@ final class SingingAnalysisWorker: @unchecked Sendable {
         private var scores: [String: KaraokeScore] = [:]
         private var sampledReferenceVersion: UInt64?
         private var sampledReference: [PitchSample] = []
+        /// Whether that reference is the declared `.mid` or the measured one.
+        /// Both go through the same scorer; only the name shown differs.
+        private var sampledReferenceIsExact = false
         private var exactConfigurations: [String: ExactConfiguration] = [:]
         private var exactScorers: [String: KaraokeScore.IncrementalExactScorer] = [:]
         private var keyConfigurations: [String: KeyConfiguration] = [:]
@@ -1065,6 +1077,7 @@ final class SingingAnalysisWorker: @unchecked Sendable {
             scores = [:]
             sampledReferenceVersion = nil
             sampledReference = []
+            sampledReferenceIsExact = false
             exactConfigurations = [:]
             exactScorers = [:]
             keyConfigurations = [:]
@@ -1081,11 +1094,19 @@ final class SingingAnalysisWorker: @unchecked Sendable {
             let lyrics = shiftedLyrics(request.lyrics)
             if sampledReferenceVersion != request.referenceVersion {
                 sampledReferenceVersion = request.referenceVersion
+                // The `.mid` first, because it is exact. The song's own
+                // melody second, because it is measured rather than declared —
+                // but measured from the recording somebody is singing to, which
+                // beats the detected key by everything.
                 sampledReference =
                     request.melody?.samples(every: KaraokeScore.referenceInterval) ?? []
+                sampledReferenceIsExact = !sampledReference.isEmpty
+                if sampledReference.isEmpty { sampledReference = request.songMelody }
             }
             guard request.refresh else {
-                if !sampledReference.isEmpty { return .exact }
+                if !sampledReference.isEmpty {
+                    return sampledReferenceIsExact ? .exact : .extractedSong
+                }
                 if sources.contains(where: { $0.role == .backingReference }) {
                     return .capturedBacking
                 }
@@ -1188,6 +1209,7 @@ final class SingingAnalysisWorker: @unchecked Sendable {
             scores = [:]
             sampledReferenceVersion = nil
             sampledReference = []
+            sampledReferenceIsExact = false
             exactConfigurations = [:]
             exactScorers = [:]
             keyConfigurations = [:]
