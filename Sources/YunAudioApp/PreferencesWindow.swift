@@ -1194,6 +1194,53 @@ struct PreferencesWindow: View {
                     if let detail = model.teardownFailureDetail {
                         YunDetailRow(
                             loc("Audio lifecycle"), value: detail, tone: .danger)
+                        // Everything it took to diagnose the dropouts, in the
+                        // one place somebody looks when they have one.
+                        //
+                        // Finding that fault needed seven numbers, and every
+                        // one of them existed inside the model while the only
+                        // way to read them was a four-minute flow check on a
+                        // machine that was not the one with the problem. A
+                        // report that arrives as "it cut out again" cannot be
+                        // acted on; this one can be copied.
+                        //
+                        // Only while there is a failure. A diagnostics pane
+                        // that always carries seven rows of engine internals
+                        // is a pane nobody reads the day it matters.
+                        YunDetailRow(
+                            loc("Decided by"),
+                            value: model.runningDecidedBy, tone: .neutral)
+                        YunDetailRow(
+                            loc("Realtime graph"),
+                            value: model.engineHasLiveGraph
+                                ? loc("present") : loc("already freed"),
+                            tone: model.engineHasLiveGraph ? .neutral : .warning)
+                        YunDetailRow(
+                            loc("Cycle counter"),
+                            value: model.whyCycleCountIsUnknown,
+                            tone: .neutral)
+                        YunDetailRow(
+                            loc("Routes still claimed"),
+                            value: String(model.activeRoutes.count), tone: .neutral)
+                        YunDetailRow(
+                            loc("Automatic stops"),
+                            value: String(
+                                format: "%d / %d", model.teardownRetriesRun,
+                                model.teardownRetriesScheduled),
+                            tone: .neutral)
+                        YunDetailRow(
+                            loc("Audio unit disposer"),
+                            value: model.disposerAdmitsNewGraph
+                                ? loc("admitting")
+                                : String(
+                                    format: loc("%d owner(s) queued"),
+                                    model.disposerPendingOwners),
+                            tone: model.disposerAdmitsNewGraph ? .neutral : .warning)
+                        if model.echoTeardownDecidedBy != "never" {
+                            YunDetailRow(
+                                loc("Echo canceller verdict"),
+                                value: model.echoTeardownDecidedBy, tone: .neutral)
+                        }
                     }
                 }
             }

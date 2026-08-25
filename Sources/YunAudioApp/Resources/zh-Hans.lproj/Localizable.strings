@@ -855,6 +855,16 @@
 "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "灯环未能在时限内确认关闭。YunAudio 将通过退出应用来隔离它。";
 "Wait for the audio route to finish changing, then try again." = "请等待音频路由完成变更后再试。";
 "Audio lifecycle" = "音频生命周期";
+"Echo canceller verdict" = "回音消除的判决";
+"%d owner(s) queued" = "%d 个持有者排队中";
+"admitting" = "放行中";
+"Audio unit disposer" = "音频单元回收器";
+"Automatic stops" = "自动停止次数";
+"Routes still claimed" = "仍声称持有的路由";
+"Cycle counter" = "周期计数器";
+"already freed" = "已经释放";
+"Realtime graph" = "实时图";
+"Decided by" = "由哪里决定";
 "The selected lyrics file could not be read." = "无法读取所选的歌词文件。";
 "The selected lyrics file exceeds the 2 MiB safety limit." = "所选的歌词文件超过 2 MiB 安全上限。";
 "Reading the selected lyrics file took too long." = "读取所选的歌词文件耗时过长。";

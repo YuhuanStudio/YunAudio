@@ -856,6 +856,16 @@
 "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting." = "The light ring did not acknowledge shutdown before the deadline. YunAudio will contain it by exiting.";
 "Wait for the audio route to finish changing, then try again." = "Wait for the audio route to finish changing, then try again.";
 "Audio lifecycle" = "Audio lifecycle";
+"Echo canceller verdict" = "Echo canceller verdict";
+"%d owner(s) queued" = "%d owner(s) queued";
+"admitting" = "admitting";
+"Audio unit disposer" = "Audio unit disposer";
+"Automatic stops" = "Automatic stops";
+"Routes still claimed" = "Routes still claimed";
+"Cycle counter" = "Cycle counter";
+"already freed" = "already freed";
+"Realtime graph" = "Realtime graph";
+"Decided by" = "Decided by";
 "The selected lyrics file could not be read." = "The selected lyrics file could not be read.";
 "The selected lyrics file exceeds the 2 MiB safety limit." = "The selected lyrics file exceeds the 2 MiB safety limit.";
 "Reading the selected lyrics file took too long." = "Reading the selected lyrics file took too long.";

@@ -1291,3 +1291,52 @@ struct MonitorLatencyWarningTests {
         #expect(model.monitorLatencyWarning == nil)
     }
 }
+
+@MainActor
+@Suite("The diagnostics say what a dropout took to find")
+struct TeardownDiagnosticsPaneTests {
+
+    /// Every value it took to diagnose the dropouts has to be reachable from
+    /// the model, or the pane is showing a subset and the next report is
+    /// "it cut out again" all over again.
+    @Test("the seven readings are all on the model")
+    func readingsAreReachable() {
+        let model = RouterModel()
+        // Present and readable with no route, which is the state somebody is in
+        // when they open the pane after a failure.
+        #expect(!model.runningDecidedBy.isEmpty)
+        #expect(!model.whyCycleCountIsUnknown.isEmpty)
+        #expect(model.activeRoutes.isEmpty)
+        #expect(model.teardownRetriesRun == 0)
+        #expect(model.teardownRetriesScheduled == 0)
+        #expect(!model.echoTeardownDecidedBy.isEmpty)
+        // These two read the engine, which must answer without a route.
+        _ = model.engineHasLiveGraph
+        _ = model.disposerPendingOwners
+        #expect(model.teardownFailureDetail == nil)
+    }
+
+    /// And they only appear once there is something to explain.
+    ///
+    /// A diagnostics pane that always carries seven rows of engine internals is
+    /// one nobody reads on the day it matters.
+    @Test("the block is gated on there being a failure")
+    func gatedOnFailure() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        let source = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PreferencesWindow.swift",
+            encoding: .utf8)
+        let start = try #require(source.range(of: "if let detail = model.teardownFailureDetail"))
+        let end = try #require(
+            source.range(of: "heading(loc(\"Integrity check\"))",
+                range: start.upperBound..<source.endIndex))
+        let block = source[start.upperBound..<end.lowerBound]
+        for reading in [
+            "runningDecidedBy", "engineHasLiveGraph", "whyCycleCountIsUnknown",
+            "activeRoutes.count", "teardownRetriesRun", "disposerAdmitsNewGraph",
+            "echoTeardownDecidedBy",
+        ] {
+            #expect(block.contains(reading), "\(reading) is not inside the failure block")
+        }
+    }
+}
