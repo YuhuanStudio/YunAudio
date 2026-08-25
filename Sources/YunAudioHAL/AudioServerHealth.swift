@@ -63,11 +63,22 @@ public enum AudioServerHealth {
     ///
     /// Blocks for at most `budget`. Safe to call from any thread that can
     /// afford that; never from an IO callback.
+    /// The open step is the aggregate, not a plain device.
+    ///
+    /// This defaulted to opening the default output, and on 2026-08-26 it
+    /// answered "healthy" inside a running application whose every Start was
+    /// failing — published to the interface and to `yunaudio-cli status` as
+    /// `audioServer healthy` while `startIsOverdue` was also true, which is a
+    /// pair of readings that cannot both be useful. A route builds a private
+    /// aggregate and opens that; asking anything easier gets an answer to a
+    /// question nobody asked.
     @discardableResult
     public static func check(
         budget: TimeInterval = AudioServerHealth.budget,
         readProperty: @escaping @Sendable () -> Bool = { defaultOutputAnswers() },
-        openAndClose: @escaping @Sendable () -> Bool = { openAndCloseAnIOProc() }
+        openAndClose: @escaping @Sendable () -> Bool = {
+            buildAggregateAndOpen(budget: AudioServerHealth.budget)
+        }
     ) -> Verdict {
         if let remembered = lock.withLock({ remembered }) { return remembered }
 

@@ -110,3 +110,45 @@ struct RelaunchApplicationTests {
         #expect(source.contains("createsNewApplicationInstance = true"))
     }
 }
+
+@MainActor
+@Suite("The overdue notice says what the server answered")
+struct OverdueDiagnosisTests {
+
+    /// Two sentences, and the difference between them is what somebody does
+    /// next. "Several seconds and no answer" describes waiting; the other one
+    /// says waiting is not going to work and gives the command that is.
+    @Test("the wedged sentence and the generic one are different")
+    func wedgedSentenceIsDistinct() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        let start = try #require(source.range(of: "var startOverdueWarning: String? {"))
+        let body = source[start.upperBound...].prefix(1400)
+        #expect(body.contains("audioServerVerdict == .notOpeningDevices"))
+        // Named, because that is the only thing that ends this state — measured
+        // to survive eight minutes with nothing running.
+        #expect(body.contains("sudo killall coreaudiod"))
+    }
+
+    /// The probe is only run once a start has actually gone overdue. It costs
+    /// three seconds and leaks a thread when the answer is bad, which is not a
+    /// price to pay on a start that is merely slow.
+    @Test("the server is asked only after the watchdog fires")
+    func serverIsAskedOnlyWhenOverdue() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/RouterModel.swift", encoding: .utf8)
+        let start = try #require(source.range(of: "private func armStartWatchdog()"))
+        let body = source[start.upperBound...].prefix(1600)
+        let overdue = try #require(body.range(of: "startIsOverdue = true"))
+        let asked = try #require(body.range(of: "AudioServerHealth.check()"))
+        #expect(overdue.lowerBound < asked.lowerBound)
+    }
+
+    @Test("nothing has been asked before a start is outstanding")
+    func nothingAskedYet() {
+        let model = RouterModel()
+        #expect(model.audioServerVerdict == nil)
+    }
+}

@@ -11952,6 +11952,19 @@ final class RouterModel {
             status["echoCancellationNeedsRelaunch"] = .bool(true)
         }
         if startIsOverdue { status["startIsOverdue"] = .bool(true) }
+        // What the server answered when the overdue start asked it. Carried
+        // here so the diagnosis can be read without a window — which is how
+        // somebody reporting this will be asked for it.
+        if let audioServerVerdict {
+            let name: String
+            switch audioServerVerdict {
+            case .healthy: name = "healthy"
+            case .notOpeningDevices: name = "notOpeningDevices"
+            case .notAnswering: name = "notAnswering"
+            case .cannotTell: name = "cannotTell"
+            }
+            status["audioServer"] = .string(name)
+        }
         if let source = selectedSource {
             status["source"] = .string(source.name)
             status["sourceUID"] = .string(source.uid)
@@ -13221,20 +13234,50 @@ final class RouterModel {
     /// where it belongs — as the thing to try when quitting did not help.
     var startOverdueWarning: String? {
         guard startIsOverdue, isBusy else { return nil }
+        // Once the server has been asked, say what it answered. "Several
+        // seconds and no answer" is a description of waiting; this is a
+        // diagnosis, and it comes with the one thing that ends it.
+        if audioServerVerdict == .notOpeningDevices {
+            return loc(
+                "The system's audio server will build a device and then refuse to open it. Every application on this machine is affected, waiting does not end it, and no setting here can clear it. Restarting the audio server does: run sudo killall coreaudiod in Terminal. Audio comes back on its own a second or two later."
+            )
+        }
         return loc(
             "Core Audio is answering questions but not opening devices, and has not for several seconds. A call inside the system's audio support did not return, which affects every application on this machine — no setting here can clear it. Quitting YunAudio releases it; if audio is still wrong afterwards, restarting the audio server does (sudo killall coreaudiod in Terminal)."
         )
     }
 
+    /// What the audio server said when asked, after a start went overdue.
+    ///
+    /// Nil until the question has been put. It is put only then, because the
+    /// probe costs three seconds and leaks a thread when the answer is bad —
+    /// a synchronous mach call cannot be cancelled, so the only way to learn
+    /// that one will not return is to make it and stop waiting.
+    private(set) var audioServerVerdict: AudioServerHealth.Verdict?
+
     private func armStartWatchdog() {
         startWatchdog?.cancel()
         startIsOverdue = false
+        audioServerVerdict = nil
         startWatchdog = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.startIsOverdueAfter))
             guard !Task.isCancelled else { return }
             await MainActor.run {
                 guard let self, self.isBusy, self.isStarting else { return }
                 self.startIsOverdue = true
+            }
+            // Ask the system, rather than leaving somebody with "several
+            // seconds and no answer" to interpret. The verdict is the
+            // difference between a machine that is busy and one in the state
+            // where no route can start at all — measured on 2026-08-26 to last
+            // at least eight minutes with nothing running, and to end only when
+            // the audio server is restarted.
+            let verdict = await Task.detached(priority: .utility) {
+                AudioServerHealth.check()
+            }.value
+            await MainActor.run {
+                guard let self, self.isBusy else { return }
+                self.audioServerVerdict = verdict
             }
         }
     }
