@@ -2616,6 +2616,29 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "fidelity" {
                 measured.correlation, band))
     }
     print("")
+    // The one thing in the default configuration that changes the signal.
+    print("")
+    print("and the conversion that is in almost every path, with nothing switched on:")
+    print("")
+    for (from, through) in [(44_100.0, 48_000.0), (48_000.0, 44_100.0), (96_000.0, 48_000.0)] {
+        // Band-limited, because white noise fills its own Nyquist and the
+        // conversion is then measured on content it is required to remove.
+        let material = SignalFidelity.bandLimitedFixture(seconds: 2, sampleRate: from)
+        guard let measured = SignalFidelity.costOfResampling(
+            from: from, through: through, on: material)
+        else {
+            print(String(format: "  %6.0f → %6.0f → %6.0f Hz   could not be set up", from, through, from))
+            continue
+        }
+        let residual = measured.residualDecibels.isFinite
+            ? String(format: "%+8.2f dB", measured.residualDecibels)
+            : "  exact   "
+        print(
+            String(
+                format: "  %6.0f → %6.0f → %6.0f Hz   residual %@  r %.5f",
+                from, through, from, residual, measured.correlation))
+    }
+    print("")
     print("residual is what is left once the delay and the level are taken out —")
     print("the part a fader cannot undo. \"exact\" means the samples came back")
     print("unchanged: that effect costs nothing at its default setting.")

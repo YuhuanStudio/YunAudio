@@ -161,6 +161,46 @@ struct EffectCostTableTests {
         #expect(!EffectKind.allCases.isEmpty)
     }
 
+    /// The conversion that is in almost every path, with nothing switched on.
+    ///
+    /// `preferredSampleRate` is 48 kHz and a great many recordings are 44.1, so
+    /// this runs where every effect above it is off. It is therefore the only
+    /// candidate left for a default that costs fidelity — and it does not.
+    @Test("a rate conversion round trip is inaudible")
+    func resamplingIsNotTheCost() throws {
+        for (from, through) in [(44_100.0, 48_000.0), (48_000.0, 44_100.0), (96_000.0, 48_000.0)] {
+            let material = SignalFidelity.bandLimitedFixture(seconds: 1, sampleRate: from)
+            let measured = try #require(
+                SignalFidelity.costOfResampling(
+                    from: from, through: through, on: material))
+            #expect(
+                measured.residualDecibels < -55,
+                "\(Int(from)) → \(Int(through)) → \(Int(from)): \(measured.residualDecibels) dB")
+            #expect(measured.correlation > 0.9999)
+        }
+    }
+
+    /// The fixture has to be band-limited or the measurement above is a
+    /// measurement of the anti-alias filter doing its job.
+    ///
+    /// This caught a wrong answer once already: white noise put the same round
+    /// trip at −9.69 dB, which reads as a broken resampler and is nothing of
+    /// the kind — 96 kHz noise carries content to 48 kHz and a conversion to 48
+    /// is *required* to remove it.
+    @Test("the band-limited fixture stays inside its ceiling")
+    func fixtureIsBandLimited() {
+        let rate = 96_000.0
+        let material = SignalFidelity.bandLimitedFixture(
+            seconds: 0.5, sampleRate: rate, highestHertz: 18_000)
+        let spectrum = SignalFidelity.bands(
+            reference: material, processed: material, sampleRate: rate)
+        // Nothing above the ceiling, which the octave table shows as the 32 kHz
+        // band being absent or empty.
+        #expect(!material.isEmpty)
+        #expect(SignalFidelity.peak(material) < 1)
+        #expect(spectrum.allSatisfy { abs($0.decibels) < 0.001 })
+    }
+
     /// Voice isolation, on the signal it is for.
     ///
     /// The table above measures it against noise, and against noise it

@@ -1,4 +1,5 @@
 import Accelerate
+import AVFoundation
 import Foundation
 
 /// What a processing chain did to a signal, as numbers.
@@ -101,12 +102,123 @@ public enum SignalFidelity {
         return compare(reference: source, processed: processed, sampleRate: sampleRate)
     }
 
+    /// What one sample-rate conversion costs, with the same ruler.
+    ///
+    /// This is the only thing in the default configuration that changes the
+    /// signal. `preferredSampleRate` is 48 kHz and a great many recordings are
+    /// 44.1 — `yunaudio-cli devices` reports "assume resampled" for most device
+    /// pairs on this machine — so the conversion is in almost every path,
+    /// while every effect above it is switched off.
+    ///
+    /// Measured through `AVAudioConverter`, which is the system's own resampler
+    /// and therefore the one actually in the path, rather than a model of it.
+    /// Round trip, because a one-way conversion cannot be compared with the
+    /// signal it came from: they are at different rates and the ruler needs
+    /// both at one.
+    ///
+    /// - Returns: Nil when the conversion could not be set up, which is a
+    ///   different answer from costing nothing.
+    public static func costOfResampling(
+        from sourceRate: Double, through intermediateRate: Double, on source: [Float]
+    ) -> Measurement? {
+        guard let there = convert(source, from: sourceRate, to: intermediateRate),
+            let back = convert(there, from: intermediateRate, to: sourceRate)
+        else { return nil }
+        return compare(reference: source, processed: back, sampleRate: sourceRate)
+    }
+
+    private static func convert(
+        _ samples: [Float], from sourceRate: Double, to destinationRate: Double
+    ) -> [Float]? {
+        guard sourceRate > 0, destinationRate > 0, !samples.isEmpty,
+            let input = AVAudioFormat(
+                standardFormatWithSampleRate: sourceRate, channels: 1),
+            let output = AVAudioFormat(
+                standardFormatWithSampleRate: destinationRate, channels: 1),
+            let converter = AVAudioConverter(from: input, to: output),
+            let inputBuffer = AVAudioPCMBuffer(
+                pcmFormat: input, frameCapacity: AVAudioFrameCount(samples.count))
+        else { return nil }
+        // Asked for explicitly. The default is not the best one, and a
+        // measurement of the default would describe a choice nobody made
+        // rather than what the path can do.
+        converter.sampleRateConverterQuality = AVAudioQuality.max.rawValue
+        inputBuffer.frameLength = AVAudioFrameCount(samples.count)
+        guard let channel = inputBuffer.floatChannelData else { return nil }
+        samples.withUnsafeBufferPointer {
+            channel[0].update(from: $0.baseAddress!, count: samples.count)
+        }
+        // Room for the ratio plus the converter's own priming.
+        let capacity = AVAudioFrameCount(
+            Double(samples.count) * destinationRate / sourceRate + 4096)
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: output, frameCapacity: capacity)
+        else { return nil }
+        var supplied = false
+        var conversionError: NSError?
+        converter.convert(to: outputBuffer, error: &conversionError) { _, status in
+            if supplied {
+                status.pointee = .endOfStream
+                return nil
+            }
+            supplied = true
+            status.pointee = .haveData
+            return inputBuffer
+        }
+        guard conversionError == nil, outputBuffer.frameLength > 0,
+            let converted = outputBuffer.floatChannelData
+        else { return nil }
+        return Array(
+            UnsafeBufferPointer(start: converted[0], count: Int(outputBuffer.frameLength)))
+    }
+
+    /// A repeatable signal that fits inside a given bandwidth.
+    ///
+    /// White noise is the wrong material for a rate conversion. It carries
+    /// full-scale content up to its own Nyquist, so converting 96 kHz noise to
+    /// 48 and back *must* lose everything above 24 kHz — and the ruler then
+    /// reports the anti-alias filter doing its job as damage. The same mistake
+    /// as measuring a speech model against noise, one layer down.
+    ///
+    /// A sum of sines below a stated ceiling is band-limited by construction,
+    /// so anything the conversion removes is something it should have kept.
+    /// The frequencies are irrational multiples of each other so no two share a
+    /// period and the sum never repeats inside the fixture.
+    public static func bandLimitedFixture(
+        seconds: Double, sampleRate: Double, highestHertz: Double = 18_000,
+        amplitude: Float = 0.3
+    ) -> [Float] {
+        let count = max(0, Int(seconds * sampleRate))
+        var samples = [Float](repeating: 0, count: count)
+        var partials: [Double] = []
+        var hertz = 40.0
+        while hertz < min(highestHertz, sampleRate / 2 - 1000) {
+            partials.append(hertz)
+            hertz *= 1.371  // Irrational-ish, so no two partials share a period.
+        }
+        guard !partials.isEmpty else { return samples }
+        let scale = Double(amplitude) / Double(partials.count).squareRoot()
+        for index in 0..<count {
+            var value = 0.0
+            let time = Double(index) / sampleRate
+            for (order, partial) in partials.enumerated() {
+                // A fixed phase offset per partial, so the peak is not the sum
+                // of every partial arriving at once.
+                value += sin(2 * Double.pi * partial * time + Double(order) * 0.7)
+            }
+            samples[index] = Float(value * scale)
+        }
+        return samples
+    }
+
     /// A repeatable signal to measure against.
     ///
     /// Deterministic noise rather than a tone, because a tone only exercises
     /// one band and every conditioning effect here is frequency-dependent. The
     /// seed is fixed so two runs on two machines are comparable, which is the
     /// whole point of having a number.
+    ///
+    /// Not for rate conversions — see `bandLimitedFixture`.
     public static func fixture(seconds: Double, sampleRate: Double, amplitude: Float = 0.3)
         -> [Float]
     {
