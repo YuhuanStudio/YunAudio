@@ -414,9 +414,26 @@ final class BoundedAudioUnitConstructionLane: @unchecked Sendable {
     /// reporting success, with `running` never becoming true.
     ///
     /// Its own lane does not stop the wedge and cannot: nothing here can cancel
-    /// that call. What it changes is the blast radius. "Echo cancellation is
-    /// unavailable until YunAudio is relaunched" is a lost feature; "no route
-    /// can be built" is a dead application.
+    /// that call.
+    ///
+    /// It was expected to change the blast radius, and it does not — that claim
+    /// was made here before it had been measured, and measuring it on
+    /// 2026-08-26 showed why. The lanes are separate; the quarantine they both
+    /// use is not. `ProcessLifetimeAudioQuarantine.shared` is what refuses a
+    /// new graph, a wedged constructor leaves an entry in it that is never
+    /// released, and a plain route is refused after an echo wedge exactly as it
+    /// was before.
+    ///
+    /// What the separation does buy is the diagnosis. `admitsConstruction` on
+    /// this lane says the echo canceller is what wedged, so the application can
+    /// name the cause instead of reporting a residue count — and that is what
+    /// `mustBeRelaunched` and `echoCancellationNeedsRelaunch` are read from.
+    ///
+    /// Giving this lane its own quarantine as well would be the containment,
+    /// and it is not done, because it is a memory-safety bet: the quarantine
+    /// exists to stop a new graph being built while a call that may still touch
+    /// Core Audio objects is in flight. Getting that wrong is a fault in the
+    /// realtime path, which is worse than the lost session it would save.
     ///
     /// Serialisation is not weakened. The echo canceller is constructed and
     /// finished before graph construction begins, so the two lanes are never

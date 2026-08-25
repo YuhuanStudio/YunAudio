@@ -6884,7 +6884,21 @@ public final class RoutingEngine: @unchecked Sendable {
     /// ownership refused while N cleanup owner(s) remain". Nobody can act on
     /// that. "This copy has to be relaunched" they can.
     public var audioUnitConstructionIsQuarantined: Bool {
+        // Either lane, and the second one is not a belt-and-braces addition —
+        // it was measured. Separating the echo canceller onto its own lane
+        // keeps *that lane's* quarantine off the shared one, and it does not
+        // separate `ProcessLifetimeAudioQuarantine.shared`, which both lanes
+        // use and which is what actually refuses a new graph. A constructor
+        // that never returns leaves an entry there that is never released, so
+        // after an echo wedge a plain route is refused too — measured on
+        // 2026-08-26, with `echoCancellationNeedsRelaunch` set and every
+        // subsequent Start failing at once.
+        //
+        // Reading only the shared lane therefore said "nothing is wrong" about
+        // a process that could not route, which is the exact failure this
+        // property exists to prevent.
         !BoundedAudioUnitConstructionLane.shared.admitsConstruction
+            || !BoundedAudioUnitConstructionLane.echoCancellation.admitsConstruction
     }
 
     /// The same for the echo canceller's own lane.

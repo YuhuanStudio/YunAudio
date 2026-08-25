@@ -13175,6 +13175,16 @@ final class RouterModel {
 
     /// What to say about either, when either is true.
     var relaunchWarning: String? {
+        // The echo canceller first when it is the cause, because naming it is
+        // the difference between "something broke" and "this switch broke it,
+        // and you can leave it off". Both sentences end in the same place —
+        // this copy has to be restarted — since a wedged constructor's
+        // quarantine entry refuses every new graph, whichever lane it was on.
+        if mustBeRelaunched, echoCancellationNeedsRelaunch {
+            return loc(
+                "Building the echo canceller did not come back from Core Audio, and nothing can be built after that. Quit and open YunAudio again — and leave echo cancellation off if it happens twice."
+            )
+        }
         if mustBeRelaunched {
             return loc(
                 "This copy of YunAudio can no longer start audio. A Core Audio call did not return, and nothing can be built after that — quit and open it again."
