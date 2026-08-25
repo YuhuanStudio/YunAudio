@@ -11,6 +11,17 @@ import ShazamKit
 /// flowing through YunAudio and returns its reference timecode, so the same
 /// path also covers browsers and future players without pretending they expose
 /// an integration they do not.
+/// How sure Shazam is, where it says.
+///
+/// `SHMatchedMediaItem.confidence` arrived in macOS 15.4. Below that a match is
+/// a match and nothing grades it, so the honest value is the top of the scale:
+/// the framework returned this item as its answer and there is no second
+/// opinion to weigh it against.
+private func shazamConfidence(of item: SHMatchedMediaItem) -> Float {
+    if #available(macOS 15.4, *) { return item.confidence }
+    return 1
+}
+
 final class MusicRecognition: @unchecked Sendable {
 
     struct Match: Sendable, Equatable {
@@ -97,7 +108,8 @@ final class MusicRecognition: @unchecked Sendable {
                         // `timeRanges` describe the reference-signature ranges,
                         // not the recording's total duration.
                         duration: 0,
-                        confidence: item.confidence, artworkURL: item.artworkURL,
+                        confidence: shazamConfidence(of: item),
+                        artworkURL: item.artworkURL,
                         appleMusicURL: item.appleMusicURL))
             case .noMatch:
                 return .noMatch

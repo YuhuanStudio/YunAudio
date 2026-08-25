@@ -3597,6 +3597,24 @@ struct ChannelNameOwnershipTests {
 /// So this reads the source. Crude, and it is the only thing that would have
 /// caught any of the three: what is wrong is a missing line, and a missing line
 /// has no runtime behaviour to assert on.
+/// The two process-restore properties, read where the system has them.
+///
+/// `CATapDescription.bundleIDs` and `isProcessRestoreEnabled` are macOS 26. The
+/// suites below assert the feature and therefore only mean anything on a system
+/// that has it — but `@Suite` cannot be applied to a type marked `@available`,
+/// so the gate lives here instead of on the suite. Below 26 they report the
+/// absence rather than failing to compile, which is the same thing `ProcessTap`
+/// itself does.
+private func heldRestoresProcesses(_ description: CATapDescription) -> Bool {
+    if #available(macOS 26.0, *) { return description.isProcessRestoreEnabled }
+    return false
+}
+
+private func heldBundleIDs(_ description: CATapDescription) -> [String] {
+    if #available(macOS 26.0, *) { return description.bundleIDs }
+    return []
+}
+
 @Suite("Every setting reaches the file")
 struct PreferencesCompletenessTests {
 
@@ -3715,8 +3733,8 @@ struct ProcessTapRestoreTests {
             processIDs: [], bundleIDs: ["com.yuhuanstudio.nothing.at.all"])
         defer { _ = tap.destroyAndWait() }
         let held = try #require(tap.systemDescription())
-        #expect(held.isProcessRestoreEnabled)
-        #expect(held.bundleIDs == ["com.yuhuanstudio.nothing.at.all"])
+        #expect(heldRestoresProcesses(held))
+        #expect(heldBundleIDs(held) == ["com.yuhuanstudio.nothing.at.all"])
         // Nothing is attached, which is the point: the tap is waiting for it.
         #expect(held.processes.isEmpty)
         #expect(tap.destroyAndWait() == .destroyed)
@@ -3735,8 +3753,8 @@ struct ProcessTapRestoreTests {
             bundleIDs: ["com.apple.Music", "com.spotify.client"])
         defer { _ = tap.destroyAndWait() }
         let held = try #require(ProcessTap.description(of: tap.id))
-        #expect(held.isProcessRestoreEnabled)
-        #expect(held.bundleIDs.sorted() == ["com.apple.Music", "com.spotify.client"])
+        #expect(heldRestoresProcesses(held))
+        #expect(heldBundleIDs(held).sorted() == ["com.apple.Music", "com.spotify.client"])
         // The fields that were already being set have to still be there: a
         // property added to a description is a chance to overwrite one.
         #expect(held.isPrivate)
@@ -3764,8 +3782,8 @@ struct ProcessTapRestoreTests {
         defer { _ = tap.destroyAndWait() }
         #expect(!tap.restoresProcesses)
         let held = try #require(tap.systemDescription())
-        #expect(held.isProcessRestoreEnabled)
-        #expect(held.bundleIDs.isEmpty)
+        #expect(heldRestoresProcesses(held))
+        #expect(heldBundleIDs(held).isEmpty)
         #expect(tap.destroyAndWait() == .destroyed)
     }
 
@@ -3782,12 +3800,12 @@ struct ProcessTapRestoreTests {
     func explicitFalse() throws {
         let description = CATapDescription(stereoMixdownOfProcesses: [])
         description.isPrivate = true
-        description.isProcessRestoreEnabled = false
+        if #available(macOS 26.0, *) { description.isProcessRestoreEnabled = false }
         var id = AudioObjectID(kAudioObjectUnknown)
         try #require(AudioHardwareCreateProcessTap(description, &id) == noErr)
         defer { AudioHardwareDestroyProcessTap(id) }
         let held = try #require(ProcessTap.description(of: id))
-        #expect(!held.isProcessRestoreEnabled)
+        #expect(!heldRestoresProcesses(held))
     }
 }
 

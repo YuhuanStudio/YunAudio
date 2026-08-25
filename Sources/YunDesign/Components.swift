@@ -308,11 +308,22 @@ private struct PillSurface: ViewModifier {
             // shape entirely — a chip the size of two words has no interior for
             // the effect to show in, so the outline is what makes it a pill
             // rather than text lying on the window.
-            content
-                .glassEffect(.regular, in: .capsule)
-                .overlay {
-                    Capsule().strokeBorder(Yun.Palette.border, lineWidth: 1)
-                }
+            if #available(macOS 26.0, *) {
+                content
+                    .glassEffect(.regular, in: .capsule)
+                    .overlay {
+                        Capsule().strokeBorder(Yun.Palette.border, lineWidth: 1)
+                    }
+            } else {
+                // The same argument, in the materials available below macOS 26.
+                // The outline is doing the work either way — it is what makes a
+                // two-word chip a pill rather than text lying on the window.
+                content
+                    .background(.ultraThinMaterial, in: .capsule)
+                    .overlay {
+                        Capsule().strokeBorder(Yun.Palette.border, lineWidth: 1)
+                    }
+            }
         }
     }
 }

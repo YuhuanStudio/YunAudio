@@ -320,10 +320,19 @@ public final class ProcessTap: @unchecked Sendable {
             !$0.hasPrefix(AudioApplications.pidIdentityPrefix) && !$0.isEmpty
         }
         let ignoredBundleIDs = bundleIDs.filter { !realBundleIDs.contains($0) }
-        let restoring = !realBundleIDs.isEmpty
-        if restoring {
+        // Process restore is a macOS 26 property of the description, and it is
+        // the one feature here that older systems simply do not have: a tap
+        // that survives the tapped application quitting and reattaches when it
+        // launches again. Everything else about the tap works without it.
+        //
+        // Below 26 the tap is still created, still captures, and still names
+        // the applications it was asked for — it just stops when they stop, and
+        // `restoresProcesses` says so rather than claiming otherwise.
+        var restoring = false
+        if #available(macOS 26.0, *), !realBundleIDs.isEmpty {
             description.bundleIDs = realBundleIDs
             description.isProcessRestoreEnabled = true
+            restoring = true
         }
         restoresProcesses = restoring
         self.bundleIDs = realBundleIDs
@@ -447,6 +456,18 @@ public final class ProcessTap: @unchecked Sendable {
         return unmanaged.takeRetainedValue()
     }
 
+    /// The bundle identifiers a tap description carries, where the system has
+    /// them.
+    ///
+    /// `CATapDescription.bundleIDs` arrived in macOS 26. Below that a tap is
+    /// identified by its process objects and its UUID, which is what the
+    /// recovery path matches on anyway — the identifiers are extra evidence in
+    /// a diagnostic, not the thing being decided.
+    private static func heldBundleIDs(_ description: CATapDescription?) -> [String]? {
+        guard #available(macOS 26.0, *) else { return nil }
+        return description?.bundleIDs
+    }
+
     private struct CreationAttempt {
         let status: OSStatus
         let tapID: AudioObjectID
@@ -517,7 +538,8 @@ public final class ProcessTap: @unchecked Sendable {
         let newTaps = (tapIDsAfter ?? []).filter { !oldTaps.contains($0) }.map { id in
             let held = description(of: id)
             return ProcessTapCreationSnapshot.ObservedTap(
-                id: id, processIDs: held?.processes, bundleIDs: held?.bundleIDs,
+                id: id, processIDs: held?.processes,
+                bundleIDs: heldBundleIDs(held),
                 uuid: held?.uuid)
         }
         return ProcessTapCreationSnapshot(

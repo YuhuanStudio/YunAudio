@@ -197,7 +197,7 @@ extension View {
         case .glass:
             if benchmark.effectiveVariant == .cardEffectsOff {
                 self
-            } else {
+            } else if #available(macOS 26.0, *) {
                 self
                     .glassEffect(.regular, in: .rect(cornerRadius: cornerRadius))
                     // Material alone disappears over a quiet desktop, most
@@ -205,6 +205,23 @@ extension View {
                     // then float with no indication of which ones belong
                     // together. The hairline preserves the glass while making
                     // the card boundary survive every backdrop.
+                    .overlay {
+                        RoundedRectangle(cornerRadius: cornerRadius)
+                            .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
+                    }
+            } else {
+                // Below macOS 26 there is no Liquid Glass, and this is the
+                // nearest thing the platform has ever had. It is not a
+                // downgrade of the design so much as the same idea in the
+                // materials of the day: translucency over the desktop, with the
+                // hairline doing exactly the job it does above — keeping the
+                // card boundary when the backdrop is quiet.
+                //
+                // Worth the branch. Requiring macOS 26 for the whole
+                // application to get one decoration would have cost every
+                // machine older than a year, for a look.
+                self
+                    .background(.ultraThinMaterial, in: .rect(cornerRadius: cornerRadius))
                     .overlay {
                         RoundedRectangle(cornerRadius: cornerRadius)
                             .strokeBorder(Yun.Palette.borderHairline, lineWidth: 1)
@@ -245,8 +262,16 @@ extension View {
             self.background(
                 Yun.Palette.windowBackground, in: .rect(cornerRadius: Yun.Radius.panel))
         case .glass:
-            GlassEffectContainer { self }
-                .background(.clear)
+            // The container exists so the material is computed once for the
+            // whole popover rather than per card. Without it, the material
+            // itself still is — it is the sharing that is lost, not the look.
+            if #available(macOS 26.0, *) {
+                GlassEffectContainer { self }
+                    .background(.clear)
+            } else {
+                self.background(
+                    .ultraThinMaterial, in: .rect(cornerRadius: Yun.Radius.panel))
+            }
         }
     }
 }

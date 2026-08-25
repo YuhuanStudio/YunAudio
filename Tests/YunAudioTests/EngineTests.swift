@@ -4459,7 +4459,7 @@ struct AudioUnitPluginTests {
     func refusesTheChainFormat() throws {
         let stubborn = AudioUnitPlugin(
             type: kAudioUnitType_FormatConverter,
-            subType: kAudioUnitSubType_AUAudioMix,
+            subType: auAudioMixSubType,
             manufacturer: kAudioUnitManufacturer_Apple,
             name: "AUAudioMix", manufacturerName: "Apple", loadsInProcess: true)
         let chain = try #require(
@@ -5126,13 +5126,22 @@ struct EqualiserTests {
 /// These are assertions rather than notes so that if a future macOS relaxes any
 /// of it, this fails and says so — which is the only way anybody would find
 /// out.
+/// `'amix'`, spelled out.
+///
+/// `kAudioUnitSubType_AUAudioMix` is annotated macOS 26, but a four-character
+/// component subtype is a number and this one does not change. These tests ask
+/// the system at runtime whether such a unit exists — which is the question
+/// they are for — and a compile-time gate would stop them being able to ask on
+/// the systems where the answer is interesting.
+private let auAudioMixSubType: OSType = 0x616D_6978
+
 @Suite("AUAudioMix constraints")
 struct AudioMixConstraintTests {
 
     private func makeUnit() -> AudioComponentInstance? {
         var description = AudioComponentDescription(
             componentType: kAudioUnitType_FormatConverter,
-            componentSubType: kAudioUnitSubType_AUAudioMix,
+            componentSubType: auAudioMixSubType,
             componentManufacturer: kAudioUnitManufacturer_Apple,
             componentFlags: 0, componentFlagsMask: 0)
         guard let component = AudioComponentFindNext(nil, &description) else { return nil }

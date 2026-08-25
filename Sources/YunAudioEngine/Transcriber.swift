@@ -531,8 +531,16 @@ public actor Transcriber {
     /// would be a hop for a string that was fixed at construction.
     public nonisolated let speaker: String
     private let locale: Locale
-    private var analyser: SpeechAnalyzer?
-    private var transcriber: SpeechTranscriber?
+    /// Held as `AnyObject` for the reason the converter below is, one release
+    /// further down: `SpeechAnalyzer` and `SpeechTranscriber` are macOS 26, and
+    /// a stored property of a 26-only type would force the whole actor to 26 —
+    /// and with it every property holding one, until the router could not name
+    /// a transcriber on macOS 14 even to say the feature is not there.
+    ///
+    /// The casts back happen inside the availability guards, where the concrete
+    /// types are legal and the compiler still checks every use of them.
+    private var analyser: AnyObject?
+    private var transcriber: AnyObject?
     /// The framework's own converter into whatever format the model wants.
     ///
     /// It knows what the model was trained at, which is not the rate the router
@@ -608,6 +616,7 @@ public actor Transcriber {
     /// The languages that can be transcribed without a download, and those that
     /// can with one.
     public static func languages() async -> (installed: [Locale], supported: [Locale]) {
+        guard #available(macOS 26, *) else { return ([], []) }
         async let installed = SpeechTranscriber.installedLocales
         async let supported = SpeechTranscriber.supportedLocales
         return (await installed, await supported)
@@ -694,6 +703,7 @@ public actor Transcriber {
         #endif
     }
 
+    @available(macOS 26, *)
     private func append(_ result: SpeechTranscriber.Result) {
         guard result.isFinal else { return }
         let text = String(result.text.characters)
@@ -760,7 +770,9 @@ public actor Transcriber {
         guard isRunning else { return }
         isRunning = false
         await feed.close()
-        try? await analyser?.finalizeAndFinishThroughEndOfInput()
+        if #available(macOS 26, *), let analyser = analyser as? SpeechAnalyzer {
+            try? await analyser.finalizeAndFinishThroughEndOfInput()
+        }
         // Finalisation ends the results sequence. Await that natural end so the
         // last final sentence reaches `onLine`; cancellation here used to cut
         // off precisely the tail Stop was meant to preserve.
@@ -774,6 +786,7 @@ public actor Transcriber {
     /// Submission is a short bounded-ring mutation. Conversion lives on the
     /// worker, and `close` is its barrier before the analyser is finalised.
     private final class Feed: @unchecked Sendable {
+        @available(macOS 26, *)
         private final class ConversionSession: @unchecked Sendable {
             let converter: AnyObject?
             let continuation: AsyncStream<AnalyzerInput>.Continuation
@@ -839,6 +852,7 @@ public actor Transcriber {
         /// clock the session start was taken on. Nil until it has.
         var openedAt: Double? { worker.openedAt }
 
+        @available(macOS 26, *)
         func open(
             converter: AnyObject?, continuation: AsyncStream<AnalyzerInput>.Continuation
         ) async {

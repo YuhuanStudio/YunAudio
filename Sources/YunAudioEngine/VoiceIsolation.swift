@@ -310,16 +310,28 @@ final class VoiceIsolationUnit: AudioUnitTeardownOwner, @unchecked Sendable {
         return value
     }
 
-    /// Chooses the model. High quality is macOS 15+.
+    /// Chooses the model.
+    ///
+    /// The high-quality one is macOS 15. Below that the standard model is the
+    /// only one the system has, and asking for the other would set a parameter
+    /// to a value that release of `AUSoundIsolation` does not define — so the
+    /// switch degrades to the model that exists rather than to an error.
     @discardableResult
     func setHighQuality(_ isHighQuality: Bool) -> OSStatus {
-        AudioUnitSetParameter(
+        var sound = Float(kAUSoundIsolationSoundType_Voice)
+        if #available(macOS 15.0, *), isHighQuality {
+            sound = Float(kAUSoundIsolationSoundType_HighQualityVoice)
+        }
+        return AudioUnitSetParameter(
             unit, AudioUnitParameterID(kAUSoundIsolationParam_SoundToIsolate),
-            kAudioUnitScope_Global, 0,
-            isHighQuality
-                ? Float(kAUSoundIsolationSoundType_HighQualityVoice)
-                : Float(kAUSoundIsolationSoundType_Voice),
-            0)
+            kAudioUnitScope_Global, 0, sound, 0)
+    }
+
+    /// Whether the high-quality model exists on this system, so the interface
+    /// can offer the choice only where there is one.
+    static var hasHighQualityModel: Bool {
+        if #available(macOS 15.0, *) { return true }
+        return false
     }
 
     /// Renders `frames` from `inputBuffer` into `outputBuffer`.

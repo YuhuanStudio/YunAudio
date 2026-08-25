@@ -1199,6 +1199,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "tap-restore" {
             print("the HAL would not give the description back — nothing can be concluded")
             exit(1)
         }
+        // Process restore is macOS 26. Below that there is nothing to check
+        // and saying so beats printing an empty list as though the HAL had
+        // dropped something.
+        guard #available(macOS 26.0, *) else {
+            print("process restore needs macOS 26 — nothing to round-trip here")
+            exit(0)
+        }
         let keptBundles = held.bundleIDs.sorted()
         print("HAL kept restore \(held.isProcessRestoreEnabled)")
         print(
