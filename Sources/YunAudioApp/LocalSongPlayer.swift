@@ -263,6 +263,39 @@ final class LocalSongPlayer: @unchecked Sendable {
     /// room, not a microphone being routed.
     ///
     /// - Returns: nil when it worked, or the reason when even this raised.
+    /// Connects two nodes by the API that returns an error, where there is one.
+    ///
+    /// `AVAudioEngine.connect(_:to:format:)` raises an Objective-C exception on
+    /// a format it cannot take — `-10868` from the time-pitch unit, measured —
+    /// and an Objective-C exception unwinding past Swift frames reaches
+    /// `std::terminate`. This project carries a Foundation-only Objective-C
+    /// target for no other purpose than to stand between the two.
+    ///
+    /// macOS 27 deprecates that method and adds `connectNode(_:to:format:)`,
+    /// which returns the error instead of raising. Where it exists the barrier
+    /// is not needed, and the failure arrives as a value rather than as an
+    /// unwind that has to be caught in another language.
+    ///
+    /// Reported per edge rather than per pair, which the exception could not
+    /// do: the two edges fail for different reasons and only one of them is the
+    /// transpose refusing the file.
+    private static func connect(
+        _ engine: AVAudioEngine, _ from: AVAudioNode, to destination: AVAudioNode,
+        format: AVAudioFormat?
+    ) -> String? {
+        if #available(macOS 27.0, *) {
+            do {
+                try engine.connectNode(from, to: destination, format: format)
+                return nil
+            } catch {
+                return error.localizedDescription
+            }
+        }
+        return catchingObjCException {
+            engine.connect(from, to: destination, format: format)
+        }
+    }
+
     private static func connectAtTheMixersOwnFormat(
         engine: AVAudioEngine, node: AVAudioPlayerNode, transpose: AVAudioUnitTimePitch,
         format: AVAudioFormat
@@ -292,10 +325,9 @@ final class LocalSongPlayer: @unchecked Sendable {
         // `AVAudioEngine` converts across a connection whose two formats differ,
         // so the rate change belongs on the edge into the mixer, where nothing
         // is scheduled and nothing depends on it.
-        if let raised = catchingObjCException({
-            engine.connect(node, to: transpose, format: format)
-            engine.connect(transpose, to: mixer, format: mixerFormat)
-        }) {
+        if let raised = connect(engine, node, to: transpose, format: format)
+            ?? connect(engine, transpose, to: mixer, format: mixerFormat)
+        {
             _ = raised
             // **Then the transpose is what cannot take this file, so the song
             // plays without it.**
@@ -313,9 +345,7 @@ final class LocalSongPlayer: @unchecked Sendable {
             // check downstream of a playing song went with it.
             engine.disconnectNodeOutput(node)
             engine.disconnectNodeOutput(transpose)
-            if let last = catchingObjCException({
-                engine.connect(node, to: mixer, format: format)
-            }) {
+            if let last = connect(engine, node, to: mixer, format: format) {
                 return last
             }
             return nil
@@ -369,11 +399,13 @@ final class LocalSongPlayer: @unchecked Sendable {
         // renders nothing at all. Position stayed at 0.0 after 600 ms of
         // playing and the time-pitch unit reported no latency, which is what an
         // engine that never started looks like.
-        if let raised = catchingObjCException({
-            output.engine.connect(output.node, to: output.transpose, format: format)
-            output.engine.connect(
-                output.transpose, to: output.engine.mainMixerNode, format: format)
-        }) {
+        if let raised = Self.connect(
+            output.engine, output.node, to: output.transpose, format: format)
+            ?? Self.connect(
+                output.engine, output.transpose, to: output.engine.mainMixerNode,
+                format: format)
+        {
+            _ = raised
             // The graph is now half-built, so it is taken down before the
             // second attempt rather than connected on top of itself — which is
             // the mistake that produced the first exception.
