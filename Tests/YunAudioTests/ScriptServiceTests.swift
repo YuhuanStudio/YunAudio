@@ -273,7 +273,12 @@ struct ScriptServiceTests {
         scheduler.setHolding(true)
         let completion = ScriptServiceAsyncGate<ScriptService.Result>()
         let rpcCount = ScriptServiceLockedCounter()
+        // The barrier is held on purpose here, and the script's own budget runs
+        // while it is — so the budget is chosen rather than inherited. With the
+        // production 250 ms this test was killing the script it was observing
+        // whenever the machine was busy, and reporting the barrier for it.
         let service = ScriptService(
+            executionTimeLimit: 30,
             scheduleOnMainActor: { scheduler.schedule($0) },
             rpcHandler: { request, causality in
                 rpcCount.increment()

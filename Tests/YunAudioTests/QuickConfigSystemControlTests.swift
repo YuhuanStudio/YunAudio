@@ -124,6 +124,14 @@ struct QuickConfigSystemControlTests {
         var superseded: [Int] = []
         var timedOut: [Int] = []
         var callbackCounts: [Int: Int] = [:]
+        // The timeout is chosen, not inherited.
+        //
+        // This test holds the first write open on purpose and queues ten
+        // thousand behind it, and the production 2.25 s covers that whole
+        // stretch — on a loaded machine some of them expired, and the
+        // coalescing assertions below then described a queue that had timed out
+        // rather than one that had coalesced. What is being tested is exactly
+        // once and first-and-latest; the deadline has its own test.
         let control = QuickConfigSystemControl(
             readSystemDefaults: { .failed },
             writeSystemDefaults: { request in
@@ -134,7 +142,8 @@ struct QuickConfigSystemControlTests {
                     releaseFirst.wait()
                 }
                 return .init(restored: 1, missing: [])
-            })
+            },
+            timeout: .seconds(120))
 
         func submit(_ value: Int) {
             control.writeDefaults(.init(inputUID: String(value), outputUID: nil)) { delivery in
@@ -347,13 +356,18 @@ struct QuickConfigSystemControlTests {
         let release = DispatchSemaphore(value: 0)
         var deliveries:
             [QuickConfigSystemControl.Delivery<QuickConfigSystemControl.ReadOutcome>] = []
+        // Chosen for the reason the burst test's is: the read is held open on
+        // purpose while the owner is released, and that stretch has to outlast
+        // the deadline or the answer below is a timeout rather than the one
+        // this test is about.
         var control: QuickConfigSystemControl? = QuickConfigSystemControl(
             readSystemDefaults: {
                 started.append(true)
                 release.wait()
                 return .failed
             },
-            writeSystemDefaults: { _ in .init(restored: 0, missing: []) })
+            writeSystemDefaults: { _ in .init(restored: 0, missing: []) },
+            timeout: .seconds(120))
         weak let retainedControl = control
 
         control?.readDefaults { deliveries.append($0) }

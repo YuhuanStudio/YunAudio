@@ -606,9 +606,17 @@ struct ControlSocketTests {
         }
     }
 
+    /// - Parameter transportTimeout: Thirty seconds by default, not the
+    ///   product's 1.5.
+    ///
+    ///   These tests are about what crosses the socket — one answer per
+    ///   request, coalescing, ownership — and not about the budget. Inheriting
+    ///   the production budget made them fail on a loaded machine and report a
+    ///   transport fault for it. The tests that *are* about the budget pass it
+    ///   explicitly, and one of them passes 0.2 to make it fire.
     private func send(
         _ client: ControlClient, _ request: ControlRequest,
-        transportTimeout: TimeInterval? = nil
+        transportTimeout: TimeInterval? = 30
     ) throws -> ControlReply {
         let box = Box()
         let done = DispatchSemaphore(value: 0)
@@ -658,7 +666,16 @@ struct ControlSocketTests {
     func roundTrip() async throws {
         let path = Self.temporaryPath()
         let model = await MainActor.run { Model() }
-        let listener = ControlListener(path: path)
+        // Both budgets chosen, as in the deadline test: injecting the
+        // client's alone leaves the server to close the connection on its own
+        // 1.5 seconds, which is the same load one layer along. This test is
+        // about what crosses the socket and comes back, not about either
+        // deadline.
+        let listener = ControlListener(
+            path: path, totalTimeout: 30,
+            scheduleOnMainActor: { operation in
+                DispatchQueue.main.async { MainActor.assumeIsolated { operation() } }
+            })
         try listener.start { request, _, reply in reply(model.answer(request)) }
         defer { listener.stop() }
 

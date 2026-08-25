@@ -343,8 +343,14 @@ struct CommandQueueTests {
         let violationsAfter = yun_rt_tripwire_violations()
 
         yun_rt_tripwire_mark_realtime(false)
+        // Per-thread, which is this test's own business and load-immune.
         #expect(yun_rt_tripwire_current_thread_depth() == 0)
-        #expect(yun_rt_tripwire_marked_thread_count() == markedBefore)
+        // The count is process-wide, and a suite running beside this one
+        // marking a thread of its own is not something this test may forbid.
+        // The depth above is the claim; this is context for a failure.
+        print(
+            "tripwire marked threads: \(yun_rt_tripwire_marked_thread_count()), "
+                + "was \(markedBefore)")
         // Sanitizer runtimes replace Darwin's allocator entry points, so the zone
         // hook cannot observe this deliberate allocation. Ordinary and Release
         // runs still prove that the enabled tripwire counts it.
@@ -394,6 +400,10 @@ struct CommandQueueTests {
         // another suite marking one of its own between the snapshot and here
         // is not this test's business — it was asserting that nothing else in
         // the process was doing anything, which is not what it is for.
+        //
+        // This direction still means something: the two threads this test
+        // marked are counted. The other direction cannot, which is why the
+        // unmark checks below print instead.
         #expect(yun_rt_tripwire_marked_thread_count() >= markedBefore + 2)
         release.signal()
         release.signal()
@@ -404,7 +414,13 @@ struct CommandQueueTests {
         {
             Thread.sleep(forTimeInterval: 0.001)
         }
-        #expect(yun_rt_tripwire_marked_thread_count() <= markedBefore)
+        // Same reason: the wait above gives this test's own threads time to
+        // unmark, and what the count reads afterwards also depends on every
+        // other suite in the process. Registration failures are different —
+        // those are faults rather than activity, and none is allowed.
+        print(
+            "tripwire marked threads after unmark: "
+                + "\(yun_rt_tripwire_marked_thread_count()), was \(markedBefore)")
         #expect(yun_rt_tripwire_registration_failures() == failuresBefore)
     }
 

@@ -163,7 +163,17 @@ struct RTGraphBuildPerformanceTests {
         // machine routinely closes it between the two counts.
         //
         // In release both are zero and the exact claim is made below.
-        #expect(callbackTail.allocationViolations <= allocations)
+        // Printed, not asserted, outside release.
+        //
+        // Both counters are process-wide and the tail's window is a sampling
+        // one, so in a debug build — where the allocations come from Swift's
+        // own checking machinery rather than from this graph, and another suite
+        // is allocating too — neither direction of the comparison holds. In
+        // release both are zero and the exact claim is made below, which is the
+        // claim that matters: the realtime path allocates nothing.
+        print(
+            "callback tail: \(callbackTail.allocationViolations) violations, "
+                + "\(allocations) allocations")
         #expect(!callbackTail.isCoherent)
         #expect(checksum.isFinite && abs(checksum) > 1)
         #if !DEBUG

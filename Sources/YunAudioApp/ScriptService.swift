@@ -422,6 +422,7 @@ final class ScriptService: @unchecked Sendable {
     private let scheduleOnMainActor:
         @Sendable (@escaping @MainActor @Sendable () -> Void) -> Void
     private let rpcHandler: RPCHandler
+    private let executionTimeLimit: TimeInterval
     private let onEntryStart: (@Sendable (EntryKind, UInt64) -> Void)?
 
     // These values are created, read and released only on `ownerQueue`.
@@ -431,8 +432,15 @@ final class ScriptService: @unchecked Sendable {
     private var currentExecution: Execution?
     private var recentContextReferences: [WeakContextReference] = []
 
+    /// - Parameter executionTimeLimit: How long one entry may run before the
+    ///   service kills it. Injectable for the reason `ControlListener`'s total
+    ///   is: a test that holds a script at a barrier on purpose is spending
+    ///   this budget while it does, and on a loaded machine the script it is
+    ///   observing dies of the timeout — so the test reports the machine and
+    ///   not the barrier. Production uses the fixed public limit.
     init(
         label: String = "com.yuhuanstudio.yunaudio.javascript",
+        executionTimeLimit: TimeInterval = ScriptService.executionTimeLimit,
         scheduleOnMainActor:
             @escaping @Sendable (
                 @escaping @MainActor @Sendable () -> Void
@@ -440,6 +448,7 @@ final class ScriptService: @unchecked Sendable {
         onEntryStart: (@Sendable (EntryKind, UInt64) -> Void)? = nil,
         rpcHandler: @escaping RPCHandler
     ) {
+        self.executionTimeLimit = executionTimeLimit
         ownerQueue = DispatchQueue(label: label, qos: .userInitiated)
         self.scheduleOnMainActor = scheduleOnMainActor
         self.onEntryStart = onEntryStart
@@ -693,7 +702,7 @@ final class ScriptService: @unchecked Sendable {
     ) -> Entry {
         state.nextEntryIdentifier &+= 1
         let admitted = DispatchTime.now().uptimeNanoseconds
-        let limit = UInt64(Self.executionTimeLimit * 1_000_000_000)
+        let limit = UInt64(executionTimeLimit * 1_000_000_000)
         let localDeadline = admitted.addingReportingOverflow(limit)
         let boundedLocalDeadline =
             localDeadline.overflow ? UInt64.max : localDeadline.partialValue
@@ -1370,7 +1379,7 @@ final class ScriptService: @unchecked Sendable {
     private func deadlineMessage() -> String {
         String(
             format: loc("The script exceeded its %.0f ms execution limit."),
-            Self.executionTimeLimit * 1_000)
+            executionTimeLimit * 1_000)
     }
 
     private static func bounded(_ text: String, to maximumBytes: Int) -> String {
