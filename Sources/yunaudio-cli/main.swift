@@ -1041,6 +1041,192 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "timing" {
 // sampler to a hung process.
 //
 // This asks the question in three seconds instead.
+// The smallest possible question about the echo canceller.
+//
+// Turning echo cancellation on and pressing Start wedges Core Audio's device
+// path — reproduced deterministically on two machines, in under four seconds,
+// from a state `health` calls clean. The chain runs through this project's
+// aggregate, its graph admission, its construction lane and its capacity
+// policy before it ever reaches Apple's unit, and any of those could in
+// principle be the part that matters.
+//
+// This is the same construction with all of that removed: find the component,
+// instantiate it, dispose it. If this wedges, the fault is in the unit and
+// nothing here can do more than avoid it. If it does not, the difference is
+// ours and is worth finding.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-instantiate" {
+    print("health before:")
+    print("  \(AudioServerHealth.probeAggregate() == .healthy ? "clean" : "ALREADY WEDGED")")
+    var description = AudioComponentDescription(
+        componentType: kAudioUnitType_Output,
+        componentSubType: EchoCancellation.componentSubType,
+        componentManufacturer: kAudioUnitManufacturer_Apple,
+        componentFlags: 0, componentFlagsMask: 0)
+    guard let component = AudioComponentFindNext(nil, &description) else {
+        print("the voice-processing unit is not present on this machine")
+        exit(1)
+    }
+    // Optionally with a route already up, which is the difference that
+    // matters: the unit binds to the current default input and output, and
+    // creates an IOProc on them inside its own instantiation. If this project
+    // is already holding those devices, the two are asking coreaudiod for the
+    // same thing at the same time.
+    var routing: RoutingEngine?
+    if CommandLine.arguments.contains("--while-routing") {
+        let all = (try? AudioDevices.all()) ?? []
+        guard let source = automaticPhysicalInput(in: all),
+            let destination = all.first(where: {
+                $0.uid == ClockAnchorPublisher.driverDeviceUID
+            }) ?? all.first(where: { $0.transport.isVirtual && $0.hasOutput })
+        else {
+            print("need a real input and a loopback output for --while-routing")
+            exit(1)
+        }
+        let engine = RoutingEngine()
+        let routes = (0..<min(2, destination.outputChannels)).map { channel in
+            Route(
+                source: ChannelRef(deviceUID: source.uid, channel: 0),
+                destination: ChannelRef(deviceUID: destination.uid, channel: channel))
+        }
+        do {
+            try engine.start(
+                sourceDeviceUID: source.uid, destinationDeviceUID: destination.uid,
+                routes: routes, preferredSampleRate: 48000)
+            routing = engine
+            print("\nroute is up: \(source.name) → \(destination.name)")
+        } catch {
+            print("could not bring a route up: \(error)")
+            exit(1)
+        }
+    }
+    defer { routing?.stop() }
+
+    print("\ninstantiating the voice-processing unit, alone…")
+    let done = DispatchSemaphore(value: 0)
+    let box = InstantiationBox()
+    let thread = Thread {
+        var instance: AudioComponentInstance?
+        let status = AudioComponentInstanceNew(component, &instance)
+        box.record(status: status)
+        if let instance { AudioComponentInstanceDispose(instance) }
+        done.signal()
+    }
+    thread.start()
+    if done.wait(timeout: .now() + 10) == .success {
+        print("  returned, status \(box.status)")
+    } else {
+        print("  DID NOT RETURN in ten seconds — the wedge is in the unit itself")
+    }
+    // The whole bridge, as the engine builds it, when asked for.
+    //
+    // Instantiating the unit alone returns instantly and wedges nothing, with
+    // or without a route already up. So the difference is in what happens after
+    // instantiation — enabling IO, naming the devices, agreeing formats — and
+    // this runs exactly that, with none of the route around it.
+    if CommandLine.arguments.contains("--full") {
+        let all = (try? AudioDevices.all()) ?? []
+        guard let microphone = automaticPhysicalInput(in: all) else {
+            print("no physical input to cancel for")
+            exit(1)
+        }
+        let speaker =
+            all.first(where: { $0.hasOutput && !$0.transport.isVirtual })
+            ?? all.first(where: \.hasOutput)
+        guard let speaker else {
+            print("no output to listen for")
+            exit(1)
+        }
+        // The one thing a route does before it builds the canceller.
+        //
+        // `startAttempt` aligns every member to the common rate first, and only
+        // then constructs the bridge. So by the time Apple's unit is asked for,
+        // the microphone and the speaker have had their nominal rate set by
+        // this process moments earlier — which is the difference between the
+        // route's path and every probe above it, all of which built cleanly.
+        if CommandLine.arguments.contains("--after-rate-change") {
+            for device in [microphone, speaker] {
+                let before = device.currentSampleRate ?? 0
+                // Any other rate this device publishes, not a guessed one. The
+                // first version of this asked for 44.1 kHz on a device that
+                // offers only 48 and 96, skipped silently, and produced a
+                // clean run that proved nothing.
+                guard let away = device.availableSampleRates.first(where: { $0 != before })
+                else {
+                    print("  \(device.name): only one rate, nothing to move")
+                    continue
+                }
+                do {
+                    try device.setNominalSampleRate(away)
+                    print("  \(device.name): \(Int(before)) Hz → \(Int(away)) Hz")
+                    try device.setNominalSampleRate(before)
+                    print("  \(device.name): \(Int(away)) Hz → \(Int(before)) Hz")
+                } catch {
+                    print("  \(device.name): could not change rate — \(error)")
+                }
+            }
+        }
+
+        // The slice the route actually asks for is its buffer size — 128 by
+        // default — and the probe's own default is 512. That is a difference
+        // between the path that wedges and the path that does not, so it is a
+        // knob rather than an assumption.
+        var sliceFrames = 512
+        if let index = CommandLine.arguments.firstIndex(of: "--frames"),
+            index + 1 < CommandLine.arguments.count,
+            let asked = Int(CommandLine.arguments[index + 1])
+        {
+            sliceFrames = asked
+        }
+        print(
+            "\nbuilding the whole bridge: mic \(microphone.name), speaker \(speaker.name), "
+                + "\(sliceFrames)-frame slice")
+        let built = DispatchSemaphore(value: 0)
+        let outcome = OutcomeBox()
+        let worker = Thread {
+            do {
+                let bridge = try EchoCancellationBridge(
+                    microphoneUID: microphone.uid,
+                    settings: EchoCancellationSettings(speakerUID: speaker.uid),
+                    routerSampleRate: 48_000,
+                    maximumFrames: sliceFrames)
+                outcome.record("built")
+                _ = bridge
+            } catch {
+                outcome.record("refused: \(error)")
+            }
+            built.signal()
+        }
+        worker.start()
+        if built.wait(timeout: .now() + 15) == .success {
+            print("  \(outcome.text)")
+        } else {
+            print("  DID NOT RETURN in fifteen seconds — this is the wedge")
+        }
+    }
+
+    print("\nhealth after:")
+    switch AudioServerHealth.probeAggregate() {
+    case .healthy: print("  clean — nothing here wedged anything")
+    case .notOpeningDevices: print("  WEDGED")
+    default: print("  could not tell")
+    }
+    exit(0)
+}
+
+final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = "no answer"
+    func record(_ value: String) { lock.withLock { stored = value } }
+    var text: String { lock.withLock { stored } }
+}
+
+final class InstantiationBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: OSStatus = -1
+    func record(status: OSStatus) { lock.withLock { stored = status } }
+    var status: OSStatus { lock.withLock { stored } }
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "health" {
     // Per device, because the first version of this asked only about the
     // default output, said "opening devices normally", and was wrong: the
@@ -1181,6 +1367,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "diagnose" {
     // application can leave one configured on purpose, and this application's
     // own aggregates exist for as long as a route does. It is the number that
     // has to be watched over a session, and the point is that it can be.
+    //
+    // What this cannot see: a *private* aggregate belonging to another
+    // process. `kAudioAggregateDeviceIsPrivateKey` keeps it out of everybody
+    // else's device list, and this project's own routes build private ones — so
+    // a running YunAudio elsewhere on the machine contributes nothing here, and
+    // "aggregate devices: 0" is not the same as "no aggregates exist". It was
+    // read that way once.
     let aggregates = devices.filter { $0.transport == .aggregate }
     print("\naggregate devices: \(aggregates.count)")
     var heldIDs = Set<AudioObjectID>()
