@@ -488,6 +488,11 @@ func runRoute(
     print("\nrunning for \(Int(seconds))s — speak into the microphone\n")
     let deadline = Date().addingTimeInterval(seconds)
     var lastCycle: UInt64 = 0
+    // Core Audio's own name for the gap somebody hears. Reported per interval
+    // rather than only as a total, because the line it lands on carries the
+    // peaks and the clock state at that instant — which is the whole reason to
+    // record a dropout rather than remember one.
+    var lastOverloads = engine.ioProcOverloadCount
     while Date() < deadline {
         Thread.sleep(forTimeInterval: 0.25)
         let peaks = engine.routePeaks
@@ -507,10 +512,14 @@ func runRoute(
         let outputPeak = engine.outputPeak
         let sourceDB = sourcePeak > 0 ? 20 * log10(sourcePeak) : -.infinity
         let outputDB = outputPeak > 0 ? 20 * log10(outputPeak) : -.infinity
+        let overloads = engine.ioProcOverloadCount
+        let missed = overloads - lastOverloads
+        lastOverloads = overloads
         print(
             String(
-                format: "  cycles +%llu  source %7.1f dBFS  output %7.1f dBFS  %@  %@",
-                delta, sourceDB, outputDB, bars.joined(separator: "  "), lock))
+                format: "  cycles +%llu  source %7.1f dBFS  output %7.1f dBFS  %@  %@%@",
+                delta, sourceDB, outputDB, bars.joined(separator: "  "), lock,
+                missed > 0 ? "  ** \(missed) MISSED DEADLINE\(missed == 1 ? "" : "S")" : ""))
     }
 
     // Re-read after the run: the clock lock takes about a second and a half to
@@ -545,6 +554,21 @@ func runRoute(
             format: "realtime path: %llu allocations over %llu cycles (%.1f per cycle)",
             violations, lastCycle,
             lastCycle > 0 ? Double(violations) / Double(lastCycle) : 0))
+    let overloadsByDevice = engine.ioProcOverloadsByDevice
+    let totalOverloads = engine.ioProcOverloadCount
+    if totalOverloads == 0 {
+        print("missed deadlines: none")
+    } else {
+        print("missed deadlines: \(totalOverloads)")
+        // Named per device because they are different faults. The aggregate is
+        // the one our IOProc is attached to, so it reports us running late; a
+        // member reports an endpoint failing to keep a schedule it agreed to,
+        // and only the second is somebody else's problem to fix.
+        for (device, count) in overloadsByDevice.sorted(by: { $0.value > $1.value }) {
+            let name = (try? AudioDevice(id: device))?.name ?? "device \(device)"
+            print("  \(name): \(count)")
+        }
+    }
     if voiceIsolation {
         print("isolation render failures: \(engine.voiceIsolationFailures)")
     }
@@ -1709,7 +1733,8 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "cycles" {
     // tear down leaves an aggregate and its taps behind, and every cycle after
     // that adds another — so the census either stays flat or it does not, and
     // one number a cycle says which.
-    let count = CommandLine.arguments.count > 2
+    let count =
+        CommandLine.arguments.count > 2
         ? Int(CommandLine.arguments[2]) ?? 20 : 20
     let all = (try? AudioDevices.all()) ?? []
     guard
@@ -2685,7 +2710,8 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "fidelity" {
     // checked against — and the first thing it says is that at their default
     // settings several of these effects are bit-transparent, which is not what
     // anybody assumed.
-    let rate = CommandLine.arguments.count > 2
+    let rate =
+        CommandLine.arguments.count > 2
         ? Double(CommandLine.arguments[2]) ?? 48_000 : 48_000
     let source = SignalFidelity.fixture(seconds: 2, sampleRate: rate)
     print("one repeatable signal, \(Int(rate)) Hz, 2 s, through each effect alone\n")
@@ -2694,13 +2720,18 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "fidelity" {
     for kind in EffectKind.allCases {
         guard let measured = SignalFidelity.cost(of: [kind], on: source, sampleRate: rate)
         else {
-            print("\(kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0))  would not build at this rate")
+            print(
+                "\(kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0))  would not build at this rate"
+            )
             continue
         }
         let worst = measured.bandDecibels.max { abs($0.decibels) < abs($1.decibels) }
-        let band = worst.map { String(format: "%5.0f Hz %+6.2f dB", $0.centreHertz, $0.decibels) } ?? "—"
+        let band =
+            worst.map { String(format: "%5.0f Hz %+6.2f dB", $0.centreHertz, $0.decibels) }
+            ?? "—"
         let name = kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)
-        let residual = measured.residualDecibels.isFinite
+        let residual =
+            measured.residualDecibels.isFinite
             ? String(format: "%+8.2f dB", measured.residualDecibels)
             : "  exact   "
         print(
@@ -2718,13 +2749,18 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "fidelity" {
         // Band-limited, because white noise fills its own Nyquist and the
         // conversion is then measured on content it is required to remove.
         let material = SignalFidelity.bandLimitedFixture(seconds: 2, sampleRate: from)
-        guard let measured = SignalFidelity.costOfResampling(
-            from: from, through: through, on: material)
+        guard
+            let measured = SignalFidelity.costOfResampling(
+                from: from, through: through, on: material)
         else {
-            print(String(format: "  %6.0f → %6.0f → %6.0f Hz   could not be set up", from, through, from))
+            print(
+                String(
+                    format: "  %6.0f → %6.0f → %6.0f Hz   could not be set up", from, through,
+                    from))
             continue
         }
-        let residual = measured.residualDecibels.isFinite
+        let residual =
+            measured.residualDecibels.isFinite
             ? String(format: "%+8.2f dB", measured.residualDecibels)
             : "  exact   "
         print(

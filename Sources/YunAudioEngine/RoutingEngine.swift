@@ -859,6 +859,53 @@ public final class RoutingEngine: @unchecked Sendable {
     /// present — 16 kHz while hands-free mode holds, and back up when it lets
     /// go.
     public var onRouteMemberRateChanged: (@Sendable (AudioObjectID, Double) -> Void)?
+
+    /// Every device this route was built from, aligned or not.
+    ///
+    /// `alignedMemberIDs` is deliberately the subset that could present the
+    /// common rate, because drift is only meaningful against a rate we set. A
+    /// missed deadline is meaningful on any member, including the one running
+    /// at its own rate — that one is the likeliest to miss.
+    private var routeMemberIDs: [AudioObjectID] = []
+
+    /// Watches those devices, and the aggregate, for missed IOProc deadlines.
+    ///
+    /// `kAudioDeviceProcessorOverload` is Core Audio's own name for the gap a
+    /// listener hears. Before this, a dropout left no trace anywhere in the
+    /// process: the report was somebody's memory of a click, and there was
+    /// nothing to compare a fix against.
+    private lazy var overloadWatcher = DeviceOverloadWatcher {
+        [weak self] event in
+        self?.onRouteOverload?(event)
+    }
+
+    /// Called on the notification thread when a device reports an overload.
+    ///
+    /// Not a route rebuild: an overload is a symptom with many causes, and
+    /// restarting the route on one would turn a single click into a gap. It is
+    /// for recording and for telling somebody.
+    public var onRouteOverload: (@Sendable (DeviceOverloadWatcher.Event) -> Void)?
+
+    /// Missed IOProc deadlines since the last `resetIOProcOverloads()`.
+    ///
+    /// Survives a route restart on purpose. A route that has to restart is
+    /// itself the symptom, and a counter zeroed by the restart would erase the
+    /// case worth looking at.
+    public var ioProcOverloadCount: Int { overloadWatcher.overloadCount }
+
+    /// The same tally split by device, so a member and the aggregate stay
+    /// distinguishable — they are different diagnoses.
+    public var ioProcOverloadsByDevice: [AudioObjectID: Int] {
+        overloadWatcher.overloadsByDevice
+    }
+
+    /// The most recent overloads with their times, oldest first.
+    public var recentIOProcOverloads: [DeviceOverloadWatcher.Event] {
+        overloadWatcher.recentEvents
+    }
+
+    /// Begins a fresh count. For a deliberate measurement, not for teardown.
+    public func resetIOProcOverloads() { overloadWatcher.reset() }
     /// Every argument the route was last brought up with.
     ///
     /// A whole snapshot rather than a few named fields, because the clock-lock
@@ -1064,9 +1111,10 @@ public final class RoutingEngine: @unchecked Sendable {
             return SampleRatePlan(targetRate: preferredRate, hasMismatch: false)
         }
         if !shared.isEmpty {
-            let wanted = preferredRate.flatMap {
-                AudioProcessingContract.supports(sampleRate: $0) ? $0 : nil
-            } ?? 48_000
+            let wanted =
+                preferredRate.flatMap {
+                    AudioProcessingContract.supports(sampleRate: $0) ? $0 : nil
+                } ?? 48_000
             let nearest = shared.min {
                 abs(log2($0 / wanted)) < abs(log2($1 / wanted))
             }
@@ -2907,6 +2955,7 @@ public final class RoutingEngine: @unchecked Sendable {
             $0.availableSampleRates.contains(targetRate)
         }
         alignedMemberIDs = membersAtTargetRate.map(\.id)
+        routeMemberIDs = alignedDevices.map(\.id)
         _ = try timed("align sample rates") {
             try AggregateDevice.alignSampleRate(
                 targetRate,
@@ -3518,6 +3567,11 @@ public final class RoutingEngine: @unchecked Sendable {
         // Armed only now: two completed cycles are the first proof the route
         // exists, and a watch armed earlier could rebuild one that never did.
         memberRateWatcher.watch(alignedMemberIDs, expecting: graphSampleRate)
+        // The aggregate as well as its members. The aggregate is what our
+        // IOProc is attached to, so it is the one that reports our own
+        // overruns; a member reports the endpoint failing to keep up with a
+        // schedule it agreed to.
+        overloadWatcher.watch(routeMemberIDs + [aggregate.id])
 
         // When the destination is our own driver, hand it the master's clock so
         // it can lock to the microphone. Any other destination — BlackHole, a
@@ -3728,6 +3782,8 @@ public final class RoutingEngine: @unchecked Sendable {
         // for a rebuild of the route being torn down.
         memberRateWatcher.stop()
         alignedMemberIDs = []
+        overloadWatcher.stop()
+        routeMemberIDs = []
 
         // Before the graph is freed, since the graph holds this object's ring.
         // Stopping the unit first also puts the microphone and the speaker back

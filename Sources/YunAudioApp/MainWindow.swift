@@ -1044,6 +1044,21 @@ struct MainWindow: View {
             VStack(alignment: .leading, spacing: Yun.Space.lg) {
                 RoutingCanvas(model: model)
 
+                // The click somebody heard, with a number on it.
+                //
+                // Core Audio posts an overload when the callback missed its
+                // deadline, and nothing in this application was listening. A
+                // dropout therefore left no trace at all: the only record was
+                // somebody's memory of a break in the sound, and what they
+                // concluded from it was that the application sounds bad.
+                if let notice = model.dropoutWarning {
+                    Text(notice)
+                        .font(Yun.Text.caption)
+                        .foregroundStyle(Yun.Palette.warning)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("DropoutNotice")
+                }
+
                 sectionHeading(loc("Analysis"))
                 YunCard {
                     VStack(alignment: .leading, spacing: Yun.Space.md) {

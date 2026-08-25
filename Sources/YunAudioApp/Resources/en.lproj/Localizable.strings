@@ -886,3 +886,6 @@
 "Calibration could not be completed on this route." = "Calibration could not be completed on this route.";
 "Calibration stopped because the audio route is no longer available." = "Calibration stopped because the audio route is no longer available.";
 "Calibration could not start on this route." = "Calibration could not start on this route.";
+"the route itself" = "the route itself";
+"The audio broke up once since routing began, reported by %@." = "The audio broke up once since routing began, reported by %@.";
+"The audio broke up %d times since routing began, most recently reported by %@." = "The audio broke up %d times since routing began, most recently reported by %@.";

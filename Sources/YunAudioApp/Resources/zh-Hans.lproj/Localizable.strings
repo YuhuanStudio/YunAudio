@@ -885,3 +885,6 @@
 "Calibration could not be completed on this route." = "无法在此音频路由上完成校准。";
 "Calibration stopped because the audio route is no longer available." = "音频路由已不可用，因此校准已停止。";
 "Calibration could not start on this route." = "无法在此音频路由上开始校准。";
+"the route itself" = "路由本身";
+"The audio broke up once since routing began, reported by %@." = "开始路由之后,声音断过一次,由%@汇报。";
+"The audio broke up %d times since routing began, most recently reported by %@." = "开始路由之后,声音断过 %d 次,最近一次由%@汇报。";

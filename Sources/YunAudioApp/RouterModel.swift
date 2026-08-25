@@ -5885,6 +5885,71 @@ final class RouterModel {
     /// the codec everybody suspects.
     static let monitorCannotBeSungToAbove: Double = 100
 
+    /// Missed IOProc deadlines since routing began in this session.
+    ///
+    /// Not cleared by a restart, deliberately. A route that has to rebuild
+    /// itself to recover is the case most worth seeing, and a tally the
+    /// rebuild zeroed would erase exactly that one.
+    ///
+    /// Core Audio posts `kAudioDeviceProcessorOverload` when a callback did not
+    /// finish before its buffer had to go out, which is the click or the gap
+    /// somebody hears. Nothing was listening for it, so every report of "it
+    /// still drops sometimes" arrived with nothing attached and could only be
+    /// argued about from memory.
+    private(set) var dropoutCount = 0
+
+    /// Which device reported the most recent one, resolved from the inventory
+    /// rather than by asking Core Audio again — the answer is wanted on the
+    /// main actor, and a property read there can block behind coreaudiod.
+    private(set) var lastDropoutDevice: String?
+
+    /// Set when the count last changed, so an old tally can be recognised as
+    /// old. Seconds on the same monotonic clock the watcher uses.
+    @ObservationIgnored private(set) var lastDropoutAt: Double?
+
+    func recordDropout(_ event: DeviceOverloadWatcher.Event) {
+        dropoutCount = engine.ioProcOverloadCount
+        lastDropoutAt = event.at
+        let known =
+            inputDevices.first(where: { $0.id == event.device })
+            ?? outputDevices.first(where: { $0.id == event.device })
+        // The aggregate is ours and is in neither list; naming it as such is
+        // more use than an object identifier, because it says whose fault the
+        // miss was.
+        lastDropoutDevice = known?.name ?? loc("the route itself")
+    }
+
+    /// What to tell somebody whose audio broke up, when it did.
+    ///
+    /// Deliberately not phrased as a fault to fix from here: an overload has
+    /// many causes and the application cannot tell which from the notification
+    /// alone. What it can do is stop the person concluding, silently and
+    /// permanently, that the application simply sounds bad.
+    var dropoutWarning: String? {
+        guard isRunning else { return nil }
+        return Self.dropoutSentence(count: dropoutCount, device: lastDropoutDevice)
+    }
+
+    /// The sentence on its own, so it can be asserted.
+    ///
+    /// `isRunning` is settable only from inside this file, which would put the
+    /// wording out of reach of any test — and the wording is the part that has
+    /// to be right, since it is all somebody gets.
+    static func dropoutSentence(count: Int, device: String?) -> String? {
+        guard count > 0 else { return nil }
+        let reporter = device ?? loc("the route itself")
+        if count == 1 {
+            return String(
+                format: loc(
+                    "The audio broke up once since routing began, reported by %@."),
+                reporter)
+        }
+        return String(
+            format: loc(
+                "The audio broke up %d times since routing began, most recently reported by %@."
+            ), count, reporter)
+    }
+
     /// What is wrong with hearing yourself here, when something is.
     ///
     /// The number has always been shown — "Hear yourself, 285.0 ms behind" —
@@ -8967,6 +9032,9 @@ final class RouterModel {
         }
         engine.onRouteMemberRateChanged = { [weak self] device, rate in
             Task { @MainActor in self?.rebuildAfterMemberRateChange(device, rate) }
+        }
+        engine.onRouteOverload = { [weak self] event in
+            Task { @MainActor in self?.recordDropout(event) }
         }
 
         if deviceInventoryIsReady {
