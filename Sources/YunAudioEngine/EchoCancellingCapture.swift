@@ -1563,13 +1563,20 @@ public final class EchoCancellingCapture {
                 }
             }
         case .blockedByRetainedTransaction:
+            // The disposer cancelled the command under its own lock before it
+            // could be promoted, so the operation provably never ran and the
+            // unit is untouched. Both callers here are live control — setting
+            // the bypass property, pausing for a start retry — and both already
+            // treat a nil status as "it did not happen".
+            //
+            // Recording a teardown verdict for it was the wider copy of the
+            // dropout defect: `lastTeardownResult` gates `stop()`, which
+            // returns it before tearing anything down, and it also gates
+            // `canBeginLifecycleCommand`, so every later command is refused
+            // too. One deferred bypass toggle at the wrong instant poisoned the
+            // capture for the life of the process.
             command.cancelBeforeStart()
             returnedStatus = nil
-            lifecycleLock.withLock {
-                if lastTeardownResult == nil {
-                    lastTeardownResult = .lifecycleTimedOut(step: nil)
-                }
-            }
         case .ownerRetained:
             returnedStatus = nil
             lifecycleLock.withLock {

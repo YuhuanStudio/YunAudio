@@ -683,4 +683,45 @@ struct DeferredLifecycleCommandTests {
         #expect(runs.count == 0)
         #expect(command.completedStatus == nil)
     }
+
+    /// Both places that classify a deferral now agree, and neither is a
+    /// teardown path.
+    ///
+    /// `EchoCancellingCapture.performLifecycleCommand` runs the bypass property
+    /// and the start-retry pause. It gates itself and `stop()` on
+    /// `lastTeardownResult`, so recording a deferral there refused every later
+    /// command as well as tearing nothing down — one bypass toggle at the wrong
+    /// instant and the capture was finished for the life of the process.
+    @Test("a deferral is not recorded as a teardown verdict in either classifier")
+    func deferralIsNeverATeardownVerdict() throws {
+        let root = PreferencesCompletenessTests.sourceRootForTests
+        // Anchored on the two runners that submit a *command*. The owner-based
+        // classifiers beside them — `captureResult(from:owner:)` and the one in
+        // `stop(until:)` — are genuine teardown paths, where a deferral does
+        // mean work is outstanding and the conservative reading is right.
+        let runners = [
+            ("EchoCancellationBridge.swift", "private func startFarEnd("),
+            ("EchoCancellingCapture.swift", "private func performLifecycleCommand("),
+        ]
+        for (file, runner) in runners {
+            let source = try String(
+                contentsOfFile: root + "Sources/YunAudioEngine/" + file,
+                encoding: .utf8)
+            let runnerStart = try #require(source.range(of: runner))
+            let start = try #require(
+                source.range(
+                    of: "case .blockedByRetainedTransaction:",
+                    range: runnerStart.upperBound..<source.endIndex))
+            let end =
+                source.range(
+                    of: "case .ownerRetained", range: start.upperBound..<source.endIndex)?
+                    .lowerBound
+                ?? source.index(start.upperBound, offsetBy: 900)
+            let branch = source[start.upperBound..<end]
+            #expect(
+                !branch.contains("lastTeardownResult ="),
+                "\(file) still records a deferred command as a teardown verdict")
+            #expect(branch.contains("cancelBeforeStart()"))
+        }
+    }
 }
