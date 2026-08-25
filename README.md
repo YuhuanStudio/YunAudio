@@ -5,10 +5,10 @@
 **An audio router for macOS with its own virtual device, and a signal path that
 can be proved bit-exact.**
 
-[![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#requirements)
+[![macOS 15+](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](#requirements)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![2078 tests](https://img.shields.io/badge/tests-2078-brightgreen)](#verification)
+[![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](#verification)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
@@ -33,7 +33,7 @@ cover them.
 
 | | |
 |---|---|
-| **Platform** | macOS 26 or later |
+| **Platform** | macOS 15 or later |
 | **Dependencies** | None. `Package.swift` declares an empty `dependencies` array |
 | **Interfaces** | Window, menu bar panel, URL scheme, CLI, Unix socket, MCP, MIDI, resident JavaScript |
 | **Formats** | 44.1–192 kHz; WAV, FLAC and AAC, with per-source stems |
@@ -220,9 +220,11 @@ sample, reporting the condition of the path rather than a verdict.
 
 ## Requirements
 
-- **macOS 26 or later.** Live transcription requires macOS 27; on 26 it is
-  reported as unavailable with the reason, and the remaining features are
-  unaffected.
+- **macOS 15 or later.** Some features need a newer system and say so rather
+  than being absent: live transcription needs macOS 26, as does keeping a
+  capture attached across the application quitting, and the Liquid Glass
+  appearance falls back to the material the system does have. Everything to do
+  with routing, capture, effects and karaoke works throughout.
 - **An Xcode carrying the macOS 27 SDK** to build, because live transcription
   uses `AnalyzerInputConverter`. The build scripts locate one; a hand-run
   `swift build` needs `source ./App/toolchain.sh` first, otherwise the error is
@@ -280,7 +282,7 @@ input, over a bit-exact path.
 ./App/verify.sh --flow="more than one input"  # one flow-check section, 44 s
 ```
 
-The steps are independent by design: 2078 unit tests, a string-table comparison
+The steps are independent by design: the unit suite, a string-table comparison
 across three languages, an offscreen render of every panel, a photograph of the
 window as the window server drew it, an assertion that no other instance holds
 the audio devices, a release-build bit-exactness measurement, and a flow check

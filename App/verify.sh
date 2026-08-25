@@ -222,14 +222,18 @@ tests_ran_and_match_baseline() {
 		echo "error: if that was deliberate, lower App/test-floor.txt in the same commit."
 		return 1
 	fi
-	# Verification is read-only. Updating this on the way past made a check
-	# silently edit four tracked files, so the evidence depended on whether the
-	# caller noticed and kept those edits. A larger suite is good, but the new
-	# number and the three public claims are a deliberate part of that change.
+	# A floor is a floor. This used to fail when the count went *up* as well,
+	# so that the number and the three README badges quoting it stayed in step —
+	# which made every change that added a test also edit four files to restate
+	# a number nobody reads and that is wrong again by the next commit. The
+	# badges no longer quote a count, and this no longer asks anybody to.
+	#
+	# Said rather than enforced, because a suite that has grown a long way past
+	# its floor has a floor that is not protecting much, and raising it is worth
+	# doing on purpose.
 	if [[ "${count}" -gt "${floor}" ]]; then
-		echo "error: ${count} tests ran, but App/test-floor.txt still says ${floor}."
-		echo "error: update the floor and all three README counts explicitly in this change."
-		return 1
+		echo "note: ${count} tests ran; the floor is ${floor}."
+		echo "note: raise App/test-floor.txt when it is worth protecting the new ones."
 	fi
 	return 0
 }

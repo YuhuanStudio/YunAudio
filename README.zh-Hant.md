@@ -4,10 +4,10 @@
 
 **macOS 音訊路由器，自帶虛擬裝置，訊號路徑的位元精確可被證明。**
 
-[![macOS 26+](https://img.shields.io/badge/macOS-26%2B-000000?logo=apple&logoColor=white)](#系統需求)
+[![macOS 15+](https://img.shields.io/badge/macOS-15%2B-000000?logo=apple&logoColor=white)](#系統需求)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
-[![2078 tests](https://img.shields.io/badge/tests-2078-brightgreen)](#驗證)
+[![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](#驗證)
 [![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系統需求)
 
 [English](README.md) · 繁體中文 · [简体中文](README.zh-Hans.md)
@@ -28,7 +28,7 @@ YunAudio 把麥克風、以及任何應用程式的音訊，路由進一個虛�
 
 | | |
 |---|---|
-| **平台** | macOS 26 或更新 |
+| **平台** | macOS 15 或更新 |
 | **相依** | 無。`Package.swift` 的 `dependencies` 為空陣列 |
 | **介面** | 視窗、選單列面板、URL scheme、CLI、Unix socket、MCP、MIDI、常駐 JavaScript |
 | **格式** | 44.1–192 kHz；WAV、FLAC、AAC，支援每來源分軌 |
@@ -180,8 +180,9 @@ Apple 的人聲隔離模型內部每週期約配置 0.3 次。
 
 ## 系統需求
 
-- **macOS 26 或更新。** 即時轉錄需要 macOS 27；在 26 上會標示為不可用並說明原因，其餘
-  功能不受影響。
+- **macOS 15 或更新。** 有些功能需要更新的系統，而它們會說出來而不是消失：即時轉錄需要
+  macOS 26，把擷取保持在應用程式關閉後也是；Liquid Glass 外觀在更舊的系統上退回該系統
+  本來就有的材質。路由、擷取、效果與 KTV 全程可用。
 - **建置需要帶 macOS 27 SDK 的 Xcode**，因為即時轉錄使用 `AnalyzerInputConverter`。
   建置腳本會自行尋找；手動執行 `swift build` 需先 `source ./App/toolchain.sh`，否則
   錯誤訊息為 `cannot find type 'AnalyzerInputConverter' in scope`。
@@ -234,7 +235,7 @@ sudo killall coreaudiod
 ./App/verify.sh --flow="more than one input"  # 單一 flow check 段落，44 秒
 ```
 
-各步驟刻意互相獨立：2078 個單元測試、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
+各步驟刻意互相獨立：單元測試套件、三語言字串表比對、每個面板的離屏繪製、視窗伺服器
 實際繪製之視窗的照片、「無其他實例佔用音訊裝置」的斷言、release 建置的位元精確量測，
 以及一次驅動整個介面對真實硬體執行的 flow check。
 
