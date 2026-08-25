@@ -129,6 +129,71 @@ struct SignalFidelityTests {
 @Suite("What every effect costs")
 struct EffectCostTableTests {
 
+    /// The effects that cost nothing at their defaults must keep costing
+    /// nothing.
+    ///
+    /// This is the assertion the table exists to make possible. Five of these
+    /// return the samples unchanged when nobody has touched their controls, and
+    /// that is why leaving them switched on is free. A change that quietly
+    /// makes one of them colour the signal at rest — a filter that no longer
+    /// bypasses, a gate whose floor moved, a limiter with makeup gain — would
+    /// otherwise be found by somebody's ears months later, described as "it
+    /// sounds worse now", and be unattributable.
+    @Test("what is transparent at rest stays transparent")
+    func transparentEffectsStayTransparent() {
+        let rate: Double = 48_000
+        let source = SignalFidelity.fixture(seconds: 1, sampleRate: rate)
+        // Measured, not assumed. Each of these was read as exact — residual
+        // −inf and a correlation of 1.000000 — on 2026-08-25.
+        let transparent: [EffectKind] = [.gate, .tone, .pitch, .formant, .limiter]
+        for kind in transparent {
+            guard let measured = SignalFidelity.cost(of: [kind], on: source, sampleRate: rate)
+            else {
+                Issue.record("\(kind.rawValue) would not build at \(rate) Hz")
+                continue
+            }
+            #expect(
+                measured.correlation > 0.999999,
+                "\(kind.rawValue) now correlates \(measured.correlation)")
+            #expect(
+                measured.residualDecibels < -100,
+                "\(kind.rawValue) now leaves \(measured.residualDecibels) dB behind")
+            #expect(
+                abs(measured.gainDecibels) < 0.01,
+                "\(kind.rawValue) now changes level by \(measured.gainDecibels) dB")
+        }
+    }
+
+    /// And the ones that are meant to be heard must stay within reach of what
+    /// they were, so a rewrite cannot silently become a different effect.
+    ///
+    /// Loose bounds on purpose. These are not transparency claims — they are
+    /// "this is still the same order of thing", which is what catches a
+    /// coefficient typed wrong without failing every time a filter is improved.
+    @Test("the audible effects stay the shape they were")
+    func audibleEffectsKeepTheirShape() {
+        let rate: Double = 48_000
+        let source = SignalFidelity.fixture(seconds: 1, sampleRate: rate)
+        // kind, residual measured on 2026-08-25, tolerance in decibels.
+        let known: [(EffectKind, Double, Double)] = [
+            (.compressor, -33.30, 6),
+            (.equaliser, -19.71, 6),
+            (.reverb, -16.15, 6),
+            (.echo, -10.85, 6),
+            (.character, -10.11, 6),
+        ]
+        for (kind, expected, tolerance) in known {
+            guard let measured = SignalFidelity.cost(of: [kind], on: source, sampleRate: rate)
+            else {
+                Issue.record("\(kind.rawValue) would not build at \(rate) Hz")
+                continue
+            }
+            #expect(
+                abs(measured.residualDecibels - expected) < tolerance,
+                "\(kind.rawValue) read \(measured.residualDecibels) dB, was \(expected)")
+        }
+    }
+
     @Test("every effect is measured against the same signal")
     func table() {
         let rate: Double = 48_000
