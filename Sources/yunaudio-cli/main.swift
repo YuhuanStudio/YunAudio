@@ -388,7 +388,8 @@ func wrapped(_ text: String, width: Int) -> [String] {
 func runRoute(
     sourceMatch: String, destinationMatch: String, seconds: Double,
     voiceIsolation: Bool = false, effects: [EffectKind] = [], bufferFrames: UInt32 = 128,
-    preferredSampleRate: Double? = nil, sourceChannel: Int? = nil
+    preferredSampleRate: Double? = nil, sourceChannel: Int? = nil,
+    echoCancellation: EchoCancellationSettings? = nil
 ) throws {
     let devices = try AudioDevices.all()
     guard let source = devices.first(where: { $0.name.contains(sourceMatch) && $0.hasInput })
@@ -461,7 +462,16 @@ func runRoute(
         effects: effects,
         preferredSampleRate: preferredSampleRate,
         bufferFrames: bufferFrames,
-        voiceIsolation: voiceIsolation ? VoiceIsolationSettings() : nil)
+        voiceIsolation: voiceIsolation ? VoiceIsolationSettings() : nil,
+        // Echo cancellation, so the engine's own path can be run without the
+        // application around it.
+        //
+        // Twelve standalone reproductions of every call the cancelling start
+        // makes came back clean while the application hung on the same call
+        // every time, which says the difference is somewhere in the process
+        // rather than in the sequence. This is the cut that separates "the
+        // engine's start path" from "everything else the application is doing".
+        echoCancellation: echoCancellation)
     if voiceIsolation {
         print("isolation   on · adds \(engine.voiceIsolationLatencyFrames) frames")
     }
@@ -1263,7 +1273,13 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-layers" {
         )
         for line in EchoCancellationDiagnostics.aggregateWhileCancelling(
             microphoneUID: microphone.uid, speakerUID: speaker.uid,
-            destinationOnly: CommandLine.arguments.contains("--destination-only"))
+            destinationOnly: CommandLine.arguments.contains("--destination-only"),
+            bufferFrames: CommandLine.arguments.firstIndex(of: "--buffer").flatMap {
+                $0 + 1 < CommandLine.arguments.count
+                    ? Int(CommandLine.arguments[$0 + 1]) : nil
+            },
+            started: CommandLine.arguments.contains("--started"),
+            driftCorrected: CommandLine.arguments.contains("--drift"))
         {
             print("  \(line)")
         }
@@ -3495,10 +3511,29 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "route" {
         try runRoute(
             sourceMatch: source, destinationMatch: destination, seconds: seconds,
             voiceIsolation: isolation,
-            effects: callChain ? [.voiceIsolation, .equaliser, .gate, .limiter] : [],
+            effects: {
+                // Named stages, so the application's own chain can be
+                // reproduced. The engine's cancelling route runs perfectly with
+                // no effects and the application hangs with two, which makes
+                // "which effects" the next question rather than a detail.
+                if let flag = CommandLine.arguments.firstIndex(of: "--effects"),
+                    flag + 1 < CommandLine.arguments.count
+                {
+                    return CommandLine.arguments[flag + 1]
+                        .split(separator: ",")
+                        .compactMap { EffectKind(rawValue: String($0)) }
+                }
+                return callChain ? [.voiceIsolation, .equaliser, .gate, .limiter] : []
+            }(),
             bufferFrames: callChain ? 256 : 128,
             preferredSampleRate: callChain ? 48000 : nil,
-            sourceChannel: sourceChannel)
+            sourceChannel: sourceChannel,
+            echoCancellation: CommandLine.arguments.contains("--echo")
+                ? EchoCancellationSettings(
+                    speakerUID: (try? AudioDevices.all())?
+                        .first(where: { $0.hasOutput && !$0.transport.isVirtual })?.uid
+                        ?? destination)
+                : nil)
     } catch {
         print("route failed: \(error)")
         exit(1)

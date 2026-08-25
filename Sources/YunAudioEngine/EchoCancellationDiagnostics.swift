@@ -146,6 +146,9 @@ public enum EchoCancellationDiagnostics {
         sampleRate: Double = 48_000,
         sliceFrames: Int = 128,
         destinationOnly: Bool = false,
+        bufferFrames: Int? = nil,
+        started: Bool = false,
+        driftCorrected: Bool = false,
         budget: TimeInterval = 15
     ) -> [String] {
         var lines: [String] = []
@@ -156,6 +159,20 @@ public enum EchoCancellationDiagnostics {
                 microphoneUID: microphoneUID, settings: settings,
                 routerSampleRate: sampleRate, maximumFrames: sliceFrames)
             lines.append("canceller built and kept alive")
+            // Started, when asked for — which is what the route does, and what
+            // ten probes before this one did not.
+            //
+            // `startAttempt` builds the canceller, builds the aggregate, builds
+            // the chain, and then calls `bridge.start()` immediately before
+            // `AudioDeviceCreateIOProcID`. Every earlier probe stopped at
+            // "built", so the one state the route is actually in when it hangs
+            // — a *running* voice-processing unit holding the microphone —
+            // had never been reproduced.
+            if started {
+                lines.append(
+                    bridge.start()
+                        ? "canceller started" : "canceller would not start")
+            }
         } catch {
             return ["canceller refused: \(String(describing: error))"]
         }
@@ -189,11 +206,29 @@ public enum EchoCancellationDiagnostics {
                     let aggregate = try AggregateDevice(
                         name: "YunAudio ordering probe",
                         subDevices: [
+                            // Drift-corrected against itself, which is what
+                            // the route asks for: with the canceller holding
+                            // the microphone the destination is the only member
+                            // left, `follower()` marks every member as one, and
+                            // the clock master is that same device.
                             AggregateDevice.SubDevice(
-                                uid: destination.uid, driftCompensation: false)
+                                uid: destination.uid, driftCompensation: driftCorrected)
                         ],
                         clockMasterUID: destination.uid)
                     lines.append("aggregate of \(destination.name) alone: created")
+                    // What the route does between creating it and opening it,
+                    // and what no probe before this one did: ask the aggregate
+                    // for the route's buffer size. A one-member aggregate of a
+                    // virtual driver being told to use 128 frames and then
+                    // opened is the last untried difference.
+                    if let bufferFrames {
+                        do {
+                            try aggregate.setBufferFrameSize(UInt32(bufferFrames))
+                            lines.append("buffer set to \(bufferFrames) frames")
+                        } catch {
+                            lines.append("buffer refused: \(String(describing: error))")
+                        }
+                    }
                     let opened = AudioServerHealth.openAndClose(aggregate.id)
                     _ = aggregate.destroy()
                     box.record(opened ? .built("opened") : .refused("would not open"))

@@ -3156,9 +3156,32 @@ public final class RoutingEngine: @unchecked Sendable {
                 extraOutputLatencyFrames: outputLatencyTrim[device.uid])
         }
 
+        // The clock master is never a follower of itself.
+        //
+        // With the canceller holding the microphone, the destination is the
+        // only member left *and* the clock master — and `follower()` marked it
+        // drift-corrected, so the aggregate asked Core Audio to correct a
+        // device's drift against its own clock. Printed by the start trace as
+        //
+        //     aggregate: clock=YunAudioDevice_UID … cancelsEcho=true
+        //     members: YunAudioDevice_UID drift
+        //
+        // Drift correction is a relationship between two clocks. Against
+        // itself it is at best a no-op the HAL has to reason about, and it made
+        // the description of the one configuration that hangs incoherent —
+        // which is not a good state to be diagnosing from.
+        func member(_ device: AudioDevice, clockMaster: String) -> AggregateDevice.SubDevice {
+            device.uid == clockMaster
+                ? AggregateDevice.SubDevice(
+                    uid: device.uid, driftCompensation: false,
+                    extraOutputLatencyFrames: outputLatencyTrim[device.uid])
+                : follower(device)
+        }
+
         let routedSubDevices: [AggregateDevice.SubDevice] =
             cancelsEcho
-            ? [follower(destination)] + extras.map(follower)
+            ? [member(destination, clockMaster: destinationDeviceUID)]
+                + extras.map { member($0, clockMaster: destinationDeviceUID) }
             : [
                 .init(uid: sourceDeviceUID, driftCompensation: false),
                 .init(
@@ -3170,6 +3193,24 @@ public final class RoutingEngine: @unchecked Sendable {
         // The microphone is the clock master; the virtual device follows it.
         // Doing it the other way round would resample the signal we are trying
         // to carry intact.
+        // The description itself, not just how long it took.
+        //
+        // Eleven standalone reproductions of every step in this path came back
+        // clean while the application hung on the next call every time, which
+        // means the difference is in the arguments rather than the sequence.
+        // Printing them is how that stops being guessed at.
+        if Self.reportsTiming {
+            let members = routedSubDevices.map {
+                $0.uid + ($0.driftCompensation ? " drift" : "")
+            }
+            let clock = cancelsEcho ? destinationDeviceUID : sourceDeviceUID
+            let summary =
+                "      ····  aggregate: clock=" + clock + " buffer="
+                + String(bufferFrames) + " taps=" + String(taps.count)
+                + " cancelsEcho=" + String(cancelsEcho) + "\n"
+                + "      ····  members: " + members.joined(separator: " | ") + "\n"
+            FileHandle.standardError.write(Data(summary.utf8))
+        }
         let aggregate = try timed("create the aggregate") {
             try AggregateDevice(
                 name: "YunAudio Route",

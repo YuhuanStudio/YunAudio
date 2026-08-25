@@ -58,3 +58,29 @@ struct EchoDiagnosticLayersTests {
         #expect(admission.lowerBound < lane.lowerBound)
     }
 }
+
+/// A clock master is not a follower of itself.
+@Suite("The cancelling route's aggregate is coherent")
+struct CancellingAggregateShapeTests {
+
+    /// With the canceller holding the microphone, the destination is the only
+    /// member left and it is also the clock master. It used to be marked
+    /// drift-corrected, which asks Core Audio to correct a device against its
+    /// own clock — a relationship that does not exist.
+    ///
+    /// Found by printing the aggregate's description while chasing a start that
+    /// hangs, and worth keeping whether or not it turns out to be that: an
+    /// incoherent description is a bad thing to diagnose from.
+    @Test("the clock master is not marked drift-corrected")
+    func clockMasterIsNotAFollower() throws {
+        let source = try String(
+            contentsOfFile: GraphLockDisciplineTests.enginePath, encoding: .utf8)
+        let start = try #require(
+            source.range(of: "let routedSubDevices: [AggregateDevice.SubDevice] ="))
+        let body = source[start.lowerBound...].prefix(500)
+        // The cancelling branch goes through the member-aware helper, not
+        // through `follower` directly.
+        #expect(body.contains("member(destination, clockMaster: destinationDeviceUID)"))
+        #expect(!body.contains("? [follower(destination)]"))
+    }
+}
