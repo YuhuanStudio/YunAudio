@@ -561,9 +561,11 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                 farEnd.lastTeardownResult.map {
                     EchoCancellationBridgeTeardownResult.farEnd($0)
                 } ?? .lifecycleTimedOut(step: .start)
-            lifecycleLock.withLock { lastTeardownResult = result }
+            lifecycleLock.withLock {
+                lastTeardownResult = result
+                teardownDecidedBy = "startFarEnd.operationFailed"
+            }
             return nil
-            teardownDecidedBy = "startFarEnd.operationFailed"
         case .timedOut(let step, _):
             lifecycleLock.withLock {
                 lastTeardownResult = .lifecycleTimedOut(step: step)
