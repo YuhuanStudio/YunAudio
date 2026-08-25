@@ -471,6 +471,14 @@ public final class EchoCancellationBridge: @unchecked Sendable {
 
     /// - Returns: False when either unit refused to start, in which case
     ///   nothing is left running.
+    /// Whether the start path narrates itself, for the same reason the route's
+    /// stages do: a start that refuses says only "the canceller would not
+    /// start", and the two ways it can refuse — the unit rejecting the start,
+    /// or the unit accepting it and never producing a frame — need different
+    /// investigations.
+    static let reportsLifecycleTiming =
+        ProcessInfo.processInfo.environment["YUNAUDIO_TIMING"] != nil
+
     public func start() -> Bool {
         guard !isRunning else { return true }
         lastTeardownResult = nil
@@ -505,6 +513,12 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                 farEndContext: UnsafeMutableRawPointer(realtimeHandles),
                 farEndProvider: farEnd == nil ? nil : Self.farEndProvider,
                 until: lifecycleDeadline)
+            if Self.reportsLifecycleTiming {
+                let note =
+                    "      ····  capture.startRaw returned "
+                    + String(started) + "\n"
+                FileHandle.standardError.write(Data(note.utf8))
+            }
             if !started, capture.terminalLifecycleResult != nil { break }
             if started {
                 let proofDeadline = DispatchTime.now() + .milliseconds(750)
@@ -513,6 +527,13 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                     producedFrames == writtenBefore
                 {
                     Thread.sleep(forTimeInterval: 0.01)
+                }
+                if Self.reportsLifecycleTiming {
+                    let note =
+                        "      ····  produced "
+                        + String(producedFrames - writtenBefore)
+                        + " frames in the proof window\n"
+                    FileHandle.standardError.write(Data(note.utf8))
                 }
                 if producedFrames > writtenBefore {
                     isRunning = true

@@ -3602,7 +3602,16 @@ public final class RoutingEngine: @unchecked Sendable {
         // the constructor so a failure to build the graph does not leave a unit
         // running with nothing to consume it.
         if let bridge {
-            guard bridge.start() else {
+            // Traced, because the start path throws here and the trace ended
+            // one stage earlier — reading as if the effect chain were the last
+            // thing that happened, when the canceller's own start is what
+            // refused.
+            let started = timed("start the echo canceller") { bridge.start() }
+            if Self.reportsTiming, !started {
+                let note = "      ····  the canceller refused to start\n"
+                FileHandle.standardError.write(Data(note.utf8))
+            }
+            guard started else {
                 if bridge.lastTeardownResult?.isComplete == false {
                     // A failed start can also fail to close. Retain the bridge
                     // so the ordinary route teardown can resume that exact
@@ -3627,8 +3636,18 @@ public final class RoutingEngine: @unchecked Sendable {
         retiredGenerations.attach(to: cell)
 
         var procID: AudioDeviceIOProcID?
-        let createStatus = AudioDeviceCreateIOProcID(
-            aggregate.id, yunAudioIOProc, UnsafeMutableRawPointer(cell), &procID)
+        // The last call in the start path with no stage of its own, and the one
+        // the trace kept ending in front of.
+        let createStatus = timed("AudioDeviceCreateIOProcID") {
+            AudioDeviceCreateIOProcID(
+                aggregate.id, yunAudioIOProc, UnsafeMutableRawPointer(cell), &procID)
+        }
+        if Self.reportsTiming, createStatus != noErr {
+            let note =
+                "      ····  AudioDeviceCreateIOProcID returned "
+                + String(createStatus) + "\n"
+            FileHandle.standardError.write(Data(note.utf8))
+        }
         if let procID {
             ioProcID = procID
             ioProcTeardownState.didCreate()
@@ -3878,7 +3897,24 @@ public final class RoutingEngine: @unchecked Sendable {
         // Stopping the unit first also puts the microphone and the speaker back
         // in the hands of whatever wants them next.
         if let echoBridge {
+            // How much of the route's teardown budget is left when the
+            // canceller's turn comes.
+            //
+            // Its stop takes the *remainder* of one shared two-second budget,
+            // and everything above it — the incident fence, the clock
+            // publisher, AudioDeviceStop, DestroyIOProcID — spends from the
+            // same pocket. A route with an effect chain fails here and the
+            // same route without one does not, so what the canceller is
+            // actually given has to be a number rather than an assumption.
+            if Self.reportsTiming {
+                let left = String(format: "%.3f", deadline.remainingTimeInterval)
+                let note =
+                    "      ····  echo teardown starts with " + left
+                    + "s of the budget left\n"
+                FileHandle.standardError.write(Data(note.utf8))
+            }
             let echoResult = echoBridge.stop(until: deadline)
+
             guard echoResult.isComplete else {
                 echoTeardownDecidedBy = echoBridge.teardownDecidedBy
                 let result = RoutingTeardownResult.echoCancellation(
