@@ -9,6 +9,12 @@ import Testing
 @MainActor
 @Suite("Router teardown admission")
 struct RouterTeardownAdmissionTests {
+    /// The state a failed teardown must leave, and the one it must not.
+    ///
+    /// This asserted `isRunning` until 2026-08-25, which is the defect rather
+    /// than the contract: a failed teardown moves the abandoned generation into
+    /// quarantine, so no audio is flowing and the interface was saying it was.
+    /// Refusing the next Start is `teardownNeedsRetry`'s job, and always was.
     @Test("an incomplete teardown keeps exactly the retrying Stop state")
     func incompleteTeardownIsFailClosed() {
         let model = RouterModel()
@@ -16,7 +22,7 @@ struct RouterTeardownAdmissionTests {
 
         model.retainFailedTeardown(.ioProcDestroyFailed(status))
 
-        #expect(model.isRunning)
+        #expect(model.isRunning == model.engineHasLiveGraph)
         #expect(!model.isBusy)
         #expect(model.teardownNeedsRetry)
         #expect(model.teardownFailureDetail?.contains("-73001") == true)
@@ -30,9 +36,43 @@ struct RouterTeardownAdmissionTests {
 
         // Start must be a no-op while the old callback lifetime is uncertain.
         model.start()
-        #expect(model.isRunning)
+        #expect(model.isRunning == model.engineHasLiveGraph)
         #expect(model.teardownNeedsRetry)
         #expect(model.lastError == message)
+
+        // And Stop must still be reachable, which is the whole reason the old
+        // code held `isRunning` true: `toggle()` reads the union of the two.
+        #expect(model.canStopRoute)
+    }
+
+    /// The invariant the dropouts violated, stated where it cannot drift.
+    ///
+    /// Measured in a clean virtual machine before the fix, four times in one
+    /// run: `noCell, running true (set by retainFailedTeardown), routes 2`.
+    /// Every teardown failure the engine can report has to leave the model
+    /// agreeing with the engine about whether audio is flowing.
+    @Test("no teardown failure can leave the model claiming a graph it has not got")
+    func runningNeverOutlivesTheGraph() {
+        let failures: [RoutingTeardownResult] = [
+            .lifecycleQueueTimedOut,
+            .ioProcStopFailed(-73_001),
+            .ioProcDestroyFailed(-73_001),
+            .clockPublisherTimedOut,
+            .echoCancellation(.lifecycleTimedOut(step: nil)),
+            .aggregate(.requestFailed(-73_001)),
+            .aggregate(.timedOut),
+            .processTap(uid: "tap", result: .timedOut),
+        ]
+        for failure in failures {
+            let model = RouterModel()
+            model.retainFailedTeardown(failure)
+            #expect(
+                model.isRunning == model.engineHasLiveGraph,
+                "\(failure) left running \(model.isRunning), graph \(model.engineHasLiveGraph)")
+            // The part that must survive: another Stop is still admitted.
+            #expect(model.teardownNeedsRetry)
+            #expect(model.canStopRoute)
+        }
     }
 }
 

@@ -6233,6 +6233,7 @@ final class RouterModel {
         // application can reach. This fixture is used only by the two design
         // harnesses, so make the synthetic signal and its transport state agree.
         isRunning = true
+        runningDecidedBy = "renderFixture"
         // Everything that does not depend on a device comes first.
         //
         // It used to sit after the guard below, so on any machine where no
@@ -6529,7 +6530,7 @@ final class RouterModel {
         // run first; otherwise the daemon disappears while our aggregate still
         // owns devices and taps, which is exactly the system-wide stall this
         // lifecycle is meant to prevent.
-        if isRunning || teardownNeedsRetry {
+        if canStopRoute {
             stop(then: install)
         } else {
             install()
@@ -6588,7 +6589,7 @@ final class RouterModel {
         let remove: @MainActor () -> Void = { [weak self] in
             self?.performDriverRemoval()
         }
-        if isRunning || teardownNeedsRetry {
+        if canStopRoute {
             stop(then: remove)
         } else {
             remove()
@@ -7952,6 +7953,32 @@ final class RouterModel {
     }
 
     // MARK: Runtime
+
+    /// Which of the seven places last decided this, for the divergence hunt.
+    ///
+    /// `isRunning` is the model's own answer and the engine's graph is the
+    /// truth, and the two were caught disagreeing — `noCell, running true,
+    /// busy false, routes 2`, in a clean virtual machine, twice. Seven sites
+    /// assign it and reasoning about which one did it produced two wrong
+    /// answers, so it records itself instead.
+    private(set) var runningDecidedBy = "never"
+
+    /// Whether audio is actually flowing, as the only thing that knows sees it.
+    ///
+    /// `isRunning` is the model's own belief, and the two were caught
+    /// disagreeing — the interface showing a running route with two cables over
+    /// a graph that had already been freed. Anything asserting on the audible
+    /// truth reads this, not the belief.
+    var engineHasLiveGraph: Bool { engine.hasLiveGraph }
+
+    /// Whether Stop has anything left to do.
+    ///
+    /// The union of the two meanings `isRunning` used to carry on its own:
+    /// audio is flowing, or a previous teardown left state behind that only
+    /// another Stop can clear. Three call sites had written it out by hand, and
+    /// a fourth that forgot would strand somebody with a route they cannot
+    /// stop — which is why it has a name now rather than three copies.
+    var canStopRoute: Bool { isRunning || teardownNeedsRetry }
 
     private(set) var isRunning = false
     private(set) var lastError: String?
@@ -10864,6 +10891,7 @@ final class RouterModel {
         isBusy = false
         isStarting = false
         isRunning = false
+        runningDecidedBy = "teardownComplete"
         teardownNeedsRetry = false
         teardownFailureDetail = nil
         routeUpdatesAreAccepted = false
@@ -10935,6 +10963,7 @@ final class RouterModel {
             pendingRoutingScriptCausality = nil
             pendingRoutingScriptTarget = nil
             isRunning = false
+            runningDecidedBy = "startReportFailed"
             teardownNeedsRetry = false
             teardownFailureDetail = nil
             routeUpdatesAreAccepted = false
@@ -10957,6 +10986,7 @@ final class RouterModel {
         ioContinuity.reset()
         audioIncidentCheckpointCadence.reset()
         isRunning = true
+        runningDecidedBy = "startReportSucceeded"
         teardownNeedsRetry = false
         teardownFailureDetail = nil
         lighting.setSignalActive(true)
@@ -11119,8 +11149,13 @@ final class RouterModel {
         }
     }
 
-    /// Keeps the old route visible and admits only another Stop after Core
-    /// Audio refused to prove that all of its callbacks and objects are gone.
+    /// Admits only another Stop after Core Audio refused to prove that all of
+    /// its callbacks and objects are gone.
+    ///
+    /// Whether the route is still *running* is a separate question and the
+    /// engine answers it: a failed teardown moves the abandoned generation into
+    /// a quarantine capsule, which leaves `graphCell` nil precisely because
+    /// nothing is routing through it any more.
     ///
     /// This is internal so the state transition can be asserted without
     /// provoking a real device failure. The engine still owns every lifetime
@@ -11137,7 +11172,26 @@ final class RouterModel {
         currentStartIntent = nil
         isBusy = false
         isStarting = false
-        isRunning = true
+        // Running means audio is flowing, and that is the engine's graph to
+        // answer for — not a blanket `true`.
+        //
+        // The intent here was right: Core Audio refused to prove its callbacks
+        // are gone, so the interface must not claim the route has stopped while
+        // one may still be live. But the two owners fail independently. When
+        // the IOProc teardown succeeds and only the echo canceller times out,
+        // the graph is freed and nothing is flowing — and this said it was.
+        //
+        // Measured, in a clean virtual machine, four times in one run:
+        //
+        //     noCell, running true (set by retainFailedTeardown), routes 2,
+        //     teardown said echoCancellation(…lifecycleTimedOut(step: nil))
+        //
+        // That is the shape every dropout report has: the interface entirely
+        // correct and no sound behind it. `teardownNeedsRetry` below already
+        // carries "there is state a second Stop must clear", which is the part
+        // that was worth keeping.
+        isRunning = engine.hasLiveGraph
+        runningDecidedBy = "retainFailedTeardown"
         startFailed = true
         teardownNeedsRetry = true
         teardownFailureDetail = String(describing: result)
@@ -11170,6 +11224,7 @@ final class RouterModel {
                     requiresStoppedGraph: true))
         }
         isRunning = false
+        runningDecidedBy = "stopSucceeded"
         recordingIntentTarget = false
         audioIncidentCheckpointCadence.reset()
         teardownNeedsRetry = false
@@ -11222,7 +11277,7 @@ final class RouterModel {
         restartIsPending = false
     }
 
-    func toggle() { isRunning || teardownNeedsRetry ? stop() : start() }
+    func toggle() { canStopRoute ? stop() : start() }
 
     // MARK: Scripting
 
@@ -11798,6 +11853,7 @@ final class RouterModel {
             stopPolling()
             routeUpdatesAreAccepted = false
             isRunning = false
+            runningDecidedBy = "syntheticShutdown"
             activeRoutes = []
             completion(.complete)
             return

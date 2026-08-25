@@ -6648,6 +6648,17 @@ public final class RoutingEngine: @unchecked Sendable {
         return graphCell.map { yun_rt_cell_cycles($0) }
     }
 
+    /// Whether there is a realtime graph behind the router at all.
+    ///
+    /// The one honest answer to "is audio flowing". `RouterModel.isRunning` is
+    /// the model's own belief and the two were caught disagreeing — the
+    /// interface showing a running route with two cables while this was false.
+    public var hasLiveGraph: Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return graphCell != nil
+    }
+
     /// Why the count could not be read, when it could not.
     ///
     /// `cycleCountIfKnown` answers nil for two unrelated reasons and the caller

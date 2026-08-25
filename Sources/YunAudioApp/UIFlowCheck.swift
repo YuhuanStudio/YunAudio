@@ -7414,8 +7414,9 @@ enum UIFlowCheck {
             // for one is nothing like the fix for the other.
             note(
                 "the count is unreadable because: \(model.whyCycleCountIsUnknown),"
-                    + " running \(model.isRunning), busy \(model.isBusy),"
-                    + " routes \(model.activeRoutes.count)")
+                    + " running \(model.isRunning) (set by \(model.runningDecidedBy)),"
+                    + " busy \(model.isBusy), routes \(model.activeRoutes.count),"
+                    + " teardown said \(model.teardownFailureDetail ?? "nothing")")
             check("\(label) — the IO cycle counter could be read at all", false)
             return
         }
