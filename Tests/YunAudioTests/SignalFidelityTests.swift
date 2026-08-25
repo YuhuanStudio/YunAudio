@@ -160,4 +160,48 @@ struct EffectCostTableTests {
         // The table is the point; the assertion is only that it was produced.
         #expect(!EffectKind.allCases.isEmpty)
     }
+
+    /// Voice isolation, on the signal it is for.
+    ///
+    /// The table above measures it against noise, and against noise it
+    /// correctly removes everything — `−57 dB` and a correlation of 0.14 is
+    /// arithmetic on the wrong input, not a defect. This is the honest number:
+    /// recorded speech, through the same chain, in the same blocks.
+    ///
+    /// It is also the number the KTV warning has been asserting without one.
+    /// That notice says Apple's model "keeps one person speaking and removes
+    /// everything else, which is the backing track and the singing"; what it
+    /// costs the voice it keeps has never been stated.
+    @Test("voice isolation, measured on speech rather than on noise")
+    func voiceIsolationOnSpeech() throws {
+        let audio = try DeterministicSpeechFixture.load()
+        guard
+            let onSpeech = SignalFidelity.cost(
+                of: [.voiceIsolation], on: audio.samples, sampleRate: audio.rate)
+        else {
+            Issue.record("the isolation chain would not build at \(audio.rate) Hz")
+            return
+        }
+        let onNoise = SignalFidelity.cost(
+            of: [.voiceIsolation],
+            on: SignalFidelity.fixture(seconds: 2, sampleRate: audio.rate),
+            sampleRate: audio.rate)
+
+        print("\nvoice isolation")
+        print("  on speech: \(onSpeech.summary)")
+        if let onNoise { print("  on noise:  \(onNoise.summary)") }
+        for band in onSpeech.bandDecibels {
+            print(String(format: "    %6.0f Hz  %+7.2f dB", band.centreHertz, band.decibels))
+        }
+        print("")
+
+        // The claim this pins: it keeps far more of speech than of noise. If
+        // that ever stops being true the model has changed under us, and the
+        // warning the KTV stage shows would be describing something else.
+        if let onNoise {
+            #expect(
+                onSpeech.correlation > onNoise.correlation,
+                "speech \(onSpeech.correlation), noise \(onNoise.correlation)")
+        }
+    }
 }
