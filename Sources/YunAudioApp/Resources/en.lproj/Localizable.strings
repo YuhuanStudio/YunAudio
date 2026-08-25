@@ -889,3 +889,8 @@
 "the route itself" = "the route itself";
 "The audio broke up once since routing began, reported by %@." = "The audio broke up once since routing began, reported by %@.";
 "The audio broke up %d times since routing began, most recently reported by %@." = "The audio broke up %d times since routing began, most recently reported by %@.";
+"Cancel echo from the speakers" = "Cancel echo from the speakers";
+"Cancelling echo; the route is restarting." = "Cancelling echo; the route is restarting.";
+"Echo cancellation off; the route is restarting." = "Echo cancellation off; the route is restarting.";
+"Cancelling echo." = "Cancelling echo.";
+"Echo cancellation off." = "Echo cancellation off.";

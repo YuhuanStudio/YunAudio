@@ -12269,6 +12269,23 @@ final class RouterModel {
             }
             return .success(
                 isScoringSinging ? loc("Scoring the singing.") : loc("Scoring stopped."))
+        case .echo(let wanted):
+            let target = wanted ?? !cancelsEcho
+            // Said plainly, because it is the surprising part: this switch
+            // rebuilds a running route. The microphone leaves the router's own
+            // aggregate and is captured through the canceller instead, which is
+            // a different graph rather than a different setting on this one.
+            let restarts = target != cancelsEcho && isRunning
+            if target != cancelsEcho { cancelsEcho = target }
+            if let reason = echoCancellationMessage { return .failure(reason) }
+            if restarts {
+                return .success(
+                    target
+                        ? loc("Cancelling echo; the route is restarting.")
+                        : loc("Echo cancellation off; the route is restarting."))
+            }
+            return .success(
+                target ? loc("Cancelling echo.") : loc("Echo cancellation off."))
         case .config(let name):
             guard
                 let configuration = quickConfigs.first(where: {

@@ -35,6 +35,16 @@ public enum RemoteCommand: Equatable, Sendable {
     case stage(Bool?)
     /// Scoring the singing. Same reason.
     case score(Bool?)
+    /// The echo canceller.
+    ///
+    /// Here for the same reason `stage` and `score` are: it is a switch of real
+    /// weight with no way in but a mouse. It takes the microphone out of the
+    /// router's own aggregate, which costs the clock lock, bit exactness and a
+    /// buffer of latency each way — and the one remaining hypothesis for
+    /// coreaudiod degrading until the machine needs a reboot is about the
+    /// aggregate this switch creates. Testing that means turning it on and off
+    /// on a machine with nobody sitting at it.
+    case echo(Bool?)
     /// A saved scene, by the name it was saved under.
     case preset(String)
     /// A saved whole-machine arrangement, likewise.
@@ -76,6 +86,8 @@ public enum RemoteCommand: Equatable, Sendable {
             return state(verb).map(RemoteCommand.stage)
         case "score", "scoring":
             return state(verb).map(RemoteCommand.score)
+        case "echo", "aec":
+            return state(verb).map(RemoteCommand.echo)
         case "config", "setup":
             let name = rest.joined(separator: "/")
             return name.isEmpty ? nil : .config(name)
@@ -107,6 +119,7 @@ public enum RemoteCommand: Equatable, Sendable {
         case .transcribe(let state): Self.url("transcribe", state)
         case .stage(let state): Self.url("stage", state)
         case .score(let state): Self.url("score", state)
+        case .echo(let state): Self.url("echo", state)
         case .config(let name): Self.url("config", name)
         case .preset(let name): Self.url("preset", name)
         case .script(let source): Self.url("script", source)

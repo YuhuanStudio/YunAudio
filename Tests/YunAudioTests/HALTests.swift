@@ -2901,6 +2901,10 @@ struct ControlArgumentsTests {
         // verb of the same name.
         #expect(
             ControlArguments.parse(["route", "Mic", "YunAudio", "5"]) == .notMine)
+        // And `aec`, for the same reason: the URL scheme spells the echo
+        // canceller's switch `yunaudio://aec/on`, while `yunaudio-cli aec` has
+        // always been the verb that opens the hardware and measures it.
+        #expect(ControlArguments.parse(["aec", "on"]) == .notMine)
     }
 
     /// A word that is not on, off or toggle is refused rather than guessed at.

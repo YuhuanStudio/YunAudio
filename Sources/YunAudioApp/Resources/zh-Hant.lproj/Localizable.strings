@@ -889,3 +889,8 @@
 "the route itself" = "路由本身";
 "The audio broke up once since routing began, reported by %@." = "開始路由之後,聲音斷過一次,由%@回報。";
 "The audio broke up %d times since routing began, most recently reported by %@." = "開始路由之後,聲音斷過 %d 次,最近一次由%@回報。";
+"Cancel echo from the speakers" = "消除喇叭傳回來的回音";
+"Cancelling echo; the route is restarting." = "正在消除回音;路由重新建立中。";
+"Echo cancellation off; the route is restarting." = "回音消除已關閉;路由重新建立中。";
+"Cancelling echo." = "正在消除回音。";
+"Echo cancellation off." = "回音消除已關閉。";

@@ -1452,7 +1452,19 @@ struct MCPBinaryTests {
 /// switch answered to none of them — which only became obvious when a
 /// screenshot of the stage with scoring on turned out to be impossible to take
 /// without somebody sitting at the machine to click twice.
-@Suite("the stage and the scoring switch can be reached without a mouse")
+/// The switches of real weight that had no way in but a mouse.
+///
+/// Every other control in this application answers to the URL scheme, the
+/// command line, the socket, MCP, MIDI and a script. The KTV stage and the
+/// scoring switch answered to none of them — which only became obvious when a
+/// screenshot of the stage with scoring on turned out to be impossible to take
+/// without somebody sitting at the machine to click twice.
+///
+/// Echo cancellation joined them for a harder reason: the last untested
+/// hypothesis for coreaudiod degrading until the machine needs a reboot is
+/// about the aggregate that switch creates, and testing it means turning it on
+/// and off on a machine with nobody sitting at the keyboard.
+@Suite("the switches that had no way in but a mouse")
 struct StageAndScoreCommandTests {
 
     @Test("the command line knows both verbs, and their aliases")
@@ -1464,6 +1476,9 @@ struct StageAndScoreCommandTests {
             (["ktv", "on"], RemoteCommand.stage(true)),
             (["score", "on"], RemoteCommand.score(true)),
             (["scoring", "off"], RemoteCommand.score(false)),
+            (["echo", "on"], RemoteCommand.echo(true)),
+            (["echo", "off"], RemoteCommand.echo(false)),
+            (["echo", "toggle"], RemoteCommand.echo(nil)),
         ] {
             guard case let .perform(command) = ControlArguments.parse(words) else {
                 Issue.record("\(words) was not recognised")
@@ -1484,6 +1499,12 @@ struct StageAndScoreCommandTests {
         #expect(
             RemoteCommand.parse(try #require(URL(string: "yunaudio://ktv/toggle")))
                 == .stage(nil))
+        #expect(
+            RemoteCommand.parse(try #require(URL(string: "yunaudio://echo/on")))
+                == .echo(true))
+        #expect(
+            RemoteCommand.parse(try #require(URL(string: "yunaudio://aec/off")))
+                == .echo(false))
     }
 
     @Test("and a command survives being written down and read back")
@@ -1493,6 +1514,7 @@ struct StageAndScoreCommandTests {
         for command in [
             RemoteCommand.stage(true), .stage(false), .stage(nil),
             .score(true), .score(false), .score(nil),
+            .echo(true), .echo(false), .echo(nil),
         ] {
             #expect(RemoteCommand.parse(command.url) == command, "\(command)")
         }
@@ -1508,6 +1530,7 @@ struct StageAndScoreCommandTests {
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/RemoteCommand+Title.swift", encoding: .utf8)
         #expect(titles.contains("case .stage:"))
+        #expect(titles.contains("case .echo:"))
         #expect(titles.contains("case .score:"))
     }
 }

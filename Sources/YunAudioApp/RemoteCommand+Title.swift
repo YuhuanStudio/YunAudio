@@ -15,6 +15,7 @@ extension RemoteCommand {
         case .transcribe: loc("Transcribe")
         case .stage: loc("Open / close the KTV window")
         case .score: loc("Score the singing")
+        case .echo: loc("Cancel echo from the speakers")
         case .config(let name): name
         case .preset(let name): loc(name)
         case .script: loc("Run a script")

@@ -61,6 +61,11 @@ public enum ControlArguments {
             return switched(verb, rest, RemoteCommand.transcribe)
         case "stage", "ktv": return switched(verb, rest, RemoteCommand.stage)
         case "score", "scoring": return switched(verb, rest, RemoteCommand.score)
+        // `aec` is deliberately not an alias here, though the URL scheme
+        // accepts it, for the same reason `route` is not: `yunaudio-cli aec` is
+        // the measuring verb that opens the hardware and runs the canceller,
+        // and taking the word here would quietly replace it with a switch.
+        case "echo": return switched(verb, rest, RemoteCommand.echo)
 
         case "preset", "scene": return named(verb, rest, "scene", RemoteCommand.preset)
         case "config", "setup": return named(verb, rest, "setup", RemoteCommand.config)

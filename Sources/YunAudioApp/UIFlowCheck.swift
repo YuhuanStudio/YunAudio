@@ -1071,18 +1071,31 @@ enum UIFlowCheck {
         await pause(2.0)
         let advanced = model.analysis.duration - measuredBefore
         let telemetry = model.analysisWorkerTelemetry
-        note(String(format: "%.2fs measured over 2.0s of wall clock", advanced))
-        // What a shortfall means, rather than only that there is one.
+        // Two different claims, and they were one check accusing the wrong
+        // half.
         //
-        // This has been reading 1.14s on a virtual machine, and the note said
-        // nothing else — so nobody could tell the ring overflowing from a drain
-        // that was never asked for, or from a meter not counting what it was
-        // given. The same measurement without a device keeps up exactly
-        // (`AnalyserKeepsUpTests`), which rules out the worker and leaves these
-        // three numbers to separate the rest: samples dropped means the ring
-        // overflowed, samples left waiting with none dropped means the drain
-        // did not run often enough, and neither with a shortfall means the loss
-        // is downstream of the drain.
+        // "1.14s measured over 2.0s of wall clock" was read for weeks as the
+        // analyser losing forty-three per cent of the audio. It is not: on a
+        // virtual machine the same line reads 0.10s with the ring reporting
+        // nothing dropped, nothing waiting and nineteen drains in those two
+        // seconds. The drain took everything there was. There was almost
+        // nothing there — the route produced a twentieth of realtime, on a
+        // machine whose output peak is -inf because it has no audio hardware
+        // worth the name.
+        //
+        // So the analyser's claim is that it loses nothing it is *given*, and
+        // that is asserted against what the graph actually wrote. Whether the
+        // machine produces audio in realtime is a separate fact, and it is
+        // noted rather than asserted, because a virtual machine legitimately
+        // does not.
+        let producedSamples =
+            telemetry.ringWrittenSamples &- telemetryBefore.ringWrittenSamples
+        let rate = model.pathQuality?.sampleRate ?? 48_000
+        let produced = rate > 0 ? Double(producedSamples) / rate : 0
+        note(
+            String(
+                format: "%.2fs measured of %.2fs produced, over 2.0s of wall clock",
+                advanced, produced))
         note(
             String(
                 format: "  ring: %llu dropped, %u waiting, %llu drains (+%llu), %llu coalesced",
@@ -1090,10 +1103,22 @@ enum UIFlowCheck {
                 telemetry.drainSteps, telemetry.drainSteps - telemetryBefore.drainSteps,
                 telemetry.coalescedDrainRequests
                     - telemetryBefore.coalescedDrainRequests))
-        check("the analyser is not dropping audio", advanced > 1.8)
+        check(
+            "the analyser measured everything the graph wrote",
+            advanced >= produced - 0.1)
         check(
             "and nothing was dropped on the floor to achieve it",
             telemetry.ringDroppedSamples == telemetryBefore.ringDroppedSamples)
+        // Where the machine does produce in realtime, say by how much it
+        // missed. A shortfall here is the route not keeping up, which is a
+        // different investigation from anything above.
+        if produced < 1.8 {
+            note(
+                String(
+                    format:
+                        "  the graph produced %.0f%% of realtime — the machine, not the analyser",
+                    produced / 2.0 * 100))
+        }
 
         // The master is applied before the fold, so turning it down has to move
         // the reading. This is what catches the tap being taken from the wrong
