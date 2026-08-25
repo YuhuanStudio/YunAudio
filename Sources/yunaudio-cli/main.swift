@@ -2583,6 +2583,45 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "mic" {
     exit(0)
 }
 
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "fidelity" {
+    // What each conditioning effect costs, against one repeatable signal.
+    //
+    // Every default in this application that touches the sound was chosen on
+    // somebody's judgement. This is the arithmetic that judgement can be
+    // checked against — and the first thing it says is that at their default
+    // settings several of these effects are bit-transparent, which is not what
+    // anybody assumed.
+    let rate = CommandLine.arguments.count > 2
+        ? Double(CommandLine.arguments[2]) ?? 48_000 : 48_000
+    let source = SignalFidelity.fixture(seconds: 2, sampleRate: rate)
+    print("one repeatable signal, \(Int(rate)) Hz, 2 s, through each effect alone\n")
+    print("effect          delay     gain     residual      r       loudest band")
+    print(String(repeating: "-", count: 78))
+    for kind in EffectKind.allCases {
+        guard let measured = SignalFidelity.cost(of: [kind], on: source, sampleRate: rate)
+        else {
+            print("\(kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0))  would not build at this rate")
+            continue
+        }
+        let worst = measured.bandDecibels.max { abs($0.decibels) < abs($1.decibels) }
+        let band = worst.map { String(format: "%5.0f Hz %+6.2f dB", $0.centreHertz, $0.decibels) } ?? "—"
+        let name = kind.rawValue.padding(toLength: 14, withPad: " ", startingAt: 0)
+        let residual = measured.residualDecibels.isFinite
+            ? String(format: "%+8.2f dB", measured.residualDecibels)
+            : "  exact   "
+        print(
+            String(
+                format: "%@  %5d  %+7.2f  %@  %.5f  %@",
+                name, measured.delayFrames, measured.gainDecibels, residual,
+                measured.correlation, band))
+    }
+    print("")
+    print("residual is what is left once the delay and the level are taken out —")
+    print("the part a fader cannot undo. \"exact\" means the samples came back")
+    print("unchanged: that effect costs nothing at its default setting.")
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "dsp" {
     for frames in [64, 128, 256, 512] {
         print(SoundIsolation.probe(sampleRate: 48000, blockFrames: frames).summary)
