@@ -3597,6 +3597,25 @@ public final class RoutingEngine: @unchecked Sendable {
             graph.pointee.selftest = block
         }
 
+        // The effect chain's publication admission goes back before the
+        // canceller is asked to start.
+        //
+        // It was taken for the chain and released by a `defer` at the end of
+        // this function, so it was still outstanding here — and the canceller's
+        // start goes through the sole disposer, which refuses while any graph
+        // admission is. Measured: `disposer answered
+        // blockedByRetainedTransaction(retainedUnits: 1)`, then two seconds of
+        // waiting, then a route that fails and a teardown that times out. A
+        // route with echo cancellation and *one* effect could not start; either
+        // alone was fine.
+        //
+        // Released here rather than reordering the start, because the admission
+        // is about publishing a graph and the chain has been built and
+        // published by this point. The `defer` stays as the failure path's
+        // release; `release()` is idempotent through the box.
+        audioUnitPublicationAdmission?.release()
+        audioUnitPublicationAdmission = nil
+
         // The canceller has to be producing before the router starts reading,
         // or the first cycles find an empty ring. Started here rather than in
         // the constructor so a failure to build the graph does not leave a unit

@@ -1278,6 +1278,19 @@ public final class EchoCancellingCapture {
 
         let commandResult = BoundedAudioUnitDisposer.shared.dispose(
             prepared.command, until: deadline)
+        // Which of the disposer's answers this was.
+        //
+        // Starting the canceller goes through the same sole disposer every
+        // other audio unit owner does, and its refusals all arrive at the
+        // caller as one `false`. `lifecycleTimedOut(step: nil)` has exactly one
+        // source in the switch below, so naming the answer here is what turns
+        // "the canceller would not start" into a cause.
+        if EchoCancellationBridge.reportsLifecycleTiming {
+            let note =
+                "      ····  disposer answered "
+                + String(describing: commandResult) + "\n"
+            FileHandle.standardError.write(Data(note.utf8))
+        }
         if case .blockedByRetainedTransaction = commandResult {
             prepared.command.cancelBeforeStart()
         }
