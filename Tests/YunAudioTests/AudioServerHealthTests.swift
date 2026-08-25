@@ -63,3 +63,41 @@ struct AudioServerHealthTests {
         #expect(AudioServerHealth.budget >= 2)
     }
 }
+
+/// The probe has to ask the question a route asks.
+///
+/// Three versions of this reported a healthy machine while every real route was
+/// failing on it: a property read, an IOProc on the default output, and an
+/// IOProc on every existing device. Each was true and none was the question.
+/// What a route does is build a private aggregate with an input and an output
+/// in it, correct drift between them, open it, and take it down — and it was
+/// the taking down that would not come back.
+@Suite("The health probe is shaped like a route")
+struct HealthProbeShapeTests {
+
+    private static func source() throws -> String {
+        try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioHAL/AudioServerHealth.swift", encoding: .utf8)
+    }
+
+    /// Two members, because a one-member aggregate built, opened and tore down
+    /// in a second on a machine where routes were timing out after three
+    /// minutes.
+    @Test("the probe aggregate has an input and an output")
+    func probeHasTwoMembers() throws {
+        let source = try Self.source()
+        #expect(source.contains("driftCompensation: false"))
+        #expect(source.contains("driftCompensation: true"))
+        #expect(source.contains("$0.hasInput"))
+    }
+
+    /// And it waits for the teardown. Creating was always fast; destroying was
+    /// the call that hung, and a probe that skips it cannot see the fault.
+    @Test("the probe waits for the aggregate to be destroyed")
+    func probeWaitsForTeardown() throws {
+        let source = try Self.source()
+        #expect(source.contains("destroyAndWait"))
+        #expect(source.contains("== .destroyed"))
+    }
+}

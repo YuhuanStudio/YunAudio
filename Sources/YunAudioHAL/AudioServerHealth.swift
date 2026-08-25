@@ -137,6 +137,76 @@ public enum AudioServerHealth {
         return verdict
     }
 
+    /// The question that actually matters: an IOProc on a *new* aggregate.
+    ///
+    /// The first version of this probed the default output, found it opened in
+    /// milliseconds, and reported the server healthy — while a fresh copy of
+    /// the application was stuck in `AudioDeviceCreateIOProcID` at that very
+    /// moment. A sweep of every existing device said the same. All of them were
+    /// asking the wrong question.
+    ///
+    /// A route does not open a physical device; it builds a private aggregate
+    /// and opens *that*, and it is the aggregate's IOProc that does not come
+    /// back. So the probe has to build one too. Nothing is started, so nothing
+    /// is heard, and the device is private and reaped with this process.
+    public static func probeAggregate(
+        budget: TimeInterval = AudioServerHealth.budget,
+        makeAndOpen: @escaping @Sendable () -> Bool = {
+            buildAggregateAndOpen(budget: AudioServerHealth.budget)
+        }
+    ) -> Verdict {
+        switch runBounded(budget, makeAndOpen) {
+        case .some(true): return .healthy
+        case .some(false): return .cannotTell
+        case nil: return .notOpeningDevices
+        }
+    }
+
+    /// Builds a one-member private aggregate, opens an IOProc on it, and takes
+    /// it down again — waiting for the teardown.
+    ///
+    /// The teardown is not an afterthought. The version of this that only
+    /// opened reported the machine healthy while a standalone route on the same
+    /// machine took a hundred and eighty seconds and then failed with "the
+    /// previous audio route is still retained: aggregate(timedOut)". Creating
+    /// was fast; destroying was what would not come back. A probe that does not
+    /// wait for the destruction is not asking what a route asks.
+    public static func buildAggregateAndOpen(
+        budget: TimeInterval = AudioServerHealth.budget
+    ) -> Bool {
+        // Two members with drift compensation, not one without.
+        //
+        // A one-member aggregate built, opened and tore down in a second on a
+        // machine where every real route was failing after a hundred and eighty
+        // seconds with `aggregate(timedOut)`. A route's aggregate has an input
+        // and an output in it and corrects drift between them, and that is the
+        // one that would not come down — so the probe has to be that shape or
+        // it is asking an easier question and reporting the answer to it.
+        guard
+            let devices = try? AudioDevices.all(),
+            let output = devices.first(where: { $0.hasOutput && !$0.transport.isVirtual })
+                ?? devices.first(where: \.hasOutput),
+            let input = devices.first(where: { $0.hasInput && $0.uid != output.uid })
+        else { return false }
+        guard
+            let aggregate = try? AggregateDevice(
+                name: "YunAudio health probe",
+                subDevices: [
+                    AggregateDevice.SubDevice(uid: input.uid, driftCompensation: false),
+                    AggregateDevice.SubDevice(uid: output.uid, driftCompensation: true),
+                ],
+                clockMasterUID: input.uid)
+        else { return false }
+        guard openAndClose(aggregate.id) else {
+            _ = aggregate.destroy()
+            return false
+        }
+        // Waited for, and given the same budget as the open. A destruction that
+        // does not complete is the same fault as an open that does not return,
+        // and it is the one this machine actually showed.
+        return aggregate.destroyAndWait(timeout: budget) == .destroyed
+    }
+
     /// The same question about one named device.
     ///
     /// Not remembered and not counted against the one-probe rule: this is the

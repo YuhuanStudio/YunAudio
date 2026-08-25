@@ -1075,6 +1075,28 @@ if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "health" {
         print("    sudo killall coreaudiod")
         exit(2)
     }
+    // The aggregate first, because it is the question a route asks.
+    //
+    // The first version of this opened the default output, found it healthy in
+    // milliseconds, and said so — while a fresh copy of the application was
+    // stuck in `AudioDeviceCreateIOProcID` at that moment. A route does not
+    // open a physical device; it builds a private aggregate and opens that.
+    print("building an aggregate and opening it (up to \(Int(AudioServerHealth.budget))s)…\n")
+    if AudioServerHealth.probeAggregate() == .notOpeningDevices {
+        print("An aggregate device was built and would not open.")
+        print("")
+        print("This is the state a route cannot start in, and it is invisible to")
+        print("every simpler check: property reads answer, and opening an")
+        print("ordinary device works. Only a freshly built aggregate hangs.")
+        print("")
+        print("`yunaudio-cli diagnose` names the processes holding devices.")
+        print("If none of them explains it, restarting the audio server does,")
+        print("and needs an administrator:")
+        print("")
+        print("    sudo killall coreaudiod")
+        exit(2)
+    }
+    print("aggregates open normally.\n")
     print("asking Core Audio to open a device (up to \(Int(AudioServerHealth.budget))s)…\n")
     switch AudioServerHealth.check() {
     case .healthy:
