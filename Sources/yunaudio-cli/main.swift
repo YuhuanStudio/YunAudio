@@ -546,6 +546,23 @@ func runRoute(
         }
     }
 
+    // Read before the teardown, not after.
+    //
+    // The first run of this printed `device 162: 1` — an identifier with no
+    // name, because the device that missed the deadline was the aggregate this
+    // route had built, and by the time `stop()` returned it no longer existed
+    // to be asked its name. The one overload worth naming above all others was
+    // the one this could not name.
+    let overloadsByDevice = engine.ioProcOverloadsByDevice
+    let totalOverloads = engine.ioProcOverloadCount
+    let overloadEvents = engine.recentIOProcOverloads
+    let aggregateID = engine.aggregate?.id
+    let overloadNames: [AudioObjectID: String] = Dictionary(
+        uniqueKeysWithValues: overloadsByDevice.keys.map { device in
+            if device == aggregateID { return (device, "the route's own aggregate") }
+            return (device, (try? AudioDevice(id: device))?.name ?? "device \(device)")
+        })
+
     engine.stop()
     let violations = RoutingEngine.allocationViolations - violationsBefore
     print("stopped. total IO cycles: \(lastCycle)")
@@ -554,8 +571,6 @@ func runRoute(
             format: "realtime path: %llu allocations over %llu cycles (%.1f per cycle)",
             violations, lastCycle,
             lastCycle > 0 ? Double(violations) / Double(lastCycle) : 0))
-    let overloadsByDevice = engine.ioProcOverloadsByDevice
-    let totalOverloads = engine.ioProcOverloadCount
     if totalOverloads == 0 {
         print("missed deadlines: none")
     } else {
@@ -565,8 +580,16 @@ func runRoute(
         // member reports an endpoint failing to keep a schedule it agreed to,
         // and only the second is somebody else's problem to fix.
         for (device, count) in overloadsByDevice.sorted(by: { $0.value > $1.value }) {
-            let name = (try? AudioDevice(id: device))?.name ?? "device \(device)"
-            print("  \(name): \(count)")
+            print("  \(overloadNames[device] ?? "device \(device)"): \(count)")
+        }
+        // When, relative to each other. A cluster in the first second is a
+        // route settling; one in the middle of a steady run is not, and those
+        // are different problems however alike the totals look.
+        if let first = overloadEvents.first {
+            let offsets = overloadEvents.prefix(12).map {
+                String(format: "%.2fs", $0.at - first.at)
+            }
+            print("  at +\(offsets.joined(separator: ", +")) from the first")
         }
     }
     if voiceIsolation {
