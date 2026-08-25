@@ -13,6 +13,41 @@ import YunAudioRT
 /// one of them asks for ownership — and the refusal is correct, it is simply
 /// about another test. The precondition was being assumed; it is waited for
 /// now, which is what the quarantine's own API is for.
+/// Reserves, retrying past a refusal that belongs to another suite.
+///
+/// `reserveAudioIncidentBeforeOwnership` consults the same process-wide
+/// quarantine `beginAudioIncidentOwnership` does — the refusal can land on
+/// either step, and wrapping only the second left the first exposed.
+private func reserveIncident(
+    _ engine: RoutingEngine,
+    sourceDeviceUID: String = "input",
+    destinationDeviceUID: String = "output",
+    preferredSampleRate: Double? = 48_000,
+    bufferFrames: UInt32 = 128,
+    processTapOwnershipExpected: Bool = false
+) throws -> RoutingEngine.AudioIncidentReservation {
+    var lastError: Error?
+    for _ in 0..<200 {
+        _ = ProcessLifetimeAudioQuarantine.shared.waitForNewAudioOwnership(timeout: 1)
+        do {
+            return try engine.reserveAudioIncidentBeforeOwnership(
+                sourceDeviceUID: sourceDeviceUID,
+                destinationDeviceUID: destinationDeviceUID,
+                preferredSampleRate: preferredSampleRate,
+                bufferFrames: bufferFrames,
+                processTapOwnershipExpected: processTapOwnershipExpected)
+        } catch {
+            lastError = error
+        }
+    }
+    struct NeverReserved: Error, CustomStringConvertible {
+        var description: String {
+            "the process-wide quarantine never admitted a construction reservation"
+        }
+    }
+    throw lastError ?? NeverReserved()
+}
+
 private func beginOwnership(
     _ engine: RoutingEngine, reservation: RoutingEngine.AudioIncidentReservation
 ) throws {
@@ -511,11 +546,7 @@ struct AudioIncidentRecorderTests {
         "a pre-ownership reservation is exact, inconclusive and replaceable only after release")
     func constructionReservationHasOneRunIdentity() throws {
         let engine = RoutingEngine()
-        let first = try engine.reserveAudioIncidentBeforeOwnership(
-            sourceDeviceUID: "input",
-            destinationDeviceUID: "output",
-            preferredSampleRate: 48_000,
-            bufferFrames: 128)
+        let first = try reserveIncident(engine)
         let firstBundle = first.constructionBundle
 
         #expect(firstBundle.callbacks.samples == 0)
@@ -525,19 +556,11 @@ struct AudioIncidentRecorderTests {
         #expect(engine.lastAudioIncidentBundle?.runID == firstBundle.runID)
         #expect(engine.takePendingAudioIncidentBundle() == nil)
         #expect(throws: RoutingError.self) {
-            try engine.reserveAudioIncidentBeforeOwnership(
-                sourceDeviceUID: "input",
-                destinationDeviceUID: "output",
-                preferredSampleRate: 48_000,
-                bufferFrames: 128)
+            try reserveIncident(engine)
         }
 
         #expect(engine.discardAudioIncidentReservation(first))
-        let second = try engine.reserveAudioIncidentBeforeOwnership(
-            sourceDeviceUID: "input",
-            destinationDeviceUID: "output",
-            preferredSampleRate: 48_000,
-            bufferFrames: 128)
+        let second = try reserveIncident(engine)
         #expect(second.constructionBundle.runID != firstBundle.runID)
         #expect(!engine.discardAudioIncidentReservation(first))
         #expect(engine.discardAudioIncidentReservation(second))
@@ -546,11 +569,7 @@ struct AudioIncidentRecorderTests {
     @Test("discarding a reservation removes its provisional latest evidence")
     func discardedReservationIsNotLatestEvidence() throws {
         let engine = RoutingEngine()
-        let reservation = try engine.reserveAudioIncidentBeforeOwnership(
-            sourceDeviceUID: "input",
-            destinationDeviceUID: "output",
-            preferredSampleRate: 48_000,
-            bufferFrames: 128)
+        let reservation = try reserveIncident(engine)
 
         #expect(engine.lastAudioIncidentBundle == reservation.constructionBundle)
         #expect(engine.discardAudioIncidentReservation(reservation))
@@ -560,12 +579,7 @@ struct AudioIncidentRecorderTests {
     @Test("a prepared process-tap checkpoint cannot be discarded before begin")
     func preparedProcessTapCheckpointForbidsDiscard() throws {
         let engine = RoutingEngine()
-        let reservation = try engine.reserveAudioIncidentBeforeOwnership(
-            sourceDeviceUID: "input",
-            destinationDeviceUID: "output",
-            preferredSampleRate: 48_000,
-            bufferFrames: 128,
-            processTapOwnershipExpected: true)
+        let reservation = try reserveIncident(engine, processTapOwnershipExpected: true)
         _ = try engine.makeProcessTapOwnershipCheckpoint(reservation: reservation)
 
         let discarded = engine.discardAudioIncidentReservation(reservation)
@@ -579,12 +593,7 @@ struct AudioIncidentRecorderTests {
     @Test("a process-tap boundary is serialised before ownership and forbids discard")
     func processTapBoundaryIsDurableEvidence() throws {
         let engine = RoutingEngine()
-        let reservation = try engine.reserveAudioIncidentBeforeOwnership(
-            sourceDeviceUID: "input",
-            destinationDeviceUID: "output",
-            preferredSampleRate: 48_000,
-            bufferFrames: 128,
-            processTapOwnershipExpected: true)
+        let reservation = try reserveIncident(engine, processTapOwnershipExpected: true)
         #expect(throws: RoutingError.self) {
             try beginOwnership(engine, reservation: reservation)
         }

@@ -281,38 +281,27 @@ struct ScriptServiceTests {
             })
         defer { service.stop() }
 
+        // The baseline is taken *before* the script is submitted.
+        //
+        // Both probes used to run while the barrier was held, which spent the
+        // script's own 250 ms budget twice over — and when it ran out the
+        // service killed the script and the reply below was not "true". A test
+        // of the barrier failing on the timeout of the thing it was observing.
+        let barrierBaseline = startMainActorProbe(samples: 30, interval: 0)
+        #expect(await barrierBaseline.wait())
+
         #expect(
             scriptSubmissionWasAccepted(
                 service.submitManual("yun.status().running") { completion.resolve($0) }))
         #expect(await scheduler.waitForFirstHeld())
 
-        let barrierBaseline = startMainActorProbe(samples: 60, interval: 0)
-        #expect(await barrierBaseline.wait())
-
-        // Two hundred samples, not a thousand, and the maximum is observed
-        // rather than asserted.
-        //
-        // A thousand zero-interval hops is a great deal of main-actor traffic
-        // in its own right — the probe was distorting the barrier it was sent
-        // to watch, and with the rest of the suite competing as well the
-        // service's own RPC was arriving late enough to be revoked. What this
-        // test is for is below and is load-immune: the reply arrives, exactly
-        // one RPC was made, and never more than one was pending. A service that
-        // blocked the main actor at its barrier could not deliver these samples
-        // at all, which `count` still says.
-        // Sixty samples, taken while the script waits at its barrier.
-        //
-        // The script has its own 250 ms budget and the barrier wait spends it,
-        // so the window this test holds open has to stay well inside it or the
-        // service kills the script and the reply below is not "true". Two
-        // hundred zero-interval hops did not, on a loaded machine, which is how
-        // a test of the barrier came to fail on the script's timeout.
-        //
-        // Sixty is still ample for the claim: a service that blocked the main
-        // actor at its barrier could not let one through.
-        let probes = startMainActorProbe(samples: 60, interval: 0)
+        // Thirty hops through the main actor while the script waits at its
+        // barrier. A service that blocked the actor there could not let one
+        // through, which is the claim — and thirty is few enough to leave the
+        // budget being observed intact.
+        let probes = startMainActorProbe(samples: 30, interval: 0)
         #expect(await probes.wait())
-        #expect(probes.count == 60)
+        #expect(probes.count == 30)
         print(
             "RPC barrier: main-actor gap max \(probes.maximumNanoseconds) ns, "
                 + "idle baseline \(barrierBaseline.maximumNanoseconds) ns")
