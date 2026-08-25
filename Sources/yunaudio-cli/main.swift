@@ -1227,6 +1227,65 @@ final class InstantiationBox: @unchecked Sendable {
     var status: OSStatus { lock.withLock { stored } }
 }
 
+// The last cut: which of the route's wrappings is the one that wedges.
+//
+// Six weaker constructions all built without incident, so what is left between
+// them and the route is the bounded lane, the cancellation context, and the
+// graph admission held across the whole thing. This runs each combination on a
+// server that is checked before and after, and prints a table.
+//
+// Every row that wedges costs one leaked thread and a restarted audio server,
+// so this is a command somebody runs deliberately on a machine they are willing
+// to break — not something the application does.
+if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "aec-layers" {
+    let all = (try? AudioDevices.all()) ?? []
+    guard let microphone = automaticPhysicalInput(in: all),
+        let speaker = all.first(where: { $0.hasOutput && !$0.transport.isVirtual })
+            ?? all.first(where: \.hasOutput)
+    else {
+        print("need a physical input and an output")
+        exit(1)
+    }
+    let combinations: [(String, EchoCancellationDiagnostics.Layers)] = [
+        ("bare (none of them)", []),
+        ("graph admission only", [.graphAdmission]),
+        ("lane only", [.lane]),
+        ("lane + context", [.lane, .constructionContext]),
+        ("lane + admission", [.lane, .graphAdmission]),
+        ("everything, as the route does it", [.lane, .graphAdmission, .constructionContext]),
+    ]
+    let wanted = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : nil
+    print("mic \(microphone.name) · speaker \(speaker.name)\n")
+    for (name, layers) in combinations {
+        if let wanted, !name.contains(wanted) { continue }
+        let before = AudioServerHealth.probeAggregate()
+        guard before == .healthy else {
+            print(
+                "  \(name.padding(toLength: 34, withPad: " ", startingAt: 0)) SKIPPED — server already wedged"
+            )
+            continue
+        }
+        let outcome = EchoCancellationDiagnostics.build(
+            microphoneUID: microphone.uid, speakerUID: speaker.uid, layers: layers)
+        let after = AudioServerHealth.probeAggregate()
+        let verdict: String
+        switch outcome {
+        case .built: verdict = "built"
+        case .refused(let why): verdict = "refused (\(why))"
+        case .didNotReturn: verdict = "DID NOT RETURN"
+        }
+        let server = after == .notOpeningDevices ? "  ← SERVER WEDGED" : ""
+        print(
+            "  \(name.padding(toLength: 34, withPad: " ", startingAt: 0)) \(verdict)\(server)")
+        if after == .notOpeningDevices {
+            print("\n    stopping here: everything after this would measure the wedge.")
+            print("    `sudo killall coreaudiod`, then run the next row by name.")
+            exit(2)
+        }
+    }
+    exit(0)
+}
+
 if CommandLine.arguments.count > 1, CommandLine.arguments[1] == "health" {
     // Per device, because the first version of this asked only about the
     // default output, said "opening devices normally", and was wrong: the
