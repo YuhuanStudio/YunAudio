@@ -517,7 +517,7 @@ final class AudioIncidentRecorder: @unchecked Sendable {
             )
         case .clockPublisherTimedOut:
             return (.ownersReleased, .timedOut, noErr)
-        case .echoCancellation(let result):
+        case .echoCancellation(let result, _):
             return (
                 .echoCancellationDisposed,
                 result.isTimeout ? .timedOut : .requestFailed,
@@ -751,7 +751,7 @@ extension RoutingTeardownResult {
         switch self {
         case .lifecycleQueueTimedOut, .ioProcTimedOut, .clockPublisherTimedOut:
             true
-        case .echoCancellation(let result):
+        case .echoCancellation(let result, _):
             result.isTimeout
         case .audioUnitOwner(let result):
             result.isTimeout

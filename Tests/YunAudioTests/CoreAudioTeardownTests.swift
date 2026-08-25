@@ -58,7 +58,7 @@ struct RouterTeardownAdmissionTests {
             .ioProcStopFailed(-73_001),
             .ioProcDestroyFailed(-73_001),
             .clockPublisherTimedOut,
-            .echoCancellation(.lifecycleTimedOut(step: nil)),
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false),
             .aggregate(.requestFailed(-73_001)),
             .aggregate(.timedOut),
             .processTap(uid: "tap", result: .timedOut),
@@ -1105,7 +1105,29 @@ struct TeardownAdviceTests {
         #expect(retryable.lastError?.contains("Stop again") == true)
 
         let terminal = RouterModel()
-        terminal.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil)))
+        terminal.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
+        #expect(!terminal.anotherStopCanClearTeardown)
+        #expect(terminal.lastError?.contains("Quit and reopen") == true)
+    }
+
+    /// A teardown that is only queued is not a teardown that failed.
+    ///
+    /// The bridge stores a verdict only when it is the last word. Deferred
+    /// behind a graph admission, the owner is promoted when that completes and
+    /// the next Stop picks up the finished result — so the interface's own
+    /// instruction is the one that works, and the route is recoverable.
+    @Test("a deferred echo teardown asks for the Stop that can actually finish it")
+    func deferredTeardownIsRecoverable() {
+        let deferred = RouterModel()
+        deferred.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: true))
+        #expect(deferred.anotherStopCanClearTeardown)
+        #expect(deferred.lastError?.contains("Stop again") == true)
+        #expect(deferred.canStopRoute)
+
+        let terminal = RouterModel()
+        terminal.retainFailedTeardown(
+            .echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
         #expect(!terminal.anotherStopCanClearTeardown)
         #expect(terminal.lastError?.contains("Quit and reopen") == true)
     }
@@ -1115,7 +1137,7 @@ struct TeardownAdviceTests {
     @Test("clearing the failure clears every derived answer with it")
     func derivedAnswersCannotDrift() {
         let model = RouterModel()
-        model.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil)))
+        model.retainFailedTeardown(.echoCancellation(.lifecycleTimedOut(step: nil), canRetry: false))
         #expect(model.teardownNeedsRetry)
         #expect(model.teardownFailureDetail != nil)
         #expect(!model.anotherStopCanClearTeardown)

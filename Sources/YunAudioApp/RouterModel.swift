@@ -8004,6 +8004,9 @@ final class RouterModel {
     /// truth reads this, not the belief.
     var engineHasLiveGraph: Bool { engine.hasLiveGraph }
 
+    /// Which branch of the echo canceller stored its teardown verdict.
+    var echoTeardownDecidedBy: String { engine.echoTeardownDecidedBy }
+
     /// Whether Stop has anything left to do.
     ///
     /// The union of the two meanings `isRunning` used to carry on its own:

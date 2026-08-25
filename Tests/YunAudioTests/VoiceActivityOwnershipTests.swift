@@ -165,7 +165,7 @@ struct VoiceActivityOwnershipTests {
         let routeStop = try section(
             of: source,
             from: "func stop(\n        then completion:",
-            to: "/// Keeps the old route visible")
+            to: "/// Admits only another Stop after Core Audio refused")
         let shutdown = try section(
             of: source,
             from: "func shutDown(",

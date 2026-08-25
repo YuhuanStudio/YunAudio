@@ -139,7 +139,10 @@ public enum RoutingTeardownResult: Sendable, Equatable {
     case ioProcDestroyFailed(OSStatus)
     case ioProcTimedOut(step: AudioIOProcTeardownStep)
     case clockPublisherTimedOut
-    case echoCancellation(EchoCancellationBridgeTeardownResult)
+    /// `canRetry` false means the bridge has stored this as its last word, so
+    /// `stop()` will return it again without tearing anything down. True means
+    /// the teardown is only deferred and the next Stop picks up its result.
+    case echoCancellation(EchoCancellationBridgeTeardownResult, canRetry: Bool)
     case audioUnitOwner(AudioUnitOwnerDisposalResult)
     case aggregate(HALDestructionResult)
     case processTap(uid: String, result: HALDestructionResult)
@@ -157,7 +160,7 @@ public enum RoutingTeardownResult: Sendable, Equatable {
     /// route. Every other case here is retryable where its owning subsystem
     /// permits, which is what this type's own contract already says.
     public var anotherStopCanClearIt: Bool {
-        if case .echoCancellation = self { return false }
+        if case .echoCancellation(_, let canRetry) = self { return canRetry }
         return true
     }
 
@@ -1942,6 +1945,14 @@ public final class RoutingEngine: @unchecked Sendable {
     /// The canceller, while it is in the path. Retained here so it outlives the
     /// ring pointer the IO thread holds.
     private var echoBridge: EchoCancellationBridge?
+
+    /// Which branch of the echo canceller stored its teardown verdict.
+    ///
+    /// Temporary, for the divergence hunt: five sites can write it and the
+    /// enum cannot tell them apart. The last non-complete verdict outlives its
+    /// bridge, so this keeps it rather than reading the current one.
+    public private(set) var echoTeardownDecidedBy = "never"
+
     /// Last complete failure pair, retained across the very short interval in
     /// which the callback is publishing its next seqlock generation. Falling
     /// back to two separately-read counters there would put the torn snapshot
@@ -3638,7 +3649,9 @@ public final class RoutingEngine: @unchecked Sendable {
         if let echoBridge {
             let echoResult = echoBridge.stop(until: deadline)
             guard echoResult.isComplete else {
-                let result = RoutingTeardownResult.echoCancellation(echoResult)
+                echoTeardownDecidedBy = echoBridge.teardownDecidedBy
+                let result = RoutingTeardownResult.echoCancellation(
+                    echoResult, canRetry: !echoBridge.teardownVerdictIsTerminal)
                 storedTeardownResult = result
                 return result
             }

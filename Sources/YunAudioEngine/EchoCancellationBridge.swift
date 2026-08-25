@@ -279,6 +279,25 @@ public final class EchoCancellationBridge: @unchecked Sendable {
     private var isRunning = false
     public private(set) var lastTeardownResult: EchoCancellationBridgeTeardownResult?
 
+    /// Whether the stored verdict is the last word on this bridge.
+    ///
+    /// False while a teardown is only deferred — enqueued behind a graph
+    /// admission or another transaction, and promoted when that completes. The
+    /// router needs the difference to know whether another Stop can clear the
+    /// route or whether only a relaunch can.
+    public var teardownVerdictIsTerminal: Bool {
+        lifecycleLock.withLock { lastTeardownResult != nil }
+    }
+
+    /// Which branch stored that verdict, for the divergence hunt.
+    ///
+    /// Five sites can write `lastTeardownResult` and the enum cannot tell them
+    /// apart — `step: nil` came from three of them. Naming the decider is what
+    /// found the last one; reasoning about which it must be is what got the
+    /// three preceding attempts wrong.
+    public private(set) var teardownDecidedBy = "never"
+
+
     /// - Parameters:
     ///   - microphoneUID: The microphone to capture and cancel for.
     ///   - settings: Speaker and far-end reference.
@@ -544,9 +563,11 @@ public final class EchoCancellationBridge: @unchecked Sendable {
                 } ?? .lifecycleTimedOut(step: .start)
             lifecycleLock.withLock { lastTeardownResult = result }
             return nil
+            teardownDecidedBy = "startFarEnd.operationFailed"
         case .timedOut(let step, _):
             lifecycleLock.withLock {
                 lastTeardownResult = .lifecycleTimedOut(step: step)
+                teardownDecidedBy = "startFarEnd.timedOut"
             }
             return nil
         case .blockedByRetainedTransaction:
@@ -572,6 +593,7 @@ public final class EchoCancellationBridge: @unchecked Sendable {
             command.cancelBeforeStart()
             lifecycleLock.withLock {
                 lastTeardownResult = .lifecycleTimedOut(step: nil)
+                teardownDecidedBy = "startFarEnd.ownerRetained"
             }
             return nil
         }
@@ -599,29 +621,65 @@ public final class EchoCancellationBridge: @unchecked Sendable {
             !captureTerminal.isComplete
         {
             let result = EchoCancellationBridgeTeardownResult.capture(captureTerminal)
-            lifecycleLock.withLock { lastTeardownResult = result }
+            lifecycleLock.withLock {
+                lastTeardownResult = result
+                teardownDecidedBy = "stop.captureAlreadyTerminal"
+            }
             return result
         }
 
         let detached = detachForTeardown(until: deadline)
         let disposal = BoundedAudioUnitDisposer.shared.dispose(detached, until: deadline)
         let result: EchoCancellationBridgeTeardownResult
+        let disposalBranch: String
+        // Whether this verdict is the last word, or whether the work is still
+        // queued and another Stop can finish it.
+        //
+        // The distinction is the difference between a route somebody can
+        // recover and one that needs the application relaunched, and it was
+        // not being made: every non-complete result was stored, and `stop()`
+        // returns the stored one before tearing anything down. A teardown
+        // merely waiting behind another transaction therefore became permanent
+        // at the instant it was deferred.
+        let isTerminal: Bool
         switch disposal {
         case .complete:
             result = detached.teardownResult ?? .complete
+            disposalBranch = "complete"
+            isTerminal = true
         case .operationFailed(let step, let status, _):
             result =
                 detached.teardownResult
                 ?? .capture(.audioUnit(step: step, status: status))
+            disposalBranch = "operationFailed"
+            isTerminal = true
         case .timedOut(let step, _):
+            // The worker is inside a call Core Audio gives no way to cancel.
+            // Ownership is genuinely uncertain and stays that way.
             result = .lifecycleTimedOut(step: step)
+            disposalBranch = "timedOut"
+            isTerminal = true
         case .ownerRetained:
+            // A verdict from the owner itself means its transaction ran and
+            // reached a conclusion. Without one, nothing ran.
             result = detached.teardownResult ?? .lifecycleTimedOut(step: nil)
+            disposalBranch = "ownerRetained"
+            isTerminal = detached.teardownResult != nil
         case .blockedByRetainedTransaction:
-            result = .lifecycleTimedOut(step: nil)
+            // The owner is enqueued behind a graph admission or another
+            // transaction, and the disposer promotes it when that completes.
+            // Nothing has failed: the teardown has not happened *yet*. Saying
+            // so lets the next Stop pick up the finished result, which is
+            // exactly what the interface tells somebody to do.
+            result = detached.teardownResult ?? .lifecycleTimedOut(step: nil)
+            disposalBranch = "blockedByRetainedTransaction"
+            isTerminal = detached.teardownResult != nil
         }
         lifecycleLock.withLock {
-            if lastTeardownResult == nil { lastTeardownResult = result }
+            if lastTeardownResult == nil, isTerminal {
+                lastTeardownResult = result
+                teardownDecidedBy = "stop.\(disposalBranch)"
+            }
         }
         let terminal = lifecycleLock.withLock { lastTeardownResult ?? result }
         if terminal.isComplete { isRunning = false }
