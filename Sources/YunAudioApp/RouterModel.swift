@@ -5828,6 +5828,34 @@ final class RouterModel {
         return true
     }
 
+    /// Whether a device names itself as something worn on the head.
+    ///
+    /// Named rather than repeated, because two places need the same judgement:
+    /// warning that a monitor may feed back, and choosing a destination when
+    /// there is no loopback to choose. Getting the two out of step would mean
+    /// preselecting exactly the device the other one warns about.
+    /// Takes what it looks at rather than the device, because a rule that can
+    /// be asserted from a string and a transport is one that gets asserted —
+    /// and asserting it immediately found it wrong.
+    ///
+    /// The name alone is not enough. "Razer Barracuda (BT)" is a headset and
+    /// carries none of these words, so the feedback warning was telling
+    /// somebody wearing headphones that they were about to feed back, which is
+    /// the sort of warning that teaches people to dismiss warnings.
+    ///
+    /// A Bluetooth *output* settles it: nobody pairs a loudspeaker they are
+    /// sitting in front of, and the ones who do have a room the microphone is
+    /// not in. Wired outputs keep the name test, because a Bluetooth speaker
+    /// exists and a USB one is ordinary.
+    nonisolated static func looksLikeHeadphones(
+        named name: String, transport: AudioTransport? = nil
+    ) -> Bool {
+        if transport?.isBluetooth == true { return true }
+        let lowered = name.lowercased()
+        let worn = ["headphone", "耳機", "耳机", "earphone", "headset", "airpods", "buds"]
+        return worn.contains { lowered.contains($0) }
+    }
+
     /// True when the chosen monitor is a loudspeaker rather than headphones, as
     /// far as its transport can say. Monitoring on speakers puts the microphone
     /// into the room the microphone is in, which is feedback.
@@ -5835,9 +5863,7 @@ final class RouterModel {
         guard let uid = monitorDeviceUID,
             let device = outputDevices.first(where: { $0.uid == uid })
         else { return false }
-        let name = device.name.lowercased()
-        let headphoneWords = ["headphone", "耳機", "earphone", "headset", "airpods"]
-        return !headphoneWords.contains { name.contains($0) }
+        return !Self.looksLikeHeadphones(named: device.name, transport: device.transport)
     }
 
     /// Above this, hearing yourself is a hindrance rather than a help.
@@ -8832,6 +8858,27 @@ final class RouterModel {
         outputDevices.contains { $0.uid == ClockAnchorPublisher.driverDeviceUID }
     }
 
+    /// Whether the missing device is actually in the way of what is selected.
+    ///
+    /// It is one capability, not the application: taps, effects, recording,
+    /// transcription, monitoring and routing to a real output all work without
+    /// it. What the device buys is other applications being able to choose
+    /// YunAudio as *their* microphone, over a path that is bit-exact rather
+    /// than resampled.
+    ///
+    /// So this is true only when somebody is trying to do that — the
+    /// destination is a virtual endpoint — and there is no other loopback
+    /// standing in. Everywhere else the absence is worth mentioning and is not
+    /// worth a warning.
+    var driverIsInTheWay: Bool {
+        guard !isDriverInstalled else { return false }
+        guard let destination = selectedDestination else {
+            // Nothing chosen yet, and no virtual endpoint to choose.
+            return !outputDevices.contains { $0.transport.isVirtual }
+        }
+        return destination.transport.isVirtual && loopbackFallback == nil
+    }
+
     private var isRestoring = false
     @ObservationIgnored private var persistsMigratedChannelDefaultAfterRestore = false
 
@@ -9867,6 +9914,21 @@ final class RouterModel {
                 outputDevices
                 .first { $0.uid == ClockAnchorPublisher.driverDeviceUID }?.uid
                 ?? outputDevices.first { $0.transport.isVirtual && $0.inputChannels > 0 }?.uid
+                // And when there is no loopback at all, headphones.
+                //
+                // Without one the picker read "None" and Start did nothing,
+                // which is the application behaving as though its optional
+                // component were required — and monitoring is a complete use
+                // of it that needs nothing installed.
+                //
+                // Headphones specifically, by the same rule the monitor
+                // feedback warning uses. The comment above is right that a
+                // real output is a feedback loop; it is right about speakers.
+                // A headset is where somebody wants to hear themselves and is
+                // the one real output that cannot howl.
+                ?? outputDevices.first {
+                    Self.looksLikeHeadphones(named: $0.name, transport: $0.transport)
+                }?.uid
         }
         // Only when there is nothing saved to overwrite. Anybody who has run
         // this before has a channel choice on disk, and it wins.

@@ -61,6 +61,8 @@
 "Start routing to measure the path." = "开始路由后即可测量信号路径。";
 "Start routing to see live measurements." = "开始路由后即可看到实时测量。";
 "The YunAudio device is not installed" = "YunAudio 虚拟设备尚未安装";
+"Installing copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio." = "安装会把一个插件复制到 /Library/Audio/Plug-Ins/HAL 并重新启动 coreaudiod，那会让所有音频短暂中断。";
+"Everything here works without it — capture, effects, recording, transcription, monitoring, and routing to any real output. What it adds is one thing: other applications can then choose YunAudio as their microphone, over a path that is bit-exact rather than resampled." = "没有它，这里的一切照常运作 —— 捕获、效果、录音、转录、监听，以及路由到任何真实输出。它只多加一件事：别的应用程序可以把 YunAudio 选成自己的麦克风，而且走的是逐位对应、不经重采样的路径。";
 "No input" = "无输入";
 "No output" = "无输出";
 "playing" = "正在发声";
@@ -73,7 +75,6 @@
 "Processing means the path is no longer bit-exact. That is the trade, not a fault." = "启用处理后，路径不再比特精确。";
 "Removes background noise using the model behind FaceTime's Voice Isolation." = "使用 FaceTime“人声隔离”背后的模型去除背景噪声。";
 "This device reports %d input channels; not all of them necessarily carry audio." = "该设备报告 %d 个输入声道，但不见得每个都有信号。";
-"Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio." = "路由需要虚拟音频设备。安装会把插件复制到 /Library/Audio/Plug-Ins/HAL 并重启 coreaudiod，期间全系统音频会短暂中断。";
 "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down." = "两端设备都支持时才生效。语音通话高于 48 kHz 没有意义。";
 "Registered with the window server, so they work without Input Monitoring permission." = "向窗口服务器注册，因此不需要“输入监控”权限。";
 "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app." = "任何非零值都表示实时契约被破坏。人声隔离会让它上升，那些分配来自 Apple 的模型。";

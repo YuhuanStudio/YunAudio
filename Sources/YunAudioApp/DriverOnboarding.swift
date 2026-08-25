@@ -20,7 +20,13 @@ struct DriverOnboarding: View {
                 HStack(spacing: Yun.Space.sm) {
                     Image(systemName: "externaldrive.badge.plus")
                         .font(.system(size: 12))
-                        .foregroundStyle(Yun.Palette.warning)
+                        // Amber only when it is in the way of what somebody
+                        // has actually chosen. A permanent warning about an
+                        // optional component is a warning people learn to
+                        // ignore, and then miss the ones that matter.
+                        .foregroundStyle(
+                            model.driverIsInTheWay
+                                ? Yun.Palette.warning : Yun.Palette.textTertiary)
                     Text(loc("The YunAudio device is not installed"))
                         .font(Yun.Text.label)
                         .foregroundStyle(Yun.Palette.textPrimary)
@@ -28,13 +34,32 @@ struct DriverOnboarding: View {
                     if isCompact { actions }
                 }
 
+                // What the device actually buys, which is one capability and
+                // not the application.
+                //
+                // This said "Routing needs the virtual audio device", and that
+                // is not true: a microphone to a pair of headphones needs
+                // nothing installed, and neither do taps, effects, recording,
+                // transcription or monitoring. What needs it is another
+                // application being able to pick YunAudio as *its* microphone.
+                // Saying otherwise turned an optional component into a wall,
+                // in an application whose own README calls it optional.
                 Text(
                     loc(
-                        "Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio."
+                        "Everything here works without it — capture, effects, recording, transcription, monitoring, and routing to any real output. What it adds is one thing: other applications can then choose YunAudio as their microphone, over a path that is bit-exact rather than resampled."
                     )
                 )
                 .font(Yun.Text.caption)
                 .foregroundStyle(Yun.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                Text(
+                    loc(
+                        "Installing copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio."
+                    )
+                )
+                .font(Yun.Text.caption)
+                .foregroundStyle(Yun.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
 
                 // Another loopback endpoint will route audio perfectly well; it

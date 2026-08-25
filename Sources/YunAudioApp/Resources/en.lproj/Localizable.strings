@@ -61,6 +61,8 @@
 "Start routing to measure the path." = "Start routing to measure the path.";
 "Start routing to see live measurements." = "Start routing to see live measurements.";
 "The YunAudio device is not installed" = "The YunAudio device is not installed";
+"Installing copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio." = "Installing copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio.";
+"Everything here works without it — capture, effects, recording, transcription, monitoring, and routing to any real output. What it adds is one thing: other applications can then choose YunAudio as their microphone, over a path that is bit-exact rather than resampled." = "Everything here works without it — capture, effects, recording, transcription, monitoring, and routing to any real output. What it adds is one thing: other applications can then choose YunAudio as their microphone, over a path that is bit-exact rather than resampled.";
 "No input" = "No input";
 "No output" = "No output";
 "playing" = "playing";
@@ -73,7 +75,6 @@
 "Processing means the path is no longer bit-exact. That is the trade, not a fault." = "Processing means the path is no longer bit-exact.";
 "Removes background noise using the model behind FaceTime's Voice Isolation." = "Removes background noise using the model behind FaceTime's Voice Isolation.";
 "This device reports %d input channels; not all of them necessarily carry audio." = "This device reports %d input channels; not all of them necessarily carry audio.";
-"Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio." = "Routing needs the virtual audio device. Installing it copies a plug-in into /Library/Audio/Plug-Ins/HAL and restarts coreaudiod, which briefly stops all audio.";
 "Applied when both devices support it. A voice chat gains nothing above 48 kHz — the far end resamples it back down." = "Applied when both devices support it. A voice chat gains nothing above 48 kHz.";
 "Registered with the window server, so they work without Input Monitoring permission." = "Registered with the window server, so they work without Input Monitoring permission.";
 "Anything above zero is a broken realtime contract. Voice isolation raises it — the allocations come from inside Apple's model, not from this app." = "Anything above zero breaks the realtime contract. Voice isolation raises it; those allocations come from Apple's model.";
