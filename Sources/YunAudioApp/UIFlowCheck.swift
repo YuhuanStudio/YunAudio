@@ -5436,9 +5436,26 @@ enum UIFlowCheck {
             let span = wanted == last ? 4.0 : chainNoteSeconds
             let expectedProgress = min(
                 1, max(0, (model.songPosition - Double(wanted) * chainNoteSeconds) / span))
+            // Tolerated by one publication of the sweep, not by a round
+            // number.
+            //
+            // `lyricProgress` is published every `lyricFrameEveryNPolls` polls
+            // and the poll is 50 ms, so it is up to 100 ms stale against a
+            // `songPosition` read this instant. Over a one-second line that is
+            // 0.1 of progress, and the tolerance was 0.05 — half a publication
+            // — so whether this passed depended on which half of the cycle the
+            // read landed in. It is a coin toss by construction, and it failed
+            // the release gate on the middle of three lines while the other two
+            // passed.
+            //
+            // Two publications, because a loaded gate can miss one. Derived
+            // from the constants so it follows them if either changes.
+            let publicationSeconds =
+                Double(RouterModel.lyricFrameEveryNPolls) * 0.05
+            let sweepTolerance = 2 * publicationSeconds / span
             check(
                 "and the sweep follows the playback clock",
-                abs(model.lyricProgress - expectedProgress) < 0.05)
+                abs(model.lyricProgress - expectedProgress) < sweepTolerance)
         }
 
         // afplay holds the device for a second or two either side of the audio
