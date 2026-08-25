@@ -54,6 +54,18 @@ public enum SignalFidelity {
         public struct Band: Sendable, Equatable {
             public let centreHertz: Double
             public let decibels: Double
+
+            /// Public so a reader can re-express a band against another one.
+            ///
+            /// These figures have the broadband level removed, which is right
+            /// for a table of all of them and wrong for naming a single one: a
+            /// low pass lowers the broadband level, so subtracting it lifts
+            /// every band the filter left alone, and the top-octave cut a
+            /// resampler makes is reported as a bass boost.
+            public init(centreHertz: Double, decibels: Double) {
+                self.centreHertz = centreHertz
+                self.decibels = decibels
+            }
         }
 
         /// One line, for a table.

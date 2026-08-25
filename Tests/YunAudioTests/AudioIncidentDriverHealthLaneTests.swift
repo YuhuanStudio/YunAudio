@@ -28,8 +28,18 @@ struct AudioIncidentDriverHealthLaneTests {
                 unsafeReadOperations: 7, unsafeWriteOperations: 11)
         }
 
+        // Long enough for the worker to be dequeued, which is what this test
+        // needs; the timeout still fires with certainty because the closure
+        // holds on `release` and never returns.
+        //
+        // Ten milliseconds was a bet that a cold machine dequeues a block
+        // within ten milliseconds, and on the first full run after a rebuild it
+        // does not. The lane then takes its expired-before-entry branch — the
+        // right behaviour, and the one thing this test is not about — the
+        // closure never runs, `entered` is never signalled, and the failure
+        // reads as the lane admitting nobody.
         let first = DispatchQueue.global(qos: .utility).sync {
-            lane.read(deviceID: 1, wasRequired: true, timeout: 0.01)
+            lane.read(deviceID: 1, wasRequired: true, timeout: 0.25)
         }
         #expect(entered.wait(timeout: .now() + TestGate.deadlock) == .success)
         #expect(first.state == .readFailed)

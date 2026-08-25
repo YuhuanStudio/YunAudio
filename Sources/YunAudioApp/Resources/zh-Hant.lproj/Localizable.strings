@@ -896,3 +896,10 @@
 "Echo cancellation off." = "回音消除已關閉。";
 "Missed deadlines" = "錯過的 deadline";
 "%d, last from %@" = "%d 次,最近一次來自%@";
+"Difference" = "差異";
+"%.1f dB below the signal" = "比訊號低 %.1f dB";
+"Level change" = "音量變化";
+"%+.2f dB" = "%+.2f dB";
+"Waveform match" = "波形吻合度";
+"Tone" = "音色";
+"%.0f Hz, %+.2f dB against 1 kHz" = "%.0f Hz,相對 1 kHz %+.2f dB";

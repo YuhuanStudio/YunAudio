@@ -1671,6 +1671,26 @@ struct PreferencesWindow: View {
     /// Policy, an in-flight probe, unsupported hardware and a stopped or live
     /// watcher are genuinely different answers. None requires a synchronous
     /// HAL read while the view is being evaluated.
+    /// The octave furthest from the middle of the voice range, and by how far.
+    ///
+    /// Returned already expressed against 1 kHz rather than against the
+    /// broadband gain, for the reason at the call site: normalising by the
+    /// broadband level reports a low-pass as every other band being lifted.
+    static func worstOctave(
+        _ fidelity: SignalFidelity.Measurement
+    ) -> SignalFidelity.Measurement.Band? {
+        guard
+            let middle = fidelity.bandDecibels.min(by: {
+                abs($0.centreHertz - 1_000) < abs($1.centreHertz - 1_000)
+            }),
+            let worst = fidelity.bandDecibels.max(by: {
+                abs($0.decibels - middle.decibels) < abs($1.decibels - middle.decibels)
+            })
+        else { return nil }
+        return .init(
+            centreHertz: worst.centreHertz, decibels: worst.decibels - middle.decibels)
+    }
+
     static func voiceDetectorState(
         isEnabled: Bool, isAvailable: Bool?, isRunning: Bool
     ) -> String {

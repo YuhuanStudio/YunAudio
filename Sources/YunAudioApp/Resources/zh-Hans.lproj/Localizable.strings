@@ -895,3 +895,10 @@
 "Echo cancellation off." = "回音消除已关闭。";
 "Missed deadlines" = "错过的 deadline";
 "%d, last from %@" = "%d 次,最近一次来自%@";
+"Difference" = "差异";
+"%.1f dB below the signal" = "比信号低 %.1f dB";
+"Level change" = "音量变化";
+"%+.2f dB" = "%+.2f dB";
+"Waveform match" = "波形吻合度";
+"Tone" = "音色";
+"%.0f Hz, %+.2f dB against 1 kHz" = "%.0f Hz,相对 1 kHz %+.2f dB";

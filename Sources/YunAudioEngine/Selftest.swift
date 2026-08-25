@@ -120,6 +120,19 @@ public struct SelftestResult: Sendable {
     /// better than chance and nothing came back.
     public let alignmentSeparation: Float
 
+    /// What the path did to the signal, in the terms somebody hears it in.
+    ///
+    /// The counts above answer "is this lossless" and nothing else: a path that
+    /// is one sample late and a path that has been through a guitar amplifier
+    /// both report zero exact matches. Gain, residual, correlation and the
+    /// octave bands are the difference between "not bit-exact" and "not
+    /// bit-exact by sixty-five decibels, all of it above sixteen kilohertz".
+    ///
+    /// Nil for a bit-exact path, where every one of those numbers is zero by
+    /// construction and the transform would be work done to say so; and nil
+    /// where the capture never aligned, because there is nothing to compare.
+    public let fidelity: SignalFidelity.Measurement?
+
     /// True when the recovered offset stands clearly above the wrong ones.
     ///
     /// Judged by ratio rather than by an absolute error, because the probe is
@@ -163,9 +176,49 @@ public struct SelftestResult: Sendable {
         return String(
             format:
                 "resampled: %d/%d identical (%.2f%%), mean error %.4f, max %.4f, "
-                + "delay %d frames, separation %.3f%@",
+                + "delay %d frames, separation %.3f%@%@",
             exactMatches, comparedFrames, percentage, meanAbsoluteError, maxAbsoluteError,
-            delayFrames, alignmentSeparation, mismatchShape)
+            delayFrames, alignmentSeparation, mismatchShape, Self.audibleShape(fidelity))
+    }
+
+    /// The same path in the terms somebody hears it in.
+    ///
+    /// "Not bit-exact" is a true statement about a path that is inaudibly
+    /// different and about one that has been ruined, and it is the only thing
+    /// the counts above can say. This says by how much.
+    ///
+    /// The probe is white noise, which fills its own Nyquist, so a resampled
+    /// path *must* lose the top of the band — the anti-alias filter doing its
+    /// job. Reporting a broadband residual alone would read that as damage;
+    /// this names the worst octave beside it, and on a sane resampler that
+    /// octave is the highest one and the rest are flat.
+    private static func audibleShape(_ fidelity: SignalFidelity.Measurement?) -> String {
+        guard let fidelity else { return "" }
+        // Read against the 1 kHz band rather than against the broadband gain.
+        //
+        // `bandDecibels` has the broadband level taken out, which is right for
+        // a table of every band together and wrong for naming one of them: a
+        // low pass lowers the broadband level, so removing it lifts every band
+        // the filter did not touch — and a resampled path, the case this exists
+        // for, then reports "32 Hz at +2.70 dB" when what happened was the top
+        // octave being cut. Relative to the middle of the voice range, a cut
+        // reads as a cut.
+        let middle = fidelity.bandDecibels.min {
+            abs($0.centreHertz - 1_000) < abs($1.centreHertz - 1_000)
+        }
+        let reference = middle?.decibels ?? 0
+        let worst = fidelity.bandDecibels.max {
+            abs($0.decibels - reference) < abs($1.decibels - reference)
+        }
+        let band =
+            worst.map {
+                String(
+                    format: ", worst octave %.0f Hz at %+.2f dB against 1 kHz",
+                    $0.centreHertz, $0.decibels - reference)
+            } ?? ""
+        return String(
+            format: " — residual %.1f dB, correlation %.6f, gain %+.2f dB%@",
+            fidelity.residualDecibels, fidelity.correlation, fidelity.gainDecibels, band)
     }
 }
 
@@ -270,8 +323,15 @@ extension SelftestCapture {
     /// offset and keeping the one that matches best. An offset found this way
     /// is only convincing because an exact match against a 24-bit pseudorandom
     /// sequence cannot happen by chance.
+    /// The rate the path ran at, for the octave analysis. Where a caller does
+    /// not know it, the bands are read against 48 kHz and the centre
+    /// frequencies are wrong by whatever the real rate differs — the residual
+    /// and the correlation are unaffected, since neither depends on it.
+    public static let assumedSampleRate: Double = 48_000
+
     public func evaluate(
-        maximumDelayFrames: Int = SelftestCapture.maximumDelayFrames
+        maximumDelayFrames: Int = SelftestCapture.maximumDelayFrames,
+        sampleRate: Double = SelftestCapture.assumedSampleRate
     ) -> SelftestResult {
         let count = samples.count
         let capture = samples
@@ -280,7 +340,7 @@ extension SelftestCapture {
                 delayFrames: 0, comparedFrames: 0, exactMatches: 0,
                 firstMismatchOffset: nil, lastMismatchOffset: nil,
                 mismatchRunCount: 0, longestMismatchRun: 0, maxAbsoluteError: 0,
-                meanAbsoluteError: 0, alignmentSeparation: 1)
+                meanAbsoluteError: 0, alignmentSeparation: 1, fidelity: nil)
         }
 
         // Skip the head of the capture: the first cycles can contain the ring
@@ -371,6 +431,24 @@ extension SelftestCapture {
             }
         }
 
+        // Measured only where it says something. A bit-exact path's numbers are
+        // all zero by construction, and a capture that never aligned has
+        // nothing to be compared against.
+        var fidelity: SignalFidelity.Measurement?
+        let alignedWell = compared > 0 && (separation < 0.6)
+        if alignedWell, matches != compared {
+            var reference = [Float](); reference.reserveCapacity(compared)
+            var processed = [Float](); processed.reserveCapacity(compared)
+            for index in 0..<count {
+                let absolute = startFrame &+ UInt64(index)
+                guard absolute >= UInt64(bestDelay) else { continue }
+                reference.append(selftestSample(absolute &- UInt64(bestDelay)))
+                processed.append(capture[index])
+            }
+            fidelity = SignalFidelity.compare(
+                reference: reference, processed: processed, sampleRate: sampleRate)
+        }
+
         return SelftestResult(
             delayFrames: bestDelay,
             comparedFrames: compared,
@@ -381,6 +459,7 @@ extension SelftestCapture {
             longestMismatchRun: longestMismatchRun,
             maxAbsoluteError: maxError,
             meanAbsoluteError: compared > 0 ? Float(totalError / Double(compared)) : 0,
-            alignmentSeparation: Float(separation))
+            alignmentSeparation: Float(separation),
+            fidelity: fidelity)
     }
 }

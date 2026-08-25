@@ -896,3 +896,10 @@
 "Echo cancellation off." = "Echo cancellation off.";
 "Missed deadlines" = "Missed deadlines";
 "%d, last from %@" = "%d, last from %@";
+"Difference" = "Difference";
+"%.1f dB below the signal" = "%.1f dB below the signal";
+"Level change" = "Level change";
+"%+.2f dB" = "%+.2f dB";
+"Waveform match" = "Waveform match";
+"Tone" = "Tone";
+"%.0f Hz, %+.2f dB against 1 kHz" = "%.0f Hz, %+.2f dB against 1 kHz";

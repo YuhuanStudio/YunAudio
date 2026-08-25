@@ -15157,6 +15157,11 @@ final class RouterModel {
         let runID: UInt64
         let graphGeneration: UInt64
         let lease: SelftestCaptureLease
+        /// Carried with the capture rather than read where it is graded: the
+        /// grading happens on a background lane, and the rate is a property of
+        /// the route that produced these samples, not of whenever somebody gets
+        /// round to comparing them.
+        let sampleRate: Double
     }
 
     private struct IntegrityDiagnosticResult: Sendable {
@@ -15174,7 +15179,8 @@ final class RouterModel {
                 IntegrityDiagnosticResult(
                     runID: snapshot.capture.runID,
                     graphGeneration: snapshot.capture.graphGeneration,
-                    result: snapshot.capture.lease.capture().evaluate())
+                    result: snapshot.capture.lease.capture()
+                        .evaluate(sampleRate: snapshot.capture.sampleRate))
             },
             publish: { [weak self] evaluation in
                 self?.finishIntegrityEvaluation(evaluation)
@@ -15275,7 +15281,9 @@ final class RouterModel {
                 let capture = IntegrityDiagnosticCapture(
                     runID: runID,
                     graphGeneration: graphGeneration,
-                    lease: snapshot.lease)
+                    lease: snapshot.lease,
+                    sampleRate: pathQuality?.sampleRate
+                        ?? SelftestCapture.assumedSampleRate)
                 if integrityDiagnosticWorker.submit(
                     DiagnosticCaptureSnapshot(generation: runID, capture: capture))
                 {

@@ -6206,7 +6206,8 @@ public final class RoutingEngine: @unchecked Sendable {
     /// MainActor or while the engine lock is held.
     public func evaluateSelftest() -> SelftestResult? {
         guard case let .available(snapshot) = captureSelftest() else { return nil }
-        return snapshot.lease.capture().evaluate()
+        return snapshot.lease.capture().evaluate(
+            sampleRate: pathQuality?.sampleRate ?? SelftestCapture.assumedSampleRate)
     }
 
     public enum SelftestProgressRead: Equatable, Sendable {
