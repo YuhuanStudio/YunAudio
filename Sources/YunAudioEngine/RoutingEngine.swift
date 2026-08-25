@@ -6701,6 +6701,22 @@ public final class RoutingEngine: @unchecked Sendable {
         case readable
     }
 
+    /// Whether the sole audio-unit disposer would admit a new route right now.
+    ///
+    /// False while owners it queued behind a graph admission are still waiting
+    /// — which is the state a deferred teardown leaves, and the one a Stop
+    /// retry needs to see clear before it can finish. Exposed so the flow check
+    /// can ask whether the deferral resolves once nothing else is building,
+    /// rather than leaving that to be reasoned about.
+    public var audioUnitDisposerAdmitsNewGraph: Bool {
+        BoundedAudioUnitDisposer.shared.admitsNewGraph
+    }
+
+    /// How many owners the disposer is still holding for deferred disposal.
+    public var audioUnitDisposerPendingOwners: Int {
+        BoundedAudioUnitDisposer.shared.pendingOwnerCount
+    }
+
     public var whyCycleCountIsUnknown: CycleCountRefusal {
         guard stateLock.try() else { return .lockBusy }
         defer { stateLock.unlock() }

@@ -639,6 +639,29 @@ struct AudioUnitDisposerTests {
 @Suite("Deferred lifecycle commands never run")
 struct DeferredLifecycleCommandTests {
 
+    /// A route teardown owner, which is the opposite contract to a command:
+    /// it stays queued until it has fenced its callbacks, and the disposer
+    /// never cancels it.
+    private final class QueuedOwner: AudioUnitTeardownOwner, @unchecked Sendable {
+        private let lock = NSLock()
+        private var disposed = false
+        private var runs = 0
+
+        var audioUnitCount: Int { lock.withLock { disposed ? 0 : 1 } }
+        var teardownRuns: Int { lock.withLock { runs } }
+
+        func tearDownAudioUnits(
+            using gate: AudioUnitTeardownGate
+        ) -> AudioUnitOwnerDisposalResult {
+            _ = gate.perform(.dispose) { noErr }
+            lock.withLock {
+                runs += 1
+                disposed = true
+            }
+            return .complete(disposedUnits: 1)
+        }
+    }
+
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
         private var value = 0
@@ -682,6 +705,53 @@ struct DeferredLifecycleCommandTests {
         #expect(drained == .timedOut(step: .start, disposedUnits: 0))
         #expect(runs.count == 0)
         #expect(command.completedStatus == nil)
+    }
+
+    /// The deferral resolves once nothing else is building.
+    ///
+    /// The clean-machine run left this open: ten automatic Stops across two
+    /// seconds, and `audioUnitOwner(.blockedByRetainedTransaction(3))` still
+    /// standing. That is not a timeout — the flow check builds routes
+    /// back-to-back, so a graph admission was almost always in flight and the
+    /// pending owners' quarantine tokens kept `admitsNewGraph` false the whole
+    /// time. Whether that is a stall or merely contention is the difference
+    /// between a leak and a retry that needs a quiet moment, and it is settled
+    /// here rather than argued about.
+    @Test("a deferred owner is disposed as soon as construction stops")
+    func deferralResolvesWhenNothingIsBuilding() throws {
+        let quarantine = ProcessLifetimeAudioQuarantine()
+        let disposer = BoundedAudioUnitDisposer(
+            quarantine: quarantine,
+            asynchronousTimeout: 0.05,
+            label: "com.yuhuanstudio.yunaudio.tests.resolve.\(UUID().uuidString)")
+        let admission = try #require(disposer.acquireGraphAdmission())
+        // A route teardown owner, not a command: the disposer cancels a
+        // deferred command by design, so one would prove nothing here.
+        let work = QueuedOwner()
+
+        let blocked = disposer.dispose(work, until: HALTeardownDeadline(timeout: 0.05))
+        #expect(blocked == .blockedByRetainedTransaction(retainedUnits: 1))
+        #expect(!disposer.admitsNewGraph)
+        #expect(disposer.pendingOwnerCount == 1)
+
+        // Exactly what the flow check never gave it: a moment with nothing
+        // under construction.
+        admission.release()
+
+        let deadline = DispatchTime.now() + .seconds(5)
+        while DispatchTime.now() < deadline, !disposer.admitsNewGraph {
+            Thread.sleep(forTimeInterval: 0.005)
+        }
+        #expect(disposer.admitsNewGraph)
+        #expect(disposer.pendingOwnerCount == 0)
+        #expect(quarantine.count == 0)
+        // Promoted *and* executed. A queue that drains without doing the work
+        // would look identical from `admitsNewGraph` alone.
+        //
+        // The caller cancels a command it has given up on, and a route
+        // teardown owner does not — so this is the deferral resolving, which
+        // is what the flow check could never give it a quiet moment to do.
+        #expect(work.teardownRuns == 1)
     }
 
     /// Both places that classify a deferral now agree, and neither is a

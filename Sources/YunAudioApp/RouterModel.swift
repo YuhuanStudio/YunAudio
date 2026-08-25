@@ -8042,6 +8042,11 @@ final class RouterModel {
     /// Which branch of the echo canceller stored its teardown verdict.
     var echoTeardownDecidedBy: String { engine.echoTeardownDecidedBy }
 
+    /// Whether the sole audio-unit disposer would admit a new route right now,
+    /// and how many owners it is still holding.
+    var disposerAdmitsNewGraph: Bool { engine.audioUnitDisposerAdmitsNewGraph }
+    var disposerPendingOwners: Int { engine.audioUnitDisposerPendingOwners }
+
     /// Whether Stop has anything left to do.
     ///
     /// The union of the two meanings `isRunning` used to carry on its own:
