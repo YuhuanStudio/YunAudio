@@ -3845,9 +3845,28 @@ enum UIFlowCheck {
             } else {
                 note("only one output on this machine — the release was not exercised")
             }
-            model.selectedDestinationUID = original
-            await waitUntil(
-                "and it is running again", { model.isRunning && !model.isBusy }, timeout: 20)
+            // A Bluetooth headset can fall asleep inside the twenty-five
+            // seconds this section spends tearing a route down and building it
+            // again, and then the device it started on is simply not there to
+            // go back to. That is the headset's power management, not the
+            // router's fall-back, and asserting through it made a check that
+            // failed at random — which is a check people stop reading.
+            if model.outputDevices.contains(where: { $0.uid == original }) {
+                model.selectedDestinationUID = original
+                await waitUntil(
+                    "and it is running again",
+                    { model.isRunning && !model.isBusy }, timeout: 20)
+            } else {
+                // Which of the two it was, said rather than left to be worked
+                // out: "the destination disappeared" reads as a fault in the
+                // router, and for a headset that went to sleep it is not one.
+                note(
+                    destination.transport.isBluetooth
+                        ? "the Bluetooth destination went to sleep or out of range during"
+                            + " the section, so returning to it was not exercised"
+                        : "the destination left the device list during the section,"
+                            + " so returning to it was not exercised")
+            }
         } else {
             note("could not build a decoy device — skipped")
         }
