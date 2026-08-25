@@ -122,6 +122,28 @@ struct KTVWordsSourcing: View {
                 .buttonStyle(YunButtonStyle(.ghost, small: true))
             }
 
+            // Which of the three ways the words are wrong, when they are.
+            //
+            // The nudge control has always been reachable, and it is the wrong
+            // answer to two of the three: a drifting file cannot be fixed by
+            // one number, and words for another recording cannot be fixed at
+            // all. Saying which saves somebody nudging a file that was never
+            // going to line up.
+            if let message = model.lyricTimingMessage {
+                HStack(alignment: .firstTextBaseline, spacing: Yun.Space.sm) {
+                    Text(message)
+                        .font(scale.caption)
+                        .foregroundStyle(scale.quiet)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if model.lyricTimingIsCorrectable {
+                        Button(loc("Line them up")) { model.applyMeasuredLyricOffset() }
+                            .buttonStyle(YunButtonStyle(.primary, small: true))
+                            .accessibilityIdentifier(identifier("ApplyMeasuredOffset"))
+                    }
+                }
+                .accessibilityIdentifier(identifier("LyricTiming"))
+            }
+
             if isExpanded { search }
             if model.isLoadingLocalWords {
                 HStack(spacing: Yun.Space.sm) {

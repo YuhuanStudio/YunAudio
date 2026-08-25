@@ -1902,6 +1902,7 @@ final class RouterModel {
         case .success(let result) where result.isUsable:
             songMelody = result.samples
             songMelodyRefusal = nil
+            diagnoseLyricTiming()
         case .success:
             // An instrumental. Saying so beats scoring somebody against stray
             // harmonics, which is the failure this was built to end.
@@ -4065,6 +4066,71 @@ final class RouterModel {
         applyLyricOffset()
     }
 
+    /// Which of the three ways the words are out of step, or nil until both
+    /// the words and the song's melody are in hand.
+    ///
+    /// Computed once when either arrives rather than on every poll: it walks
+    /// every lyric line against every sung phrase, which is nothing beside a
+    /// song and far too much twenty times a second.
+    private(set) var lyricTiming: LyricTiming.Diagnosis?
+
+    /// Whether the diagnosis names a correction one number can make.
+    var lyricTimingIsCorrectable: Bool {
+        guard let lyricTiming else { return false }
+        return lyricTiming.verdict == .uniformOffset
+    }
+
+    /// What to tell somebody about it, in their own terms.
+    var lyricTimingMessage: String? {
+        guard let lyricTiming else { return nil }
+        switch lyricTiming.verdict {
+        case .aligned, .notEnoughToTell:
+            return nil
+        case .uniformOffset:
+            return String(
+                format: loc("These words run %.1f s %@ the singing."),
+                abs(lyricTiming.offsetSeconds),
+                lyricTiming.offsetSeconds > 0 ? loc("ahead of") : loc("behind"))
+        case .drifting:
+            return String(
+                format: loc(
+                    "These words drift %.1f s a minute against the singing, so no single nudge will hold them."
+                ),
+                abs(lyricTiming.driftSecondsPerMinute))
+        case .wrongWords:
+            return loc(
+                "These words do not line up with this recording anywhere — they are probably for a different edition."
+            )
+        }
+    }
+
+    /// Applies the correction the diagnosis found, where it found one.
+    func applyMeasuredLyricOffset() {
+        guard let lyricTiming, lyricTiming.verdict == .uniformOffset else { return }
+        nudgeLyricOffset(by: lyricTiming.offsetSeconds)
+        // The words have moved, so the diagnosis is about a state that no
+        // longer exists.
+        diagnoseLyricTiming()
+    }
+
+    /// Runs the comparison when both halves of it exist.
+    func diagnoseLyricTiming() {
+        guard let lyrics, !songMelody.isEmpty, let duration = nowPlaying?.duration,
+            duration > 0
+        else {
+            if lyricTiming != nil { lyricTiming = nil }
+            return
+        }
+        // Against the times the interface is actually using, offset and all —
+        // otherwise it would report a problem somebody has already corrected.
+        let found = LyricTiming.diagnose(
+            lyrics: lyrics.lines.map {
+                Lyrics.Line(time: $0.time - lyrics.offset, text: $0.text)
+            },
+            melody: songMelody, duration: duration)
+        if lyricTiming != found { lyricTiming = found }
+    }
+
     func clearLyricOffset() {
         guard let identity = nowPlaying.map(Self.lyricsIdentity(for:)) else { return }
         LyricOffsets.clear(identity)
@@ -4082,6 +4148,7 @@ final class RouterModel {
         updated.offset = fileLyricOffset + lyricOffsetSeconds
         lyrics = updated
         followTheWords()
+        diagnoseLyricTiming()
     }
 
     /// Word times for the line being sung, when the file carried them.

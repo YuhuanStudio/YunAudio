@@ -411,6 +411,12 @@
 "%d filters, %.1f dB of headroom taken." = "%d filters, %.1f dB of headroom taken.";
 "Nothing is being corrected until routing starts." = "Nothing is being corrected until routing starts.";
 "Open the folder" = "Open the folder";
+"Line them up" = "Line them up";
+"These words do not line up with this recording anywhere — they are probably for a different edition." = "These words do not line up with this recording anywhere — they are probably for a different edition.";
+"These words drift %.1f s a minute against the singing, so no single nudge will hold them." = "These words drift %.1f s a minute against the singing, so no single nudge will hold them.";
+"behind" = "behind";
+"ahead of" = "ahead of";
+"These words run %.1f s %@ the singing." = "These words run %.1f s %@ the singing.";
 
 /* Settings: language, theme and accent. */
 "Language" = "Language";

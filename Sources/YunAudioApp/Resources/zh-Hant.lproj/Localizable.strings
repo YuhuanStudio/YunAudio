@@ -411,6 +411,12 @@
 "%d filters, %.1f dB of headroom taken." = "%d 個濾波器，讓出了 %.1f dB 的餘裕。";
 "Nothing is being corrected until routing starts." = "要開始路由之後才會實際套用補償。";
 "Open the folder" = "打開資料夾";
+"Line them up" = "對齊";
+"These words do not line up with this recording anywhere — they are probably for a different edition." = "這份歌詞和這個錄音在任何位置都對不上,多半是另一個版本的詞。";
+"These words drift %.1f s a minute against the singing, so no single nudge will hold them." = "這份歌詞每分鐘和演唱拉開 %.1f 秒,單一的位移撐不住。";
+"behind" = "晚";
+"ahead of" = "早";
+"These words run %.1f s %@ the singing." = "這份歌詞比演唱%2$@ %1$.1f 秒。";
 
 /* Settings: language, theme and accent. */
 "Language" = "語言";

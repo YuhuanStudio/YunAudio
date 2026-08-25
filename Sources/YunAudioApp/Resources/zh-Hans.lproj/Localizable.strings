@@ -411,6 +411,12 @@
 "%d filters, %.1f dB of headroom taken." = "%d 个滤波器，占用 %.1f dB 余量。";
 "Nothing is being corrected until routing starts." = "开始路由后才会实际应用补偿。";
 "Open the folder" = "打开文件夹";
+"Line them up" = "对齐";
+"These words do not line up with this recording anywhere — they are probably for a different edition." = "这份歌词和这个录音在任何位置都对不上，多半是另一个版本的词。";
+"These words drift %.1f s a minute against the singing, so no single nudge will hold them." = "这份歌词每分钟和演唱拉开 %.1f 秒，单一的位移撑不住。";
+"behind" = "晚";
+"ahead of" = "早";
+"These words run %.1f s %@ the singing." = "这份歌词比演唱%2$@ %1$.1f 秒。";
 
 /* Settings: language, theme and accent. */
 "Language" = "语言";
