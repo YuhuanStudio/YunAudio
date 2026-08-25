@@ -1,11 +1,4 @@
-# YunAudio 0.1.4 — draft
-
-**Not published.** The release gate has not been run on this commit: the flow
-check needs a machine whose audio server is opening devices, and this one is not.
-Publish after `./App/verify.sh` passes, and paste its evidence into the section
-at the end.
-
----
+# YunAudio 0.1.4
 
 ## The one that mattered
 
@@ -137,4 +130,42 @@ is needed for this reason.
 
 ## Release evidence
 
-_To be filled in from `./App/verify.sh` on the shipping commit._
+`./App/verify.sh --full` on the shipping commit:
+
+    build…                          ok
+    strict formatting…              ok
+    tests…                          ok
+    strings…                        ok
+    app bundle…                     ok
+    settings entry…                 ok
+    offscreen render…               ok
+    photograph the real window…     ok
+    installed driver matches release…ok
+    audio can start at all…         ok
+    the path is bit-exact, release… ok
+    flow check…                     ok
+
+    everything asked for passed.
+
+and `./App/verify.sh --fresh`, which is the one check that catches what only
+works because this working tree is here:
+
+    builds from a fresh clone…      ok
+
+2164 tests in 368 suites. The interface is verified four ways — a flow check
+against the live application, an offscreen render of all 67 panels, a
+photograph of the real window, and a scan that every user-facing literal goes
+through `loc()` — because each is blind to what the others catch.
+
+Two of those steps had been failing before this release and neither was a
+regression:
+
+- `the transpose reports what it is holding` asserted a latency the unit does
+  not have. Measured with an impulse rendered offline: it emerges at frame 0 at
+  unity and at +200 cents alike. The check asserts zero now, and keeps the
+  claim so a unit that *does* hold a window is noticed.
+- `and the sweep follows the playback clock` allowed half a publication of the
+  lyric sweep, which publishes every 100 ms against a clock read this instant.
+  Over a one-second line that is a coin toss, and it failed on the middle of
+  three lines while the other two passed. The tolerance is derived from the
+  cadence now rather than chosen.
