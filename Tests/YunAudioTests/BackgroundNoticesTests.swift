@@ -15,28 +15,64 @@ struct BackgroundNoticesTests {
     /// A warning already on screen is not repeated as a banner.
     @Test("a visible window keeps the notification quiet")
     func visibleWindowStaysQuiet() {
-        #expect(
-            !BackgroundNotices.shouldPost(
-                windowIsVisible: true, alreadyPosted: [], key: "dropouts"))
+        let ledger = BackgroundNoticeLedger()
+        #expect(!ledger.mayAnnounce(key: "dropouts", windowIsVisible: true))
     }
 
     /// The case this exists for: the fault happened and nobody can see it.
     @Test("a closed window posts")
     func closedWindowPosts() {
-        #expect(
-            BackgroundNotices.shouldPost(
-                windowIsVisible: false, alreadyPosted: [], key: "dropouts"))
+        let ledger = BackgroundNoticeLedger()
+        #expect(ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
     }
 
     /// The second "audio broke up" adds nothing the first did not.
     @Test("each fault speaks once")
     func eachFaultSpeaksOnce() {
-        #expect(
-            !BackgroundNotices.shouldPost(
-                windowIsVisible: false, alreadyPosted: ["dropouts"], key: "dropouts"))
-        #expect(
-            BackgroundNotices.shouldPost(
-                windowIsVisible: false, alreadyPosted: ["dropouts"], key: "route-stopped"))
+        var ledger = BackgroundNoticeLedger()
+        ledger.beginAnnouncing("dropouts")
+        ledger.handedOver("dropouts")
+        #expect(!ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
+        // A different fault is a different thing to say.
+        #expect(ledger.mayAnnounce(key: "route-stopped", windowIsVisible: false))
+    }
+
+    /// The window between the guard and the centre is not instantaneous — the
+    /// first notice of a process waits on an authorisation callback — and two
+    /// faults arriving inside it must not both pass.
+    @Test("a notice in flight holds the guard shut")
+    func inFlightHoldsTheGuard() {
+        var ledger = BackgroundNoticeLedger()
+        ledger.beginAnnouncing("dropouts")
+        #expect(!ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
+        #expect(ledger.posted.isEmpty, "nothing has reached the centre yet")
+    }
+
+    /// The defect this split exists for: marking a fault as spoken before
+    /// knowing whether it was said. A refused authorisation left the fault
+    /// recorded as posted, so it could never speak again for the whole session
+    /// — the one path where the notification mattered most.
+    @Test("a refused authorisation leaves the fault free to speak again")
+    func refusalDoesNotCountAsSpoken() {
+        var ledger = BackgroundNoticeLedger()
+        ledger.beginAnnouncing("dropouts")
+        ledger.refused("dropouts")
+        #expect(ledger.posted.isEmpty, "it was never said")
+        #expect(ledger.announcing.isEmpty, "and it is no longer in flight")
+        #expect(ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
+    }
+
+    /// A new route session may speak about everything again, and under a new
+    /// session number so the identifier does not replace the last one.
+    @Test("a reset reopens every fault under a fresh session")
+    func resetReopensEverything() {
+        var ledger = BackgroundNoticeLedger()
+        ledger.beginAnnouncing("dropouts")
+        ledger.handedOver("dropouts")
+        let before = ledger.session
+        ledger.reset()
+        #expect(ledger.session == before &+ 1)
+        #expect(ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
     }
 
     /// A repeat of the same fault in a later session is a new entry.
