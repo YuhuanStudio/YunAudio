@@ -140,8 +140,12 @@ enum NowPlayingResourceLoader {
             if let data = read(url, maximumBytes: maximumPlainLyricsBytes),
                 let text = String(data: data, encoding: .utf8)
             {
-                let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !words.isEmpty {
+                // Cleaned on the way out, not only on the way in. What an index
+                // calls its untimed field is routinely the same `.lrc`
+                // document, and a cache written before this was understood is
+                // still on disk — a trim alone put `[00:00.00-1] 作词 : …` back
+                // on the stage on every replay.
+                if let words = Lyrics.plainWords(from: text) {
                     plainLyrics = words
                     plainURL = url
                 }

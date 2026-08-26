@@ -321,6 +321,49 @@ struct ExternalIOWorkerTests {
         #expect(!result.reachedLimit)
     }
 
+    /// The cache on disk is older than what we now know about it, and it is
+    /// read on every replay.
+    ///
+    /// A NetEase answer for a song it does not have is a credit block and
+    /// nothing else — 「下雨天」 was cached as exactly two lines of `作词`/`作曲`
+    /// under a timestamp form the parser could not read. Trimmed and shown,
+    /// that put `[00:00.00-1] 作词 : Lara Liang/Zhang Jie` on the stage; and
+    /// because the file was already written, fixing the network path alone
+    /// would have left it there.
+    @MainActor
+    @Test("a cached credit block is not words, however it was written")
+    func cachedCreditBlockIsNotShown() throws {
+        let directory = URL(fileURLWithPath: "/lyrics", isDirectory: true)
+        let names = ["Moon Chew - 下雨天 [NetEase Cloud Music].txt"]
+        // The bytes as they sit on disk today.
+        let cached = Data(
+            "[00:00.00-1] 作词 : Lara Liang/Zhang Jie\n[00:00.00-1] 作曲 : Lara Liang/Zhang Jie"
+                .utf8)
+        let fileSystem = BoundedFileSystem(
+            itemExists: { _, _ in .exists(false) },
+            listDirectory: { _, maximumEntries, _, _ in
+                BoundedDirectorySnapshot(
+                    names: Array(names.prefix(maximumEntries)), isAvailable: true,
+                    reachedLimit: false, timedOut: false)
+            },
+            readFile: { url, maximumBytes, _ in
+                url.pathExtension == "txt"
+                    ? (cached.count <= maximumBytes ? .data(cached) : .tooLarge)
+                    : .unavailable
+            })
+        let track = NowPlaying.Track(
+            application: "Music", title: "下雨天", artist: "Moon Chew", album: "",
+            position: 0, duration: 265, isPlaying: true, identity: "track-rain")
+        let result = NowPlayingResourceLoader.load(
+            NowPlayingResourceRequest(
+                generation: 1, track: track, directory: directory, needsArtwork: false),
+            fileSystem: fileSystem)
+
+        #expect(result.timedLyrics == nil, "no stamp in it survives as a lyric")
+        #expect(result.plainLyrics == nil, "and a credit block is not untimed words")
+        #expect(result.plainLyricsURL == nil, "so nothing is attributed to it either")
+    }
+
     @Test("local-song sidecars use exact names and reject oversized input")
     func localSongResourceBounds() {
         let song = URL(fileURLWithPath: "/Volumes/KTV/duet.wav")
