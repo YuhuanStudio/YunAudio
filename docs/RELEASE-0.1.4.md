@@ -118,6 +118,11 @@ README ever stop naming the same version.
 Nothing to do beyond replacing the application. The virtual device is unchanged
 and does not need reinstalling.
 
+This build is signed ad-hoc rather than notarised, so on another Mac Gatekeeper
+refuses it on first launch. `READ ME FIRST.txt` inside the disk image says how
+to get past that; it is the ordinary way unnotarised open-source software
+arrives on this platform.
+
 If a machine has been left in the state the fault above produced — routes that
 will not start, and `yunaudio-cli health` reporting that an aggregate device was
 built and would not open — restarting the audio server clears it, and needs an
