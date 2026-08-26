@@ -113,7 +113,11 @@ struct OnlineLyrics: Sendable {
             let acceptedSynchronised =
                 parsed != nil && synchronised.map(OnlineLyrics.isInstrumentalLyrics) != true
                 ? synchronised : nil
-            let plain = plain?.nonEmpty
+            // Cleaned here rather than at the point of drawing, so ranking
+            // judges the words that would actually appear: a candidate whose
+            // untimed field is nothing but a credit block has nothing to show
+            // and must not outrank an index that does.
+            let plain = plain?.nonEmpty.flatMap { Lyrics.plainWords(from: $0) }
             let acceptedPlain =
                 plain.map(OnlineLyrics.isInstrumentalLyrics) == true ? nil : plain
             guard acceptedSynchronised != nil || acceptedPlain != nil else { return nil }

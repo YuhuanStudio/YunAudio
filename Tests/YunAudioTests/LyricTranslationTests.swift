@@ -83,3 +83,95 @@ struct LyricTranslationTests {
         #expect(original.withTranslation("").lines == original.lines)
     }
 }
+
+/// The stamps public indexes actually emit, as opposed to the ones the format
+/// describes.
+///
+/// A file this parser rejects does not degrade — it collapses. Every line
+/// without a recognised stamp is dropped, so a suffix on every line leaves no
+/// lines at all, `parse` answers nil, and the panel falls back to drawing the
+/// raw document: brackets in the text, and the production credits on the stage
+/// because the filter that removes them only runs over parsed lines.
+@Suite("Timestamps in the wild")
+struct LyricTimestampToleranceTests {
+
+    /// 「下雨天」 from NetEase, which is what put `[00:00.00-1] 作词 : Lara
+    /// Liang/Zhang Jie` on screen.
+    @Test("a NetEase line-length suffix does not cost the line its time")
+    func neteaseSuffixParses() throws {
+        #expect(Lyrics.timestamp("00:00.00-1") == 0)
+        #expect(Lyrics.timestamp("01:15.50-12") == 75.5)
+        // And the plain forms still read the same.
+        #expect(Lyrics.timestamp("00:12.50") == 12.5)
+        #expect(Lyrics.timestamp("00:12.500") == 12.5)
+        #expect(Lyrics.timestamp("01:00") == 60)
+    }
+
+    /// Tolerated narrowly. A bracket holding something else must still end the
+    /// header, or a tag would be read as a time and its value drawn as a lyric.
+    @Test("only a hyphen and digits are forgiven")
+    func onlyTheSuffixIsForgiven() {
+        #expect(Lyrics.timestamp("00:00.00-") == nil)
+        #expect(Lyrics.timestamp("00:00.00-x") == nil)
+        #expect(Lyrics.timestamp("ti:Song") == nil)
+        #expect(Lyrics.timestamp("offset:-500") == nil)
+        #expect(Lyrics.timestamp("00:61.00-1") == nil)
+    }
+
+    /// The whole failure, end to end: the file parses, and the credits it
+    /// opened with are gone from the stage.
+    @Test("a file suffixed throughout parses and drops its credits")
+    func suffixedFileParsesAndFiltersCredits() throws {
+        let file = """
+            [00:00.00-1] 作词 : Lara Liang/Zhang Jie
+            [00:00.00-1] 作曲 : Lara Liang/Zhang Jie
+            [00:18.50-1]下雨天了怎麼辦
+            [00:22.10-1]我好想你
+            """
+        let lyrics = try #require(Lyrics.parse(file), "the file must not collapse")
+        #expect(lyrics.lines.map(\.text) == ["下雨天了怎麼辦", "我好想你"])
+        #expect(lyrics.lines.first?.time == 18.5)
+        #expect(!lyrics.lines.contains { $0.text.contains("作词") })
+        #expect(!lyrics.lines.contains { $0.text.contains("[") })
+    }
+}
+
+/// The other door into the stage: the untimed field.
+///
+/// A file the parser cannot read is not shown as nothing — the indexes answer
+/// with a second, untimed field and that is drawn instead. It was drawn
+/// verbatim, so a document that was `.lrc` all along came back through here
+/// with its brackets and its credits, which is what the timed path exists to
+/// remove.
+@Suite("Untimed words")
+struct PlainLyricCleaningTests {
+
+    @Test("bracketed heads and credits do not reach the stage")
+    func headsAndCreditsAreRemoved() throws {
+        let raw = """
+            [00:00.00-1] 作词 : Lara Liang/Zhang Jie
+            [00:00.00-1] 作曲 : Lara Liang/Zhang Jie
+            [ti:下雨天]
+            [00:18.50-1]下雨天了怎麼辦
+
+            [00:22.10-1]我好想你
+            """
+        let words = try #require(Lyrics.plainWords(from: raw))
+        #expect(words == "下雨天了怎麼辦\n我好想你")
+    }
+
+    /// Plain words that were always plain are left alone.
+    @Test("words with no brackets pass through unchanged")
+    func plainWordsSurvive() throws {
+        let words = try #require(Lyrics.plainWords(from: "Hello darkness\nMy old friend"))
+        #expect(words == "Hello darkness\nMy old friend")
+    }
+
+    /// Nothing left is nil, not an empty stage — the caller can then fall
+    /// through to another index instead of showing a blank.
+    @Test("a document that is only credits has nothing to show")
+    func creditsOnlyIsNil() {
+        #expect(Lyrics.plainWords(from: "[00:00.00]作词 : A\n[00:01.00]编曲 : B") == nil)
+        #expect(Lyrics.plainWords(from: "\n\n  \n") == nil)
+    }
+}

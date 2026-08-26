@@ -382,14 +382,67 @@ public struct Lyrics: Sendable, Hashable {
     public typealias Syllable = Line.Syllable
 
     /// `mm:ss.xx`, `mm:ss.xxx` or `mm:ss`, or nil when it is not a time at all.
+    ///
+    /// A trailing `-n` is tolerated and discarded. NetEase writes some files
+    /// as `[00:00.00-1]`, and reading the whole fraction with `Double` refused
+    /// every one of those stamps — so the line carried no time, so it was
+    /// dropped, so the file parsed to nothing and the panel fell back to
+    /// showing the raw document. 「下雨天」 opened on `[00:00.00-1] 作词 : Lara
+    /// Liang/Zhang Jie`: brackets still in the text, and the credit filter
+    /// never reached because there were no parsed lines to filter.
+    ///
+    /// Tolerated narrowly. The suffix must be a hyphen and digits and nothing
+    /// else, so a bracket holding arbitrary text is still not a timestamp and
+    /// still ends the header the way the format needs it to.
     static func timestamp(_ body: String) -> Double? {
         let parts = body.split(separator: ":", omittingEmptySubsequences: false)
         guard parts.count == 2, let minutes = Double(parts[0]), minutes >= 0 else {
             return nil
         }
-        let rest = parts[1]
+        var rest = parts[1]
+        if let hyphen = rest.lastIndex(of: "-") {
+            let suffix = rest[rest.index(after: hyphen)...]
+            guard !suffix.isEmpty, suffix.allSatisfy(\.isASCII),
+                suffix.allSatisfy(\.isNumber)
+            else { return nil }
+            rest = rest[rest.startIndex..<hyphen]
+        }
         guard let seconds = Double(rest), seconds >= 0, seconds < 60 else { return nil }
         return minutes * 60 + seconds
+    }
+
+    /// Words with no timing, made fit to draw.
+    ///
+    /// The indexes answer with two fields and this is the second one: what to
+    /// show when nothing carried a stamp this parser could read. It was drawn
+    /// verbatim, which is only correct if the field really is plain words —
+    /// and routinely it is the same `.lrc` document, so a file the parser
+    /// collapsed on reappeared through this door with its brackets intact and
+    /// its production credits at the top, because the filter that removes
+    /// those only ever ran over parsed lines.
+    ///
+    /// So the same two rules apply here: a head of bracketed stamps and tags
+    /// comes off, and a credit is not a lyric. Nil when nothing is left, which
+    /// is the honest answer for a document that was only ever a credit block —
+    /// and lets the caller fall through to the next index rather than put an
+    /// empty stage up.
+    public static func plainWords(from text: String) -> String? {
+        var kept: [String] = []
+        for raw in text.split(whereSeparator: \.isNewline) {
+            var line = Substring(raw)
+            // Every bracket at the head, whether or not it was a time we could
+            // read: unreadable is exactly the case that brought us here, and
+            // leaving it in puts `[00:00.00-1]` on the stage.
+            while line.first == "[", let close = line.firstIndex(of: "]") {
+                line = line[line.index(after: close)...]
+            }
+            let body = line.trimmingCharacters(in: .whitespaces)
+            guard !body.isEmpty, !isCredit(body) else { continue }
+            kept.append(body)
+        }
+        // Blank padding at either end is the file's layout, not a rest — there
+        // is no timeline here for a rest to sit on.
+        return kept.isEmpty ? nil : kept.joined(separator: "\n")
     }
 
     /// Attaches a second `.lrc` of the same song in another language.
