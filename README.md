@@ -36,7 +36,7 @@ cover them.
 | **Platform** | macOS 14.2 or later |
 | **Dependencies** | None. `Package.swift` declares an empty `dependencies` array |
 | **Interfaces** | Window, menu bar panel, URL scheme, CLI, Unix socket, MCP, MIDI, resident JavaScript |
-| **Formats** | 44.1–192 kHz; WAV, FLAC and AAC, with per-source stems |
+| **Formats** | 44.1–96 kHz through the virtual device, to 192 kHz between physical ones; WAV, FLAC and AAC, with per-source stems |
 | **Licence** | Apache 2.0 |
 
 ## Features

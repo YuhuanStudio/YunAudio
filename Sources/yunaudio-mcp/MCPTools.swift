@@ -254,7 +254,7 @@ extension MCPServer {
                 + "yun.transcribe(state) — each taking true, false, or nothing to toggle — "
                 + "plus yun.preset(name), yun.config(name), yun.status(), yun.presets(), "
                 + "yun.configs() and yun.log(value). Nothing else exists: no filesystem, no "
-                + "network, no timers, no require. A script is stopped after two seconds. What "
+                + "network, no timers, no require. A script is stopped after 250 milliseconds. What "
                 + "comes back is whatever it logged, or its last value. Prefer the dedicated "
                 + "tools for anything they already cover — they validate their arguments and "
                 + "this does not.",
