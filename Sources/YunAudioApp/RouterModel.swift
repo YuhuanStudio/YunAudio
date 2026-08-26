@@ -9123,6 +9123,12 @@ final class RouterModel {
         deviceWatcher = DeviceChangeWatcher { [weak self] in
             Task { @MainActor in self?.requestDeviceChangeRefresh() }
         }
+        // Alongside the device watcher, because they answer the same question
+        // from different directions: the watcher sees endpoints come and go,
+        // and this sees the machine itself go — which the watcher cannot, since
+        // the device list on the far side of a sleep can be identical while
+        // every IOProc in it is dead.
+        observeSleepAndWake()
         engine.onRouteMemberRateChanged = { [weak self] device, rate in
             Task { @MainActor in self?.rebuildAfterMemberRateChange(device, rate) }
         }
@@ -10548,6 +10554,95 @@ final class RouterModel {
             wasInterruptedByDeviceLoss = false
             startFailed = false
             start()
+        }
+    }
+
+    // MARK: Sleep and wake
+
+    /// What to do with the route when the machine wakes.
+    ///
+    /// Sleep stops IOProcs, and what comes back is not guaranteed to be what
+    /// went down: the interface can say "running" while the cycle counter
+    /// stands still, which reads as the application being broken and is
+    /// actually the route being dead. Nothing observed sleep at all — the
+    /// route's fate across a lid-close was whatever CoreAudio happened to do.
+    ///
+    /// The decision is a function of two numbers so it can be asserted: the
+    /// cycle count when the machine went to sleep and the count read shortly
+    /// after it woke. Audio flowing again on its own means leave it alone;
+    /// a counter that has not moved means the route is dead and is restarted.
+    nonisolated static func wakeAction(
+        wasRunning: Bool, cyclesAtSleep: UInt64, cyclesAfterWake: UInt64
+    ) -> WakeAction {
+        guard wasRunning else { return .nothing }
+        return cyclesAfterWake > cyclesAtSleep ? .nothing : .restart
+    }
+
+    enum WakeAction: Equatable {
+        case nothing
+        case restart
+    }
+
+    /// How long after wake to wait before judging the route.
+    ///
+    /// Two seconds: CoreAudio brings devices back asynchronously, and judging
+    /// at the first instant would restart routes that were about to resume on
+    /// their own. Long enough for a healthy route to have produced hundreds of
+    /// cycles, short enough that a dead one is back before anybody has
+    /// finished sitting down.
+    nonisolated static let wakeSettleSeconds: Double = 2
+
+    @ObservationIgnored private var cyclesAtSleep: UInt64 = 0
+    @ObservationIgnored private var wasRunningAtSleep = false
+    @ObservationIgnored private var sleepObservers: [NSObjectProtocol] = []
+
+    /// Registers for the workspace's sleep and wake notifications.
+    ///
+    /// Idempotent, so a second call cannot double-restart a route.
+    func observeSleepAndWake(
+        center: NotificationCenter = NSWorkspace.shared.notificationCenter
+    ) {
+        guard sleepObservers.isEmpty else { return }
+        sleepObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.willSleepNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainRunLoopDelivery.perform { self?.noteSleep() }
+            })
+        sleepObservers.append(
+            center.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                MainRunLoopDelivery.perform { self?.handleWake() }
+            })
+    }
+
+    private func noteSleep() {
+        wasRunningAtSleep = isRunning
+        cyclesAtSleep = engine.cycleCount
+    }
+
+    func handleWake() {
+        let wasRunning = wasRunningAtSleep
+        let atSleep = cyclesAtSleep
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.wakeSettleSeconds))
+            guard let self else { return }
+            // Devices may have come and gone while the lid was shut; the
+            // refresh is what takes a displaced device back either way.
+            self.requestDeviceChangeRefresh()
+            switch Self.wakeAction(
+                wasRunning: wasRunning, cyclesAtSleep: atSleep,
+                cyclesAfterWake: self.engine.cycleCount)
+            {
+            case .nothing:
+                break
+            case .restart:
+                // The full restart rather than a nudge: the graph that went
+                // down with the lid may reference devices that renumbered on
+                // wake, and a rebuild recomputes all of it.
+                self.restartIfRunning()
+            }
         }
     }
 
