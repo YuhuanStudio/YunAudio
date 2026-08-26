@@ -795,10 +795,16 @@ struct OnlineLyrics: Sendable {
                 parsed != nil
                     && synchronised.map(Self.isInstrumentalLyrics) != true
                 ? synchronised : nil
+            // Cleaned before it is ranked, not after. A candidate whose
+            // untimed field is nothing but a credit block has nothing to show,
+            // and uncleaned it could still win on duration — then `Match.init`
+            // cleaned it to nil, found no timed words either, and returned nil
+            // for the whole provider, discarding a second candidate that had
+            // real words.
             let acceptedPlain =
-                candidate.plainLyrics?.nonEmpty.flatMap {
-                    Self.isInstrumentalLyrics($0) ? nil : $0
-                }
+                candidate.plainLyrics?.nonEmpty
+                .flatMap { Lyrics.plainWords(from: $0) }
+                .flatMap { Self.isInstrumentalLyrics($0) ? nil : $0 }
             guard acceptedSynchronised != nil || acceptedPlain != nil else { continue }
             let selection = LRCLIBSelection(
                 candidate: candidate, synchronised: acceptedSynchronised,

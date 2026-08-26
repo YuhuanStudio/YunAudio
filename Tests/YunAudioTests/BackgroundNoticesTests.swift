@@ -31,7 +31,7 @@ struct BackgroundNoticesTests {
     func eachFaultSpeaksOnce() {
         var ledger = BackgroundNoticeLedger()
         ledger.beginAnnouncing("dropouts")
-        ledger.handedOver("dropouts")
+        ledger.handedOver("dropouts", from: ledger.session)
         #expect(!ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
         // A different fault is a different thing to say.
         #expect(ledger.mayAnnounce(key: "route-stopped", windowIsVisible: false))
@@ -56,10 +56,33 @@ struct BackgroundNoticesTests {
     func refusalDoesNotCountAsSpoken() {
         var ledger = BackgroundNoticeLedger()
         ledger.beginAnnouncing("dropouts")
-        ledger.refused("dropouts")
+        ledger.refused("dropouts", from: ledger.session)
         #expect(ledger.posted.isEmpty, "it was never said")
         #expect(ledger.announcing.isEmpty, "and it is no longer in flight")
         #expect(ledger.mayAnnounce(key: "dropouts", windowIsVisible: false))
+    }
+
+    /// An answer that arrives after the route it belonged to has been replaced
+    /// belongs to nothing.
+    ///
+    /// The authorisation callback is not synchronous, and a route can be
+    /// stopped and started inside the wait. Recorded blind, the old session's
+    /// answer landed in the new session's `posted` and silenced that fault for
+    /// the whole of it — the notification killed by a route it never saw.
+    @Test("a late answer does not silence the session that replaced it")
+    func lateAnswerDoesNotCrossSessions() {
+        var ledger = BackgroundNoticeLedger()
+        let inFlight = ledger.session
+        ledger.beginAnnouncing("route-stopped")
+        ledger.reset()
+        ledger.handedOver("route-stopped", from: inFlight)
+        #expect(ledger.posted.isEmpty, "the new session has said nothing")
+        #expect(ledger.mayAnnounce(key: "route-stopped", windowIsVisible: false))
+        // And a refusal from the past cannot reach across either — here it
+        // would have cleared an in-flight notice the new session owns.
+        ledger.beginAnnouncing("route-stopped")
+        ledger.refused("route-stopped", from: inFlight)
+        #expect(!ledger.mayAnnounce(key: "route-stopped", windowIsVisible: false))
     }
 
     /// A new route session may speak about everything again, and under a new
@@ -68,7 +91,7 @@ struct BackgroundNoticesTests {
     func resetReopensEverything() {
         var ledger = BackgroundNoticeLedger()
         ledger.beginAnnouncing("dropouts")
-        ledger.handedOver("dropouts")
+        ledger.handedOver("dropouts", from: ledger.session)
         let before = ledger.session
         ledger.reset()
         #expect(ledger.session == before &+ 1)

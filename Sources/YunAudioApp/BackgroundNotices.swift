@@ -53,15 +53,24 @@ struct BackgroundNoticeLedger: Equatable {
     }
 
     /// The centre has it. Now it counts as said.
-    mutating func handedOver(_ key: String) {
+    ///
+    /// Ignored when the session has moved on. Handing over is not synchronous
+    /// — the first notice of a process waits on an authorisation callback, and
+    /// a route can be stopped and started inside that wait. Recorded blind,
+    /// the old session's answer wrote into the new session's `posted`, and the
+    /// fault it names could never speak again for the whole of that new
+    /// session: the notice was silenced by a route it had nothing to do with.
+    mutating func handedOver(_ key: String, from session: UInt64) {
+        guard session == self.session else { return }
         announcing.remove(key)
         posted.insert(key)
     }
 
     /// It was never said, so it must not be remembered as said — the next one
     /// of its kind may find authorisation granted, or at worst spend one cheap
-    /// no-op.
-    mutating func refused(_ key: String) {
+    /// no-op. Ignored across a session boundary for the same reason as above.
+    mutating func refused(_ key: String, from session: UInt64) {
+        guard session == self.session else { return }
         announcing.remove(key)
     }
 
@@ -136,7 +145,7 @@ final class BackgroundNotices {
         }
         let centre = UNUserNotificationCenter.current()
         if authorisationRequested {
-            ledger.handedOver(key)
+            ledger.handedOver(key, from: session)
             deliver()
         } else {
             authorisationRequested = true
@@ -149,10 +158,13 @@ final class BackgroundNotices {
                     // said — the next one of its kind may find authorisation
                     // granted, or at worst spend one cheap no-op.
                     guard granted else {
-                        self.ledger.refused(key)
+                        self.ledger.refused(key, from: session)
                         return
                     }
-                    self.ledger.handedOver(key)
+                    // Delivered either way — the fault did happen, and its
+                    // identifier carries the session it happened in, so it
+                    // cannot replace anything the new session has said.
+                    self.ledger.handedOver(key, from: session)
                     deliver()
                 }
             }

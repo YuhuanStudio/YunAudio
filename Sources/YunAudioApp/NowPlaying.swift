@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Foundation
+import YunAudioEngine
 import YunAudioHAL
 
 /// What the music players on this Mac are playing, and where they are in it.
@@ -909,8 +910,13 @@ enum NowPlaying {
         // a fifty-minute song.
         var duration = Double(fields[4]) ?? 0
         if application == "Spotify" { duration /= 1000 }
+        // Cleaned at the source, so the four places that read it cannot
+        // disagree about whether it was. People paste `.lrc` documents into
+        // Music's own lyrics field routinely, and drawn verbatim that puts the
+        // stamps and the credit block on the stage — the same failure the
+        // cache and the network paths were fixed for, through a third door.
         let nativeLyrics =
-            fields[7].trimmingCharacters(in: .whitespacesAndNewlines)
+            Lyrics.plainWords(from: fields[7]) ?? ""
         let artwork = fields[8].trimmingCharacters(in: .whitespacesAndNewlines)
         return Track(
             application: application,

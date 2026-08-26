@@ -157,7 +157,9 @@ struct PlainLyricCleaningTests {
             [00:22.10-1]我好想你
             """
         let words = try #require(Lyrics.plainWords(from: raw))
-        #expect(words == "下雨天了怎麼辦\n我好想你")
+        // The blank between them survives as a stanza break; the `[ti:]` tag
+        // above does not become one, because it was never a gap.
+        #expect(words == "下雨天了怎麼辦\n\n我好想你")
     }
 
     /// Plain words that were always plain are left alone.
@@ -165,6 +167,42 @@ struct PlainLyricCleaningTests {
     func plainWordsSurvive() throws {
         let words = try #require(Lyrics.plainWords(from: "Hello darkness\nMy old friend"))
         #expect(words == "Hello darkness\nMy old friend")
+    }
+
+    /// A plain sheet's own structure is not `.lrc` syntax.
+    ///
+    /// The strip took every bracket at the head of a line, which deletes the
+    /// section headings an untimed sheet exists to show.
+    @Test("section headings and stage directions survive")
+    func sheetStructureSurvives() throws {
+        let words = try #require(
+            Lyrics.plainWords(
+                from: "[Verse 1]\nOpen your eyes: I'm still here\n[Chorus]\n[laughs] oh well"))
+        #expect(
+            words == "[Verse 1]\nOpen your eyes: I'm still here\n[Chorus]\n[laughs] oh well")
+    }
+
+    /// `op` and `sp` are real credit roles, and matched as bare prefixes they
+    /// also match a lyric that begins with them.
+    @Test("an English role must end where a word ends")
+    func creditRolesRespectWordBoundaries() {
+        #expect(!Lyrics.isCredit("Open your eyes: I'm still here"))
+        #expect(!Lyrics.isCredit("Special: the way you are"))
+        #expect(Lyrics.isCredit("OP : Universal"))
+        #expect(Lyrics.isCredit("SP: Sony"))
+        // The Chinese roles keep the loose prefix they need — what arrives is
+        // the role in two languages at once.
+        #expect(Lyrics.isCredit("作词 Lyricist : 翟云鹏"))
+        #expect(Lyrics.isCredit("鼓Drum : 郝稷倫"))
+    }
+
+    /// Stanza breaks are the sheet's grouping, and flattening them turns a
+    /// song into one block — but a run of six blanks is padding, not six rests.
+    @Test("one stanza break is kept and a run of them is not")
+    func stanzaBreaksCollapseToOne() throws {
+        let words = try #require(
+            Lyrics.plainWords(from: "\n\nfirst verse\n\n\n\nsecond verse\n\n"))
+        #expect(words == "first verse\n\nsecond verse")
     }
 
     /// Nothing left is nil, not an empty stage — the caller can then fall

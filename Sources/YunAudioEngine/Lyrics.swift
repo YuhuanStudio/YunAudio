@@ -314,7 +314,17 @@ public struct Lyrics: Sendable, Hashable {
         // file. Long heads are still sentences rather than roles, but the cap
         // has to clear that last one.
         guard !head.isEmpty, head.count <= 40 else { return false }
-        return creditRoles.contains { head.hasPrefix($0) }
+        return creditRoles.contains { role in
+            guard head.hasPrefix(role) else { return false }
+            // An English role has to end where a word ends. `op` and `sp` are
+            // real roles the indexes send, and matched as a bare prefix they
+            // also match 「Open your eyes: I'm still here」 — a lyric, deleted
+            // for looking like a credit. The Chinese roles keep the loose
+            // prefix they need: what arrives is the role in two languages at
+            // once, 「作词 Lyricist : …」, with no boundary to test.
+            guard let last = role.last, last.isASCII, last.isLetter else { return true }
+            return head.dropFirst(role.count).first?.isLetter != true
+        }
     }
 
     /// Fixed duet markers, in both scripts. A performer's name is recognised
@@ -428,21 +438,58 @@ public struct Lyrics: Sendable, Hashable {
     /// empty stage up.
     public static func plainWords(from text: String) -> String? {
         var kept: [String] = []
-        for raw in text.split(whereSeparator: \.isNewline) {
+        for raw in text.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
             var line = Substring(raw)
-            // Every bracket at the head, whether or not it was a time we could
-            // read: unreadable is exactly the case that brought us here, and
-            // leaving it in puts `[00:00.00-1]` on the stage.
-            while line.first == "[", let close = line.firstIndex(of: "]") {
+            // A line that was blank before anything was taken off it, as
+            // against one this pass emptied. `[ti:下雨天]` is a tag being
+            // removed, not a gap between verses, and counting it as a stanza
+            // break puts a hole in the sheet where a header used to be.
+            let wasBlank = line.trimmingCharacters(in: .whitespaces).isEmpty
+            while line.first == "[", let close = line.firstIndex(of: "]"),
+                isLRCHead(String(line[line.index(after: line.startIndex)..<close]))
+            {
                 line = line[line.index(after: close)...]
             }
             let body = line.trimmingCharacters(in: .whitespaces)
-            guard !body.isEmpty, !isCredit(body) else { continue }
+            if body.isEmpty {
+                guard wasBlank else { continue }
+                // A stanza break, kept — but only one. An untimed sheet uses
+                // blank lines to group verses, and flattening them turns a
+                // song into one undifferentiated block. Runs of them are the
+                // file's own padding rather than four rests.
+                if let last = kept.last, !last.isEmpty { kept.append("") }
+                continue
+            }
+            guard !isCredit(body) else { continue }
             kept.append(body)
         }
-        // Blank padding at either end is the file's layout, not a rest — there
-        // is no timeline here for a rest to sit on.
+        // Padding at either end has nothing to separate.
+        while kept.first?.isEmpty == true { kept.removeFirst() }
+        while kept.last?.isEmpty == true { kept.removeLast() }
         return kept.isEmpty ? nil : kept.joined(separator: "\n")
+    }
+
+    /// Whether a bracket at the head of a line is `.lrc` syntax rather than
+    /// part of the words.
+    ///
+    /// The strip cannot simply take every bracket. A plain lyric sheet writes
+    /// `[Verse 1]`, `[Chorus]` and `[laughs]`, and removing those deletes the
+    /// structure the sheet exists to show. But it cannot only take stamps this
+    /// parser reads either — a stamp it could not read is exactly the case
+    /// that sends a document down the untimed path in the first place.
+    ///
+    /// So: a stamp, a stamp-shaped thing this version does not understand, or
+    /// a metadata tag. `[Verse 1]` is none of the three — no colon, and it
+    /// does not begin with a digit.
+    static func isLRCHead(_ body: String) -> Bool {
+        if timestamp(body) != nil { return true }
+        guard let colon = body.firstIndex(where: { $0 == ":" }) else { return false }
+        // Stamp-shaped: something numeric before the colon.
+        if body.first?.isNumber == true { return true }
+        // A tag: a short alphabetic key, which is how `[ti:]` and the rest are
+        // written. Anything longer is a sentence that happens to have a colon.
+        let key = body[body.startIndex..<colon]
+        return !key.isEmpty && key.count <= 8 && key.allSatisfy { $0.isLetter && $0.isASCII }
     }
 
     /// Attaches a second `.lrc` of the same song in another language.
