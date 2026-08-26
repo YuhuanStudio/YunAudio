@@ -6009,7 +6009,19 @@ final class RouterModel {
         // "it is breaking up right now" from.
         recentDropoutTimes.append(event.at)
         recentDropoutTimes = Self.dropoutsInsideTheWindow(recentDropoutTimes, at: event.at)
-        if Self.isBreakingUp(recentDropoutTimes) { dropoutsHaveClustered = true }
+        if Self.isBreakingUp(recentDropoutTimes) {
+            dropoutsHaveClustered = true
+            // Said to the system too, because the window saying it may be
+            // closed — this application keeps routing without one, and audio
+            // breaking up is exactly the fault somebody closes the window
+            // before hitting.
+            BackgroundNotices.shared.announce(
+                key: "dropouts",
+                title: loc("The audio is breaking up"),
+                body: loc(
+                    "Several missed deadlines in a few seconds. Open YunAudio for the details and a fix."
+                ))
+        }
     }
 
     /// What to tell somebody whose audio broke up, when it did.
@@ -10530,6 +10542,12 @@ final class RouterModel {
             stop()
             wasInterruptedByDeviceLoss = true
             lastError = loc("A device in the route was unplugged.")
+            BackgroundNotices.shared.announce(
+                key: "route-stopped",
+                title: loc("Audio stopped"),
+                body: loc(
+                    "A device in the route was unplugged and nothing could stand in for it."
+                ))
         } else if !isRunning, !stillGone, !isBusy, wasInterruptedByDeviceLoss || startFailed {
             // Both ends are present again — the substitution above saw to that —
             // and yet the route is down. Either the rebuild the substitution
@@ -11168,6 +11186,9 @@ final class RouterModel {
         isBusy = true
         isStarting = true
         armStartWatchdog()
+        // A fresh route session may speak again about faults the previous one
+        // already reported.
+        BackgroundNotices.shared.reset()
         let intent = RouteStartIntent()
         currentStartIntent = intent
         let engine = engine
@@ -13360,6 +13381,12 @@ final class RouterModel {
             await MainActor.run {
                 guard let self, self.isBusy, self.isStarting else { return }
                 self.startIsOverdue = true
+                BackgroundNotices.shared.announce(
+                    key: "start-overdue",
+                    title: loc("Audio is not starting"),
+                    body: loc(
+                        "Core Audio has not answered for several seconds. Open YunAudio for what to do."
+                    ))
             }
             // Ask the system, rather than leaving somebody with "several
             // seconds and no answer" to interpret. The verdict is the

@@ -913,3 +913,9 @@
 "Core Audio is answering questions but not opening devices, and has not for several seconds. A call inside the system's audio support did not return, which affects every application on this machine — no setting here can clear it. Quitting YunAudio releases it; if audio is still wrong afterwards, restarting the audio server does (sudo killall coreaudiod in Terminal)." = "Core Audio 還在回答問題,但已經好幾秒開不了裝置。系統音訊支援裡有一個呼叫沒有回來,這會影響這台機器上的每一個程式 —— 這裡沒有任何設定能解決。結束 YunAudio 就會放開它;如果之後音訊還是不對,重啟音訊伺服器可以(終端機執行 sudo killall coreaudiod)。";
 "Building the echo canceller did not come back from Core Audio, and nothing can be built after that. Quit and open YunAudio again — and leave echo cancellation off if it happens twice." = "建構回音消除器的呼叫沒有從 Core Audio 回來,在那之後什麼都建不起來。請結束 YunAudio 再重新打開 —— 如果再發生一次,就別開回音消除。";
 "The system's audio server will build a device and then refuse to open it. Every application on this machine is affected, waiting does not end it, and no setting here can clear it. Restarting the audio server does: run sudo killall coreaudiod in Terminal. Audio comes back on its own a second or two later." = "系統的音訊伺服器會建出裝置,然後拒絕開啟它。這台機器上的每一個程式都會受影響,等待不會結束它,這裡也沒有任何設定能解決。重啟音訊伺服器可以:在終端機執行 sudo killall coreaudiod。一兩秒後音訊會自己回來。";
+"The audio is breaking up" = "聲音正在斷斷續續";
+"Several missed deadlines in a few seconds. Open YunAudio for the details and a fix." = "幾秒內錯過了多個 deadline。打開 YunAudio 看細節和解法。";
+"Audio stopped" = "音訊停止了";
+"A device in the route was unplugged and nothing could stand in for it." = "路由中的裝置被拔掉了,而且沒有東西能頂替它。";
+"Audio is not starting" = "音訊起不來";
+"Core Audio has not answered for several seconds. Open YunAudio for what to do." = "Core Audio 已經好幾秒沒有回應。打開 YunAudio 看該怎麼做。";
