@@ -401,6 +401,41 @@ enum UIFlowCheck {
                 }
             }
             note("style mask: \(window.styleMask.rawValue)")
+            // Closing the window is not quitting the application.
+            //
+            // This is a menu-bar application — `LSUIElement`, no Dock icon —
+            // so the window is a view onto something that keeps running
+            // without it. That is the whole shape of the product and nothing
+            // asserted it: a change that tied the engine to the window's
+            // lifetime would take the audio down with the window and every
+            // other check here would still pass, because they all run with the
+            // window open.
+            let routesBefore = model.activeRoutes.count
+            let runningBefore = model.isRunning
+            window.performClose(nil)
+            await pause(0.4)
+            check("closing the window does not quit the application", NSApp.isRunning)
+            check(
+                "and the route is untouched by it",
+                model.isRunning == runningBefore
+                    && model.activeRoutes.count == routesBefore)
+            // And the way back in. The delegate's reopen hook is what the menu
+            // bar item and the Dock both call, so exercising it is exercising
+            // the only route a person has to the window once it is closed.
+            //
+            // Through `TerminationObserver.current`, not `NSApp.delegate`:
+            // SwiftUI installs its own forwarding delegate around the adaptor,
+            // so the observer is not the application's delegate. The class says
+            // so and keeps a weak reference for exactly this — and asking the
+            // wrong one is how this check first reported that there was no way
+            // back into a window it had just closed.
+            let reopen = TerminationObserver.current?.onReopenMainWindow
+            check("there is a way to bring the window back", reopen != nil)
+            reopen?()
+            await pause(0.6)
+            check(
+                "and it comes back",
+                NSApp.windows.contains { $0.title == "YunAudio" && $0.isVisible })
             check("the window is titled", window.styleMask.contains(.titled))
             check("and closable", window.styleMask.contains(.closable))
             check("and miniaturisable", window.styleMask.contains(.miniaturizable))

@@ -125,6 +125,28 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Closing the window is not quitting.
+    ///
+    /// This is a menu-bar application: `LSUIElement`, no Dock icon, a status
+    /// item that starts and stops routing, and an engine whose whole point is
+    /// to keep carrying audio while somebody works in something else. SwiftUI's
+    /// default for a `Window` scene is the opposite — the last window closing
+    /// ends the process — so closing the router's window took the audio down
+    /// with it.
+    ///
+    /// Measured before the fix: the flow check called `performClose` on the
+    /// main window and the process exited cleanly, mid-section, with every
+    /// check after it unrun.
+    ///
+    /// The way back in is already built: `applicationShouldHandleReopen` above,
+    /// the status item's "Open YunAudio", and the URL scheme. Quitting stays
+    /// deliberate — the menu item, ⌘Q, or `yunaudio-cli`.
+    func applicationShouldTerminateAfterLastWindowClosed(
+        _ sender: NSApplication
+    ) -> Bool {
+        false
+    }
+
     func applicationShouldHandleReopen(
         _ sender: NSApplication, hasVisibleWindows flag: Bool
     ) -> Bool {
