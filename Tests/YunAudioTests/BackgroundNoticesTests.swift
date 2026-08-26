@@ -54,3 +54,21 @@ struct BackgroundNoticesTests {
         #expect(source.contains("BackgroundNotices.shared.reset()"))
     }
 }
+
+@MainActor
+@Suite("The notice centre and the test runner")
+struct BackgroundNoticesProcessTests {
+
+    /// The guard this suite exists in: `UNUserNotificationCenter.current()`
+    /// throws `bundleProxyForCurrentProcess is nil` in a bundle-less process,
+    /// and the first test that drove three dropouts through the model brought
+    /// the whole suite down as an uncaught NSException.
+    @Test("a bundle-less process does not touch the notification centre")
+    func bundlelessProcessIsGuarded() {
+        #expect(!BackgroundNotices.processCanPostNotifications)
+        // And announcing from here must be a no-op rather than a crash —
+        // which this call is the proof of.
+        BackgroundNotices.shared.announce(
+            key: "test", title: "test", body: "test")
+    }
+}

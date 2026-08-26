@@ -29,6 +29,17 @@ final class BackgroundNotices {
         !windowIsVisible && !alreadyPosted.contains(key)
     }
 
+    /// Whether this process can talk to the notification centre at all.
+    ///
+    /// `UNUserNotificationCenter.current()` throws an Objective-C exception —
+    /// `bundleProxyForCurrentProcess is nil` — in a process without an
+    /// application bundle, which is what the test runner is. The first test
+    /// that drove three dropouts through the model took the whole suite down
+    /// with it. An `.app` bundle is the thing the centre actually requires, so
+    /// that is what is checked.
+    nonisolated static let processCanPostNotifications =
+        Bundle.main.bundleURL.pathExtension == "app"
+
     private var posted: Set<String> = []
     private var authorisationRequested = false
 
@@ -42,6 +53,7 @@ final class BackgroundNotices {
     /// dialog, which is the right weight for a utility's fault reports —
     /// somebody who wants banners can promote them in System Settings.
     func announce(key: String, title: String, body: String) {
+        guard Self.processCanPostNotifications else { return }
         let windowIsVisible = NSApp.windows.contains {
             $0.isVisible && ($0.title == "YunAudio" || $0.title.isEmpty == false)
         }
