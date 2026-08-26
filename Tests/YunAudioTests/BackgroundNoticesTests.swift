@@ -39,6 +39,21 @@ struct BackgroundNoticesTests {
                 windowIsVisible: false, alreadyPosted: ["dropouts"], key: "route-stopped"))
     }
 
+    /// A repeat of the same fault in a later session is a new entry.
+    ///
+    /// Re-using a notification identifier replaces what was delivered rather
+    /// than adding to it, so the second session's warning would overwrite the
+    /// first — and a replacement of something already dismissed may never
+    /// alert. The identifier carries the session for that reason.
+    @Test("the identifier carries the session, not only the fault")
+    func identifierCarriesTheSession() throws {
+        let source = try String(
+            contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
+                + "Sources/YunAudioApp/BackgroundNotices.swift", encoding: .utf8)
+        #expect(source.contains("yunaudio.\(key).\(session)"))
+        #expect(source.contains("session &+= 1"))
+    }
+
     /// The hooks exist where the faults happen, and the reset where a new
     /// route session begins — one per site, so a rename cannot silently orphan
     /// one.

@@ -42,9 +42,15 @@ final class BackgroundNotices {
 
     private var posted: Set<String> = []
     private var authorisationRequested = false
+    /// Rises once per route session, so a repeat of the same fault is a new
+    /// entry rather than a replacement of the last one.
+    private var session: UInt64 = 0
 
     /// Forgets what has been posted, so the next route session can speak again.
-    func reset() { posted = [] }
+    func reset() {
+        posted = []
+        session &+= 1
+    }
 
     /// Posts one notice, subject to the rule above.
     ///
@@ -62,6 +68,9 @@ final class BackgroundNotices {
                 windowIsVisible: windowIsVisible, alreadyPosted: posted, key: key)
         else { return }
         posted.insert(key)
+        // Read out here rather than captured: the closure is `@Sendable` and
+        // this actor's state is not for it to reach into.
+        let session = session
 
         let deliver: @Sendable () -> Void = {
             // Fetched inside the closure rather than captured: the centre is
@@ -72,7 +81,15 @@ final class BackgroundNotices {
             content.body = body
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(
-                    identifier: "com.yuhuanstudio.yunaudio.\(key)",
+                    // The session is in the identifier, not just the key.
+                    //
+                    // Re-using one replaces the delivered notification rather
+                    // than adding to it, so the second session's "the audio is
+                    // breaking up" would quietly overwrite the first — and if
+                    // the first had already been dismissed, there is a real
+                    // chance the replacement never alerts at all. Each session's
+                    // notice is its own.
+                    identifier: "com.yuhuanstudio.yunaudio.\(key).\(session)",
                     content: content, trigger: nil))
         }
         let centre = UNUserNotificationCenter.current()
