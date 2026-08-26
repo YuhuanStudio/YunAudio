@@ -50,7 +50,7 @@ struct BackgroundNoticesTests {
         let source = try String(
             contentsOfFile: PreferencesCompletenessTests.sourceRootForTests
                 + "Sources/YunAudioApp/BackgroundNotices.swift", encoding: .utf8)
-        #expect(source.contains("yunaudio.\(key).\(session)"))
+        #expect(source.contains(#"yunaudio.\(key).\(session)"#))
         #expect(source.contains("session &+= 1"))
     }
 
