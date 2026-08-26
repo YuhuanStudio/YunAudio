@@ -344,6 +344,68 @@ enum UIFlowCheck {
             "its frame is remembered between launches",
             window?.frameAutosaveName == "YunAudioMainWindow")
 
+        // The three buttons every macOS window has.
+        //
+        // The title bar is hidden and the content reaches the frame, which is
+        // what the header's 28-point top inset exists to leave room for — the
+        // traffic lights are supposed to float over it. Somebody reported them
+        // simply absent, and nothing in this gate would have noticed: an
+        // offscreen render has no window chrome at all, and a photograph shows
+        // a dark corner that reads as empty either way.
+        if let window {
+            for (name, kind) in [
+                ("close", NSWindow.ButtonType.closeButton),
+                ("minimise", .miniaturizeButton),
+                ("zoom", .zoomButton),
+            ] {
+                let button = window.standardWindowButton(kind)
+                check("the window has its \(name) button", button != nil)
+                check(
+                    "and the \(name) button is not hidden",
+                    button?.isHidden == false)
+                if let button, !button.isHidden {
+                    // In the frame, not merely allocated. A button parked
+                    // outside the visible bounds is as absent as a missing one.
+                    let frame = button.convert(button.bounds, to: nil)
+                    check(
+                        "and the \(name) button is inside the window",
+                        frame.maxY <= window.frame.height + 1 && frame.minX >= -1)
+                    note(
+                        String(
+                            format: "%@ button at %.0f, %.0f", name, frame.minX,
+                            frame.minY))
+                }
+            }
+            // Present, unhidden, correctly placed — and invisible. The only
+            // thing left is what is drawn on top of them, so the order the
+            // theme frame stacks its children in is the reading that matters.
+            if let themeFrame = window.contentView?.superview {
+                let order = themeFrame.subviews.map { view -> String in
+                    let kind = String(describing: type(of: view))
+                    let opaque = view.isOpaque ? " opaque" : ""
+                    let hidden = view.isHidden ? " hidden" : ""
+                    return "\(kind)\(opaque)\(hidden)"
+                }
+                note("theme frame stacks: \(order.joined(separator: " → "))")
+                let titlebarIndex = themeFrame.subviews.firstIndex {
+                    String(describing: type(of: $0)).contains("Titlebar")
+                }
+                let contentIndex = themeFrame.subviews.firstIndex { $0 === window.contentView }
+                if let titlebarIndex, let contentIndex {
+                    // Later in the array is drawn later, so it is on top.
+                    check(
+                        "the title bar is stacked above the content",
+                        titlebarIndex > contentIndex)
+                } else {
+                    check("the theme frame has a title bar container", titlebarIndex != nil)
+                }
+            }
+            note("style mask: \(window.styleMask.rawValue)")
+            check("the window is titled", window.styleMask.contains(.titled))
+            check("and closable", window.styleMask.contains(.closable))
+            check("and miniaturisable", window.styleMask.contains(.miniaturizable))
+        }
+
         // A shortcut that cannot be registered and cannot be changed is a dead
         // feature. Both of the original combinations were already owned by
         // something else on this machine, so it falls through candidates now.
