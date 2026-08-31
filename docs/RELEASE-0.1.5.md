@@ -73,4 +73,39 @@ holding the current-player repair behind them.
 
 ## Release evidence
 
-To be recorded on the tagged shipping commit.
+`./App/verify.sh --full` on the release candidate:
+
+    build…                          ok
+    strict formatting…              ok
+    tests…                          ok
+    strings…                        ok
+    app bundle…                     ok
+    settings entry…                 ok
+    offscreen render…               ok
+    photograph the real window…     ok
+    installed driver matches release…ok
+    audio can start at all…         ok
+    the path is bit-exact, release… ok
+    flow check…                     ok
+
+`./App/verify.sh --fresh` also passed: the app builds from a clean exported
+clone with no access to this working tree's build products or untracked files.
+
+The Automation failure was reproduced and then measured away on macOS 27 build
+26A5421a with Spotify 1.2.98.301 running. The candidate read the track, artwork,
+duration and position and drew the words in the real KTV window. A one-second
+sample found repeated real AppleScript reads and no passive permission preflight
+on either worker queue.
+
+The release soak held a real Razer Barracuda Bluetooth input → YunAudio route
+for 30 minutes:
+
+    allocations on the IO thread  0
+    path at the end               bit-exact
+    processor                     0.52% of one core
+    memory growth                 -6.8 kB/min
+    cycle rate                    125.0/s, worst deviation 0.1
+    clock                         locked 1.000000 throughout
+
+The driver source is unchanged from 0.1.4, and the installed copy matched it
+before every hardware assertion ran.
