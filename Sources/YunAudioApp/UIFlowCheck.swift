@@ -1495,14 +1495,18 @@ enum UIFlowCheck {
             buses.first(where: \.followsMaster)?.id != model.monitorDeviceUID
                 || model.monitorDeviceUID == nil)
 
-        if model.monitorOptions.isEmpty {
-            note("no second output on this machine — one bus only")
-        } else if let second = model.monitorOptions.first(where: {
-            $0.uid != model.selectedDestinationUID
-        }) {
+        if let second = measurableMonitor(
+            in: model, excluding: Set([model.selectedDestinationUID].compactMap { $0 }))
+        {
             let previous = model.monitorDeviceUID
             model.monitorDeviceUID = second.uid
-            await waitUntil("the monitor came up", { !model.isBusy }, timeout: 15)
+            await waitUntil(
+                "the monitor came up",
+                {
+                    model.activeRoutes.contains {
+                        $0.destination.deviceUID == second.uid
+                    }
+                }, timeout: 15)
             let two = model.buses
             check("choosing a monitor makes a second bus", two.count == 2)
             check("they are A and B", Set(two.map(\.letter)) == ["A", "B"])
@@ -1511,6 +1515,8 @@ enum UIFlowCheck {
                 two.first { $0.id == second.uid }?.kind == .monitor)
             model.monitorDeviceUID = previous
             await waitUntil("and it went back", { !model.isBusy }, timeout: 15)
+        } else {
+            note("no second output with resolved topology — one bus only")
         }
 
         try section("sources rather than wires")
@@ -1759,10 +1765,16 @@ enum UIFlowCheck {
         check("disarming restores the previous mute", model.isInputMuted == muteBefore)
 
         try section("direct monitoring")
-        if let monitor = model.monitorOptions.first {
+        if let monitor = measurableMonitor(in: model) {
             let routesBefore = model.activeRoutes.count
             model.monitorDeviceUID = monitor.uid
-            await waitUntil("the monitor came up", { !model.isBusy }, timeout: 12)
+            await waitUntil(
+                "the monitor came up",
+                {
+                    model.activeRoutes.contains {
+                        $0.destination.deviceUID == monitor.uid
+                    }
+                }, timeout: 12)
             if let error = model.lastError { note("the monitor said: \(error)") }
             check("no error was reported", model.lastError == nil)
             check("still routing", model.isRunning)
@@ -6659,6 +6671,23 @@ enum UIFlowCheck {
         await checkPersisted("and back again") { $0.residentScript == originalScript }
     }
 
+    /// A monitor whose channels are facts rather than a metadata placeholder.
+    ///
+    /// Unused Bluetooth endpoints deliberately appear in both pickers until a
+    /// person chooses one and its exact topology is hydrated. That is the right
+    /// product behaviour and the wrong input to a check about an already-built
+    /// second bus: the first unresolved row on this machine is the headset's
+    /// input endpoint, which correctly resolves to zero output channels. Choose
+    /// only a device which can carry the samples this check is about.
+    private static func measurableMonitor(
+        in model: RouterModel, excluding: Set<String> = []
+    ) -> AudioDevice? {
+        model.monitorOptions.first {
+            $0.hasCompleteTopology && $0.outputChannels > 0
+                && !excluding.contains($0.uid)
+        }
+    }
+
     /// The monitor mix, which is carried by route *indices* rather than by
     /// anything the routes themselves say.
     ///
@@ -6674,8 +6703,8 @@ enum UIFlowCheck {
             note("no route is up — skipped")
             return
         }
-        guard let monitor = model.monitorOptions.first else {
-            note("no second output to monitor on — skipped")
+        guard let monitor = measurableMonitor(in: model) else {
+            note("no second output with resolved topology to monitor on — skipped")
             return
         }
         await waitUntil("nothing else is in flight", { !model.isBusy }, timeout: 20)
@@ -7936,14 +7965,19 @@ enum UIFlowCheck {
         // headphone correction, the monitor sends — was silent rather than
         // noisy, so the plain case coming back is no evidence about these.
         if let microphone = microphones.first {
-            if let monitor = model.monitorOptions.first(where: {
-                $0.uid != toneDevice.uid && $0.uid != model.selectedDestinationUID
-            }) {
+            let excluded = Set(
+                [toneDevice.uid, model.selectedDestinationUID].compactMap { $0 })
+            if let monitor = measurableMonitor(in: model, excluding: excluded) {
                 model.monitorDeviceUID = monitor.uid
                 await settle(model, timeout: 15)
                 await waitUntil(
                     "the monitor came up on \(monitor.name)",
-                    { model.isRunning && !model.isBusy }, timeout: 15)
+                    {
+                        model.isRunning && !model.isBusy
+                            && model.activeRoutes.contains {
+                                $0.destination.deviceUID == monitor.uid
+                            }
+                    }, timeout: 15)
                 note("with a monitor on \(monitor.name)")
                 await roundTrip(
                     model, from: toneDevice, via: microphone, label: "with a monitor")
@@ -8723,12 +8757,18 @@ enum UIFlowCheck {
         let previousMonitor = model.monitorDeviceUID
         var borrowedMonitor = false
         if previousMonitor == nil,
-            let second = model.monitorOptions.first(where: {
-                $0.uid != model.selectedDestinationUID
-            })
+            let second = measurableMonitor(
+                in: model,
+                excluding: Set([model.selectedDestinationUID].compactMap { $0 }))
         {
             model.monitorDeviceUID = second.uid
-            await waitUntil("a second bus came up", { !model.isBusy }, timeout: 15)
+            await waitUntil(
+                "a second bus came up",
+                {
+                    model.activeRoutes.contains {
+                        $0.destination.deviceUID == second.uid
+                    }
+                }, timeout: 15)
             borrowedMonitor = model.monitorDeviceUID == second.uid
         }
         defer {
