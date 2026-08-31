@@ -339,7 +339,8 @@ final class PermissionCentre {
         microphone = snapshot.microphone
         loginItem = snapshot.loginItem
         automationTargets = snapshot.automationTargets
-        automation = snapshot.automation
+        let installed = Set(snapshot.automationTargets.map(\.bundleID))
+        automation = automation.filter { installed.contains($0.key) }
         hasCompletedSafeStatusSnapshot = true
 
         guard requestAllWaitsForSnapshot else { return }

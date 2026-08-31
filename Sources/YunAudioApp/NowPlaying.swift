@@ -115,7 +115,6 @@ enum NowPlaying {
         var paused: Track?
         for (name, bundleID) in players {
             guard isPlayerRunning(bundleID) else { continue }
-            guard automationPermissionStatus(for: bundleID) == noErr else { continue }
             guard let track = read(name: name) else { continue }
             if track.isPlaying { return track }
             if paused == nil { paused = track }
@@ -127,7 +126,6 @@ enum NowPlaying {
         // is not.
         for browser in BrowserNowPlaying.browsers {
             guard isPlayerRunning(browser.bundleID) else { continue }
-            guard automationPermissionStatus(for: browser.bundleID) == noErr else { continue }
             guard let track = readBrowser(browser.name) else { continue }
             if track.isPlaying { return track }
             if paused == nil { paused = track }
@@ -467,13 +465,6 @@ enum NowPlaying {
         var failure: QueryFailure?
         for (name, bundleID) in ordered(preferring: application) {
             guard isPlayerRunning(bundleID) else { continue }
-            let permission = automationPermissionStatus(for: bundleID)
-            guard permission == noErr else {
-                failure =
-                    failure
-                    ?? queryFailure(application: name, code: Int(permission))
-                continue
-            }
             let query = readPosition(name: name)
             if let queryFailure = query.failure {
                 failure = failure ?? queryFailure
@@ -554,8 +545,7 @@ enum NowPlaying {
         guard
             let bundleID = (players + BrowserNowPlaying.browsers.map { ($0.name, $0.bundleID) })
                 .first(where: { $0.0 == application })?.1,
-            isPlayerRunning(bundleID),
-            automationPermissionStatus(for: bundleID) == noErr
+            isPlayerRunning(bundleID)
         else { return nil }
         return isBrowser(application) ? readBrowser(application) : read(name: application)
     }
@@ -941,23 +931,23 @@ enum NowPlaying {
         installedAutomationTargets.map(\.bundleID)
     }
 
-    /// Reads Automation state without displaying a prompt or asking the player
-    /// for data.
-    nonisolated static func automationPermissionStatus(for bundleID: String) -> OSStatus {
-        determineAutomationPermission(for: bundleID, askingUser: false)
-    }
-
-    /// Asks TCC for one player's Automation permission without reading a track.
+    /// Asks for Automation by sending the smallest real event the feature uses.
+    ///
+    /// `AEDeterminePermissionToAutomateTarget` is not a safe preflight on current
+    /// macOS 27: it can wait forever for Spotify even though an AppleScript event
+    /// answers. A real event gives TCC the same user-mediated decision and its
+    /// error is the permission state the rest of the application already maps.
     nonisolated static func requestAutomationPermission(for bundleID: String) -> OSStatus {
-        determineAutomationPermission(for: bundleID, askingUser: true)
-    }
-
-    nonisolated private static func determineAutomationPermission(
-        for bundleID: String, askingUser: Bool
-    ) -> OSStatus {
-        let target = NSAppleEventDescriptor(bundleIdentifier: bundleID)
-        guard let descriptor = target.aeDesc else { return OSStatus(paramErr) }
-        return AEDeterminePermissionToAutomateTarget(
-            descriptor, AEEventClass(kAECoreSuite), AEEventID(kAEGetData), askingUser)
+        guard isPlayerRunning(bundleID) else { return OSStatus(procNotFound) }
+        guard
+            bundleID.unicodeScalars.allSatisfy({
+                CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).contains($0)
+            })
+        else { return OSStatus(paramErr) }
+        let source = "tell application id \"\(bundleID)\" to get running"
+        guard let script = NSAppleScript(source: source) else { return OSStatus(paramErr) }
+        var error: NSDictionary?
+        _ = script.executeAndReturnError(&error)
+        return OSStatus(error?["NSAppleScriptErrorNumber"] as? Int ?? Int(noErr))
     }
 }

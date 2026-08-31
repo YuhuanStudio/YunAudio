@@ -15,7 +15,6 @@ struct PermissionSafeStatusSnapshot: Equatable, Sendable {
     let microphone: PermissionCentre.State
     let loginItem: PermissionCentre.State
     let automationTargets: [NowPlaying.AutomationTarget]
-    let automation: [String: PermissionCentre.State]
     let completedSystemCalls: Int
     let timedOut: Bool
     let wasRevoked: Bool
@@ -26,7 +25,6 @@ struct PermissionSystemServiceOperations: @unchecked Sendable {
     let microphoneState: @Sendable () -> PermissionCentre.State
     let loginItemState: @Sendable () -> PermissionCentre.State
     let isApplicationInstalled: @Sendable (String) -> Bool
-    let automationState: @Sendable (String) -> PermissionCentre.State
 
     static let system = PermissionSystemServiceOperations(
         microphoneState: {
@@ -38,10 +36,6 @@ struct PermissionSystemServiceOperations: @unchecked Sendable {
         },
         isApplicationInstalled: { bundleID in
             NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) != nil
-        },
-        automationState: { bundleID in
-            PermissionCentre.automationState(
-                NowPlaying.automationPermissionStatus(for: bundleID))
         })
 }
 
@@ -51,6 +45,12 @@ struct PermissionSystemServiceOperations: @unchecked Sendable {
 /// whether an answer is publishable, while the sole worker retains ownership if
 /// a call returns late. At most eight known automation targets are examined; a
 /// registry cannot turn this status card into an unbounded scan.
+///
+/// Automation state deliberately is not preflighted here. On macOS 27 build
+/// 26A5421a, `AEDeterminePermissionToAutomateTarget` never returned for a live
+/// Spotify 1.2.98.301. Combining that call with installation discovery erased
+/// the Music result already in hand and left this sole worker occupied forever.
+/// Actual Apple events now provide the permission answer at the feature boundary.
 enum PermissionSafeStatusProbe {
     static let defaultTimeout: Duration = .milliseconds(750)
     static let maximumAutomationTargets = 8
@@ -86,7 +86,6 @@ enum PermissionSafeStatusProbe {
         if let interruption = interruption() { return interruption }
 
         var targets: [NowPlaying.AutomationTarget] = []
-        var automation: [String: PermissionCentre.State] = [:]
         for candidate in candidates.prefix(maximumAutomationTargets) {
             if let interruption = interruption() { return interruption }
             let installed = operations.isApplicationInstalled(candidate.bundleID)
@@ -94,15 +93,10 @@ enum PermissionSafeStatusProbe {
             if let interruption = interruption() { return interruption }
             guard installed else { continue }
             targets.append(candidate)
-
-            let state = operations.automationState(candidate.bundleID)
-            completed += 1
-            if let interruption = interruption() { return interruption }
-            automation[candidate.bundleID] = state
         }
         return PermissionSafeStatusSnapshot(
             microphone: microphone, loginItem: loginItem,
-            automationTargets: targets, automation: automation,
+            automationTargets: targets,
             completedSystemCalls: completed, timedOut: false, wasRevoked: false)
     }
 
@@ -111,7 +105,7 @@ enum PermissionSafeStatusProbe {
     ) -> PermissionSafeStatusSnapshot {
         PermissionSafeStatusSnapshot(
             microphone: .notDetermined, loginItem: .notDetermined,
-            automationTargets: [], automation: [:],
+            automationTargets: [],
             completedSystemCalls: completedSystemCalls,
             timedOut: timedOut, wasRevoked: wasRevoked)
     }

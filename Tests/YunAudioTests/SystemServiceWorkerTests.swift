@@ -303,7 +303,7 @@ struct AppIconWorkerTests {
 
 @Suite("Permission snapshot worker", .serialized)
 struct PermissionSnapshotWorkerTests {
-    @Test("one snapshot has an eight-target and eighteen-call ceiling")
+    @Test("one snapshot finds eight targets in ten calls without touching TCC")
     func finiteRegistryBoundary() {
         let calls = SystemServiceLockedBox<[String]>([])
         let candidates = (0..<12).map {
@@ -321,10 +321,6 @@ struct PermissionSnapshotWorkerTests {
             isApplicationInstalled: { bundleID in
                 calls.update { $0.append("installed:\(bundleID)") }
                 return true
-            },
-            automationState: { bundleID in
-                calls.update { $0.append("automation:\(bundleID)") }
-                return .allowed
             })
 
         let result = PermissionSafeStatusProbe.inspect(
@@ -333,9 +329,9 @@ struct PermissionSnapshotWorkerTests {
         #expect(result.microphone == .allowed)
         #expect(result.loginItem == .needsRequest)
         #expect(result.automationTargets.count == 8)
-        #expect(result.automation.count == 8)
-        #expect(result.completedSystemCalls == 18)
-        #expect(calls.read().count == 18)
+        #expect(result.completedSystemCalls == 10)
+        #expect(calls.read().count == 10)
+        #expect(calls.read().filter { $0.hasPrefix("installed:") }.count == 8)
     }
 
     @Test("a late system answer stops the remaining snapshot calls")
@@ -354,10 +350,6 @@ struct PermissionSnapshotWorkerTests {
             isApplicationInstalled: { _ in
                 calls.update { $0.append("registry") }
                 return true
-            },
-            automationState: { _ in
-                calls.update { $0.append("automation") }
-                return .allowed
             })
 
         let result = PermissionSafeStatusProbe.inspect(

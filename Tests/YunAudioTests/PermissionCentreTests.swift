@@ -161,20 +161,21 @@ struct PermissionCentreTests {
         #expect(PermissionCentre.loginItemState(.unavailable) == .unavailable)
     }
 
-    @Test("player reads preflight Automation without prompting")
-    func playerReadsDoNotInventConsent() throws {
+    @Test("player reads and installation discovery never use passive Automation preflight")
+    func playerReadsDoNotPreflightAutomation() throws {
         let root = PreferencesCompletenessTests.sourceRootForTests
-        let source = try String(
+        let nowPlaying = try String(
             contentsOfFile: root + "Sources/YunAudioApp/NowPlaying.swift",
             encoding: .utf8)
+        let snapshot = try String(
+            contentsOfFile: root + "Sources/YunAudioApp/PermissionSnapshotWorker.swift",
+            encoding: .utf8)
 
-        #expect(
-            source.contains(
-                "let permission = automationPermissionStatus(for: bundleID)"))
-        #expect(source.contains("guard permission == noErr else"))
-        #expect(
-            source.contains(
-                "determineAutomationPermission(for: bundleID, askingUser: false)"))
+        #expect(nowPlaying.ranges(of: "AEDeterminePermissionToAutomateTarget").count == 1)
+        #expect(!nowPlaying.contains("automationPermissionStatus"))
+        #expect(snapshot.ranges(of: "AEDeterminePermissionToAutomateTarget").count == 1)
+        #expect(!snapshot.contains("automationState:"))
+        #expect(nowPlaying.contains("script.executeAndReturnError(&error)"))
     }
 
     @Test("the first-launch guide cannot re-enter status installation")
