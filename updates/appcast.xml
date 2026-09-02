@@ -1,8 +1,121 @@
-<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+<?xml version="1.0" standalone="yes"?>
+<!-- sparkle-sign-warning:
 IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
---><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+-->
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
     <channel>
         <title>YunAudio</title>
+        <item>
+            <title>0.1.6</title>
+            <pubDate>Wed, 02 Sep 2026 23:11:25 +0800</pubDate>
+            <link>https://github.com/YuhuanStudio/YunAudio/releases/tag/v0.1.6</link>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>0.1.6</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description sparkle:format="markdown"><![CDATA[# YunAudio 0.1.6
+
+## The application can tell you when it is old
+
+YunAudio now checks for updates itself. The status menu and About settings both
+offer **Check for Updates…**; Sparkle asks on the second ordinary launch whether
+daily automatic checks are wanted and remembers the answer. Render, screenshot,
+bundle and flow evidence start zero updater owners and make no network request.
+
+This is not a link wrapped around a version number. The update feed is signed,
+the archive has its own Ed25519 signature, and extraction is refused until that
+signature has been checked. The acceptance gate runs the assembled application
+against the real feed twice: the signed document is accepted; the same-length
+document with one changed byte is rejected by Sparkle itself.
+
+Installing an update still follows YunAudio's ordinary Quit path. Any running
+route, recorder, player, script and control socket therefore reaches its existing
+bounded teardown fence before Sparkle may replace and relaunch the application.
+
+## Installation is one command now
+
+The public `YuhuanStudio/homebrew-tap` carries a tested cask:
+
+```bash
+brew install --cask yuhuanstudio/tap/yunaudio
+```
+
+and later:
+
+```bash
+brew upgrade --cask yunaudio
+```
+
+The cask moves only the application into Applications. It does not ask for
+administrator access, install the optional virtual device or restart system
+audio. The driver remains embedded in the app; About settings installs or
+removes it only after an explicit action and the standard administrator prompt.
+
+The DMG remains available. An app running from a read-only image, App
+Translocation, Downloads or another folder says why it should be moved to
+Applications before an in-place update.
+
+## A useful problem report starts with identity, not private data
+
+About settings now opens a GitHub issue prefilled with the YunAudio version,
+build and macOS build. Device names, routes, microphone state, song titles and
+diagnostics are deliberately absent; the person filing the report decides what
+else belongs there.
+
+## The limit imposed by having no paid Apple account
+
+This release is still ad-hoc signed and not notarised. The first launch can still
+require **Open Anyway**, and replacing the binary can make macOS ask for
+microphone or Automation access again because an ad-hoc code requirement is the
+binary's changing hash rather than a stable developer identity.
+
+Sparkle is independently authenticated with the public Ed25519 key sealed into
+the app. An ad-hoc host has no Apple Team ID for Library Validation to compare
+with the separately signed Sparkle framework, so the app carries
+`disable-library-validation`. That security exception, its reason and the
+condition for removing it are asserted in the suite and recorded in
+`docs/limits.md`; it is not presented as equivalent to Developer ID signing.
+
+## Upgrading
+
+Replace the application, or use the Homebrew command above. The virtual audio
+device is unchanged and does not need reinstalling.
+
+## Release evidence
+
+`./App/verify.sh --full` on the release candidate:
+
+    build…                          ok
+    strict formatting…              ok
+    tests…                          ok
+    strings…                        ok
+    app bundle…                     ok
+    signed update feed…             ok
+    settings entry…                 ok
+    offscreen render…               ok
+    photograph the real window…     ok
+    installed driver matches release…ok
+    audio can start at all…         ok
+    the path is bit-exact, release… ok
+    flow check…                     ok
+
+The signed-feed gate runs Sparkle itself against two documents served by a
+loopback HTTP server. The real feed returns `ok`; replacing one byte while
+keeping its length unchanged returns `SUSparkleErrorDomain` and “EdDSA signature
+does not match”. Independently, CryptoKit verifies the feed's 64-byte signature
+over its exact signed byte count using the public key embedded in Info.plist.
+
+The app bundle was then moved away from `.build`, its nested signature was
+verified with `codesign --deep --strict`, and an ordinary production launch
+loaded Sparkle successfully under the declared Library Validation exception.
+
+The Homebrew cask passed `brew style`, `brew audit`, `brew fetch` and
+`brew livecheck`. It was installed into a temporary application directory,
+reported version 0.1.5, carried the embedded driver, passed deep code-signature
+verification, and was uninstalled without touching `/Applications/YunAudio.app`.
+]]></description>
+            <enclosure url="https://github.com/YuhuanStudio/YunAudio/releases/download/v0.1.6/YunAudio-0.1.6-app.zip" length="8436686" type="application/octet-stream" sparkle:edSignature="ZRTMK7IilGES+DuHXAU56Id7QK/cBxcz6wYz7yVk/KWSPqS+F6vlVlo7PVFqgN6NpLoaDxtdfBZGcptBCPJTBw=="/>
+        </item>
         <item>
             <title>0.1.5</title>
             <pubDate>Sun, 31 Aug 2026 14:34:20 +0000</pubDate>
@@ -11,10 +124,11 @@ IMPORTANT: This file was signed by Sparkle. Any modifications to this file requi
             <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
             <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <enclosure url="https://github.com/YuhuanStudio/YunAudio/releases/download/v0.1.5/YunAudio-0.1.5-app.zip" sparkle:edSignature="Sz0GUT5JPUMpevjLDdllVnjpPY4vjntuL0uV7Tgg/wDaZyt/UTwJi0cSfKXMcISxs6g2qCbtv8kRDcOnQlcPAA==" length="7308621" type="application/octet-stream"></enclosure>
+            <enclosure url="https://github.com/YuhuanStudio/YunAudio/releases/download/v0.1.5/YunAudio-0.1.5-app.zip" sparkle:edSignature="Sz0GUT5JPUMpevjLDdllVnjpPY4vjntuL0uV7Tgg/wDaZyt/UTwJi0cSfKXMcISxs6g2qCbtv8kRDcOnQlcPAA==" length="7308621" type="application/octet-stream"/>
         </item>
     </channel>
-</rss><!-- sparkle-signatures:
-edSignature: aa9XSKpgU/40EcfT28cBmY3rh4wKxqwN54YP2ni5Z+mRPjNDWwAJQOnJ0s5vkkurZ7llg7FatFEHomyWhJu3BQ==
-length: 1214
+</rss>
+<!-- sparkle-signatures:
+edSignature: bUaaDFEx7RL39Jf4mkIPuQXhDzsC1RHYsBLysskAdT3Jy+a/HHwPIVBPF6Wsei+wHkWcfCSVqrNvlGf8r5wtAQ==
+length: 6573
 -->
