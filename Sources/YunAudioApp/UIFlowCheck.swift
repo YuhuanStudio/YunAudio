@@ -453,6 +453,11 @@ enum UIFlowCheck {
             "the in-window shortcuts are listed too",
             model.hotkeyDescriptions.contains { !$0.isGlobal })
 
+        let menuTitles = TerminationObserver.current?.statusItem?.menuTitlesForFlowCheck ?? []
+        check(
+            "the status menu offers update checks",
+            menuTitles.filter { $0 == loc("Check for Updates…") }.count == 1)
+
         check("the settings entry presents a window", SettingsWindow.open(model: model))
         check("and that window contains the preferences", PreferencesWindow.openWindow() != nil)
         if let settings = PreferencesWindow.openWindow() {

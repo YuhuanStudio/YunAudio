@@ -149,6 +149,7 @@ struct PreferencesWindow: View {
     @Bindable private var theme = YunTheme.shared
     @Bindable private var navigation: SettingsNavigation
     @Bindable private var permissions = PermissionCentre.shared
+    @Bindable private var updater = AppUpdateController.shared
     /// Mirrored rather than read through a computed binding: the activation
     /// policy lives on `NSApp`, nothing observes it, and a switch bound
     /// straight to it would not move when clicked.
@@ -1505,6 +1506,97 @@ struct PreferencesWindow: View {
                         }
                     }
                     YunDetailRow(loc("Licence"), value: loc("Apache 2.0"))
+                }
+            }
+
+            heading(loc("Updates"))
+            YunCard {
+                VStack(alignment: .leading, spacing: Yun.Space.md) {
+                    HStack(spacing: Yun.Space.sm) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(loc("Keep YunAudio up to date"))
+                                .font(Yun.Text.body)
+                                .foregroundStyle(Yun.Palette.textPrimary)
+                            Text(
+                                loc(
+                                    "Checks the signed YunAudio update feed at most once a day. No device, route or song information is sent."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: Yun.Space.sm)
+                        Button(loc("Check for Updates…")) {
+                            updater.checkForUpdates()
+                        }
+                        .buttonStyle(YunButtonStyle(.secondary, small: true))
+                        .disabled(!updater.isAvailable || !updater.canCheckForUpdates)
+                    }
+
+                    YunDivider()
+                    HStack(spacing: Yun.Space.sm) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(loc("Automatically check for updates"))
+                                .font(Yun.Text.body)
+                                .foregroundStyle(Yun.Palette.textPrimary)
+                            Text(
+                                loc(
+                                    "Sparkle asks before enabling automatic checks and remembers the answer. Updates are verified with YunAudio's Ed25519 key before installation."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: Yun.Space.sm)
+                        YunSwitch(
+                            isOn: Binding(
+                                get: { updater.automaticallyChecksForUpdates },
+                                set: { updater.setAutomaticallyChecksForUpdates($0) })
+                        )
+                        .disabled(!updater.isAvailable)
+                    }
+
+                    if !updater.installationLocation.canReplaceInPlace {
+                        YunDivider()
+                        HStack(alignment: .top, spacing: Yun.Space.sm) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(Yun.Palette.warning)
+                            Text(
+                                loc(
+                                    "This copy is not in Applications. Move YunAudio there before updating so macOS can replace it reliably."
+                                )
+                            )
+                            .font(Yun.Text.caption)
+                            .foregroundStyle(Yun.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: Yun.Space.sm)
+                            Button(loc("Open Applications")) {
+                                updater.openApplicationsFolder()
+                            }
+                            .buttonStyle(YunButtonStyle(.secondary, small: true))
+                        }
+                    }
+
+                    YunDivider()
+                    Text(
+                        loc(
+                            "This build has no paid Apple Developer identity. The update is cryptographically verified, but macOS may ask for microphone or Automation access again after replacing it."
+                        )
+                    )
+                    .font(Yun.Text.caption)
+                    .foregroundStyle(Yun.Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: Yun.Space.sm) {
+                        Button(loc("Release notes")) { updater.openReleases() }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(Yun.Palette.accent)
+                        Spacer()
+                        Button(loc("Report a problem")) { updater.reportIssue() }
+                            .buttonStyle(YunButtonStyle(.secondary, small: true))
+                    }
                 }
             }
 

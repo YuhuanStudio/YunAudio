@@ -9,6 +9,7 @@ struct AppStartupTests {
         let cases: [[String: String]] = [
             ["YUNAUDIO_RENDER": "/tmp/render"],
             ["YUNAUDIO_SETTINGS_CHECK": "1"],
+            ["YUNAUDIO_UPDATE_CHECK": "/tmp/update-result"],
             [
                 "YUNAUDIO_SCREENSHOT": "/tmp/shots",
                 "YUNAUDIO_SCREENSHOT_NO_AUDIO": "1",
@@ -36,7 +37,7 @@ struct AppStartupTests {
             #expect(!AppStartup.startsLiveSystemServices(environment: environment))
             if policy.liveServiceAdmissionCount == 0 { zeroAdmissionModes += 1 }
         }
-        #expect(zeroAdmissionModes == 6)
+        #expect(zeroAdmissionModes == 7)
     }
 
     @Test("production and live verification retain their distinct authority")

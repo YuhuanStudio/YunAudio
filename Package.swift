@@ -49,6 +49,11 @@ let package = Package(
         .executable(name: "yunaudio-mcp", targets: ["yunaudio-mcp"]),
         .executable(name: "YunAudioApp", targets: ["YunAudioApp"]),
     ],
+    dependencies: [
+        .package(
+            url: "https://github.com/sparkle-project/Sparkle",
+            exact: "2.9.6")
+    ],
     targets: [
         // C shim. The os_workgroup / AudioWorkInterval APIs are annotated
         // __SWIFT_UNAVAILABLE_MSG("Swift is not supported for use with audio
@@ -111,13 +116,23 @@ let package = Package(
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunDesign", "YunAudioRazer",
                 "YunAudioControl", "YunAudioMedia", "YunAudioOBS", "YunAudioObjC",
+                .product(name: "Sparkle", package: "Sparkle"),
                 // For JavaScriptCore's execution time limit, which is declared
                 // in YunAudioRT.h because JavaScriptCore does not export it to
                 // Swift. See the note there.
                 "YunAudioRT",
             ],
             resources: [.process("Resources")],
-            swiftSettings: noDynamicActorIsolation),
+            swiftSettings: noDynamicActorIsolation,
+            linkerSettings: [
+                // SwiftPM's binary-framework rpath points into `.build`, which
+                // disappears on another Mac. The assembled app carries Sparkle
+                // beside the executable under `Contents/Frameworks`.
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker",
+                    "@executable_path/../Frameworks",
+                ])
+            ]),
 
         .executableTarget(
             name: "yunaudio-cli",
@@ -142,6 +157,7 @@ let package = Package(
             dependencies: [
                 "YunAudioHAL", "YunAudioEngine", "YunAudioRT", "YunAudioRazer",
                 "YunAudioControl", "YunAudioMedia", "YunAudioOBS", "yunaudio-mcp",
+                .product(name: "Sparkle", package: "Sparkle"),
                 // The app is an executable target, and a test target can depend
                 // on one since Swift 5.5. It is here so the MIDI message
                 // decoding and soft-takeover arithmetic can be tested without a
@@ -149,6 +165,15 @@ let package = Package(
                 // beside the CoreMIDI client that feeds them.
                 "YunAudioApp",
             ],
-            resources: [.copy("Resources/SpeechFixture.wav")]),
+            resources: [.copy("Resources/SpeechFixture.wav")],
+            linkerSettings: [
+                // Xcode's SwiftPM test runner places binary frameworks beside
+                // the `.xctest`, but does not add that product directory to the
+                // test executable's rpaths even for a direct dependency.
+                .unsafeFlags([
+                    "-Xlinker", "-rpath", "-Xlinker",
+                    "@loader_path/../../..",
+                ])
+            ]),
     ]
 )

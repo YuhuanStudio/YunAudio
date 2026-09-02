@@ -73,8 +73,12 @@ waive that end-to-end number.
 
 ## Current limitations
 
-- The driver is ad-hoc signed. Distribution needs a Developer ID identity and
-  notarisation.
+- The app and driver are ad-hoc signed. Distribution needs a Developer ID
+  identity and notarisation to preserve TCC grants across updates. Sparkle's
+  feed and archives are authenticated independently with Ed25519, but an
+  ad-hoc host has no Team ID against which Library Validation can admit the
+  updater framework, so `disable-library-validation` remains in the app's
+  entitlements until Developer ID signing exists.
 - Voice isolation makes `AudioUnitRender` allocate on the IO thread — roughly 0.3
   allocations per cycle, from inside Apple's model rather than from this code.
   The bypass path stays at exactly zero. It has not caused a dropout in testing,

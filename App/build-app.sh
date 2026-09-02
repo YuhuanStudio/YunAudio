@@ -88,7 +88,10 @@ RUNNING
 fi
 
 rm -rf "${BUNDLE}"
-mkdir -p "${BUNDLE}/Contents/MacOS" "${BUNDLE}/Contents/Resources"
+mkdir -p \
+	"${BUNDLE}/Contents/MacOS" \
+	"${BUNDLE}/Contents/Resources" \
+	"${BUNDLE}/Contents/Frameworks"
 # The icon is drawn by the binary that was just built, so it has to be told
 # which one — asking for the debug build here during a release build would
 # compile a second copy of the whole application to draw a picture.
@@ -118,6 +121,17 @@ for MODULE_BUNDLE in "${MODULE_BUNDLES[@]}"; do
 done
 cp App/Info.plist "${BUNDLE}/Contents/Info.plist"
 cp "${BINARY}" "${BUNDLE}/Contents/MacOS/YunAudioApp"
+
+# SwiftPM links binary artifacts but does not assemble an application bundle.
+# The executable's shipping rpath points here; without this copy the build works
+# only while `.build` is present and dies in dyld on another Mac. `ditto`
+# preserves Sparkle's versioned-framework symlinks and nested helper bundles.
+SPARKLE_FRAMEWORK=".build/${CONFIGURATION}/Sparkle.framework"
+if [[ ! -d "${SPARKLE_FRAMEWORK}" ]]; then
+	echo "error: Sparkle.framework is missing from .build/${CONFIGURATION}" >&2
+	exit 1
+fi
+ditto "${SPARKLE_FRAMEWORK}" "${BUNDLE}/Contents/Frameworks/Sparkle.framework"
 for LOCALISATION in App/Resources/*.lproj; do
 	cp -R "${LOCALISATION}" "${BUNDLE}/Contents/Resources/"
 done
@@ -138,6 +152,15 @@ cat >build/yunaudio.entitlements <<'PLIST'
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
 	<key>com.apple.security.automation.apple-events</key>
+	<true/>
+	<!--
+	Sparkle is distributed under its own signature. An ad-hoc host has no Apple
+	Team ID for Library Validation to compare with it, even when both nested code
+	and host are re-signed together; dyld rejects the framework before main().
+	The update archive is instead authenticated by the Ed25519 public key sealed
+	into Info.plist. Remove this exception when Developer ID signing is available.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
 	<true/>
 </dict>
 </plist>
@@ -164,6 +187,12 @@ if [[ -z "${SIGN_IDENTITY}" ]] &&
 fi
 
 echo "signing…"
+# Sparkle carries an updater app, XPC services and an executable framework. Sign
+# that nested graph with the same identity as the host before sealing the host;
+# re-signing only the outer app leaves Library Validation comparing two owners.
+codesign --force --deep --sign "${SIGN_IDENTITY:--}" \
+	--options runtime \
+	"${BUNDLE}/Contents/Frameworks/Sparkle.framework"
 codesign --force --sign "${SIGN_IDENTITY:--}" \
 	--entitlements build/yunaudio.entitlements \
 	--options runtime \

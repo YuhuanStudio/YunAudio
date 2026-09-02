@@ -1,0 +1,20 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>YunAudio</title>
+        <item>
+            <title>0.1.5</title>
+            <pubDate>Sun, 31 Aug 2026 14:34:20 +0000</pubDate>
+            <link>https://github.com/YuhuanStudio/YunAudio/releases/tag/v0.1.5</link>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>0.1.5</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.2</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/YuhuanStudio/YunAudio/releases/download/v0.1.5/YunAudio-0.1.5-app.zip" sparkle:edSignature="Sz0GUT5JPUMpevjLDdllVnjpPY4vjntuL0uV7Tgg/wDaZyt/UTwJi0cSfKXMcISxs6g2qCbtv8kRDcOnQlcPAA==" length="7308621" type="application/octet-stream"></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: aa9XSKpgU/40EcfT28cBmY3rh4wKxqwN54YP2ni5Z+mRPjNDWwAJQOnJ0s5vkkurZ7llg7FatFEHomyWhJu3BQ==
+length: 1214
+-->

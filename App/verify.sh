@@ -54,6 +54,7 @@ verify.sh runs these, in this order. Each is a substring match for --only.
   tests                          2022 of them                         ~80 s
   strings                        both tables, and every loc()          ~1 s
   app bundle                     build and isolated resource smoke   ~50 s
+  signed update feed             real Sparkle, valid/tampered pair    ~3 s
   settings entry                 opens a real settings window          ~2 s
   offscreen render               every panel, no window server       ~20 s
   photograph the real window     what the window server drew         ~70 s
@@ -254,6 +255,8 @@ if [[ "${APP_BUNDLE_FAILED}" == "1" ]]; then
 	printf 'failed: %s\n' "${FAILED[*]}"
 	exit 1
 fi
+
+step "signed update feed" ./App/check-updates.sh
 
 settings_entry_opened() {
 	local output

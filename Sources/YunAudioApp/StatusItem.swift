@@ -158,6 +158,10 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
         menu.addItem(
             withTitle: loc("Settings"), action: #selector(openSettings), keyEquivalent: ","
         ).target = self
+        menu.addItem(
+            withTitle: loc("Check for Updates…"), action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        ).target = self
         menu.addItem(.separator())
         menu.addItem(
             withTitle: loc("Quit"), action: #selector(quit), keyEquivalent: "q"
@@ -173,6 +177,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     private var muteItem: NSMenuItem?
     private var configItem: NSMenuItem?
     private var openMainWindow: (@MainActor () -> Void)?
+
+    /// User actions in the retained menu, exposed as values for live evidence.
+    var menuTitlesForFlowCheck: [String] {
+        rightClickMenu?.items.filter { !$0.isSeparatorItem }.map(\.title) ?? []
+    }
 
     func setOpenMainWindow(_ action: @escaping @MainActor () -> Void) {
         openMainWindow = action
@@ -737,6 +746,11 @@ final class StatusItemController: NSObject, NSPopoverDelegate {
     @objc private func openSettings() {
         popover.performClose(nil)
         SettingsWindow.open(model: model)
+    }
+
+    @objc private func checkForUpdates() {
+        popover.performClose(nil)
+        AppUpdateController.shared.checkForUpdates()
     }
 
     @objc private func quit() {

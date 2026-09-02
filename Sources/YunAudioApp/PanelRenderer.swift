@@ -291,7 +291,9 @@ enum PanelRenderer {
                 // is seen here; taller than it, because the panes scroll in the
                 // running app and a capture that crops hides the last card in
                 // every section from the only check that looks at colour.
-                size: CGSize(width: 620, height: 700))
+                size: CGSize(
+                    width: 620,
+                    height: section == .about ? 1_050 : 700))
         }
     }
 

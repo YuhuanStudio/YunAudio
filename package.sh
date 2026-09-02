@@ -77,6 +77,11 @@ mkdir -p "${STAGING}"
 APP="${STAGING}/YunAudio.app"
 cp -R build/YunAudio.app "${APP}"
 
+# `build-app.sh` signed this graph for local execution. A distribution identity,
+# when one exists, has to own Sparkle's helpers too before the outer app is
+# sealed; otherwise the updater is nested code from a different signer.
+codesign --force --deep "${SIGN_ARGS[@]}" \
+	"${APP}/Contents/Frameworks/Sparkle.framework"
 codesign --force "${SIGN_ARGS[@]}" \
 	--entitlements build/yunaudio.entitlements "${APP}"
 codesign --verify --deep --strict "${APP}"
@@ -272,6 +277,53 @@ SUMS="build/checksums-${VERSION}.txt"
 	"$(basename "${APP_ZIP}")" \
 	"$(basename "${TOOLS_ZIP}")" >"$(basename "${SUMS}")" )
 echo "built ${SUMS}"
+
+# The update feed is outside the application bundle deliberately. Putting it in
+# Resources creates a cycle: changing the appcast changes the app zip, which
+# changes the Ed25519 signature the appcast has to contain. Existing apps read
+# the signed feed from raw GitHub `main`; a release therefore packages the final
+# archive first, then updates this tracked document for the release commit which
+# follows the tag.
+APPCAST_TOOL=".build/artifacts/sparkle/Sparkle/bin/generate_appcast"
+APPCAST_SIGNER=".build/artifacts/sparkle/Sparkle/bin/sign_update"
+APPCAST_ACCOUNT="com.yuhuanstudio.yunaudio"
+RELEASE_NOTES="docs/RELEASE-${VERSION}.md"
+if git describe --exact-match --tags HEAD >/dev/null 2>&1; then
+	if [[ ! -x "${APPCAST_TOOL}" || ! -x "${APPCAST_SIGNER}" ]]; then
+		echo "error: Sparkle signing tools are missing" >&2
+		exit 1
+	fi
+	if [[ ! -f "${RELEASE_NOTES}" ]]; then
+		echo "error: ${RELEASE_NOTES} is missing" >&2
+		exit 1
+	fi
+	APPCAST_WORK="$(mktemp -d)"
+	cleanup_appcast_work() {
+		[[ -d "${APPCAST_WORK}" ]] && rm -rf -- "${APPCAST_WORK}"
+	}
+	trap cleanup_appcast_work EXIT
+	cp "${APP_ZIP}" "${APPCAST_WORK}/"
+	cp "${RELEASE_NOTES}" \
+		"${APPCAST_WORK}/YunAudio-${VERSION}-app.md"
+	if [[ -f updates/appcast.xml ]]; then
+		cp updates/appcast.xml "${APPCAST_WORK}/"
+	fi
+	"${APPCAST_TOOL}" \
+		--account "${APPCAST_ACCOUNT}" \
+		--download-url-prefix \
+		"https://github.com/YuhuanStudio/YunAudio/releases/download/v${VERSION}/" \
+		--link \
+		"https://github.com/YuhuanStudio/YunAudio/releases/tag/v${VERSION}" \
+		--embed-release-notes \
+		--maximum-versions 3 \
+		"${APPCAST_WORK}"
+	cp "${APPCAST_WORK}/appcast.xml" updates/appcast.xml
+	"${APPCAST_SIGNER}" --verify --account "${APPCAST_ACCOUNT}" updates/appcast.xml
+	echo "updated and verified updates/appcast.xml"
+	echo "commit and push the feed after the release tag is published"
+else
+	echo "not on an exact tag — leaving updates/appcast.xml unchanged"
+fi
 
 if [[ "${NOTARIZE}" == "1" ]]; then
 	echo "==> submitting for notarisation"

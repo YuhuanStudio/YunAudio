@@ -56,7 +56,10 @@ admission budget，否則只能做離線或明確標成高延遲的處理。
 
 ## 現行限制
 
-- 驅動是 ad-hoc 簽章。散布需要 Developer ID 身分與公證。
+- app 與驅動皆為 ad-hoc 簽章。要讓 TCC 授權跨版本保留，散布需要 Developer ID 身分與
+  公證。Sparkle 的 feed 與 archive 另以 Ed25519 驗證；但 ad-hoc host 沒有 Team ID 可供
+  Library Validation 接納 updater framework，因此在具備 Developer ID 前，app entitlement
+  必須保留 `disable-library-validation`。
 - 人聲隔離會讓 `AudioUnitRender` 在 IO 執行緒上配置記憶體 —— 每個週期大約 0.3 次，
   來自 Apple 模型內部而不是這裡的程式碼。旁路路徑維持在剛好零。測試中它沒有造成過
   斷音，但它開著的時候即時契約是破的。

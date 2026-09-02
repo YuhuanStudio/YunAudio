@@ -8,7 +8,7 @@
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
 [![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](#驗證)
-[![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#系統需求)
+[![以 Sparkle 2 更新](https://img.shields.io/badge/updates-Sparkle%202-blue)](https://sparkle-project.org)
 
 [English](README.md) · 繁體中文 · [简体中文](README.zh-Hans.md)
 
@@ -29,7 +29,7 @@ YunAudio 把麥克風、以及任何應用程式的音訊，路由進一個虛�
 | | |
 |---|---|
 | **平台** | macOS 15 或更新 |
-| **相依** | 無。`Package.swift` 的 `dependencies` 為空陣列 |
+| **相依** | Sparkle 2，內嵌於 app 以提供簽署過的更新 |
 | **介面** | 視窗、選單列面板、URL scheme、CLI、Unix socket、MCP、MIDI、常駐 JavaScript |
 | **格式** | 44.1–192 kHz；WAV、FLAC、AAC，支援每來源分軌 |
 | **授權** | Apache 2.0 |
@@ -180,15 +180,25 @@ Apple 的人聲隔離模型內部每週期約配置 0.3 次。
 
 ## 系統需求
 
-- **macOS 15 或更新。** 有些功能需要更新的系統，而它們會說出來而不是消失：即時轉錄需要
-  macOS 26，把擷取保持在應用程式關閉後也是；Liquid Glass 外觀在更舊的系統上退回該系統
-  本來就有的材質。路由、擷取、效果與 KTV 全程可用。
+- **macOS 14.2 或更新。** 底線是 process tap；人聲隔離需要 macOS 15，即時轉錄需要
+  macOS 26，把擷取保持在應用程式關閉後也是。需要較新系統的功能會說明原因而不是消失；
+  路由、擷取、效果與 KTV 在 14.2 起皆可用。
 - **建置需要帶 macOS 27 SDK 的 Xcode**，因為即時轉錄使用 `AnalyzerInputConverter`。
   建置腳本會自行尋找；手動執行 `swift build` 需先 `source ./App/toolchain.sh`，否則
   錯誤訊息為 `cannot find type 'AnalyzerInputConverter' in scope`。
-- **無第三方相依。**
+- **Sparkle 2 是唯一第三方相依。** 它內嵌於 app，並以 YunAudio 的 Ed25519 金鑰驗證
+  更新 feed 與每一份 archive。
 
 ## 安裝
+
+### Homebrew
+
+```bash
+brew install --cask yuhuanstudio/tap/yunaudio
+```
+
+之後可用 `brew upgrade --cask yunaudio` 升級。Homebrew 只會把 app 放進「應用程式」；
+不會安裝選配的音訊裝置、不會要求管理員權限，也不會重啟系統音訊。
 
 ### 磁碟映像
 
@@ -198,6 +208,10 @@ Apple 的人聲隔離模型內部每週期約配置 0.3 次。
 應用程式為 ad-hoc 簽章，因此 macOS 會拒絕首次啟動並回報無法驗證開發者。系統設定的
 「隱私權與安全性」提供**仍要打開**，執行一次即可。映像內的 `READ ME FIRST.txt` 說明
 這件事與相關步驟。
+
+從「應用程式」啟動後，YunAudio 會透過 Sparkle 檢查簽署過的更新 feed，並在解壓前驗證
+更新本身。沒有付費 Apple Developer 身分時，app 被替換後 macOS 仍可能再次詢問麥克風
+或「自動化」權限。
 
 ### 從原始碼建置
 
@@ -269,7 +283,9 @@ App/                bundle 組裝、圖示與 verify.sh
   Sound 選單劣化。0.1.2 已移除會提高此類故障機率的已量測 driver、teardown 與 ownership
   缺陷，但 [issue #9](https://github.com/YuhuanStudio/YunAudio/issues/9) 的隔離系統音訊恢復
   驗證仍未完成。使用可選驅動時，請保留移除指令備用。
-- 驅動為 ad-hoc 簽章。要在散布時不出現首次啟動對話框，需要 Developer ID 身分與公證。
+- app 與驅動皆為 ad-hoc 簽章。要在散布時不出現首次啟動對話框，或讓隱私權授權跨版本保留，
+  需要 Developer ID 身分與公證。Sparkle 以 Ed25519 驗證 feed 與 archive；但 ad-hoc host
+  必須關閉 Library Validation，才能載入由不同簽章擁有的 updater framework。
 - 人聲隔離會使 `AudioUnitRender` 在 IO 執行緒上配置記憶體，約每週期 0.3 次，來自 Apple
   模型內部。旁路路徑維持為零。目前未觀察到斷音，但該功能啟用期間即時契約是破的。
 - 驅動故障會使 `coreaudiod` 連同所有掛載的系統音訊一併中止。上述移除指令值得留在手邊。

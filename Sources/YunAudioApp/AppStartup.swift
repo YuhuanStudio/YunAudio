@@ -110,6 +110,7 @@ enum AppStartup {
         if environment["YUNAUDIO_RENDER"] != nil
             || environment["YUNAUDIO_UI_BENCHMARK"] != nil
             || environment["YUNAUDIO_SETTINGS_CHECK"] != nil
+            || environment["YUNAUDIO_UPDATE_CHECK"] != nil
             || environment["YUNAUDIO_SCREENSHOT_NO_AUDIO"] != nil
         {
             return ModelPolicy(kind: .syntheticEvidence)
@@ -151,6 +152,7 @@ enum AppStartup {
             environment["YUNAUDIO_FLOWCHECK"] != nil
             || environment["YUNAUDIO_SCREENSHOT"] != nil
             || environment["YUNAUDIO_SETTINGS_CHECK"] != nil
+            || environment["YUNAUDIO_UPDATE_CHECK"] != nil
         guard bypassesSingleInstance || claimSingleInstance() else {
             return .duplicate
         }

@@ -174,6 +174,30 @@ final class TerminationObserver: NSObject, NSApplicationDelegate {
         // never saved.
         YunTheme.shared.applyAppearance()
         InterfaceOptions.apply()
+        // Update checks belong to an ordinary bundled launch only. The owner
+        // applies the same startup policy used by every hardware service, so
+        // render, screenshot and flow evidence cannot contact the feed or show
+        // Sparkle's second-launch permission prompt.
+        AppUpdateController.shared.start(environment: environment)
+
+        // A model-free release probe asks Sparkle itself to parse and verify the
+        // feed. It writes a completion marker rather than relying on Console
+        // output, then terminates through the ordinary ownership join.
+        if let resultPath = environment["YUNAUDIO_UPDATE_CHECK"] {
+            AppUpdateController.shared.verifyFeed { error in
+                let result = error.map { "error: \($0)\n" } ?? "ok\n"
+                do {
+                    try Data(result.utf8).write(
+                        to: URL(fileURLWithPath: resultPath), options: .atomic)
+                    NSApp.terminate(nil)
+                } catch {
+                    NonBlockingDiagnostic.write(
+                        "could not write update-check marker: \(error)\n")
+                    exit(1)
+                }
+            }
+            return
+        }
 
         // This path exists to put symbols behind the application's UI cost,
         // without mixing in a route, HAL inventory or MIDI. The benchmark

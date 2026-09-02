@@ -9,7 +9,7 @@ can be proved bit-exact.**
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](https://swift.org)
 [![Licence Apache 2.0](https://img.shields.io/badge/licence-Apache%202.0-blue)](LICENSE)
 [![tests passing](https://img.shields.io/badge/tests-passing-brightgreen)](#verification)
-[![no dependencies](https://img.shields.io/badge/dependencies-none-lightgrey)](#requirements)
+[![updates Sparkle 2](https://img.shields.io/badge/updates-Sparkle%202-blue)](https://sparkle-project.org)
 
 English · [繁體中文](README.zh-Hant.md) · [简体中文](README.zh-Hans.md)
 
@@ -34,7 +34,7 @@ cover them.
 | | |
 |---|---|
 | **Platform** | macOS 14.2 or later |
-| **Dependencies** | None. `Package.swift` declares an empty `dependencies` array |
+| **Dependencies** | Sparkle 2, embedded for signed application updates |
 | **Interfaces** | Window, menu bar panel, URL scheme, CLI, Unix socket, MCP, MIDI, resident JavaScript |
 | **Formats** | 44.1–96 kHz through the virtual device, to 192 kHz between physical ones; WAV, FLAC and AAC, with per-source stems |
 | **Licence** | Apache 2.0 |
@@ -243,9 +243,20 @@ sample, reporting the condition of the path rather than a verdict.
   uses `AnalyzerInputConverter`. The build scripts locate one; a hand-run
   `swift build` needs `source ./App/toolchain.sh` first, otherwise the error is
   `cannot find type 'AnalyzerInputConverter' in scope`.
-- **No third-party dependencies.**
+- **Sparkle 2 is the only third-party dependency.** It is embedded in the app
+  and verifies both the update feed and every archive with YunAudio's Ed25519 key.
 
 ## Installation
+
+### Homebrew
+
+```bash
+brew install --cask yuhuanstudio/tap/yunaudio
+```
+
+Later versions can be installed with `brew upgrade --cask yunaudio`. Homebrew
+moves the app into Applications; it does not install the optional audio device,
+ask for administrator access or restart system audio.
 
 ### Disk image
 
@@ -256,6 +267,11 @@ The application is ad-hoc signed, so macOS refuses the first launch and reports
 that the developer cannot be verified. Privacy & Security in System Settings
 offers **Open Anyway**; once is sufficient. `READ ME FIRST.txt` in the image
 states this, and the steps involved.
+
+Once running from Applications, YunAudio checks a signed update feed through
+Sparkle. The update itself is verified before extraction. Without a paid Apple
+Developer identity, macOS may still ask for microphone or Automation access
+again after the application is replaced.
 
 ### From source
 
@@ -340,8 +356,11 @@ App/                bundle assembly, the icon, and verify.sh
   made that class of failure more likely, but the isolated system-audio recovery
   validation in [issue #9](https://github.com/YuhuanStudio/YunAudio/issues/9)
   is still incomplete. Keep the removal command available when using the optional driver.
-- The driver is ad-hoc signed. Distribution without a first-launch dialog
-  requires a Developer ID identity and notarisation.
+- The app and driver are ad-hoc signed. Distribution without a first-launch
+  dialog, or preserving privacy grants across binary updates, requires a
+  Developer ID identity and notarisation. Sparkle verifies the feed and archive
+  with Ed25519, but an ad-hoc host must disable Library Validation to load the
+  independently signed updater framework.
 - Voice isolation causes `AudioUnitRender` to allocate on the IO thread, at
   approximately 0.3 allocations per cycle, from within Apple's model. The bypass
   path remains at zero. No dropout has been observed, but the realtime contract
