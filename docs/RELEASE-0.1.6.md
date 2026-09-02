@@ -94,7 +94,12 @@ The app bundle was then moved away from `.build`, its nested signature was
 verified with `codesign --deep --strict`, and an ordinary production launch
 loaded Sparkle successfully under the declared Library Validation exception.
 
-The Homebrew cask passed `brew style`, `brew audit`, `brew fetch` and
-`brew livecheck`. It was installed into a temporary application directory,
-reported version 0.1.5, carried the embedded driver, passed deep code-signature
-verification, and was uninstalled without touching `/Applications/YunAudio.app`.
+`./App/verify.sh --fresh` also passed: a clean clone resolved Sparkle 2.9.6,
+built the app and test bundle with no access to this working tree's artifact
+cache, and completed every deterministic test and bundle check.
+
+The final 0.1.6 Homebrew cask passed `brew style`, `brew audit`, `brew fetch`
+and `brew livecheck`. It was installed into a temporary application directory,
+reported version 0.1.6 build 7, carried both Sparkle and the embedded driver,
+passed deep code-signature verification, and was uninstalled without touching
+`/Applications/YunAudio.app`.
